@@ -102,12 +102,15 @@ def _null_p99(
     return float(np.quantile(samples, 0.99))
 
 
-def _candidate_columns(data_summary: Mapping[str, Any] | None) -> list[str]:
-    """复用 get_data_summary 的类型推断：连续、非常量、非疑似 ID。
+# 离散列的类型标记。二值列 K=10 等量分箱退化（只剩 2 个非空箱），且二值-二值对下
+# η²(2 组) ≡ r²（2×2 表恒等式），判据分子按构造成立不了 —— 见模块顶部说明。
+_DISCRETE_TYPES = ("binary", "categorical_numeric")
 
-    排除 binary / categorical_numeric：K=10 等量分箱在二元列上退化（只剩 2 个非空箱）。
-    排除 possible_id：ID 列是均匀噪声，只会挤掉真变量名额。
-    """
+
+def _typed_columns(
+    data_summary: Mapping[str, Any] | None, inferred_types: tuple[str, ...]
+) -> list[str]:
+    """复用 get_data_summary 的类型推断，取出指定类型且非疑似 ID 的列。"""
 
     profiles = (data_summary or {}).get("column_profiles")
     if not isinstance(profiles, Mapping):
@@ -118,9 +121,25 @@ def _candidate_columns(data_summary: Mapping[str, Any] | None) -> list[str]:
         column
         for column in order
         if isinstance(profiles.get(column), Mapping)
-        and profiles[column].get("inferred_type") == "continuous"
+        and profiles[column].get("inferred_type") in inferred_types
         and not profiles[column].get("possible_id")
     ]
+
+
+def _candidate_columns(data_summary: Mapping[str, Any] | None) -> list[str]:
+    """连续、非常量、非疑似 ID 的列。
+
+    排除 binary / categorical_numeric：K=10 等量分箱在二元列上退化（只剩 2 个非空箱）。
+    排除 possible_id：ID 列是均匀噪声，只会挤掉真变量名额。
+    """
+
+    return _typed_columns(data_summary, ("continuous",))
+
+
+def _discrete_columns(data_summary: Mapping[str, Any] | None) -> list[str]:
+    """会被 _candidate_columns 排除的离散列，用来区分"没连续列"和"是离散数据"。"""
+
+    return _typed_columns(data_summary, _DISCRETE_TYPES)
 
 
 def _measure(
@@ -136,6 +155,11 @@ def _measure(
 
     candidates = [column for column in _candidate_columns(data_summary) if column in df.columns]
     if len(candidates) < 2:
+        # 全离散数据集：判据不适用（不是数据有问题，也不是线性）。给一个能被下游识别的
+        # 专属 reason，别和"连续列不够"混在一个字符串里。
+        discrete = [column for column in _discrete_columns(data_summary) if column in df.columns]
+        if not candidates and len(discrete) >= 2:
+            return _insufficient("discrete_data_continuous_method_not_applicable"), {}
         return _insufficient("fewer_than_two_continuous_columns", len(candidates)), {}
 
     frame = df.loc[:, candidates]
@@ -265,6 +289,20 @@ def _self_check() -> None:
 
     empty = pd.DataFrame({"x0": [np.nan] * _MAX_ROWS, "x1": [np.nan] * _MAX_ROWS})
     assert measure_nonlinearity(empty, get_data_summary(empty))["verdict"] == "insufficient"
+
+    # 全离散数据集：专属 reason，让下游分得清"判据不适用"和"数据坏/列不够"
+    binary = pd.DataFrame(
+        rng.integers(0, 2, size=(_MAX_ROWS, 5)), columns=[f"x{i}" for i in range(5)]
+    )
+    binary_payload = measure_nonlinearity(binary, get_data_summary(binary))
+    assert binary_payload["verdict"] == "insufficient", binary_payload
+    assert binary_payload["reason"] == "discrete_data_continuous_method_not_applicable", binary_payload
+
+    # 混合数据集：还有连续列走老路（连续子集上照算），reason 不带离散标记
+    mixed = pd.DataFrame(rng.normal(size=(_MAX_ROWS, 5)), columns=[f"x{i}" for i in range(5)])
+    mixed["flag"] = rng.integers(0, 2, size=_MAX_ROWS)
+    mixed_payload = measure_nonlinearity(mixed, get_data_summary(mixed))
+    assert mixed_payload["verdict"] in ("linear", "nonlinear"), mixed_payload
 
     # 抽样截断必须如实标记
     wide = rng.normal(size=(_MAX_ROWS, 14))

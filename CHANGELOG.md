@@ -1575,3 +1575,13 @@
   - 【preprocess_summary 送达 Deep Agent】：此前预处理报告跑在 Deep Agent 之前却从不进入它，现由 `to_deep_agent_input` 把父图的 `preprocess_summary` 显式写进子图那条 system message 的 JSON；报告不投影进子图 state（无代码消费它，投影只多占 checkpoint），`ParentStateUpdate` / `from_deep_agent_output` 的回写白名单不动。
   - 【测试与验证】：新增 `tests/unit/agent/test_nonlinearity.py`，断言本体在模块自检 `_self_check()` 里（`python -m Agent.Processing.nonlinearity` 可直跑）；`test_deep_agent_state.py` 新增用例锁住 `nonlinearity` 与 `preprocess_summary` 出现在那条 system message 里。25 个 d5 数据集复现归档倍率最大偏差 0.0049，λ=0 误报 0/5、λ=1.0 漏报 0/5，`pytest tests/unit` 全绿。
   - 【已知边界】：序数程度而非刻度，同一强度 p=5 读 3.29~12.27、p=12 掉一半，故只保留 `ratio = 1` 一条判据线、不做强度分档。
+
+---
+2026.9.27
+- 【离散数据集的线性判据适用性】
+  - 【问题】：二值集候选列数为 0，只能返回通用的 `fewer_than_two_continuous_columns`。该字符串同时对应"连续列只有一列""数据损坏""本来就没有连续变量"等多种情形，下游无法区分"判据不适用"与"数据有问题"。
+  - 【列筛选重构】：抽出 `_typed_columns(data_summary, inferred_types)` 承载类型推断与 `possible_id` 排除逻辑，`_candidate_columns` 收窄为 `("continuous",)`，新增 `_discrete_columns` 取 `("binary", "categorical_numeric")`。
+  - 【判定】：`_measure()` 在连续候选少于 2 时，若**连续候选为 0 且离散列 ≥2**，返回 `reason = "discrete_data_continuous_method_not_applicable"`；否则维持 `fewer_than_two_continuous_columns`。
+  - 【为何复用 `insufficient` 而不新增 `verdict`】：新增枚举值要同步改预处理报告 prompt、Deep Agent 运行级提示与既有消费方；而 `reason` 本就随 `analysis_parameters` 进入两处 prompt，机器可读，且不必破坏既有 `insufficient`（未能评估）的语义。**下游应按 `reason` 区分"不适用"，不要按 `verdict`。**
+  - 【消费端 prompt】：`Agent/causal_agent/nodes.py` 预处理报告第 5 条补充该 `reason` 的含义（判据适用范围问题，不代表线性、也不代表数据有问题）；`Agent/deep_agent/prompts.py` 的 `MANDATORY_ALGORITHM_INSTRUCTION` 补充 `ratio` 为 `null`（本次未能评估）时同样不能据此排除非线性机制。
+  - 【已知边界】：混合数据集（既有连续又有离散列）保持现状——只在连续子集上计算，不因含离散列而整体判"不适用"；离散列仍完全不参与统计量。判据对离散数据依然**不具备检出能力**，本次改动只是让"不适用"可被下游识别，未提供替代统计量。
