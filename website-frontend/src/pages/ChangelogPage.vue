@@ -35,9 +35,10 @@ onMounted(() => {
       <nav class="nav-links" aria-label="主导航">
         <a href="/">首页</a>
         <a href="/product">产品</a>
-        <a href="/dashboard">应用原型</a>
+        <a href="/pricing">价格</a>
+        <a href="/docs">文档</a>
         <a href="/changelog" aria-current="page">更新日志</a>
-        <a href="/#experts">专家智囊</a>
+        <a href="/about">关于</a>
       </nav>
       <div class="nav-actions">
         <a class="ghost" href="/auth/sign-in">登录</a>
@@ -128,10 +129,10 @@ onMounted(() => {
       <div class="wrap">
         <div class="section-head">
           <h2 class="section-title" id="archive-title">更早的版本</h2>
-          <p class="section-lede">更早的公开版本会用与上面相同的结构出现在这里。</p>
+          <p class="section-lede">如有更早的正式版本记录，后续将按发布时间顺序补充。</p>
         </div>
         <div class="empty-note" data-reveal="">
-          <p>目前公开的版本只有 0.2.0，所以这里暂时没有更早的记录。本页只公开影响使用方式的变化，仓库内部的开发日志按提交持续追加，不在本页展示历史细节。</p>
+          <p>当前官网公开版本为 0.2.0，暂无更早版本记录。本页面仅发布影响用户使用方式的正式变更，内部开发日志不在官网展示。</p>
           <p class="empty-note-actions">
             <a class="ghost" href="/product">看产品能力与版本边界</a>
           </p>
@@ -156,25 +157,25 @@ onMounted(() => {
     <div class="wrap">
       <h2 class="sr-only">页脚</h2>
       <div class="foot-grid">
-        <p class="foot-brand">面向因果分析场景的智能体工作台。如有错误，即可提出</p>
+        <p class="foot-brand">面向因果分析场景的智能体工作台。如有错误，即刻提出</p>
+        <div class="foot-col">
+          <h3 class="foot-col-title">官网</h3>
+          <a href="/">首页</a>
+          <a href="/product">产品</a>
+          <a href="/pricing">价格</a>
+          <a href="/docs">文档</a>
+          <a href="/changelog">更新日志</a>
+          <a href="/about">关于</a>
+        </div>
         <div class="foot-col">
           <h3 class="foot-col-title">产品</h3>
-          <a href="/">官网首页</a>
-          <a href="/product">产品能力</a>
-          <a href="/dashboard">应用原型</a>
-          <a href="/#experts">专家智囊</a>
+          <a href="/product">产品矩阵</a>
+          <a href="/dashboard">进入工作区</a>
         </div>
         <div class="foot-col">
-          <h3 class="foot-col-title">本页</h3>
-          <a href="#v0-2-0">当前版本 0.2.0</a>
-          <a href="#archive">更早的版本</a>
-          <a href="#top">回到页面顶部</a>
-        </div>
-        <div class="foot-col">
-          <h3 class="foot-col-title">正式站点</h3>
-          <a href="/docs">使用文档</a>
-          <a href="/about">关于我们</a>
+          <h3 class="foot-col-title">账号</h3>
           <a href="/auth/sign-in">登录</a>
+          <a href="/auth/sign-up">注册</a>
         </div>
       </div>
       <div class="foot-base">

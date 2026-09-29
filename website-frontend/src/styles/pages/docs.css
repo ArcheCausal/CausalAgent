@@ -392,7 +392,7 @@ p, li { text-wrap: pretty; }
 /* ---------- 页脚：反色带 ---------- */
 .foot { margin-top: var(--spacing-80); padding: var(--spacing-64) 0 var(--spacing-32); background: var(--color-ink); color: var(--color-paper); }
 .foot :focus-visible { outline-color: var(--color-paper); }
-.foot-grid { display: grid; gap: var(--spacing-40); grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(0, 1fr)); }
+.foot-grid { display: grid; gap: var(--spacing-40); grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(0, 1fr)); }
 .foot-brand { margin: 0; max-width: 46ch; font-size: var(--text-body-sm); line-height: var(--leading-body); color: var(--color-stone); }
 .foot-col { display: grid; gap: var(--spacing-8); align-content: start; }
 .foot-col-title { margin: 0 0 var(--spacing-4); font-size: var(--text-caption); color: var(--color-ash); letter-spacing: 0.08em; }

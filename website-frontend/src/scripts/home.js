@@ -1320,9 +1320,9 @@ export function initHome() {
       });
     }
 
-    /* ---------- 切页弹簧 ----------
-       站内所有「切到某一页」的动作——章节索引、跳过链接、回到顶部、链路索引，
-       以及滚动停住后的落点吸附——共用同一条临界阻尼弹簧。
+    /* ---------- 显式滚动跳转 ----------
+       章节索引、跳过链接、回到顶部与链路索引共用同一条临界阻尼弹簧。
+       普通滚动保持浏览器原生行为，不在停手后自动吸附到章节落点。
        每一帧按真实经过的时间解一次解析解，而不是按帧数往上累加：
        60Hz、120Hz 与中途掉一帧走的是同一条轨迹，运动节奏不会随屏幕刷新率变化。
        固有频率随行程远近调整，短程干脆落停，长程把峰值速度压住，内容不会被拖成一片虚影。
@@ -1422,9 +1422,7 @@ export function initHome() {
       }
 
       return {
-        to: to,
-        cancel: stop,
-        running: function () { return raf !== 0; }
+        to: to
       };
     })();
 
@@ -2266,87 +2264,6 @@ export function initHome() {
 
     selectSession(current);
     onScroll();
-    /* ---------- 每节落点：滚动停住后，同一条切页弹簧把最近的一节送到位 ---------- */
-    (function () {
-      if (reduceMotion) { return; }
-      var main = document.getElementById("main");
-      var hero = document.querySelector(".hero-showcase");
-      var nav = document.querySelector(".topnav");
-      var materials = document.getElementById("materials");
-      if (!main || !hero) { return; }
-      var stops = [];
-      var heroEnd = 0;
-      var materialsTop = -1;
-      var materialsEnd = -1;
-      var timer = 0;
-
-      function measure() {
-        var base = window.pageYOffset;
-        var head = (nav ? nav.offsetHeight : 72) + 16;
-        var rect = hero.getBoundingClientRect();
-        heroEnd = rect.top + base + rect.height;
-        var mrect = materials ? materials.getBoundingClientRect() : null;
-        materialsTop = mrect ? mrect.top + base - head : -1;
-        materialsEnd = mrect ? mrect.bottom + base - head : -1;
-        stops = list("#main .section, #main .measure, #main .closing").map(function (node) {
-          return Math.max(0, node.getBoundingClientRect().top + base - head);
-        }).sort(function (a, b) { return a - b; });
-      }
-
-      /* 首屏那段交接不参与，里面的工作台要能自由停住；
-         材料小节也不参与：三张卡一路叠上来要走完将近两屏的滚动，
-         中途一停顿就被吸回节首的话，后面两张永远上不来；
-         停到距某一节起点三成屏幕以内时接管，把它送到位 */
-      function nearest() {
-        var y = window.pageYOffset;
-        if (y <= heroEnd + 40) { return -1; }
-        if (materialsTop >= 0 && y >= materialsTop && y <= materialsEnd) { return -1; }
-        var gap = window.innerHeight * 0.3;
-        var best = -1;
-        for (var i = 0; i < stops.length; i++) {
-          var d = Math.abs(stops[i] - y);
-          if (d < gap) { gap = d; best = i; }
-        }
-        return best;
-      }
-
-      function glide() {
-        timer = 0;
-        if (springNav.running()) { return; }
-        var i = nearest();
-        if (i < 0) { return; }
-        if (Math.abs(stops[i] - window.pageYOffset) < 2) { return; }
-        springNav.to(stops[i]);
-      }
-
-      function later() {
-        if (springNav.running()) { return; }
-        window.clearTimeout(timer);
-        /* 停手之后再多等一会儿：等浏览器自己的滚动惯性和平滑滚动彻底停稳，
-           弹簧才从真正静止的位置起步，不会和还没走完的那点滚动互相拉扯 */
-        timer = window.setTimeout(glide, 200);
-      }
-
-      function drop() {
-        window.clearTimeout(timer);
-        springNav.cancel();
-      }
-
-      /* 拖动滚动条时立刻交还控制权：滚动条属于 html 本身，
-         按在页面内容上的抬手会落在后代元素上，不会进到这里 */
-      function dropOnBar(event) {
-        if (event.target === document.documentElement) { drop(); }
-      }
-
-      measure();
-      window.addEventListener("load", measure);
-      window.addEventListener("resize", measure);
-      window.addEventListener("scroll", later, { passive: true });
-      window.addEventListener("pointerdown", dropOnBar, { passive: true });
-      window.addEventListener("wheel", drop, { passive: true });
-      window.addEventListener("touchstart", drop, { passive: true });
-      window.addEventListener("keydown", drop, { passive: true });
-    })();
     /* ---------- 全站指针：白色圆点跟随指针，按下时白色细环扩散 ---------- */
     (function () {
       var fine = window.matchMedia && window.matchMedia("(hover: hover) and (pointer: fine)").matches;

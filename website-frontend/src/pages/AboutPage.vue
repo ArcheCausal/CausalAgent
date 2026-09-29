@@ -31,12 +31,13 @@ onMounted(() => {
       <nav class="nav-links" aria-label="主导航">
         <a href="/">首页</a>
         <a href="/product">产品</a>
-        <a href="/dashboard">应用原型</a>
-        <a href="/#experts">专家智囊</a>
+        <a href="/pricing">价格</a>
+        <a href="/docs">文档</a>
+        <a href="/changelog">更新日志</a>
         <a href="/about" aria-current="page">关于</a>
       </nav>
       <div class="nav-actions">
-        <a class="pill" href="/dashboard">打开应用原型</a>
+        <a class="pill" href="/dashboard">打开工作区</a>
       </div>
     </div>
   </header>
@@ -144,31 +145,30 @@ onMounted(() => {
     <div class="wrap">
       <h2 class="sr-only">页脚</h2>
       <div class="foot-grid">
-        <p class="foot-brand">所有产品均以实际产品为准，一切解释权归CausalAgent所有</p>
+        <p class="foot-brand">面向因果分析场景的智能体工作台，提供可复核的分析流程。</p>
+        <div class="foot-col">
+          <h3 class="foot-col-title">官网</h3>
+          <a href="/">首页</a>
+          <a href="/product">产品</a>
+          <a href="/pricing">价格</a>
+          <a href="/docs">文档</a>
+          <a href="/changelog">更新日志</a>
+          <a href="/about">关于</a>
+        </div>
         <div class="foot-col">
           <h3 class="foot-col-title">产品</h3>
-          <a href="/dashboard">应用原型</a>
-          <a href="/product#cdfm">CDFM 算法</a>
-          <a href="/product#library">DMIR 算法库</a>
-          <a href="/product">产品总览</a>
+          <a href="/product">产品矩阵</a>
+          <a href="/dashboard">进入工作区</a>
         </div>
         <div class="foot-col">
-          <h3 class="foot-col-title">源码</h3>
-          <a href="https://github.com/DMIRLAB-Group" target="_blank" rel="noopener">DMIRLAB-Group<span class="sr-only">（在新窗口打开）</span></a>
-          <a href="https://github.com/DMIRLAB-Group/CDFM" target="_blank" rel="noopener">CDFM<span class="sr-only">（在新窗口打开）</span></a>
-          <a href="https://github.com/DMIRLAB-Group/CausalAgent" target="_blank" rel="noopener">CausalAgent<span class="sr-only">（在新窗口打开）</span></a>
-        </div>
-        <div class="foot-col">
-          <h3 class="foot-col-title">页面</h3>
-          <a href="/">官网首页</a>
-          <a href="/#experts">专家智囊</a>
-          <a href="/about">关于我们</a>
-          <a href="#top">回到页面顶部</a>
+          <h3 class="foot-col-title">账号</h3>
+          <a href="/auth/sign-in">登录</a>
+          <a href="/auth/sign-up">注册</a>
         </div>
       </div>
       <div class="foot-base">
-        <span>© 2026 DMIRLAB-Group</span>
-        <span>CausalAgent</span>
+        <span>© 2026 CausalAgent</span>
+        <span>CausalAgent团队具有一切解释权</span>
       </div>
     </div>
   </footer>

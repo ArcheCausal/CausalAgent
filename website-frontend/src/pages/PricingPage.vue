@@ -138,18 +138,20 @@ onMounted(() => {
       <div class="wrap">
         <h2 class="sr-only">页脚</h2>
         <div class="foot-grid">
-          <p class="foot-brand">面向因果分析场景的智能体工作台。数据文件、内部知识库与公开资料在同一条链路上走完，过程与结论一起留下。</p>
+          <p class="foot-brand">面向因果分析场景的智能体工作台，提供可复核的分析流程。</p>
           <div class="foot-col">
-            <h3 class="foot-col-title">产品</h3>
-            <a href="/product">产品能力</a>
-            <a href="/dashboard">进入工作区</a>
+            <h3 class="foot-col-title">官网</h3>
+            <a href="/">首页</a>
+            <a href="/product">产品</a>
+            <a href="/pricing">价格</a>
+            <a href="/docs">文档</a>
             <a href="/changelog">更新日志</a>
+            <a href="/about">关于</a>
           </div>
           <div class="foot-col">
-            <h3 class="foot-col-title">资源</h3>
-            <a href="/docs">使用文档</a>
-            <a href="/about">关于我们</a>
-            <a href="/#experts">专家智囊</a>
+            <h3 class="foot-col-title">产品</h3>
+            <a href="/product">产品矩阵</a>
+            <a href="/dashboard">进入工作区</a>
           </div>
           <div class="foot-col">
             <h3 class="foot-col-title">账号</h3>
@@ -159,7 +161,7 @@ onMounted(() => {
         </div>
         <div class="foot-base">
           <span>© 2026 CausalAgent</span>
-
+          <span>CausalAgent团队具有一切解释权</span>
         </div>
       </div>
     </footer>

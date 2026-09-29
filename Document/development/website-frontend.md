@@ -6,7 +6,9 @@
 
 ## 入口与页面
 
-`app/main/routes.py` 的 `main_bp` 提供全部官网页面：`/`、`/product`、`/pricing`、`/about`、`/docs`、`/changelog` 以及 `/auth/sign-in`、`/auth/sign-up`。这些路径都返回同一份构建产物，页面由浏览器按 `location.pathname` 选择（`src/routes.ts`）；未登记的路径不由 `main_bp` 提供，访问得到 404，构建产物内的 `not-found` 页面只作为兜底。`/dashboard`、`/rag-eval`、`/admin` 只作为真实系统入口链接出现在导航和页脚，不由官网产物提供。
+`app/main/routes.py` 的 `main_bp` 提供全部官网页面：`/`、`/product`、`/pricing`、`/about`、`/docs`、`/changelog` 以及 `/auth/sign-in`、`/auth/sign-up`。这些路径都返回同一份构建产物，页面由浏览器按 `location.pathname` 选择（`src/routes.ts`）；未登记的路径不由 `main_bp` 提供，访问得到 404，构建产物内的 `not-found` 页面只作为兜底。`/dashboard`、`/rag-eval`、`/admin` 是独立系统入口，不由官网产物提供，只在产品说明、操作入口或相关页面链接中出现。
+
+官网主导航统一为“首页、产品、价格、文档、更新日志、关于”六项；各公开页面的页脚使用相同的官网、产品和账号链接，移除“应用原型”“专家智囊”等不属于官网主导航的旧选项。
 
 每个公开地址都是整页加载，`src/App.vue` 按 `location.pathname` 异步引入对应页面组件，因此同一个文档只会解析一个页面。页面的标题和说明按地址取自 `src/routes.ts` 的 `SITE_PAGE_META`。
 
@@ -29,11 +31,11 @@
 - `src/styles/pages/<page>.css` 由原型该页的内联样式逐字转写，认证页共用 `src/styles/pages/auth.css`；
 - `src/scripts/<page>.js` 由原型该页的内联脚本逐字转写，导出初始化函数，页面挂载后调用；认证页共用 `src/scripts/causal-map.js`。
 
-原型的页面脚本以 `window.gsap` 与 `window.ScrollTrigger` 使用 GSAP，但原型目录导出的 vendor 文件缺失。官网以依赖 `gsap@3.15.0` 提供这两个库，首页与更新日志页挂载时调用 `src/scripts/vendor-gsap.js` 按原型的全局约定把它们挂到 `window`，页面脚本保持逐字不改；其余页面不引入 GSAP。GSAP 与滚动触发动效留在官网，不进入共享包。
+原型的页面脚本以 `window.gsap` 与 `window.ScrollTrigger` 使用 GSAP，但原型目录导出的 vendor 文件缺失。官网以依赖 `gsap@3.15.0` 提供这两个库，首页与更新日志页挂载时调用 `src/scripts/vendor-gsap.js` 按原型的全局约定把它们挂到 `window`；首页额外移除了滚动停驻吸附逻辑，保留显式锚点跳转和其他页面动效，其余页面不引入 GSAP。GSAP 与滚动触发动效留在官网，不进入共享包。
 
 页面只引用已登记路径或真实系统入口。通告条文本、关闭行为、章节索引、滚动进度、Canvas 因果图、滚动触发渐入与认证页的三维因果图都来自原型脚本。`/docs` 面向使用者，`/changelog` 只记录影响使用方式的变化；仓库内部的 `Document/` 与 `CHANGELOG.md` 不通过官网发布。首页、产品页和认证页使用的标志、专家照片、论文页面与基准图是发布到 `public/assets/` 与 `public/` 的静态资源，通过 `/site-assets/` 同源提供；官网不在运行时加载普通用户应用、RAG 评测台或管理员前端。
 
-页头与认证页的品牌标志使用发布在 `public/brand/causalagent-mark.svg` 的仓库品牌图，不再绘制文字字形。首页“隐私、保护与RAG管理”轮播和产品页的配图位置使用登录后采集的真实界面截图：工作台 `public/media/workspace-console.png`、管理员端 `public/media/admin-console.png`、RAG 测评台 `public/media/rag-eval-console.png` 与日志仪表盘 `public/media/observability-logs.png`。四张图统一为 1600×1000（16:10），页面以 `object-fit: cover` 与顶部对齐裁切显示；截图只包含聚合指标和状态，不含知识源清单、内容哈希或用户文件内容。
+页头与认证页的品牌标志使用发布在 `public/brand/causalagent-mark.svg` 的仓库品牌图，不再绘制文字字形。官网入口的 favicon 与触摸图标使用 `public/brand/causalagent-mark-rounded.png`，黑色标志置于白色圆角底板上，四角保持透明。首页“隐私、保护与RAG管理”轮播和产品页的配图位置使用登录后采集的真实界面截图：工作台 `public/media/workspace-console.png`、管理员端 `public/media/admin-console.png`、RAG 测评台 `public/media/rag-eval-console.png` 与日志仪表盘 `public/media/observability-logs.png`。四张图统一为 1600×1000（16:10），页面以 `object-fit: cover` 与顶部对齐裁切显示；截图只包含聚合指标和状态，不含知识源清单、内容哈希或用户文件内容。
 
 原型自带的定制中文字体不在约定范围内，页面统一使用共享设计系统的 `--ca-font-sans`，字形度量由此产生的细微差异属于允许保留的差异；滚动交接、Canvas 因果图、滚动触发渐入与 GSAP 相关逻辑留在官网，不进入共享包。
 

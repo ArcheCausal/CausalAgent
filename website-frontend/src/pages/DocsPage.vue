@@ -34,13 +34,13 @@ onMounted(() => {
       <nav class="nav-links" aria-label="主导航">
         <a href="/">首页</a>
         <a href="/product">产品</a>
-        <a href="/dashboard">应用原型</a>
+        <a href="/pricing">价格</a>
         <a href="/docs" aria-current="page">文档</a>
-        <a href="/#experts">专家智囊</a>
+        <a href="/changelog">更新日志</a>
         <a href="/about">关于</a>
       </nav>
       <div class="nav-actions">
-        <a class="pill" href="/dashboard">打开应用原型</a>
+        <a class="pill" href="/dashboard">打开工作区</a>
       </div>
     </div>
   </header>
@@ -499,7 +499,7 @@ onMounted(() => {
             <p class="more-desc">看三件产品的位置，以及各自解决什么问题。</p>
           </li>
           <li>
-            <a href="/dashboard">应用原型<svg aria-hidden="true"><use href="#ic-out"></use></svg></a>
+            <a href="/dashboard">进入工作区<svg aria-hidden="true"><use href="#ic-out"></use></svg></a>
             <p class="more-desc">看工作区的界面原型：会话栏、执行阶段、结论文档与输入区。</p>
           </li>
           <li>
@@ -522,27 +522,30 @@ onMounted(() => {
     <div class="wrap">
       <h2 class="sr-only">页脚</h2>
       <div class="foot-grid">
-        <p class="foot-brand">如有错误，即刻联系管理员</p>
+        <p class="foot-brand">面向因果分析场景的智能体工作台，提供可复核的分析流程。</p>
         <div class="foot-col">
-          <h3 class="foot-col-title">文档</h3>
-          <a href="#/overview">概览</a>
-          <a href="#/quickstart">快速开始</a>
-          <a href="#/workspace">工作区</a>
-          <a href="#/results">结果与报告</a>
+          <h3 class="foot-col-title">官网</h3>
+          <a href="/">首页</a>
+          <a href="/product">产品</a>
+          <a href="/pricing">价格</a>
+          <a href="/docs">文档</a>
+          <a href="/changelog">更新日志</a>
+          <a href="/about">关于</a>
         </div>
         <div class="foot-col">
-          <h3 class="foot-col-title">页面</h3>
-          <a href="/">官网首页</a>
+          <h3 class="foot-col-title">产品</h3>
           <a href="/product">产品矩阵</a>
-          <a href="/dashboard">应用原型</a>
-          <a href="/#experts">专家智囊</a>
-          <a href="/about">关于我们</a>
-          <a href="#top">回到页面顶部</a>
+          <a href="/dashboard">进入工作区</a>
+        </div>
+        <div class="foot-col">
+          <h3 class="foot-col-title">账号</h3>
+          <a href="/auth/sign-in">登录</a>
+          <a href="/auth/sign-up">注册</a>
         </div>
       </div>
       <div class="foot-base">
         <span>© 2026 CausalAgent</span>
-
+        <span>CausalAgent团队具有一切解释权</span>
       </div>
     </div>
   </footer>
