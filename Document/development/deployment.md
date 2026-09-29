@@ -21,7 +21,7 @@
 
 四个前端各自使用独立的运行时目录，Compose 默认指向镜像内产物，源码卷不能覆盖这些目录：官网 `WEBSITE_FRONTEND_DIST_DIR=/opt/causalagent-website`，普通用户应用 `CHAT_FRONTEND_DIST_DIR=/opt/causalagent-chat`，RAG 评测台 `RAG_EVAL_FRONTEND_DIST_DIR=/opt/causalagent-rag-eval`，管理员系统 `ADMIN_FRONTEND_DIST_DIR=/opt/causalagent-admin`。
 
-四套入口的页面地址与资源前缀是：官网 `/`、`/product`、`/about`、`/docs`、`/changelog`、`/auth/sign-in`、`/auth/sign-up` 与 `/site-assets/`；普通用户应用 `/dashboard*` 与 `/dashboard-assets/`；RAG 评测台 `/rag-eval` 与 `/rag-eval/assets/`；管理员系统 `/admin*` 与 `/admin/assets/`。入口 HTML 不缓存，带 hash 的 `assets/` 资源使用长期 immutable 缓存；任一 dist 缺失时它的页面入口和资源路径统一返回带 request ID 的 503（`website_frontend_missing`、`chat_frontend_missing`、`rag_eval_frontend_missing`），不回退到其他前端。
+四套入口的页面地址与资源前缀是：官网 `/`、`/product`、`/pricing`、`/about`、`/docs`、`/changelog`、`/auth/sign-in`、`/auth/sign-up` 与 `/site-assets/`；普通用户应用 `/dashboard*` 与 `/dashboard-assets/`；RAG 评测台 `/rag-eval` 与 `/rag-eval/assets/`、`/rag-eval/brand/`；管理员系统 `/admin*` 与 `/admin/assets/`、`/admin/brand/`。入口 HTML 不缓存，带 hash 的 `assets/` 资源使用长期 immutable 缓存；任一 dist 缺失时它的页面入口和资源路径统一返回带 request ID 的 503（`website_frontend_missing`、`chat_frontend_missing`、`rag_eval_frontend_missing`），不回退到其他前端。
 
 ## 开发部署
 

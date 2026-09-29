@@ -161,7 +161,7 @@ npm run dev
 Pop-Location
 ```
 
-Vite 将 `/api` 代理到 `http://127.0.0.1:5001`。设置 `WEBSITE_VITE_DEV_SERVER_URL=http://127.0.0.1:5175` 后，`/`、`/product`、`/about`、`/docs`、`/changelog` 与 `/auth/sign-in`、`/auth/sign-up` 会跳转到 `http://127.0.0.1:5175/site-assets<原路径>`；未设置时由 Flask 从 `website-frontend/dist/` 或 `WEBSITE_FRONTEND_DIST_DIR` 提供。该工程使用 `.npmrc` 固定 `legacy-peer-deps`，安装依赖请使用 `npm ci`。
+Vite 将 `/api` 代理到 `http://127.0.0.1:5001`。设置 `WEBSITE_VITE_DEV_SERVER_URL=http://127.0.0.1:5175` 后，`/`、`/product`、`/pricing`、`/about`、`/docs`、`/changelog` 与 `/auth/sign-in`、`/auth/sign-up` 会跳转到 `http://127.0.0.1:5175/site-assets<原路径>`；未设置时由 Flask 从 `website-frontend/dist/` 或 `WEBSITE_FRONTEND_DIST_DIR` 提供。该工程使用 `.npmrc` 固定 `legacy-peer-deps`，安装依赖请使用 `npm ci`。
 
 ## RAG 评测台前端开发
 

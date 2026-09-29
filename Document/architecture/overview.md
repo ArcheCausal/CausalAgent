@@ -8,7 +8,7 @@
 
 CausalAgent 的 Web 入口是 `CausalAgent.py`，它调用 `app/__init__.py` 的 `create_app()`。应用启动时先执行数据库就绪检查，再注册 `auth`、`chat`、`files`、`agent`、`main`、`admin` 和 `admin_page` 七个 blueprint。Web 进程只负责认证、短请求、Job 入队和 SSE 推送，不在请求线程中执行 Agent、MCP 或 RAG 长任务。
 
-桌面入口 `Run_causal.py` 委托给 `windows-client/causalagent_desktop/`，只创建 Windows WebView2（Edge Chromium）壳并加载已经配置的 CausalAgent origin。开发默认地址是 `http://127.0.0.1:5001/dashboard`，Release 包嵌入正式 HTTPS origin 并默认进入 `/dashboard`；桌面端不包含 Flask、MySQL、worker、模型或第二套前端，服务器仍必须先提供现有 Web 页面、Cookie Session、API、SSE 和文件能力。同源下运行四个独立构建的前端：官网 `website-frontend/` 提供 `/`、`/product`、`/about`、`/docs`、`/changelog` 与 `/auth/sign-in`、`/auth/sign-up`；普通用户应用 `chat-frontend/` 提供 `/dashboard*`；RAG 评测台 `app/rag_eval/frontend/` 提供 `/rag-eval`；管理员前端 `admin-frontend/` 提供 `/admin*`。页面按权限表授权，各前端的构建产物都由 Flask 在同源路径提供。
+桌面入口 `Run_causal.py` 委托给 `windows-client/causalagent_desktop/`，只创建 Windows WebView2（Edge Chromium）壳并加载已经配置的 CausalAgent origin。开发默认地址是 `http://127.0.0.1:5001/dashboard`，Release 包嵌入正式 HTTPS origin 并默认进入 `/dashboard`；桌面端不包含 Flask、MySQL、worker、模型或第二套前端，服务器仍必须先提供现有 Web 页面、Cookie Session、API、SSE 和文件能力。同源下运行四个独立构建的前端：官网 `website-frontend/` 提供 `/`、`/product`、`/pricing`、`/about`、`/docs`、`/changelog` 与 `/auth/sign-in`、`/auth/sign-up`；普通用户应用 `chat-frontend/` 提供 `/dashboard*`；RAG 评测台 `app/rag_eval/frontend/` 提供 `/rag-eval`；管理员前端 `admin-frontend/` 提供 `/admin*`。页面按权限表授权，各前端的构建产物都由 Flask 在同源路径提供。
 
 ## 进程与职责
 

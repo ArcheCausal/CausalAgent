@@ -10,7 +10,7 @@
 
 | 前端 | 样式入口 | 体量 | 组件样式方式 |
 | --- | --- | --- | --- |
-| 官网 `website-frontend/` | `src/styles/base.css`、`src/styles/site.css` | 1.2 KB 与 9.6 KB | 页面组件不使用 scoped 样式，统一写在全局样式里 |
+| 官网 `website-frontend/` | `src/styles/base.css` 与 `src/styles/pages/` 下各页样式（逐字转写自官网原型的内联样式） | 0.7 KB 与 26-104 KB | 六个公开页面各带自身样式表，认证页共用 `pages/auth.css`；路由是整页加载，同一文档只挂载一个页面，因此各页样式不做作用域限定 |
 | 聊天端 `chat-frontend/` | `src/styles/` 下的 `reset.css`、`tokens.css`、`motion.css`、`main.css` | 0.5 KB、0.5 KB、0.3 KB 与 22 KB | 15 个组件中有 7 个带 scoped 样式 |
 | 管理员端 `admin-frontend/` | `@causalagent/design-system/styles.css`、`src/element-plus.css`、`src/styles.css` | 共享样式、控件适配和业务样式 | 全部 8 个页面、应用外壳和 4 个局部模块使用共享组件；Element Plus 保留复杂控件 |
 | RAG 评测台 `app/rag_eval/frontend/` | `src/style.css`、`src/shared-design-system.css` 与共享包样式 | 业务样式约 85.5 KB，迁移覆盖单独成文件 | `App.vue` 保留流程布局，页面标题、连接状态和报告标签页使用共享组件 |
@@ -21,7 +21,7 @@
 
 | 前端 | 主色 | 正文与次要文字 | 描边 | 页面底色 |
 | --- | --- | --- | --- | --- |
-| 官网 | `#2f6df6` | `#10192b` / `#5b6b85` | `#e2e7f0` | `#ffffff` |
+| 官网 | 共享 `--ca-ink`（页面样式逐字取自原型，配色即共享灰阶） | `--ca-ink` / `--ca-slate` | `--ca-hairline` | `--ca-paper` |
 | 聊天端 | `#007bff` | `#1f2937` / `#6b7280` | `#e2e5e9` | `#ffffff` |
 | 管理员端 | `#2563eb` | `#172033` / `#667085` | `#e5e7eb` | `#ffffff` |
 | RAG 评测台 | 共享 `--ca-ink`（旧业务规则仍保留局部状态色） | 共享 `--ca-text-default` / `--ca-text-muted` | 共享 `--ca-border-default` | 共享 `--ca-surface-page` |
@@ -30,11 +30,11 @@
 
 在共享字体接入前，四个前端分别使用 Inter 等字体并依赖系统中文字体。当前四端统一使用 Geist Sans 400 绘制其字形范围内的拉丁文字和数字，使用随包的 Noto Sans SC 400 绘制中文和 CJK 标点；系统字体只作为罕见缺字的最后回退。
 
-圆角取值分散在 2px 到 28px 之间：管理员端集中在 8px 和 10px，聊天端集中在 4px 到 12px，官网使用 10、14、20 三档；RAG 评测台公共卡片和控件已使用共享四档圆角，遗留业务选择器仍有旧取值。投影同样各自定义，管理员端只有一个自定义投影，官网、聊天端和 RAG 评测台各有一套。
+圆角取值分散在 2px 到 28px 之间：管理员端集中在 8px 和 10px，聊天端集中在 4px 到 12px；官网逐字沿用原型的 `--radius-*` 取值（8、20、24、28px），与共享四档一致。投影同样各自定义，管理员端只有一个自定义投影，官网沿用原型的三层浅投影，聊天端和 RAG 评测台各有一套。
 
 布局宽度仍按应用场景区分：管理员端使用 264px/80px 的展开与收起侧栏；官网和聊天端保留各自内容宽度与布局。
 
-动效方面，聊天端的时长定义在 `--motion-duration: 300ms`，官网和管理员端仍直接写 `0.2s ease` 一类的值；RAG 评测台新增的公共交互改用共享动效 token，旧业务规则仍待清理。
+动效方面，聊天端的时长定义在 `--motion-duration: 300ms`，管理员端仍直接写 `0.2s ease` 一类的值；官网逐字沿用原型的 `--motion-*` 时长与缓动（200、240、320、210、620ms），RAG 评测台新增的公共交互改用共享动效 token，旧业务规则仍待清理。
 
 ## 重复实现
 
@@ -58,7 +58,7 @@
 字体基础已接入四端；完整品牌基础与共享组件仍按应用页面先行、官网样板页面随后验证的顺序迁移：
 
 ```text
-1. 官网视觉基础（已完成：提取到 packages/design-system）
+1. 官网视觉基础（已完成：提取到 packages/design-system，页面样式逐字沿用原型）
 2. 管理员端业务概览页及其余管理页面（已完成：`admin-frontend/` 全页面接入）
 3. 聊天端工作区
 4. RAG 评测台（已接入共享基础，业务流程布局保留在 `App.vue`）
