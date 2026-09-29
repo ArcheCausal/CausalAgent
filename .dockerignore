@@ -1,4 +1,5 @@
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *$py.class
 *.so
@@ -43,6 +44,7 @@ test_*.py
 !requirements.txt
 !requirements-base.txt
 !requirements-test.txt
+!packages/design-system/src/fonts/licenses/*.txt
 !tests/
 tests/*
 !tests/smoke/
@@ -78,6 +80,7 @@ admin-frontend/node_modules/
 admin-frontend/dist/
 admin-frontend/test-results/
 admin-frontend/playwright-report/
+packages/design-system/node_modules/
 chat-frontend/node_modules/
 chat-frontend/dist/
 chat-frontend/test-results/
@@ -85,6 +88,7 @@ chat-frontend/playwright-report/
 website-frontend/node_modules/
 website-frontend/dist/
 app/rag_eval/frontend/node_modules/
+app/rag_eval/frontend_dist/
 
 
 # --- 数据文件和大文件 ---

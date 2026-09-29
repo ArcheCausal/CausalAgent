@@ -1,86 +1,48 @@
+/* 官网整站入口样式。
+
+   品牌字体、颜色和基础状态来自共享设计系统（@causalagent/design-system）；
+   本文件只保留整页加载需要的文档级规则，具体页面样式在各页自己的样式表里。 */
 :root {
   color-scheme: light;
-  --ink-900: #10192b;
-  --ink-700: #2c3a52;
-  --ink-500: #5b6b85;
-  --ink-300: #97a3b8;
-  --line: #e2e7f0;
-  --surface: #ffffff;
-  --surface-muted: #f5f7fb;
-  --accent: #2f6df6;
-  --accent-strong: #1f52c8;
-  --accent-soft: #e8f0ff;
-  --danger: #c8322f;
-  --radius-large: 20px;
-  --radius-medium: 14px;
-  --radius-small: 10px;
-  --shadow-soft: 0 18px 40px rgba(16, 25, 43, 0.08);
-  --content-width: 1120px;
 }
 
-* {
+html {
+  scroll-behavior: smooth;
+}
+
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
-html,
 body {
+  min-width: 320px;
   margin: 0;
-  padding: 0;
+  overflow-x: clip;
+  background: var(--ca-surface-page);
+  color: var(--ca-text-default);
+  font-family: var(--ca-font-sans);
+  font-weight: var(--ca-weight-regular);
+  font-size: var(--ca-text-body);
+  line-height: var(--ca-leading-body);
+  font-variant-numeric: tabular-nums;
 }
 
-body {
-  background: var(--surface);
-  color: var(--ink-900);
-  font-family: 'Inter', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
-  font-size: 16px;
-  line-height: 1.7;
-  -webkit-font-smoothing: antialiased;
-}
-
-a {
+button,
+input,
+select,
+textarea {
+  font: inherit;
   color: inherit;
-  text-decoration: none;
 }
 
-h1,
-h2,
-h3 {
-  line-height: 1.3;
-  margin: 0 0 12px;
-  letter-spacing: -0.01em;
+img {
+  max-width: 100%;
 }
 
-h1 {
-  font-size: 2.6rem;
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
 }
-
-h2 {
-  font-size: 1.7rem;
-}
-
-h3 {
-  font-size: 1.1rem;
-}
-
-p {
-  margin: 0 0 12px;
-}
-
-ul,
-ol {
-  margin: 0 0 12px;
-  padding-left: 20px;
-}
-
-li {
-  margin-bottom: 6px;
-}
-
-button {
-  font: inherit;
-}
-
-input {
-  font: inherit;
-}
-

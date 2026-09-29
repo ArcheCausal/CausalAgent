@@ -14,22 +14,28 @@ defineProps<{ title: string | null }>()
 <style scoped>
 .report-section {
   display: flex;
+  width: 100%;
+  min-width: 0;
   flex-direction: column;
-  gap: var(--report-block-gap, 14px);
+  gap: 12px;
 }
 
 .report-section-title {
   margin: 0;
   padding-bottom: 6px;
   font-size: var(--report-section-title-size, 18px);
+  font-weight: 400;
   line-height: 1.4;
   border-bottom: 1px solid var(--report-border, #e2e5e9);
 }
 
 .report-section-body {
   display: flex;
+  width: 100%;
+  min-width: 0;
   flex-direction: column;
-  gap: var(--report-block-gap, 14px);
+  align-items: stretch;
+  gap: 16px;
 }
 
 @media (max-width: 640px) {

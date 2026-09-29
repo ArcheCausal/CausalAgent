@@ -10,15 +10,17 @@
 src/
   index.ts                 组件与类型的统一导出，以及可选的全局注册插件
   types.ts                 组件对外暴露的类型
-  fonts/                   品牌字体文件
+  fonts/                   Geist Sans 与 Noto Sans SC 的 WOFF2 子集及 OFL 授权文件
   styles/
     index.css              唯一推荐的样式入口，按字体、token、基础、组件的顺序引入
-    fonts.css              品牌字体声明
+    fonts.css              品牌字体声明及字符范围分配
+    noto-sans-sc-400.css   Noto Sans SC 400 的 Unicode 子集声明
     base.css               品牌基础规则：字体、字重、焦点环、文字链接、减少动态
     tokens/                设计 token，分颜色、语义、字体、间距、形状、投影和动效
     components/            各组件的样式，类名以 ca- 开头
   components/              9 个基础组件的 Vue 单文件组件
 tests/                     组件行为、键盘操作和无障碍契约的单元测试
+vite/                      Vite 构建钩子，随前端产物发布字体 OFL 授权文本
 ```
 
 本包以源码形式参与各前端的构建，不单独产出构建产物，也不发布到包仓库。
@@ -47,13 +49,14 @@ import '@causalagent/design-system/styles.css'
 
 ## 接入某个前端
 
-四个前端当前还没有接入本包。接入时需要三件事：
+管理员端和 RAG 评测台已接入本包；官网和聊天端完整接入时需要：
 
 1. 在前端的 `vite.config.ts` 里把 `@causalagent/design-system` 指向本目录的 `src`，让源码参与该前端的构建；
 2. 在前端的 TypeScript 配置里加同样的路径映射，让类型检查能解析到源码；
-3. 在前端入口引入样式，并确认样式表的路径在本前端可解析，Vite 会把字体文件作为资源一起打包。
+3. 在前端入口引入完整样式，并确认样式表的路径在本前端可解析，Vite 会把实际使用到的字体子集作为资源一起打包。
+4. 在 Vite 配置中启用本目录的字体许可插件，使两个 OFL 文本随带摘要的字体资源一起进入构建产物。
 
-管理员端、聊天端和 RAG 评测台使用 `/` 开头的资源前缀，接入时要同时确认资源前缀和字体文件的相对路径没有问题。
+管理员端、聊天端和 RAG 评测台使用 `/` 开头的资源前缀，接入时要同时确认资源前缀和字体文件的相对路径没有问题。管理员端额外通过 `src/element-plus.css` 把 Element Plus 复杂控件适配到共享语义 token。
 
 ## 开发与自检
 

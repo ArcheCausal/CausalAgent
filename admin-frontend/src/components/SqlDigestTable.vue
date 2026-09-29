@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import { CaBadge, CaButton } from '@causalagent/design-system'
 import { computed, ref } from 'vue'
 import { displayValue, formatNumber } from '../lib/dashboard'
 import { toSqlDigestView, type SqlDigestView } from '../lib/sqlSemantics'
+import { statusTone } from '../lib/statusTone'
 
 const props = defineProps<{
   statements: Record<string, unknown>[]
@@ -55,7 +57,7 @@ function clearDetails(): void {
   <el-table class="sql-business-table" :data="rows" table-layout="auto">
     <el-table-column label="业务模块" min-width="150" align="center">
       <template #default="{ row }">
-        <el-tag effect="plain" round>{{ row.meaning.module }}</el-tag>
+        <CaBadge tone="neutral">{{ row.meaning.module }}</CaBadge>
       </template>
     </el-table-column>
     <el-table-column label="功能" min-width="240">
@@ -75,18 +77,14 @@ function clearDetails(): void {
     </el-table-column>
     <el-table-column label="识别方式" min-width="110">
       <template #default="{ row }">
-        <el-tag
-          :type="row.meaning.confidence === 'confirmed' ? 'success' : 'warning'"
-          effect="light"
-          round
-        >
+        <CaBadge :tone="statusTone(row.meaning.confidence)">
           {{ row.meaning.confidence === 'confirmed' ? '代码确认' : '推断' }}
-        </el-tag>
+        </CaBadge>
       </template>
     </el-table-column>
     <el-table-column label="操作" fixed="right" width="112">
       <template #default="{ row }">
-        <el-button type="primary" link @click="openDetails(row)">查看详情</el-button>
+        <CaButton variant="quiet" size="sm" @click="openDetails(row)">查看详情</CaButton>
       </template>
     </el-table-column>
   </el-table>
@@ -108,14 +106,10 @@ function clearDetails(): void {
     <div v-if="selectedStatement" class="sql-detail-content">
       <section class="sql-detail-business">
         <div class="sql-detail-tags">
-          <el-tag effect="plain" round>{{ selectedStatement.meaning.module }}</el-tag>
-          <el-tag
-            :type="selectedStatement.meaning.confidence === 'confirmed' ? 'success' : 'warning'"
-            effect="light"
-            round
-          >
+          <CaBadge tone="neutral">{{ selectedStatement.meaning.module }}</CaBadge>
+          <CaBadge :tone="statusTone(selectedStatement.meaning.confidence)">
             {{ selectedStatement.meaning.confidence === 'confirmed' ? '代码确认' : '推断' }}
-          </el-tag>
+          </CaBadge>
         </div>
         <strong>{{ selectedStatement.meaning.action }}</strong>
         <p>{{ selectedStatement.meaning.description }}</p>
@@ -157,7 +151,7 @@ function clearDetails(): void {
       </section>
 
       <div class="sql-detail-actions">
-        <el-button @click="detailVisible = false">关闭详情</el-button>
+        <CaButton variant="secondary" @click="detailVisible = false">关闭详情</CaButton>
       </div>
     </div>
   </el-drawer>

@@ -121,6 +121,7 @@ export interface ChatMessage {
   text: MessageText
   analysisJobId?: string
   analysisJobInputId?: number
+  fileAttachment?: { filename: string }
   references?: Reference[]
   thinkingAfter?: ExecutionPhase
   /** 本页实时执行到一半时被追问固定下来的执行记录；只存在于内存，不来自接口。 */

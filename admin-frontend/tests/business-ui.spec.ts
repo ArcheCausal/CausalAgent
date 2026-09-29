@@ -26,6 +26,12 @@ vi.mock('../src/api', async (importOriginal) => {
 })
 
 const elementStubs = {
+  CaButton: {
+    props: ['href', 'disabled', 'loading'],
+    template: '<component :is="href ? \'a\' : \'button\'" :href="href"><slot /></component>',
+  },
+  CaEmptyState: { template: '<div class="empty-stub"><slot /></div>' },
+  CaLoadingState: { template: '<div class="skeleton-stub" />' },
   ElAlert: { template: '<div class="alert-stub"><slot /></div>' },
   ElButton: { template: '<button><slot /></button>' },
   ElDialog: {
@@ -33,8 +39,6 @@ const elementStubs = {
     emits: ['update:modelValue'],
     template: '<section v-if="modelValue" class="dialog-stub"><slot /><slot name="footer" /></section>',
   },
-  ElEmpty: { template: '<div class="empty-stub" />' },
-  ElSkeleton: { template: '<div class="skeleton-stub" />' },
   ElTooltip: { template: '<span class="tooltip-stub"><slot /></span>' },
 }
 
@@ -96,7 +100,7 @@ describe('3.1 管理员界面交互边界', () => {
     expect(wrapper.find('.sensitive-notice').exists()).toBe(false)
   })
 
-  it('桌面侧栏在 248/76 模式间切换并持久化，Logo 始终复用受保护原图', async () => {
+  it('桌面侧栏在 264/80 模式间切换并持久化，Logo 始终复用受保护原图', async () => {
     const router = createRouter({
       history: createMemoryHistory('/admin/'),
       routes: [{ path: '/database', component: { template: '<div>database</div>' } }],
@@ -115,7 +119,7 @@ describe('3.1 管理员界面交互边界', () => {
     expect(wrapper.findAll('img[src="/api/admin/brand/logo"]')).toHaveLength(2)
     expect(wrapper.findAll('.nav-icon svg')).toHaveLength(8)
     expect(wrapper.findAll('.nav-icon').every(icon => icon.text() === '')).toBe(true)
-    expect(wrapper.findAll('.nav-icon svg').every(icon => icon.attributes('stroke-width') === '1.8'))
+    expect(wrapper.findAll('.nav-icon svg').every(icon => icon.attributes('stroke-width') === '1.5'))
       .toBe(true)
     expect(wrapper.find('.grafana-entry-button').attributes('href'))
       .toBe('http://127.0.0.1:3000/')

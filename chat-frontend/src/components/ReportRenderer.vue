@@ -127,7 +127,7 @@ function focusEvidence(blockIds: string[]) {
 .report-document {
   display: flex;
   flex-direction: column;
-  gap: var(--report-block-gap, 18px);
+  gap: 32px;
   width: 100%;
   max-width: 100%;
   overflow-wrap: anywhere;
@@ -142,6 +142,7 @@ function focusEvidence(blockIds: string[]) {
 .report-title {
   margin: 0;
   font-size: var(--report-title-size, 22px);
+  font-weight: 400;
   line-height: 1.35;
 }
 
@@ -154,6 +155,7 @@ function focusEvidence(blockIds: string[]) {
 .report-sources-title {
   margin: 0 0 6px;
   font-size: 14px;
+  font-weight: 400;
   color: var(--report-accent, #0067c0);
 }
 
@@ -244,8 +246,8 @@ function focusEvidence(blockIds: string[]) {
 }
 
 .report-document :deep(.is-cited-target) {
-  background: var(--report-cited-background, #fff6d8);
-  box-shadow: 0 0 0 6px var(--report-cited-background, #fff6d8);
+  background: var(--report-cited-background, #f3f3f3);
+  box-shadow: 0 0 0 6px var(--report-cited-background, #f3f3f3);
   border-radius: 4px;
   transition: background-color 200ms ease, box-shadow 200ms ease;
 }

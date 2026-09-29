@@ -138,7 +138,9 @@ describe('ReportRenderer', () => {
     const wrapper = mount(ReportRenderer, { props: { document: documentPayload() } })
 
     expect(wrapper.get('.report-chart-title').text()).toBe('年龄分布')
-    expect(wrapper.findAll('.report-histogram-svg rect')).toHaveLength(3)
+    const bars = wrapper.findAll('.report-histogram-svg rect')
+    expect(bars).toHaveLength(3)
+    expect(bars.map((bar) => bar.attributes('opacity'))).toEqual(['0.696', '1', '0.544'])
   })
 
   it('keeps rendering the rest of the report when a block type is unknown', () => {

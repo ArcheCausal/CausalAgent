@@ -1,0 +1,237 @@
+/* Element Plus 是管理员端复杂控件的适配器；基础展示组件使用共享设计系统。 */
+:root {
+  --el-color-primary: var(--ca-ink);
+  --el-color-primary-light-3: var(--ca-pewter);
+  --el-color-primary-light-5: var(--ca-stone);
+  --el-color-primary-light-7: var(--ca-hairline);
+  --el-color-primary-light-8: var(--ca-vellum);
+  --el-color-primary-light-9: var(--ca-vellum);
+  --el-color-primary-dark-2: var(--ca-ink-hover);
+  --el-color-success: var(--ca-text-default);
+  --el-color-success-light-3: var(--ca-text-muted-strong);
+  --el-color-success-light-5: var(--ca-stone);
+  --el-color-success-light-7: var(--ca-hairline);
+  --el-color-success-light-8: var(--ca-vellum);
+  --el-color-success-light-9: var(--ca-vellum);
+  --el-color-warning: var(--ca-text-muted-strong);
+  --el-color-warning-light-3: var(--ca-slate);
+  --el-color-warning-light-5: var(--ca-stone);
+  --el-color-warning-light-7: var(--ca-hairline);
+  --el-color-warning-light-8: var(--ca-vellum);
+  --el-color-warning-light-9: var(--ca-vellum);
+  --el-color-info: var(--ca-text-muted);
+  --el-color-info-light-3: var(--ca-text-muted-strong);
+  --el-color-info-light-5: var(--ca-stone);
+  --el-color-info-light-7: var(--ca-hairline);
+  --el-color-info-light-8: var(--ca-vellum);
+  --el-color-info-light-9: var(--ca-vellum);
+  --el-text-color-primary: var(--ca-text-default);
+  --el-text-color-regular: var(--ca-text-default);
+  --el-text-color-secondary: var(--ca-text-muted);
+  --el-text-color-placeholder: var(--ca-text-subtle);
+  --el-border-color: var(--ca-border-default);
+  --el-border-color-light: var(--ca-border-default);
+  --el-border-color-lighter: var(--ca-border-default);
+  --el-fill-color-blank: var(--ca-surface-panel);
+  --el-fill-color-light: var(--ca-surface-muted);
+  --el-fill-color-lighter: var(--ca-surface-muted);
+  --el-fill-color: var(--ca-surface-muted);
+  --el-bg-color: var(--ca-surface-page);
+  --el-bg-color-page: var(--ca-surface-page);
+  --el-bg-color-overlay: var(--ca-surface-panel);
+  --el-box-shadow: var(--ca-shadow-panel);
+  --el-box-shadow-light: var(--ca-shadow-raise);
+  --el-border-radius-base: var(--ca-radius-small);
+  --el-border-radius-small: var(--ca-radius-small);
+  --el-border-radius-round: var(--ca-radius-full);
+  --el-font-family: var(--ca-font-sans);
+  --el-font-size-base: var(--ca-text-body-sm);
+  --el-font-weight-primary: var(--ca-weight-regular);
+}
+
+.el-button,
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select__wrapper,
+.el-input-number,
+.el-switch,
+.el-tag,
+.el-alert,
+.el-dialog,
+.el-drawer,
+.el-collapse,
+.el-descriptions {
+  font-family: var(--ca-font-sans);
+}
+
+.el-button,
+.el-tag,
+.el-alert,
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select__wrapper,
+.el-input-number,
+.el-dialog,
+.el-drawer,
+.el-collapse,
+.el-descriptions {
+  border-radius: var(--ca-radius-small);
+}
+
+.el-button {
+  font-weight: var(--ca-weight-regular);
+}
+
+.el-button--primary,
+.el-button--success,
+.el-button--warning,
+.el-button--info {
+  color: var(--ca-text-default);
+  background: var(--ca-surface-panel);
+  border-color: var(--ca-border-strong);
+}
+
+.el-button--primary:hover,
+.el-button--primary:focus,
+.el-button--success:hover,
+.el-button--success:focus,
+.el-button--warning:hover,
+.el-button--warning:focus,
+.el-button--info:hover,
+.el-button--info:focus {
+  color: var(--ca-text-default);
+  background: var(--ca-surface-muted);
+  border-color: var(--ca-ink);
+}
+
+.el-button--primary.is-plain,
+.el-button--success.is-plain,
+.el-button--warning.is-plain,
+.el-button--info.is-plain {
+  color: var(--ca-text-default);
+  background: var(--ca-surface-muted);
+  border-color: var(--ca-border-default);
+}
+
+.el-button.is-link,
+.el-button.is-text {
+  color: var(--ca-text-default);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: var(--ca-border-width);
+}
+
+.el-button.is-link.el-button--danger,
+.el-button.is-text.el-button--danger {
+  color: var(--el-color-danger);
+}
+
+.el-tag {
+  font-weight: var(--ca-weight-regular);
+}
+
+.el-alert {
+  border: var(--ca-border-width) solid var(--ca-border-default);
+  background: var(--ca-surface-muted);
+}
+
+.el-alert--warning {
+  color: var(--ca-text-default);
+  background: var(--ca-surface-notice);
+}
+
+.el-alert--success,
+.el-alert--info {
+  color: var(--ca-text-default);
+  background: var(--ca-surface-muted);
+}
+
+.el-alert--error {
+  color: var(--ca-text-default);
+  background: var(--ca-surface-muted);
+  border-color: var(--ca-border-default);
+}
+
+.el-alert.danger-alert {
+  color: var(--el-color-danger);
+  background: var(--el-color-danger-light-9);
+  border-color: var(--el-color-danger-light-5);
+}
+
+.el-table {
+  --el-table-border-color: var(--ca-border-default);
+  --el-table-header-bg-color: var(--ca-surface-muted);
+  --el-table-row-hover-bg-color: var(--ca-surface-muted);
+  --el-table-current-row-bg-color: var(--ca-surface-muted);
+  --el-table-tr-bg-color: var(--ca-surface-panel);
+  --el-table-text-color: var(--ca-text-default);
+  --el-table-header-text-color: var(--ca-text-muted);
+  font-size: var(--ca-text-body-sm);
+}
+
+.el-table th.el-table__cell,
+.el-table td.el-table__cell {
+  font-weight: var(--ca-weight-regular);
+}
+
+.el-dialog__header,
+.el-drawer__header {
+  font-weight: var(--ca-weight-regular);
+}
+
+.el-form-item__label,
+.el-descriptions__label,
+.el-collapse-item__header {
+  font-weight: var(--ca-weight-regular);
+}
+
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused,
+.el-textarea__inner:focus {
+  box-shadow: 0 0 0 2px var(--ca-focus-ring) !important;
+}
+
+.el-empty__description p {
+  color: var(--ca-text-muted);
+  font-weight: var(--ca-weight-regular);
+}
+
+.el-loading-spinner .circular {
+  display: none;
+}
+
+.el-loading-spinner::after,
+.el-loading-spinner::before {
+  position: absolute;
+  top: 50%;
+  height: 2px;
+  border-radius: var(--ca-radius-full);
+  content: '';
+  transform: translateY(-50%);
+}
+
+.el-loading-spinner::after {
+  right: 30%;
+  left: 30%;
+  background: var(--ca-border-default);
+}
+
+.el-loading-spinner::before {
+  left: 30%;
+  z-index: 1;
+  width: 40%;
+  background: var(--ca-ink);
+  animation: admin-loading-progress 1100ms var(--ca-ease-out) infinite;
+}
+
+@keyframes admin-loading-progress {
+  from { transform: translate(-110%, -50%); }
+  to { transform: translate(250%, -50%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .el-loading-spinner::before {
+    transform: translateY(-50%);
+    animation: none;
+  }
+}

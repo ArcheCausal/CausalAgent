@@ -49,6 +49,9 @@ export const chatMessageSchema = z.object({
   text: z.union([z.string(), structuredMessageSchema]),
   analysis_job_id: z.string().nullable().optional(),
   analysis_job_input_id: z.number().int().positive().nullable().optional(),
+  file_attachment: z.object({
+    filename: z.string().min(1),
+  }).optional(),
   references: z.array(z.object({
     title: z.string(),
     url: z.string(),

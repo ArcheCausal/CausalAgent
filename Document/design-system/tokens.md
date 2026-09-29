@@ -59,7 +59,7 @@ token 声明在 `@layer ca-tokens` 里。业务页面里没有放进层级的变
 
 | token | 取值 |
 | --- | --- |
-| `--ca-font-sans` | Geist Sans、Noto Sans SC、HarmonyOS Sans SC、Microsoft YaHei UI、PingFang SC、系统无衬线 |
+| `--ca-font-sans` | 随包 Geist Sans 400（拉丁字形）、Noto Sans SC 400（中文和 CJK 字形），最后回退到系统无衬线 |
 | `--ca-font-mono` | 系统等宽字体栈，用于代码、SQL 摘要和错误码 |
 | `--ca-weight-regular` | `400` |
 | `--ca-text-caption` / `--ca-leading-caption` | `12px` / `1.5` |
@@ -71,6 +71,10 @@ token 声明在 `@layer ca-tokens` 里。业务页面里没有放进层级的变
 | `--ca-text-heading` / `--ca-leading-heading` | `48px` / `1.11` |
 | `--ca-text-heading-lg` / `--ca-leading-heading-lg` | `60px` / `1.1` |
 | `--ca-text-display` / `--ca-leading-display` | `72px` / `1.2` |
+
+`--ca-font-sans` 是跨前端统一的品牌字体栈。Geist Sans 的 unicode-range 必须匹配实际字体文件并排除 CJK 标点；中文、CJK 标点和全角字符由随包的 Noto Sans SC WOFF2 子集绘制。当前 vendored 的 Noto Sans SC 400 子集来自 @fontsource/noto-sans-sc 5.3.0。页面不得依赖 Windows、macOS 或 Linux 是否安装中文字体。当前只提供 400 字重，字体授权文件保存在 `packages/design-system/src/fonts/licenses/`，构建后以内容摘要文件名复制到前端产物的 `assets/font-licenses/`，发布字体资源时必须一并保留授权文件。
+
+中文正文使用中文全角标点（，。！？：；（））。半角 ASCII 标点仍按英文宽度排版，字体不会改写正文内容。
 
 `--ca-font-mono` 是应用端补充的取值，官网原型页面没有代码区块，因此原型里没有对应变量。
 

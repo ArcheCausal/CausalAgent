@@ -35,10 +35,13 @@ FROM node:24-alpine AS admin-builder
 
 WORKDIR /frontend
 
+COPY packages/design-system/src/ /packages/design-system/src/
 COPY admin-frontend/package.json admin-frontend/package-lock.json ./
-RUN npm ci
+RUN npm ci \
+    && ln -s /frontend/node_modules /packages/design-system/node_modules
 
 COPY admin-frontend/ ./
+COPY packages/design-system/ /packages/design-system/
 RUN npm run build
 
 
@@ -50,6 +53,7 @@ COPY chat-frontend/package.json chat-frontend/package-lock.json ./
 RUN npm ci
 
 COPY chat-frontend/ ./
+COPY packages/design-system/ /packages/design-system/
 RUN npm run build
 
 
@@ -57,10 +61,13 @@ FROM node:24-alpine AS website-builder
 
 WORKDIR /frontend
 
+COPY packages/design-system/src/ /packages/design-system/src/
 COPY website-frontend/package.json website-frontend/package-lock.json website-frontend/.npmrc ./
-RUN npm ci
+RUN npm ci \
+    && ln -s /frontend/node_modules /packages/design-system/node_modules
 
 COPY website-frontend/ ./
+COPY packages/design-system/ /packages/design-system/
 RUN npm run build
 
 
@@ -72,6 +79,7 @@ COPY app/rag_eval/frontend/package.json app/rag_eval/frontend/package-lock.json 
 RUN npm ci
 
 COPY app/rag_eval/frontend/ ./
+COPY packages/design-system/ /workspace/packages/design-system/
 RUN npm run build
 
 

@@ -24,6 +24,9 @@
   "text": "目标变量是 Y",
   "analysis_job_id": "job-id",
   "analysis_job_input_id": 42,
+  "file_attachment": {
+    "filename": "patients.csv"
+  },
   "thinking_after": {
     "phase_sequence": 1,
     "status": "completed",
@@ -61,6 +64,8 @@ assistant 消息的 `text` 在报告场景下是结构化报告载荷，与 SSE 
 报告文档保存在 `chat_attachments` 的 `report_document` 附件里，`chat_messages.content` 只保存报告标题作为会话预览。历史读取会重新通过后端报告 schema 校验附件 JSON，再包装成上述载荷；附件损坏或 schema 非法时记录 `chat.attachment.degraded`，只返回消息正文中的报告预览，不把无效 JSON 发给前端。旧版 `visualization`、`causal_graph` 和 `web_search_references` 附件继续按原格式读取和投影。
 
 删除会话前，服务端锁定该会话的 Job 和 Session；如果存在 `queued`、`running` 或 `waiting_input` Job，返回 `409`。否则在同一个 MySQL 事务中登记所有 Job 的父子图 checkpoint 清理 outbox、删除附件、删除聊天消息和删除 Session，然后返回后台清理状态。MySQL 业务删除成功不代表 PostgreSQL checkpoint 已同步完成。删除会话只清理 Job checkpoint，不删除该用户长期记忆。
+
+当用户消息精确关联到初始 Job 输入，且该 Job 有冻结文件名时，历史响应会附带可选的 file_attachment.filename。服务端通过 analysis_job_input_id、输入账本的 chat_message_id 和 job_id 校验归属；响应只返回文件名，不返回文件内容、文件 ID、对象 ID 或哈希。没有文件的消息、恢复输入和 assistant 消息不包含该字段。
 
 ## 文件接口
 

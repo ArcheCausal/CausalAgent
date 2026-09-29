@@ -665,7 +665,7 @@ test('3.2 业务页面、受控写入、敏感揭示和可收缩导航在 mock �
   await expect(page.locator('.nav-item').filter({ hasText: '会话与内容管理' }))
     .toHaveCSS('font-size', '14px')
   await expect(page.locator('.nav-icon svg')).toHaveCount(8)
-  await expect(page.locator('.nav-icon svg').first()).toHaveAttribute('stroke-width', '1.8')
+  await expect(page.locator('.nav-icon svg').first()).toHaveAttribute('stroke-width', '1.5')
 
   const grafanaEntry = page.getByRole('link', { name: '进入 Grafana' })
   const chatEntry = page.getByRole('link', { name: '进入聊天' })

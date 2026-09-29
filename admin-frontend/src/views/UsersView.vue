@@ -2,8 +2,16 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ApiError, adminApi } from '../api'
+import {
+  CaBadge,
+  CaButton,
+  CaCard,
+  CaErrorState,
+  CaPageHeader,
+} from '@causalagent/design-system'
 import CursorPager from '../components/CursorPager.vue'
 import { formatDate } from '../lib/dashboard'
+import { statusTone } from '../lib/statusTone'
 import type {
   AdminOperationResult,
   AdminUser,
@@ -325,12 +333,8 @@ onMounted(() => {
 </script>
 
 <template>
-  <section>
-    <header class="page-header">
-      <div>
-        <h1>用户与权限管理</h1>
-      </div>
-    </header>
+  <section class="admin-page">
+    <CaPageHeader title="用户与权限管理" :level="1" size="md" />
 
     <section class="filter-bar">
       <el-input v-model="q" clearable placeholder="用户名" @keyup.enter="loadUsers(true)" />
@@ -342,27 +346,29 @@ onMounted(() => {
         <el-option label="已启用" value="true" />
         <el-option label="已禁用" value="false" />
       </el-select>
-      <el-button type="primary" :loading="loading" @click="loadUsers(true)">筛选</el-button>
+      <CaButton variant="primary" :loading="loading" @click="loadUsers(true)">筛选</CaButton>
     </section>
 
-    <el-alert v-if="error" class="page-notice" type="error" :closable="false" :title="error" />
+    <CaErrorState v-if="error" class="page-notice" title="用户读取失败" :description="error" />
 
-    <section v-if="persistenceCleanupResult" class="panel persistence-cleanup-result">
+    <CaCard
+      v-if="persistenceCleanupResult"
+      as="section"
+      class="panel persistence-cleanup-result"
+      variant="outline"
+      padding="md"
+    >
       <div class="panel-header">
         <div>
           <h2>PostgreSQL 持久化数据清理进度</h2>
           <p>用户业务数据已删除；父子图 checkpoint 和长期记忆 Store 由后台 worker 异步清理。</p>
         </div>
-        <el-tag
-          :type="persistenceCleanupStatusLabel(persistenceCleanupResult, 'checkpoint_cleanup') === '成功'
-            && persistenceCleanupStatusLabel(persistenceCleanupResult, 'user_memory_cleanup') === '成功' ? 'success'
-            : persistenceCleanupStatusLabel(persistenceCleanupResult, 'checkpoint_cleanup') === '失败'
-              || persistenceCleanupStatusLabel(persistenceCleanupResult, 'user_memory_cleanup') === '失败' ? 'danger'
-              : 'warning'"
-          round
+        <CaBadge
+          :tone="persistenceCleanupStatusLabel(persistenceCleanupResult, 'checkpoint_cleanup') === '失败'
+            || persistenceCleanupStatusLabel(persistenceCleanupResult, 'user_memory_cleanup') === '失败' ? 'strong' : 'neutral'"
         >
           {{ persistenceCleanupResult.status === 'succeeded' ? '成功' : persistenceCleanupResult.status === 'failed' ? '失败' : '清理中' }}
-        </el-tag>
+        </CaBadge>
       </div>
       <div class="inline-metrics four-columns">
         <div><span>MySQL 用户数据</span><strong>已删除</strong></div>
@@ -380,37 +386,41 @@ onMounted(() => {
       >
         查看全局清理状态
       </router-link>
-    </section>
+    </CaCard>
 
-    <section class="panel table-panel">
+    <CaCard as="section" class="panel table-panel" variant="outline" padding="md">
       <div class="controlled-action-bar">
         <span>已选择 {{ selectedUsers.length }} / 20 个用户</span>
-        <el-button
+        <CaButton
+          variant="secondary"
           :disabled="!selectedUsers.length"
           @click="openOperation('set_active', selectedUsers, true)"
         >
           批量启用
-        </el-button>
+        </CaButton>
         <el-button
+          type="danger"
           :disabled="!selectedUsers.length"
           @click="openOperation('set_active', selectedUsers, false)"
         >
           批量禁用
         </el-button>
-        <el-button
+        <CaButton
+          variant="secondary"
           :disabled="!selectedUsers.length"
           @click="openOperation('set_role', selectedUsers, 'admin')"
         >
           批量设为管理员
-        </el-button>
-        <el-button
+        </CaButton>
+        <CaButton
+          variant="secondary"
           :disabled="!selectedUsers.length"
           @click="openOperation('set_role', selectedUsers, 'user')"
         >
           批量设为普通用户
-        </el-button>
+        </CaButton>
         <el-button
-          type="warning"
+          type="danger"
           :disabled="!selectedUsers.length"
           @click="openOperation('set_password', selectedUsers)"
         >
@@ -430,16 +440,16 @@ onMounted(() => {
         <el-table-column prop="username" label="用户名" min-width="180" />
         <el-table-column label="角色" width="120">
           <template #default="{ row }">
-            <el-tag :type="row.role === 'admin' ? 'primary' : 'info'">
+            <CaBadge :tone="statusTone(row.role === 'admin' ? 'active' : 'unknown')">
               {{ row.role === 'admin' ? '管理员' : '普通用户' }}
-            </el-tag>
+            </CaBadge>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="110">
           <template #default="{ row }">
-            <el-tag :type="row.is_active ? 'success' : 'danger'">
+            <CaBadge :tone="statusTone(row.is_active ? 'enabled' : 'disabled')">
               {{ row.is_active ? '已启用' : '已禁用' }}
-            </el-tag>
+            </CaBadge>
           </template>
         </el-table-column>
         <el-table-column label="创建时间" min-width="180">
@@ -450,22 +460,31 @@ onMounted(() => {
         </el-table-column>
         <el-table-column label="操作" width="350" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="openDetail(row)">详情</el-button>
+            <CaButton variant="quiet" size="sm" @click="openDetail(row)">详情</CaButton>
             <el-button
+              v-if="row.is_active"
               link
-              :type="row.is_active ? 'warning' : 'success'"
-              @click="openOperation('set_active', [row], !row.is_active)"
+              type="danger"
+              @click="openOperation('set_active', [row], false)"
             >
-              {{ row.is_active ? '禁用' : '启用' }}
+              禁用
             </el-button>
-            <el-button
-              link
-              type="primary"
+            <CaButton
+              v-else
+              variant="quiet"
+              size="sm"
+              @click="openOperation('set_active', [row], true)"
+            >
+              启用
+            </CaButton>
+            <CaButton
+              variant="quiet"
+              size="sm"
               @click="openOperation('set_role', [row], row.role === 'admin' ? 'user' : 'admin')"
             >
               {{ row.role === 'admin' ? '降为用户' : '升为管理员' }}
-            </el-button>
-            <el-button link type="warning" @click="openOperation('set_password', [row])">改密</el-button>
+            </CaButton>
+            <el-button link type="danger" @click="openOperation('set_password', [row])">改密</el-button>
             <el-button link type="danger" @click="openDelete(row)">删除</el-button>
           </template>
         </el-table-column>
@@ -477,7 +496,7 @@ onMounted(() => {
         @previous="previousPage"
         @next="nextPage"
       />
-    </section>
+      </CaCard>
 
     <el-drawer v-model="detailVisible" title="用户详情" size="min(520px, 100vw)">
       <div v-loading="detailLoading">
@@ -577,9 +596,23 @@ onMounted(() => {
         </el-form>
       </div>
       <template #footer>
-        <el-button @click="operationVisible = false">取消</el-button>
+        <CaButton variant="secondary" @click="operationVisible = false">取消</CaButton>
+        <CaButton
+          v-if="operationAction !== 'set_password' && !(operationAction === 'set_active' && operationValue === false)"
+          variant="primary"
+          :loading="operationSubmitting"
+          :disabled="
+            !operationPreview?.can_execute ||
+              !operationConfirmed ||
+              !reauthPassword
+          "
+          @click="submitOperation"
+        >
+          确认执行
+        </CaButton>
         <el-button
-          type="primary"
+          v-else
+          type="danger"
           :loading="operationSubmitting"
           :disabled="
             !operationPreview?.can_execute ||
@@ -597,6 +630,7 @@ onMounted(() => {
     <el-dialog v-model="deleteVisible" title="删除用户" width="min(720px, 96vw)">
       <div v-loading="deleteLoading">
         <el-alert
+          class="danger-alert"
           type="error"
           :closable="false"
           show-icon
@@ -604,7 +638,7 @@ onMounted(() => {
         />
         <el-alert
           v-if="deleteError"
-          class="dialog-error"
+          class="dialog-error danger-alert"
           type="error"
           :closable="false"
           show-icon
@@ -622,7 +656,7 @@ onMounted(() => {
           </el-descriptions>
           <el-alert
             v-if="deleteImpact.blockers.length"
-            class="page-notice"
+            class="page-notice danger-alert"
             type="error"
             :closable="false"
             :title="deleteImpact.blockers.join('；')"
@@ -659,7 +693,7 @@ onMounted(() => {
         </template>
       </div>
       <template #footer>
-        <el-button @click="deleteVisible = false">取消</el-button>
+        <CaButton variant="secondary" @click="deleteVisible = false">取消</CaButton>
         <el-button
           type="danger"
           :loading="deleteSubmitting"
@@ -682,56 +716,56 @@ onMounted(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 14px;
+  gap: var(--ca-space-8);
+  margin-bottom: var(--ca-space-12);
 }
 
 .controlled-action-bar > span {
   margin-right: auto;
-  color: #64748b;
+  color: var(--ca-text-muted);
 }
 
 .operation-preview-table,
 .impact-grid,
 .reauth-form {
-  margin-top: 16px;
+  margin-top: var(--ca-space-16);
 }
 
 .dialog-error {
-  margin-top: 12px;
+  margin-top: var(--ca-space-12);
 }
 
 .danger-confirmation-form {
   display: grid;
-  gap: 16px;
-  margin-top: 16px;
+  gap: var(--ca-space-16);
+  margin-top: var(--ca-space-16);
 }
 
 .danger-confirmation-field label {
   display: block;
-  margin-bottom: 8px;
-  color: #1f2937;
-  font-weight: 600;
+  margin-bottom: var(--ca-space-8);
+  color: var(--ca-text-default);
+  font-weight: var(--ca-weight-regular);
 }
 
 .danger-confirmation-field p {
-  margin: 6px 0 0;
-  color: #64748b;
-  font-size: 13px;
+  margin: var(--ca-space-4) 0 0;
+  color: var(--ca-text-muted);
+  font-size: var(--ca-text-caption);
   line-height: 1.5;
 }
 
 .operation-confirmation {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  color: #334155;
+  gap: var(--ca-space-8);
+  color: var(--ca-text-default);
   cursor: pointer;
 }
 
 .operation-confirmation input {
-  width: 16px;
-  height: 16px;
-  accent-color: #2563eb;
+  width: var(--ca-space-16);
+  height: var(--ca-space-16);
+  accent-color: var(--ca-text-default);
 }
 </style>

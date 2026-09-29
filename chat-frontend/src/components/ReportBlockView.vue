@@ -38,6 +38,11 @@ defineProps<{ block: ReportBlockViewModel }>()
 </template>
 
 <style scoped>
+.report-block {
+  width: 100%;
+  min-width: 0;
+}
+
 .report-unknown-block {
   padding: 10px 12px;
   font-size: 13px;

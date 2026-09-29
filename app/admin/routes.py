@@ -144,6 +144,13 @@ def admin_asset(filename: str):
     return send_from_directory(_admin_dist_dir() / "assets", filename)
 
 
+@admin_page_bp.route("/brand/<path:filename>")
+@admin_required(page=True)
+def admin_brand_asset(filename: str):
+    """仅向实时校验通过的管理员返回 Vue 品牌图标与应用清单。"""
+    return send_from_directory(_admin_dist_dir() / "brand", filename)
+
+
 @admin_bp.route("/brand/logo")
 @admin_required
 def admin_brand_logo():

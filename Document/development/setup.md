@@ -123,7 +123,7 @@ $env:CAUSALAGENT_DESKTOP_URL = "http://127.0.0.1:5001/dashboard"
 
 四个前端共用的品牌基础和基础组件位于 `packages/design-system/`，它以源码形式参与各前端的构建，不单独产出构建产物。视觉决策、token 和组件契约的记录在 `Document/design-system/`，接入方式和改动约束见 `packages/design-system/README.md`。
 
-本包目前还没有被任何前端接入，因此不启动开发服务器。改动后执行自检：
+管理员端和 RAG 评测台已接入本包的共享样式与组件；本包本身不启动独立开发服务器。改动后执行自检：
 
 ```powershell
 Push-Location packages/design-system
@@ -161,7 +161,7 @@ npm run dev
 Pop-Location
 ```
 
-Vite 将 `/api` 代理到 `http://127.0.0.1:5001`。设置 `WEBSITE_VITE_DEV_SERVER_URL=http://127.0.0.1:5175` 后，`/`、`/product`、`/about`、`/docs`、`/changelog` 与 `/auth/sign-in`、`/auth/sign-up` 会跳转到 `http://127.0.0.1:5175/site-assets<原路径>`；未设置时由 Flask 从 `website-frontend/dist/` 或 `WEBSITE_FRONTEND_DIST_DIR` 提供。该工程使用 `.npmrc` 固定 `legacy-peer-deps`，安装依赖请使用 `npm ci`。
+Vite 将 `/api` 代理到 `http://127.0.0.1:5001`。设置 `WEBSITE_VITE_DEV_SERVER_URL=http://127.0.0.1:5175` 后，`/`、`/product`、`/pricing`、`/about`、`/docs`、`/changelog` 与 `/auth/sign-in`、`/auth/sign-up` 会跳转到 `http://127.0.0.1:5175/site-assets<原路径>`；未设置时由 Flask 从 `website-frontend/dist/` 或 `WEBSITE_FRONTEND_DIST_DIR` 提供。该工程使用 `.npmrc` 固定 `legacy-peer-deps`，安装依赖请使用 `npm ci`。
 
 ## RAG 评测台前端开发
 

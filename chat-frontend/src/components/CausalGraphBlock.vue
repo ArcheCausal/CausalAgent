@@ -51,7 +51,7 @@ function onSelectEdge(payload: { id: string; from: string; to: string; label: st
 .report-causal-graph {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
   padding: 14px 16px;
   background: var(--report-surface, #ffffff);
   border: 1px solid var(--report-border, #e2e5e9);
@@ -61,7 +61,7 @@ function onSelectEdge(payload: { id: string; from: string; to: string; label: st
 .report-causal-graph-title {
   margin: 0;
   font-size: var(--report-chart-title-size, 15px);
-  font-weight: 600;
+  font-weight: 400;
 }
 
 .report-chart-state,

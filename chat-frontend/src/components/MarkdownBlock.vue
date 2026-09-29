@@ -16,26 +16,57 @@ const html = computed(() => renderMarkdown(props.content))
 
 <style scoped>
 .report-markdown {
+  width: 100%;
   min-width: 0;
   font-size: var(--report-text-size, 15px);
   line-height: 1.65;
 }
 
 .report-markdown :deep(.markdown-content) {
+  width: 100%;
+  min-width: 0;
+  overflow-x: auto;
   overflow-wrap: anywhere;
 }
 
+.report-markdown :deep(h1),
+.report-markdown :deep(h2),
+.report-markdown :deep(h3),
+.report-markdown :deep(h4),
+.report-markdown :deep(th) {
+  font-weight: 400;
+}
+
+.report-markdown :deep(p) {
+  width: 100%;
+  max-width: none;
+  margin: 0 0 12px;
+}
+
 .report-markdown :deep(table) {
-  display: block;
+  display: table;
+  width: 100%;
+  min-width: 100%;
   max-width: 100%;
-  overflow-x: auto;
+  table-layout: auto;
   border-collapse: collapse;
 }
 
 .report-markdown :deep(th),
 .report-markdown :deep(td) {
-  padding: 6px 10px;
-  border: 1px solid var(--report-border, #e2e5e9);
+  padding: 12px 8px 12px 0;
+  text-align: left;
+  border-top: 1px solid var(--report-border, #e2e5e9);
+}
+
+.report-markdown :deep(thead th) {
+  color: var(--color-text-muted, #6f6f6f);
+  font-size: 12px;
+  border-top: 0;
+}
+
+.report-markdown :deep(tbody th) {
+  color: var(--color-text-muted, #6f6f6f);
 }
 
 .report-markdown :deep(pre) {

@@ -18,6 +18,11 @@ function onDecisionSettled(jobId: string | undefined, payload: { stepId: string;
   jobs.settleDecision(jobId, payload.stepId, payload.key)
 }
 
+function fileExtension(filename: string): string {
+  const extension = filename.split('.').pop()?.trim()
+  return extension ? extension.toUpperCase() : 'FILE'
+}
+
 /** 只有已持久化的历史阶段事件会走到这里；公开决策在历史中本来就是完整文本。 */
 function phaseThinking(phase: ExecutionPhase): ThinkingProjection {
   const steps: ThinkingProjection['steps'] = {}
@@ -128,6 +133,12 @@ watch(() => props.messages.length, () => scrollFollow.keepLatest())
   <div v-if="!messageRows.length" class="conversation-empty" aria-live="polite">CausalAgent</div>
   <div v-for="row in messageRows" :key="row.message.localId" class="message-row" :class="`${row.message.sender}-message-row`">
     <article class="message" :class="`${row.message.sender}-message`">
+      <div v-if="row.message.sender === 'user' && row.message.fileAttachment" class="selected-file-card message-file-card">
+        <span class="selected-file-icon" aria-hidden="true">{{ fileExtension(row.message.fileAttachment.filename) }}</span>
+        <span class="selected-file-details">
+          <strong class="selected-file-name" :title="row.message.fileAttachment.filename">{{ row.message.fileAttachment.filename }}</strong>
+        </span>
+      </div>
       <MessageBody :text="row.message.text" />
     </article>
     <ThinkingTimeline

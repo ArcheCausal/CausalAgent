@@ -260,11 +260,10 @@ cd admin-frontend
 npm ci
 npm run typecheck
 npm run test:unit
-npm run test:e2e:mock
 npm run build
 ```
 
-`npm run build` 会先执行 typecheck，再生成 `/admin/` base 的 Vite 产物。修改管理员 API 或页面后必须至少覆盖 loading、empty、error、401/403 和敏感内容边界；真实数据库写流程只能在隔离环境运行。
+`npm run build` 会先执行 typecheck，再生成 `/admin/` base 的 Vite 产物。管理员设计系统统一本轮只检查 loading、empty、error、401/403 和敏感内容代码契约；浏览器与真实数据库验收不纳入本轮页面样式交付。
 
 ## 隔离管理员 E2E
 

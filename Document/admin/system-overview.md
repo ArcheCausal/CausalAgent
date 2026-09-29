@@ -8,7 +8,7 @@
 
 ## 一、定位与架构
 
-管理员系统是独立于普通聊天页面的治理面：前端位于 `admin-frontend/`，采用 Vue 3、TypeScript、Vue Router、Element Plus 和 Vite；Flask 负责页面鉴权、API 与生产静态资源托管。Node 只参与镜像构建，生产运行时不启动 Vite。
+管理员系统是独立于普通聊天页面的治理面：前端位于 `admin-frontend/`，采用 Vue 3、TypeScript、Vue Router、共享 `@causalagent/design-system`、Element Plus 和 Vite；共享包负责品牌基础、按钮、卡片、标记、标题、标签页及加载/空/错误状态，Element Plus 保留表格、抽屉、对话框、Descriptions、表单控件、选择器、Timeline、Tooltip、Collapse 和局部加载遮罩。Flask 负责页面鉴权、API 与生产静态资源托管。Node 只参与镜像构建，生产运行时不启动 Vite。
 
 ```mermaid
 flowchart LR
@@ -67,4 +67,4 @@ flowchart LR
 
 ## 四、边界与维护
 
-当前只初始化 `user` 与 `admin` 两个角色，授权判断统一读取 `user_roles` 与 `role_permissions` 权限表，`users.role` 只作为过渡兼容字段；后台不提供自定义角色与权限的管理界面，也不提供任意 SQL、迁移、自动修复、数据库授权、复制控制或任务控制。结构变更必须通过 Alembic，并同步检查 `app/db.py` 就绪检查。管理员前端源码变更后必须重新构建（`npm run build`），并执行 Python 测试、TypeScript/Vitest、Mock E2E 与生产构建；构建产物不进入版本库，未构建时 `/admin/` 返回带 request ID 的 `503`。高风险写入应在隔离主从 E2E 中验收。
+当前只初始化 `user` 与 `admin` 两个角色，授权判断统一读取 `user_roles` 与 `role_permissions` 权限表，`users.role` 只作为过渡兼容字段；后台不提供自定义角色与权限的管理界面，也不提供任意 SQL、迁移、自动修复、数据库授权、复制控制或任务控制。结构变更必须通过 Alembic，并同步检查 `app/db.py` 就绪检查。管理员前端设计系统统一的代码检查包括共享包 typecheck、unit/check，管理员端 typecheck、unit、build，以及管理员部署和四前端入口的 Python 静态契约测试；本轮不把浏览器、数据库或隔离环境验收混入页面样式交付。构建产物不进入版本库，未构建时 `/admin/` 返回带 request ID 的 `503`。

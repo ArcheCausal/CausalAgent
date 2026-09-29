@@ -1,11 +1,7 @@
-/* CausalAgent 设计系统：字体层
-
-   全站只有一个字重 400。字体包只提供 Geist Sans 400 的拉丁字形，
-   中文回退到系统无衬线，因此页面和组件都不得要求其它字重，
-   否则浏览器会合成粗体，与品牌方向不一致。 */
+/* CausalAgent 设计系统：字体层。各字符集使用随包提供的字形子集。 */
 @layer ca-tokens {
   :root {
-    --ca-font-sans: "Geist Sans", "Noto Sans SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "PingFang SC", ui-sans-serif, system-ui, sans-serif;
+    --ca-font-sans: "Geist Sans", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
     /* 代码与 SQL 摘要用等宽字体；原型页面没有代码区块，这一档为应用端补充 */
     --ca-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
     --ca-weight-regular: 400;

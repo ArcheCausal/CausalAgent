@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { CaButton, CaEmptyState } from '@causalagent/design-system'
 import { ref, watch } from 'vue'
 import { ApiError } from '../api'
 import type { SensitiveContentChunk } from '../types'
@@ -55,17 +56,17 @@ watch(visible, (opened) => {
     <el-alert v-if="error" class="content-error" type="error" :closable="false" :title="error" />
     <div v-loading="loading && !content" class="sensitive-content">
       <pre v-if="content" v-text="content" />
-      <el-empty v-else-if="!loading && !error" description="正文为空" />
+      <CaEmptyState v-else-if="!loading && !error" description="正文为空" />
     </div>
     <template #footer>
-      <el-button
+      <CaButton
         v-if="nextOffset !== null"
         :loading="loading"
         @click="load(nextOffset)"
       >
         继续加载
-      </el-button>
-      <el-button type="primary" @click="visible = false">关闭</el-button>
+      </CaButton>
+      <CaButton variant="secondary" @click="visible = false">关闭</CaButton>
     </template>
   </el-dialog>
 </template>

@@ -173,7 +173,7 @@ def load_session_content():
 
             cursor.execute(
                 """
-                SELECT job_id, status, created_at, finished_at
+                SELECT job_id, status, created_at, finished_at, input_filename
                 FROM analysis_jobs
                 WHERE session_id = %s AND user_id = %s
                 ORDER BY created_at, id
@@ -207,6 +207,9 @@ def load_session_content():
                 )
                 event_rows = cursor.fetchall()
 
+            jobs_by_id = {str(row["job_id"]): row for row in job_rows}
+            inputs_by_id = {int(row["input_id"]): row for row in input_rows}
+
             phases_by_message_id = assemble_execution_phases(
                 messages=chat_rows,
                 jobs=job_rows,
@@ -223,6 +226,20 @@ def load_session_content():
                     "analysis_job_id": row.get("analysis_job_id"),
                     "analysis_job_input_id": row.get("analysis_job_input_id"),
                 }
+
+                if sender == "user" and row.get("analysis_job_input_id") is not None:
+                    input_row = inputs_by_id.get(int(row["analysis_job_input_id"]))
+                    job_id = row.get("analysis_job_id")
+                    if (
+                        input_row
+                        and input_row.get("input_type") == "initial"
+                        and int(input_row.get("chat_message_id") or 0) == int(row["id"])
+                        and job_id
+                        and str(input_row.get("job_id")) == str(job_id)
+                    ):
+                        filename = jobs_by_id.get(str(job_id), {}).get("input_filename")
+                        if isinstance(filename, str) and filename.strip():
+                            message["file_attachment"] = {"filename": filename}
 
                 # 如果是AI消息，且有附件，则优先使用附件内容
                 if sender == "ai" and row["has_attachment"]:

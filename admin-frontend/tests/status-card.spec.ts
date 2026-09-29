@@ -18,7 +18,11 @@ describe('StatusCard', () => {
       },
       global: {
         stubs: {
-          ElTag: { template: '<span class="tag-stub"><slot /></span>' },
+          CaCard: { template: '<article><slot /></article>' },
+          CaBadge: {
+            props: ['tone'],
+            template: '<span class="badge-stub" :data-tone="tone"><slot /></span>',
+          },
         },
       },
     })
@@ -28,6 +32,7 @@ describe('StatusCard', () => {
     expect(wrapper.text()).toContain('警告')
     expect(wrapper.text()).toContain('primary')
     expect(wrapper.text()).toContain('已过期')
+    expect(wrapper.get('.badge-stub').attributes('data-tone')).toBe('neutral')
     expect(wrapper.get('.card-meta').attributes('title')).toContain('primary')
     expect(wrapper.get('.card-meta').attributes('title')).toContain('2026')
   })

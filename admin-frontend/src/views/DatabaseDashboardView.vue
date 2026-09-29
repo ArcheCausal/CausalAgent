@@ -1,4 +1,12 @@
 <script setup lang="ts">
+import {
+  CaBadge,
+  CaButton,
+  CaCard,
+  CaEmptyState,
+  CaErrorState,
+  CaPageHeader,
+} from '@causalagent/design-system'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { adminApi } from '../api'
@@ -22,6 +30,7 @@ import {
   snapshotObservedRequest,
   statusLabel,
 } from '../lib/dashboard'
+import { statusTone } from '../lib/statusTone'
 import type { DashboardData, SnapshotMeta } from '../types'
 
 type DashboardView = 'database' | 'cleanup-worker' | 'outbox'
@@ -108,12 +117,6 @@ const cleanupWorkerStatus = computed(() => {
   return cleanupRuntime.value.worker_status === 'processing' ? '处理中' : '空闲'
 })
 
-const cleanupWorkerStatusType = computed<'success' | 'warning' | 'danger' | 'info'>(() => {
-  if (cleanupWorkerStatus.value === '异常') return 'danger'
-  if (cleanupWorkerStatus.value === '警告' || cleanupWorkerStatus.value === '失联' || cleanupWorkerStatus.value === '已停止') return 'warning'
-  if (cleanupWorkerStatus.value === '空闲' || cleanupWorkerStatus.value === '处理中') return 'success'
-  return 'info'
-})
 // 兼容旧版 mock/过渡接口；真实共享快照包含 cleanup 字段时不再在数据库状态页展示 Job。
 const legacyJobsVisible = computed(() => Boolean(
   dashboard.value
@@ -443,21 +446,25 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <header class="page-header">
-    <div>
-      <h1>数据库状态看板</h1>
-    </div>
-    <div class="header-actions">
+  <section class="admin-page database-page">
+    <CaPageHeader title="数据库状态看板" :level="1" size="md">
+      <template #actions>
       <div class="header-status">
         <span>{{ lastObservedAt }}</span>
         <span>{{ refreshPolicyText }}</span>
       </div>
-      <el-button type="primary" :loading="refreshing" @click="requestSharedRefresh">手动刷新</el-button>
-    </div>
-  </header>
+      <CaButton variant="primary" :loading="refreshing" @click="requestSharedRefresh">手动刷新</CaButton>
+      </template>
+    </CaPageHeader>
 
+  <CaErrorState
+    v-if="pageNotice && noticeType === 'error'"
+    class="page-notice"
+    title="数据库看板操作失败"
+    :description="pageNotice"
+  />
   <el-alert
-    v-if="pageNotice"
+    v-else-if="pageNotice"
     class="page-notice"
     :title="pageNotice"
     :type="noticeType"
@@ -496,7 +503,7 @@ onBeforeUnmount(() => {
     <StatusCard label="连接使用率" :value="connectionsValue" :detail="connectionsDetail" :meta="connectionsMeta" />
   </section>
 
-  <section class="panel">
+  <CaCard as="section" class="panel" variant="outline" padding="md">
     <div class="panel-header">
       <div>
         <h2>表容量</h2>
@@ -511,16 +518,16 @@ onBeforeUnmount(() => {
       <el-table-column label="索引量" min-width="120"><template #default="{ row }">{{ formatBytes(row.index_length) }}</template></el-table-column>
       <el-table-column label="总大小" min-width="120"><template #default="{ row }">{{ formatBytes(row.total_length) }}</template></el-table-column>
     </el-table>
-  </section>
+  </CaCard>
 
-  <section class="panel">
+  <CaCard as="section" class="panel" variant="outline" padding="md">
     <div class="panel-header">
       <div>
         <h2>完整性审计</h2>
       </div>
       <div class="panel-actions">
         <span class="source-meta">{{ metaText(integrity) }}</span>
-        <el-button plain type="primary" :loading="auditing" @click="requestIntegrityAudit">执行完整性审计</el-button>
+        <CaButton variant="secondary" :loading="auditing" @click="requestIntegrityAudit">执行完整性审计</CaButton>
       </div>
     </div>
     <div v-if="integrityState().message" class="section-state" :class="integrityState().tone">{{ integrityState().message }}</div>
@@ -529,14 +536,14 @@ onBeforeUnmount(() => {
       <el-table-column label="数量" min-width="100"><template #default="{ row }">{{ formatNumber(row.value) }}</template></el-table-column>
       <el-table-column label="结果" min-width="100">
         <template #default="{ row }">
-          <el-tag :type="row.status === 'healthy' ? 'success' : row.status === 'error' ? 'danger' : 'warning'" round>{{ statusLabel(row.status) }}</el-tag>
+            <CaBadge :tone="statusTone(row.status)">{{ statusLabel(row.status) }}</CaBadge>
         </template>
       </el-table-column>
       <el-table-column label="来源" min-width="150"><template #default="{ row }">{{ row.source_alias || integrity.source_alias || '共享监控快照' }}</template></el-table-column>
     </el-table>
-  </section>
+  </CaCard>
 
-  <section class="panel">
+  <CaCard as="section" class="panel" variant="outline" padding="md">
     <div class="panel-header">
       <div>
         <h2>SQL 性能摘要</h2>
@@ -562,9 +569,9 @@ onBeforeUnmount(() => {
       </div>
       <SqlDigestTable :statements="statements" />
     </template>
-  </section>
+  </CaCard>
 
-  <section v-if="legacyJobsVisible" class="panel">
+  <CaCard v-if="legacyJobsVisible" as="section" class="panel" variant="outline" padding="md">
     <div class="panel-header">
       <div>
         <h2>Worker / Job 快照</h2>
@@ -587,17 +594,17 @@ onBeforeUnmount(() => {
       <el-table-column label="心跳时间" min-width="180"><template #default="{ row }">{{ formatDate(row.heartbeat_at) }}</template></el-table-column>
       <el-table-column label="创建时间" min-width="180"><template #default="{ row }">{{ formatDate(row.created_at) }}</template></el-table-column>
     </el-table>
-  </section>
+  </CaCard>
   </template>
 
   <template v-else-if="activeView === 'cleanup-worker'">
-    <section class="panel cleanup-worker-panel">
+    <CaCard as="section" class="panel cleanup-worker-panel" variant="outline" padding="md">
       <div class="panel-header">
         <div>
           <h2>PostgreSQL Agent 持久化清理进程</h2>
           <p>该视图只展示清理 worker 最近心跳、当前任务类型和本次启动统计。</p>
         </div>
-        <el-tag :type="cleanupWorkerStatusType" round>{{ cleanupWorkerStatus }}</el-tag>
+        <CaBadge :tone="statusTone(cleanupWorkerStatus)">{{ cleanupWorkerStatus }}</CaBadge>
       </div>
       <div class="inline-metrics four-columns">
         <div><span>Worker 逻辑别名</span><strong>{{ cleanupRuntime.worker_alias || 'agent-persistence-cleanup' }}</strong></div>
@@ -614,11 +621,11 @@ onBeforeUnmount(() => {
       <div v-else-if="cleanupRuntime.is_stale" class="section-state warning">最近心跳已超过阈值，worker 可能失联。</div>
       <div v-else-if="cleanupRuntime.last_error_present" class="section-state warning">最近一次 cleanup 处理出现失败，详细异常保留在服务端日志。</div>
       <div v-else class="section-state">心跳正常，worker 当前{{ cleanupRuntime.worker_status === 'processing' ? '正在处理任务' : '空闲' }}。</div>
-    </section>
+    </CaCard>
   </template>
 
   <template v-else>
-    <section class="panel outbox-panel">
+    <CaCard as="section" class="panel outbox-panel" variant="outline" padding="md">
       <div class="panel-header">
         <div>
           <h2>Agent 持久化清理 Outbox 队列</h2>
@@ -664,9 +671,9 @@ onBeforeUnmount(() => {
         <el-table-column prop="operation_id" label="Operation ID" min-width="230" show-overflow-tooltip />
         <el-table-column label="状态" min-width="120">
           <template #default="{ row }">
-            <el-tag :type="row.error_state ? 'danger' : row.status === 'processing' ? 'warning' : 'info'">
+            <CaBadge :tone="row.error_state ? 'strong' : statusTone(row.status)">
               {{ row.lease_expired ? '租约过期' : row.status === 'pending' && row.is_due ? '到期 Pending' : row.status }}
-            </el-tag>
+            </CaBadge>
           </template>
         </el-table-column>
         <el-table-column label="尝试次数" min-width="100"><template #default="{ row }">{{ row.attempts }} / {{ row.max_attempts }}</template></el-table-column>
@@ -676,7 +683,8 @@ onBeforeUnmount(() => {
         <el-table-column label="完成时间" min-width="180"><template #default="{ row }">{{ formatDate(row.completed_at) }}</template></el-table-column>
         <el-table-column label="错误" min-width="90"><template #default="{ row }">{{ row.has_error ? '有' : '无' }}</template></el-table-column>
       </el-table>
-      <el-empty v-else description="当前没有待处理或异常 cleanup 记录" />
-    </section>
+      <CaEmptyState v-else description="当前没有待处理或异常 cleanup 记录" />
+    </CaCard>
   </template>
+  </section>
 </template>

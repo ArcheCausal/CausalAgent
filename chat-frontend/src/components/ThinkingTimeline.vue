@@ -63,6 +63,7 @@ onBeforeUnmount(() => {
       <span v-if="thinking.status === 'active'" class="thinking-dots" aria-hidden="true">...</span>
       <span class="disclosure">{{ expanded ? '▾' : '▸' }}</span>
     </button>
+    <div v-if="thinking.status === 'active'" class="think-line" aria-hidden="true"><i></i></div>
     <div v-show="expanded" class="thinking-detail-container">
       <div class="thinking-detail">
         <div v-for="step in stepRows" :key="step.stepId" class="thinking-step step-item" :class="`is-${step.status}`">

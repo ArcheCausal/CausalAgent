@@ -10,16 +10,18 @@
 
 1. `python-deps` 按 `tests/smoke/requirements-deep-agent-py311-linux.lock` 的 hash 锁定安装全部 Python 依赖（含 CPU PyTorch），不使用 `requirements-base.txt` 与 `requirements.txt` 在线求解。
 2. `test` 在共享依赖上安装 `requirements-test.txt`，默认执行 `tests/unit`。
-3. `admin-builder` 构建管理员前端，产物复制到 `/opt/causalagent-admin`。
-4. `chat-builder` 构建普通用户应用，产物复制到 `/opt/causalagent-chat`。
-5. `website-builder` 构建官网前端，产物复制到 `/opt/causalagent-website`。
-6. `rag-eval-builder` 构建 RAG 评测台前端，产物复制到 `/opt/causalagent-rag-eval`。
+3. `admin-builder` 构建管理员前端，连同共享设计系统字体源码一起构建，产物复制到 `/opt/causalagent-admin`。
+4. `chat-builder` 构建普通用户应用，连同共享设计系统字体源码一起构建，产物复制到 `/opt/causalagent-chat`。
+5. `website-builder` 构建官网前端，连同共享设计系统字体源码一起构建，产物复制到 `/opt/causalagent-website`。
+6. `rag-eval-builder` 构建 RAG 评测台，连同共享设计系统字体源码一起构建，产物复制到 `/opt/causalagent-rag-eval`。
+
+四个前端的 Vite 构建会把 Geist Sans 和 Noto Sans SC 的 WOFF2 子集放入各自的资源目录，并把字体对应的 OFL 文件复制到 `assets/font-licenses/`，文件名包含内容摘要。许可文本通过各前端已有的资源路由提供，与同目录带 hash 的字体资源一样可以安全使用 immutable 缓存；发布时字体与许可证必须一起保留。
 
 最终运行镜像不包含 Node、npm，不启动 Vite，不开放 Node 端口；Gunicorn 默认绑定 `0.0.0.0:5001`，由 `WEB_WORKERS`、`WEB_THREADS` 和 `WEB_TIMEOUT` 调整 Web 进程参数。
 
 四个前端各自使用独立的运行时目录，Compose 默认指向镜像内产物，源码卷不能覆盖这些目录：官网 `WEBSITE_FRONTEND_DIST_DIR=/opt/causalagent-website`，普通用户应用 `CHAT_FRONTEND_DIST_DIR=/opt/causalagent-chat`，RAG 评测台 `RAG_EVAL_FRONTEND_DIST_DIR=/opt/causalagent-rag-eval`，管理员系统 `ADMIN_FRONTEND_DIST_DIR=/opt/causalagent-admin`。
 
-四套入口的页面地址与资源前缀是：官网 `/`、`/product`、`/about`、`/docs`、`/changelog`、`/auth/sign-in`、`/auth/sign-up` 与 `/site-assets/`；普通用户应用 `/dashboard*` 与 `/dashboard-assets/`；RAG 评测台 `/rag-eval` 与 `/rag-eval/assets/`；管理员系统 `/admin*` 与 `/admin/assets/`。入口 HTML 不缓存，带 hash 的 `assets/` 资源使用长期 immutable 缓存；任一 dist 缺失时它的页面入口和资源路径统一返回带 request ID 的 503（`website_frontend_missing`、`chat_frontend_missing`、`rag_eval_frontend_missing`），不回退到其他前端。
+四套入口的页面地址与资源前缀是：官网 `/`、`/product`、`/pricing`、`/about`、`/docs`、`/changelog`、`/auth/sign-in`、`/auth/sign-up` 与 `/site-assets/`；普通用户应用 `/dashboard*` 与 `/dashboard-assets/`；RAG 评测台 `/rag-eval` 与 `/rag-eval/assets/`、`/rag-eval/brand/`；管理员系统 `/admin*` 与 `/admin/assets/`、`/admin/brand/`。入口 HTML 不缓存，带 hash 的 `assets/` 资源使用长期 immutable 缓存；任一 dist 缺失时它的页面入口和资源路径统一返回带 request ID 的 503（`website_frontend_missing`、`chat_frontend_missing`、`rag_eval_frontend_missing`），不回退到其他前端。
 
 ## 开发部署
 
@@ -133,9 +135,9 @@ powershell -ExecutionPolicy Bypass -File .\windows-client\build.ps1 `
 
 ## 管理员产物
 
-本地非 Docker 发布前必须在 `admin-frontend/` 执行 typecheck、unit、Mock E2E 和 build。未设置 `ADMIN_VITE_DEV_SERVER_URL` 时，Flask 从 `admin-frontend/dist/`（或 `ADMIN_FRONTEND_DIST_DIR` 指定目录）提供 `/admin/`；目录缺少 `index.html` 时返回带 request ID 的 503 和 `admin_frontend_missing`。Docker 运行镜像从 `/opt/causalagent-admin` 提供构建结果。
+本地非 Docker 发布前必须在 `admin-frontend/` 执行 typecheck、unit 和 build。管理员端构建通过 Vite/TypeScript 别名读取 `packages/design-system/src`，Docker `admin-builder` 在安装 npm 依赖前复制共享包源码。未设置 `ADMIN_VITE_DEV_SERVER_URL` 时，Flask 从 `admin-frontend/dist/`（或 `ADMIN_FRONTEND_DIST_DIR` 指定目录）提供 `/admin/`；目录缺少 `index.html` 时返回带 request ID 的 503 和 `admin_frontend_missing`。Docker 运行镜像从 `/opt/causalagent-admin` 提供构建结果。
 
-四个前端的构建产物都不进入版本库：`.gitignore` 与 `.dockerignore` 分别忽略 `admin-frontend/dist/`、`chat-frontend/dist/`、`website-frontend/dist/` 和 `app/rag_eval/frontend_dist/`，镜像构建阶段从当前源代码重新生成。开发热更新才显式启动 Vite，生产不要把 Vite 端口作为后端依赖。
+官网、聊天端和管理员端的 `dist/` 由 `.gitignore` 与 `.dockerignore` 排除。RAG 评测台的 `app/rag_eval/frontend_dist/` 通过 `.gitignore` 的显式例外保留在版本库，供本地 Flask 静态页面和入口契约使用；Docker 构建上下文排除这份副本，并由 `rag-eval-builder` 从当前源码生成部署产物。开发热更新才显式启动 Vite，生产不要把 Vite 端口作为后端依赖。
 
 ## 数据库发布顺序
 

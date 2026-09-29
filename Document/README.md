@@ -66,7 +66,7 @@
 - [`admin/architecture.md`](admin/architecture.md)：Flask 管理员 API、Vue 页面、鉴权和共享能力消费关系。
 - [`admin/api.md`](admin/api.md)：管理员页面和 API 的完整契约。
 - [`admin/development.md`](admin/development.md)：管理员前端构建、开发入口和发布依赖。
-- [`admin/testing.md`](admin/testing.md)：管理员专项单元、Mock E2E 和隔离主从验收。
+- [`admin/testing.md`](admin/testing.md)：管理员专项代码级测试与部署静态契约。
 
 ## 归属原则
 

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { CaButton } from '@causalagent/design-system'
+
 defineProps<{
   canPrevious: boolean
   hasMore: boolean
@@ -15,12 +17,12 @@ defineEmits<{
   <div class="cursor-pager">
     <span>每页最多展示20条</span>
     <div>
-      <el-button :disabled="!canPrevious || loading" @click="$emit('previous')">
+      <CaButton size="sm" variant="secondary" :disabled="!canPrevious || loading" @click="$emit('previous')">
         上一页
-      </el-button>
-      <el-button type="primary" plain :disabled="!hasMore || loading" @click="$emit('next')">
+      </CaButton>
+      <CaButton size="sm" variant="primary" :disabled="!hasMore || loading" @click="$emit('next')">
         下一页
-      </el-button>
+      </CaButton>
     </div>
   </div>
 </template>

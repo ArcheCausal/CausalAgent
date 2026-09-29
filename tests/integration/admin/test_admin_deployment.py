@@ -12,6 +12,10 @@ class AdminFrontendDeploymentTests(unittest.TestCase):
         text = Path("Dockerfile").read_text(encoding="utf-8")
 
         self.assertIn("FROM node:24-alpine AS admin-builder", text)
+        self.assertIn(
+            "COPY packages/design-system/src/ /packages/design-system/src/",
+            text,
+        )
         self.assertIn("RUN npm ci", text)
         self.assertIn("RUN npm run build", text)
         self.assertIn("FROM python-deps AS runtime", text)

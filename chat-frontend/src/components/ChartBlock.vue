@@ -73,11 +73,13 @@ const heatmap = computed(() => {
 
 function heatStyle(value: number): Record<string, string> {
   const clamped = Math.max(-1, Math.min(1, value))
-  const alpha = Math.min(0.92, Math.abs(clamped))
-  const color = clamped >= 0
-    ? `rgba(0, 103, 192, ${alpha.toFixed(3)})`
-    : `rgba(206, 66, 66, ${alpha.toFixed(3)})`
-  return { background: color }
+  const alpha = Math.min(0.22, Math.abs(clamped) * 0.22)
+  return { background: 'rgba(23, 23, 23, ' + alpha.toFixed(3) + ')' }
+}
+
+function barOpacity(ratio: number): number {
+  const relativeCount = Math.max(0, Math.min(1, ratio))
+  return Number((0.24 + relativeCount * 0.76).toFixed(3))
 }
 
 const chartLabel = computed(() => props.title ?? '数据图表')
@@ -104,6 +106,7 @@ const chartLabel = computed(() => props.title ?? '数据图表')
             :y="100 - bar.ratio * 96"
             width="8"
             :height="Math.max(2, bar.ratio * 96)"
+            :opacity="barOpacity(bar.ratio)"
           >
             <title>{{ `${bar.label}：${bar.count}` }}</title>
           </rect>
@@ -119,7 +122,7 @@ const chartLabel = computed(() => props.title ?? '数据图表')
         <li v-for="row in barRows" :key="row.key" class="report-bar-row">
           <span class="report-bar-label" :title="row.label">{{ row.label }}</span>
           <svg class="report-bar-track" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true">
-            <rect x="0" y="0" :width="Math.max(0.5, row.ratio * 100)" height="10" />
+            <rect x="0" y="0" :width="Math.max(0.5, row.ratio * 100)" height="10" :opacity="barOpacity(row.ratio)" />
           </svg>
           <span class="report-bar-value">{{ row.count }}</span>
         </li>
@@ -137,7 +140,7 @@ const chartLabel = computed(() => props.title ?? '数据图表')
             class="report-heatmap-cell"
             :style="heatStyle(heatmap.matrix[rowIndex]?.[columnIndex] ?? 0)"
             :title="`${rowName} × ${columnName}：${formatNumber(heatmap.matrix[rowIndex]?.[columnIndex])}`"
-          ></span>
+          >{{ formatNumber(heatmap.matrix[rowIndex]?.[columnIndex]) }}</span>
         </template>
       </div>
       <p class="report-chart-hint">颜色越深表示相关性绝对值越大。</p>
@@ -150,7 +153,7 @@ const chartLabel = computed(() => props.title ?? '数据图表')
 .report-chart {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   margin: 0;
   padding: 14px 16px;
   background: var(--report-surface, #ffffff);
@@ -160,7 +163,7 @@ const chartLabel = computed(() => props.title ?? '数据图表')
 
 .report-chart-title {
   font-size: var(--report-chart-title-size, 15px);
-  font-weight: 600;
+  font-weight: 400;
 }
 
 .report-chart-state,
@@ -231,8 +234,11 @@ const chartLabel = computed(() => props.title ?? '数据图表')
 }
 
 .report-heatmap-cell {
-  height: 26px;
-  border-radius: 3px;
+  display: grid;
+  min-height: 34px;
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+  place-items: center;
 }
 
 @media (max-width: 640px) {

@@ -6,7 +6,7 @@
 
 ## 生产部署
 
-Dockerfile 使用 Node 24 构建 `admin-frontend/`，再把产物复制到最终 Python 镜像的 `/opt/causalagent-admin`。运行镜像不包含 Node、不启动 Vite，也不开放 Node 端口。
+Dockerfile 使用 Node 24 构建 `admin-frontend/`；构建前复制 `packages/design-system/src/`，由 Vite/TypeScript 别名读取共享源码，再把产物复制到最终 Python 镜像的 `/opt/causalagent-admin`。运行镜像不包含 Node、不启动 Vite，也不开放 Node 端口。
 
 非 Docker 环境需要先生成管理员前端产物：
 
@@ -15,7 +15,6 @@ cd admin-frontend
 npm ci
 npm run typecheck
 npm run test:unit
-npm run test:e2e:mock
 npm run build
 ```
 

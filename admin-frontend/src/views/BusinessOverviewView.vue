@@ -1,7 +1,15 @@
 <script setup lang="ts">
+import {
+  CaBadge,
+  CaButton,
+  CaCard,
+  CaErrorState,
+  CaPageHeader,
+} from '@causalagent/design-system'
 import { onMounted, ref } from 'vue'
 import { ApiError, adminApi } from '../api'
 import { formatDate, formatNumber, statusLabel } from '../lib/dashboard'
+import { statusTone } from '../lib/statusTone'
 import type { BusinessOverview } from '../types'
 
 const overview = ref<BusinessOverview | null>(null)
@@ -26,25 +34,31 @@ onMounted(loadOverview)
 </script>
 
 <template>
-  <section>
-    <header class="page-header">
-      <div>
-        <h1>业务概览</h1>
-      </div>
-      <el-button type="primary" plain :loading="loading" @click="loadOverview">重新读取</el-button>
-    </header>
+  <section class="admin-page">
+    <CaPageHeader title="业务概览" :level="1" size="md">
+      <template #actions>
+        <CaButton variant="secondary" :loading="loading" @click="loadOverview">重新读取</CaButton>
+      </template>
+    </CaPageHeader>
 
-    <el-alert v-if="error" class="page-notice" type="error" :closable="false" :title="error" />
+    <CaErrorState v-if="error" class="page-notice" title="读取业务概览失败" :description="error" />
 
     <div v-loading="loading" class="overview-grid">
-      <article v-for="metric in overview?.metrics || []" :key="metric.key" class="overview-card">
+      <CaCard
+        v-for="metric in overview?.metrics || []"
+        :key="metric.key"
+        as="article"
+        class="overview-card"
+        variant="outline"
+        padding="sm"
+      >
         <span>{{ metric.label }}</span>
         <strong>{{ formatNumber(metric.value) }}</strong>
         <small>{{ metric.is_estimate ? '估算' : '精确' }} · {{ metric.source_alias }}</small>
-      </article>
+      </CaCard>
     </div>
 
-    <section class="panel">
+    <CaCard as="section" class="panel" variant="outline" padding="md">
       <div class="panel-header">
         <div>
           <h2>共享监控快照</h2>
@@ -57,9 +71,9 @@ onMounted(loadOverview)
         <el-table-column prop="snapshot_key" label="快照类型" min-width="160" />
         <el-table-column label="状态" width="110">
           <template #default="{ row }">
-            <el-tag :type="row.status === 'healthy' ? 'success' : row.status === 'error' ? 'danger' : 'warning'">
+            <CaBadge :tone="statusTone(row.status)">
               {{ statusLabel(row.status) }}
-            </el-tag>
+            </CaBadge>
           </template>
         </el-table-column>
         <el-table-column label="时间" min-width="190">
@@ -71,6 +85,6 @@ onMounted(loadOverview)
         <el-table-column prop="source_alias" label="来源" min-width="180" />
         <el-table-column prop="warning" label="说明" min-width="220" show-overflow-tooltip />
       </el-table>
-    </section>
+    </CaCard>
   </section>
 </template>

@@ -27,7 +27,7 @@ tests/
 
 ## 前端与页面入口
 
-仓库现在有四个互相独立的 Vue 3 + TypeScript 工程，都不加入根级 npm workspace：官网 `website-frontend/`、普通用户应用 `chat-frontend/`、管理员系统 `admin-frontend/`、RAG 评测台 `app/rag_eval/frontend/`。进入目录后执行 `npm ci` 安装锁定依赖；`website-frontend`、`chat-frontend`、`admin-frontend` 的 `npm run check` 覆盖类型检查、单元或组件测试、Mock Playwright E2E 和生产构建，`app/rag_eval/frontend` 使用 `npm run typecheck`、`npm test` 和 `npm run build`。Mock E2E 只使用模拟 API，不等价于真实 Flask、数据库、worker、模型或浏览器验收。
+仓库现在有四个互相独立的 Vue 3 + TypeScript 工程，都不加入根级 npm workspace：官网 `website-frontend/`、普通用户应用 `chat-frontend/`、管理员系统 `admin-frontend/`、RAG 评测台 `app/rag_eval/frontend/`。进入目录后执行 `npm ci` 安装锁定依赖。各端的 `npm run check` 覆盖范围按实际 package scripts 区分：官网运行类型检查、单元测试和生产构建；普通用户应用还运行 lint、组件测试和 Mock Playwright E2E；管理员系统运行类型检查、单元测试和生产构建，Mock E2E 需另行运行 `npm run test:e2e:mock`（命令见 `Document/admin/testing.md`）；RAG 评测台使用 `npm run typecheck`、`npm test` 和 `npm run build`。Mock E2E 只使用模拟 API，不等价于真实 Flask、数据库、worker、模型或浏览器验收。
 
 页面入口与构建产物的 Flask 契约由本地或发布前手工检查：
 

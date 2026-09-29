@@ -39,6 +39,7 @@ function toMessage(value: ChatMessageResponse, localId: string): ChatMessage {
     text,
     analysisJobId: value.analysis_job_id ?? undefined,
     analysisJobInputId: value.analysis_job_input_id ?? undefined,
+    fileAttachment: value.file_attachment ? { filename: value.file_attachment.filename } : undefined,
     references: value.references?.map((reference) => ({ title: reference.title, url: reference.url })),
     thinkingAfter: value.thinking_after ? toPhase(value.thinking_after) : undefined,
   }
@@ -109,13 +110,14 @@ export const useSessionsStore = defineStore('sessions', {
         throw error
       }
     },
-    appendUserMessage(text: string, jobId: string): void {
+    appendUserMessage(text: string, jobId: string, fileAttachment?: ChatMessage['fileAttachment']): void {
       this.localMessageSequence += 1
       this.messages.push({
         localId: `message-${this.localMessageSequence}`,
         sender: 'user',
         text,
         analysisJobId: jobId,
+        fileAttachment,
       })
     },
     /** 追问恢复后，上一阶段的执行记录固定在它所属的用户消息上，不再随运行态记录继续变化。 */

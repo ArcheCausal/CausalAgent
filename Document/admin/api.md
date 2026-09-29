@@ -26,6 +26,8 @@
 | `GET` | `/admin/database` | 数据库看板与管理员默认落点 |
 | `GET` | `/admin/database/settings` | 采集配置页面 |
 | `GET` | `/admin/database/audit` | 数据库审计页面 |
+| `GET` | `/admin/assets/<filename>` | 受保护的管理员前端构建资源 |
+| `GET` | `/admin/brand/<filename>` | 受保护的管理员品牌图标与应用清单资源 |
 | `GET` | `/api/admin/brand/logo` | 受保护的品牌图片 |
 
 未登录访问管理员页面时跳转 `/auth/sign-in?next=<管理页面>`；缺少 `admin.access` 权限返回 `403`（错误码 `admin_required`）。

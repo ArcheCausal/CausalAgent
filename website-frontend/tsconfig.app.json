@@ -11,9 +11,16 @@
     "jsx": "preserve",
     "resolveJsonModule": true,
     "isolatedModules": true,
+    "allowJs": true,
+    "checkJs": false,
     "esModuleInterop": true,
+    "baseUrl": ".",
+    "paths": {
+      "@causalagent/design-system": ["../packages/design-system/src/index.ts"],
+      "@causalagent/design-system/*": ["../packages/design-system/src/*"]
+    },
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["vite/client", "vitest/globals"],
+    "types": ["vite/client", "vitest/globals", "node"],
     "skipLibCheck": true,
     "noEmit": true
   },

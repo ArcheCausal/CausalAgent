@@ -1,5 +1,5 @@
 :root {
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--ca-font-sans);
   color: #1c2228;
   background: #f4f6f3;
   font-synthesis: none;
@@ -23,14 +23,14 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .78rem; }
 .sidebar-toggle:hover { border-color: #d5e2d7; background: #edf4ee; color: #3f7154; }
 .sidebar-caption { padding: 33px 12px 10px; color: #a0aaa2; font-size: .62rem; font-weight: 800; letter-spacing: .14em; }
 .side-nav { display: grid; gap: 4px; }
-.nav-item { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 42px; padding: 0 12px; border: 0; border-radius: 9px; background: transparent; color: #707b73; text-align: left; font-size: .84rem; }
+.nav-item { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 42px; padding: 0 12px; border: 0; border-radius: var(--ca-radius-full); background: transparent; color: #707b73; text-align: left; text-decoration: none; font-size: .84rem; }
 .nav-item:hover { background: #edf4ee; color: #3f5949; }
 .nav-item.active { background: #dceee1; color: #3f7154; font-weight: 800; }
 .nav-item svg { color: #7d8b81; }
 .nav-item.active svg { color: #4f8866; }
 .nav-badge { margin-left: auto; padding: 2px 5px; border-radius: 4px; background: #edf5ef; color: #679274; font-size: .6rem; font-weight: 800; }
 .nav-submenu { display: grid; gap: 2px; margin: -1px 0 5px 26px; padding: 3px 0 3px 10px; border-left: 1px solid #dce8de; }
-.nav-subitem { min-height: 31px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: #7e8981; text-align: left; font-size: .73rem; }
+.ca-btn--quiet.nav-subitem { display: flex; justify-content: flex-start; width: 100%; min-height: 31px; padding: 0 var(--ca-space-12) 0 var(--ca-space-24); border: 0; border-radius: var(--ca-radius-full); background: transparent; color: #7e8981; text-align: left; text-decoration: none; font-size: .73rem; }
 .nav-subitem:hover, .nav-subitem.active { background: #edf5ef; color: #3f7154; }
 .sidebar-footer { display: flex; align-items: center; gap: 9px; margin-top: auto; padding: 14px 12px 0; border-top: 1px solid #e6ebe6; color: #536157; font-size: .75rem; }
 .sidebar-footer div { display: grid; gap: 2px; }
@@ -205,7 +205,7 @@ textarea:focus { border-color: #1c7065; box-shadow: 0 0 0 3px #dff2ed; }
 .config-layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr); gap: 18px; align-items: start; }
 .config-layout > .panel { min-height: 0; }
 .config-body { padding-bottom: 4px; }
-.strategy-profile-panel { margin-bottom: 14px; }
+.strategy-profile-panel { margin-bottom: 14px; padding-bottom: 12px; }
 .strategy-profile-controls { display: grid; grid-template-columns: minmax(180px, 1.2fr) minmax(180px, 1fr) auto; align-items: end; gap: 12px; padding: 16px 21px 10px; }
 .strategy-profile-controls label { display: grid; gap: 6px; color: #5e6c63; font-size: .74rem; font-weight: 750; }
 .strategy-profile-controls select, .strategy-profile-controls input { min-height: 34px; padding: 0 9px; border: 1px solid #ccd6ce; border-radius: 5px; background: #fbfcfb; color: #26332b; font-size: .74rem; }
@@ -273,11 +273,12 @@ textarea:focus { border-color: #1c7065; box-shadow: 0 0 0 3px #dff2ed; }
 .dataset-body { display: grid; gap: 10px; padding: 18px 21px 0; }
 .dataset-body p { margin: 0; color: #748078; font-size: .76rem; line-height: 1.6; }
 .index-selector { display: grid; gap: 6px; color: #315861; font-size: .72rem; font-weight: 750; }
-.index-selector select { width: 100%; min-height: 38px; padding: 0 10px; border: 1px solid #b9dce2; border-radius: 7px; background: #f8fcfc; color: #173e47; font: inherit; cursor: pointer; }
+.index-selector select { width: 100%; min-height: 40px; overflow: hidden; padding: 0 10px; border: 1px solid #b9dce2; border-radius: 7px; background: #f8fcfc; color: #173e47; font: inherit; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.workspace-index-selector { margin: 0 25px 0 36px; }
 .index-selector select:focus-visible { outline: 3px solid rgba(8, 145, 178, .24); outline-offset: 2px; }
 .index-selector-row { display: flex; align-items: center; gap: 8px; }
 .index-selector-row select { flex: 1; min-width: 0; }
-.index-delete-button { flex: 0 0 auto; min-height: 38px; padding: 0 11px; }
+.secondary-button.index-delete-button { flex: 0 0 40px; width: 40px; height: 40px; min-height: 40px; padding: 0; border-radius: var(--ca-radius-small); }
 .bound-index.incompatible { border-left-color: #d97706; background: #fff9ed; color: #7c5a1b; }
 .bound-index.incompatible code, .bound-index.incompatible .bound-check { color: #a45b09; }
 .dataset-body textarea { min-height: 150px; font-family: "SFMono-Regular", Consolas, monospace; font-size: .72rem; }
@@ -493,7 +494,7 @@ textarea:focus { border-color: #1c7065; box-shadow: 0 0 0 3px #dff2ed; }
 
 /* RAG Eval redesign: analytical SaaS workspace (UI/UX Pro Max design system). */
 :root {
-  font-family: "Plus Jakarta Sans", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--ca-font-sans);
   color: #0f2f3a;
   background: #f4fbfc;
   accent-color: #0891b2;
@@ -923,7 +924,7 @@ h2 { color: #123842; font-weight: 780; }
 .release-intro h2 { margin: 3px 0 6px; color: #173e47; font-size: 1.24rem; }
 .release-intro p:not(.kicker) { max-width: 720px; margin: 0; color: #557078; font-size: .8rem; line-height: 1.6; }
 .release-summary-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(280px, .9fr); gap: 18px; margin-bottom: 18px; }
-.release-facts, .pointer-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 0 21px 20px; }
+.release-facts, .pointer-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 0 21px 32px; }
 .release-facts span, .pointer-facts span { display: grid; gap: 5px; min-width: 0; }
 .release-facts small, .pointer-facts small { color: #759098; font-size: .68rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .release-facts code, .pointer-facts strong { overflow: hidden; color: #234b54; font-size: .75rem; text-overflow: ellipsis; white-space: nowrap; }

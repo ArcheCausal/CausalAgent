@@ -2,6 +2,13 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ApiError, adminApi } from '../api'
+import {
+  CaButton,
+  CaCard,
+  CaEmptyState,
+  CaErrorState,
+  CaPageHeader,
+} from '@causalagent/design-system'
 import CursorPager from '../components/CursorPager.vue'
 import { formatBytes, formatDate } from '../lib/dashboard'
 import type { AdminFile, CsvPreview, CursorPage, FileDeleteImpact } from '../types'
@@ -187,15 +194,13 @@ onMounted(() => loadFiles())
 </script>
 
 <template>
-  <section>
-    <header class="page-header">
-      <div>
-        <h1>对话文件管理</h1>
-        <p class="page-description">
-          CSV 预览与下载会更新访问时间、次数并写入审计。
-        </p>
-      </div>
-    </header>
+  <section class="admin-page">
+    <CaPageHeader
+      title="对话文件管理"
+      description="CSV 预览与下载会更新访问时间、次数并写入审计。"
+      :level="1"
+      size="md"
+    />
 
     <section class="filter-bar">
       <el-input v-model="q" clearable placeholder="文件名" @keyup.enter="loadFiles(true)" />
@@ -204,12 +209,12 @@ onMounted(() => loadFiles())
         <el-option label="text/csv" value="text/csv" />
         <el-option label="application/vnd.ms-excel" value="application/vnd.ms-excel" />
       </el-select>
-      <el-button type="primary" :loading="loading" @click="loadFiles(true)">筛选</el-button>
+      <CaButton variant="primary" :loading="loading" @click="loadFiles(true)">筛选</CaButton>
     </section>
 
-    <el-alert v-if="error" class="page-notice" type="error" :closable="false" :title="error" />
+    <CaErrorState v-if="error" class="page-notice" title="文件读取失败" :description="error" />
 
-    <section class="panel table-panel">
+    <CaCard as="section" class="panel table-panel" variant="outline" padding="md">
       <el-table v-loading="loading" :data="page?.items || []" empty-text="没有符合条件的文件">
         <el-table-column prop="id" label="ID" width="80" />
         <el-table-column prop="original_filename" label="文件名" min-width="220" show-overflow-tooltip />
@@ -225,16 +230,16 @@ onMounted(() => loadFiles())
         </el-table-column>
         <el-table-column label="操作" width="290" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="openDetail(row)">详情</el-button>
-            <el-button link type="primary" @click="openPreview(row)">预览</el-button>
-            <el-button
-              link
-              type="primary"
+            <CaButton variant="quiet" size="sm" @click="openDetail(row)">详情</CaButton>
+            <CaButton variant="quiet" size="sm" @click="openPreview(row)">预览</CaButton>
+            <CaButton
+              variant="quiet"
+              size="sm"
               :loading="downloadingId === row.id"
               @click="download(row)"
             >
               下载
-            </el-button>
+            </CaButton>
             <el-button link type="danger" @click="openDelete(row)">删除</el-button>
           </template>
         </el-table-column>
@@ -246,7 +251,7 @@ onMounted(() => loadFiles())
         @previous="previousPage"
         @next="nextPage"
       />
-    </section>
+    </CaCard>
 
     <el-drawer v-model="detailVisible" title="文件详情" size="min(560px, 100vw)">
       <div v-loading="detailLoading">
@@ -285,13 +290,14 @@ onMounted(() => loadFiles())
             </tbody>
           </table>
         </div>
-        <el-empty v-else-if="!previewLoading" description="CSV 内容为空" />
+        <CaEmptyState v-else-if="!previewLoading" description="CSV 内容为空" />
       </div>
     </el-dialog>
 
     <el-dialog v-model="deleteVisible" title="删除文件" width="min(660px, 96vw)">
       <div v-loading="deleteLoading">
         <el-alert
+          class="danger-alert"
           type="error"
           :closable="false"
           show-icon
@@ -299,7 +305,7 @@ onMounted(() => loadFiles())
         />
         <el-alert
           v-if="deleteError"
-          class="dialog-error"
+          class="dialog-error danger-alert"
           type="error"
           :closable="false"
           show-icon
@@ -322,7 +328,7 @@ onMounted(() => loadFiles())
           </el-descriptions>
           <el-alert
             v-if="deleteImpact.blockers.length"
-            class="page-notice"
+            class="page-notice danger-alert"
             type="error"
             :closable="false"
             :title="deleteImpact.blockers.join('；')"
@@ -359,7 +365,7 @@ onMounted(() => loadFiles())
         </template>
       </div>
       <template #footer>
-        <el-button @click="deleteVisible = false">取消</el-button>
+        <CaButton variant="secondary" @click="deleteVisible = false">取消</CaButton>
         <el-button
           type="danger"
           :loading="deleteSubmitting"
@@ -380,29 +386,29 @@ onMounted(() => loadFiles())
 <style scoped>
 .file-delete-impact,
 .file-delete-form {
-  margin-top: 16px;
+  margin-top: var(--ca-space-16);
 }
 
 .dialog-error {
-  margin-top: 12px;
+  margin-top: var(--ca-space-12);
 }
 
 .file-delete-form {
   display: grid;
-  gap: 16px;
+  gap: var(--ca-space-16);
 }
 
 .danger-confirmation-field label {
   display: block;
-  margin-bottom: 8px;
-  color: #1f2937;
-  font-weight: 600;
+  margin-bottom: var(--ca-space-8);
+  color: var(--ca-text-default);
+  font-weight: var(--ca-weight-regular);
 }
 
 .danger-confirmation-field p {
-  margin: 6px 0 0;
-  color: #64748b;
-  font-size: 13px;
+  margin: var(--ca-space-4) 0 0;
+  color: var(--ca-text-muted);
+  font-size: var(--ca-text-caption);
   line-height: 1.5;
 }
 </style>

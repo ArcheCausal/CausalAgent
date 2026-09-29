@@ -115,10 +115,21 @@ watch(() => props.draft, () => { void nextTick(resize) })
     ></textarea>
     <div class="composer-actions">
       <input ref="fileInput" class="visually-hidden" type="file" accept=".csv,text/csv" @change="onFileChange" />
-      <button class="secondary-button web-search-button" :class="{ active: webSearchEnabled }" type="button" :aria-pressed="webSearchEnabled" @click="emit('update:web-search', !webSearchEnabled)">
-        {{ webSearchEnabled ? text.webSearchOn : text.webSearchOff }}
+      <button class="secondary-button web-search-button" :class="{ active: webSearchEnabled }" type="button" :aria-label="text.webSearch" :aria-pressed="webSearchEnabled" @click="emit('update:web-search', !webSearchEnabled)">
+        <svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <circle cx="12" cy="12" r="8.4"></circle>
+          <path d="M3.6 12h16.8"></path>
+          <ellipse cx="12" cy="12" rx="3.6" ry="8.4"></ellipse>
+        </svg>
+        <span>{{ text.webSearch }}</span>
       </button>
-      <button class="secondary-button upload-button" type="button" :disabled="sending || Boolean(isRunning)" @click="onUploadClick">{{ text.upload }}</button>
+      <button class="secondary-button upload-button" type="button" :aria-label="text.upload" :title="text.upload" :disabled="sending || Boolean(isRunning)" @click="onUploadClick">
+        <svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M12 16.5V4.5"></path>
+          <path d="M7.5 9 12 4.5 16.5 9"></path>
+          <path d="M4.5 16.5v3h15v-3"></path>
+        </svg>
+      </button>
       <button
         class="primary-button send-button"
         :class="{ 'is-running': isRunning }"
@@ -128,6 +139,10 @@ watch(() => props.draft, () => { void nextTick(resize) })
         :disabled="sending || isCanceling || (!isRunning && !draft.trim())"
         @click="onPrimaryAction"
       >
+        <svg class="composer-icon send-button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M12 19.5V5"></path>
+          <path d="m6 11 6-6 6 6"></path>
+        </svg>
         <span class="send-button-label">{{ sending ? text.loading : text.send }}</span>
         <span class="send-button-stop" aria-hidden="true"></span>
       </button>
