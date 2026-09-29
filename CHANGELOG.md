@@ -1676,3 +1676,10 @@
   - 【preprocess_summary 送达 Deep Agent】：此前预处理报告跑在 Deep Agent 之前却从不进入它，现由 `to_deep_agent_input` 把父图的 `preprocess_summary` 显式写进子图那条 system message 的 JSON；报告不投影进子图 state（无代码消费它，投影只多占 checkpoint），`ParentStateUpdate` / `from_deep_agent_output` 的回写白名单不动。
   - 【测试与验证】：新增 `tests/unit/agent/test_nonlinearity.py`，断言本体在模块自检 `_self_check()` 里（`python -m Agent.Processing.nonlinearity` 可直跑）；`test_deep_agent_state.py` 新增用例锁住 `nonlinearity` 与 `preprocess_summary` 出现在那条 system message 里。25 个 d5 数据集复现归档倍率最大偏差 0.0049，λ=0 误报 0/5、λ=1.0 漏报 0/5，`pytest tests/unit` 全绿。
   - 【已知边界】：序数程度而非刻度，同一强度 p=5 读 3.29~12.27、p=12 掉一半，故只保留 `ratio = 1` 一条判据线、不做强度分档。
+
+---
+2026.9.29
+- 【用户认证：新注册账号默认权限修复】
+  - 【默认角色关系】：注册用户时在同一数据库事务内写入 `user` 角色关系，使新账号按既有角色权限获得普通工作区访问能力，无需提升为管理员。
+  - 【遗留账号修复】：新增数据迁移，为缺少关系的历史账号补齐默认 `user` 角色，并保持兼容字段为 `admin` 的账号拥有管理员关系。
+  - 【回归覆盖】：新增注册事务与迁移链回归用例，锁定用户创建、默认角色写入和事务提交顺序以及无损回填边界。

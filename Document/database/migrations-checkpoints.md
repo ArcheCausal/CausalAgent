@@ -17,7 +17,7 @@ Docker Compose 中 `db-bootstrap` 是一次性服务，`app`、worker、monitor 
 
 ## 当前迁移链
 
-当前唯一 head 是 `c9d0e1f2a3b4`。develop 的 migration 作为主体链路，RAG 评测 DDL 使用独立且全仓唯一的 revision ID，最终由无 DDL 合流点统一；最终链路和 down revision 以文件内容为准：
+当前唯一 head 是 `d0e1f2a3b4c5`。develop 的 migration 作为主体链路，RAG 评测 DDL 使用独立且全仓唯一的 revision ID，最终由无 DDL 合流点统一；最终链路和 down revision 以文件内容为准：
 
 | Revision | 当前作用 |
 | --- | --- |
@@ -40,8 +40,9 @@ Docker Compose 中 `db-bootstrap` 是一次性服务，`app`、worker、monitor 
 | `v8b9c0d1e2f3` | 为 chat_attachments.attachment_type 增加结构化报告附件类型 |
 | `w9c0d1e2f3a4` | 建立 `roles`、`permissions`、`user_roles`、`role_permissions`，初始化两个角色与第一阶段权限并回填用户关系 |
 | `c9d0e1f2a3b4` | 建立跨 Job 的 `analysis_contexts`，并给 Session、Job 和输入账本增加上下文绑定字段 |
+| `d0e1f2a3b4c5` | 补齐新注册用户缺失的默认 `user` 角色关系，并为兼容字段仍为 `admin` 的用户补齐管理员关系 |
 
-`f8b9c0d1e2f3` 的 `down_revision` 声明为 `e4f5a6b7c8d9` 与 `e7a9b2c3d4f5`；develop 主链随后经 `f9a0b1c2d3e4`、`a1b2c3d4e5f6`、`b2c3d4e5f6a7`、`c3d4e5f6a7b8` 和 `a0b1c2d3e4f5` 继续，RAG 分支经 `r1...`、`r2...`、`r3...`、`g7...`、`h8...`、`i9...` 继续，最终由 `s4d5e6f7a8b9` 合流，再由 `t5e6f7a8b9c0` 线性追加记忆清理 outbox、由 `u7a8b9c0d1e2` 扩展快照键长度、由 `v8b9c0d1e2f3` 增加结构化报告附件类型、由 `w9c0d1e2f3a4` 建立角色与权限关系表，最后由 `c9d0e1f2a3b4` 建立分析上下文结构。回退这类合并迁移必须指定明确目标 revision，不能用 `alembic downgrade -1` 代替。
+`f8b9c0d1e2f3` 的 `down_revision` 声明为 `e4f5a6b7c8d9` 与 `e7a9b2c3d4f5`；develop 主链随后经 `f9a0b1c2d3e4`、`a1b2c3d4e5f6`、`b2c3d4e5f6a7`、`c3d4e5f6a7b8` 和 `a0b1c2d3e4f5` 继续，RAG 分支经 `r1...`、`r2...`、`r3...`、`g7...`、`h8...`、`i9...` 继续，最终由 `s4d5e6f7a8b9` 合流，再由 `t5e6f7a8b9c0` 线性追加记忆清理 outbox、由 `u7a8b9c0d1e2` 扩展快照键长度、由 `v8b9c0d1e2f3` 增加结构化报告附件类型、由 `w9c0d1e2f3a4` 建立角色与权限关系表、由 `c9d0e1f2a3b4` 建立分析上下文结构，最后由 `d0e1f2a3b4c5` 补齐注册缺陷遗留的角色关系。回退这类合并迁移必须指定明确目标 revision，不能用 `alembic downgrade -1` 代替。
 
 ## 破坏性事实
 
@@ -52,6 +53,7 @@ Docker Compose 中 `db-bootstrap` 是一次性服务，`app`、worker、monitor 
 - `w9c0d1e2f3a4` 新建四张 RBAC 表并按现有 `users.role` 回填 `user_roles`，不改写 `users.role` 与任何业务数据。downgrade 只删除这四张表；再次 upgrade 会重新初始化角色权限并重新回填关系，期间的授权变更记录不在迁移范围内。
 - `a1b2c3d4e5f6` 直接 `DROP TABLE IF EXISTS uploaded_files`，创建 `file_objects`、`user_files` 和 Job 输入结构；不回填旧数据、不提供旧数据 fallback，也不增加旧数据拒绝迁移逻辑。downgrade 只恢复空的旧 `uploaded_files` 表结构。
 - `c9d0e1f2a3b4` 新建 `analysis_contexts` 并向 `sessions`、`analysis_jobs`、`analysis_job_inputs` 增加可空列；不回填历史 Session 或历史 Job 的上下文，旧数据在下一次分析或追问时按需创建。downgrade 只删除这些新结构与对应外键，不删除会话、Job、输入或报告数据。
+- `d0e1f2a3b4c5` 只向缺少对应关系的用户补写 `user_roles`：所有用户至少获得 `user` 角色，兼容字段仍为 `admin` 的用户同时保留管理员角色；不修改 `users`、角色种子或权限种子。由于新增关系无法与迁移前已存在的合法授权区分，downgrade 不删除任何角色关系。
 - 迁移脚本属于高风险历史事实，不应为了让本地旧库“看起来能升级”而静默删除、回填或修改历史 migration。
 
 ## PostgreSQL checkpoint

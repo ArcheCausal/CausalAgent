@@ -141,4 +141,4 @@ powershell -ExecutionPolicy Bypass -File .\windows-client\build.ps1 `
 
 ## 数据库发布顺序
 
-开发/预发空库或数据库环境重建时先启动依赖数据库，再运行 `Database.bootstrap` 完成 Alembic 和 checkpoint setup，确认成功后才启动 app/worker/monitor/agent-persistence-cleanup/rag-eval-worker。当前唯一 Alembic head 是 `c9d0e1f2a3b4`；清理 worker 还要求 Agent worker 至少完成一次启动以初始化官方 Store schema。具有破坏性的 checkpoint/file migration 不会自动回填旧数据，执行 downgrade 必须选择明确 revision，并在隔离环境先验证往返。迁移风险和 preflight 规则见 [`../database/migrations-checkpoints.md`](../database/migrations-checkpoints.md)。
+开发/预发空库或数据库环境重建时先启动依赖数据库，再运行 `Database.bootstrap` 完成 Alembic 和 checkpoint setup，确认成功后才启动 app/worker/monitor/agent-persistence-cleanup/rag-eval-worker。当前唯一 Alembic head 是 `d0e1f2a3b4c5`；清理 worker 还要求 Agent worker 至少完成一次启动以初始化官方 Store schema。具有破坏性的 checkpoint/file migration 不会自动回填旧数据，执行 downgrade 必须选择明确 revision，并在隔离环境先验证往返。迁移风险和 preflight 规则见 [`../database/migrations-checkpoints.md`](../database/migrations-checkpoints.md)。
