@@ -1665,3 +1665,14 @@
   - 【浏览器图标优化】：改用黑色标志配白色圆角底板的 `causalagent-mark-rounded.png`，四角保持透明，提升浅色浏览器标签栏中的可辨识度。
   - 【官网导航补充】：将“价格”加入所有公开页面的顶部主导航和页脚官网导航，保持价格页与其他官网页面的导航一致。
   - 【首页因果地球动效】：将首屏原有的环绕因果图改为缓慢自转的球面点阵，呈现变量之间的有向关系、周期性干预与影响传播，并在减少动态设置下显示静止图形；动效沿用官网灰阶风格，只替换首页 Canvas 绘制逻辑。
+
+---
+2026.9.23
+- 【数据集线性度信号接入 Deep Agent】
+  - 【指标】：新增 `Agent/Processing/nonlinearity.py`，`measure_nonlinearity()` 按 `S = mean(η²−r²)`（`η²` 为按秩分 10 等量箱后的组间方差占比）衡量变量间非线性，噪声上限 `null_p99` 由各列独立打乱重算 1000 次取 99 分位，`ratio = S / null_p99 ≥ 1` 判为非线性主导。阈值比较落在代码里（`verdict` 字段），`ratio < 1` 只表示未检出超过噪声的非线性结构、不等于线性。候选列取 `continuous` 且非 `possible_id`，列数上限 12、行数钳在 1000（`null_p99` 随 n 骤降，必须按数据集现算），列不足或行少于 100 判 `insufficient`。
+  - 【载荷】：写入 `analysis_parameters["nonlinearity"]` 的只有 `{ratio, verdict, n_vars, n_rows, sampled, reason}`；`S` 与 `null_p99` 只对人有价值，不进 prompt。
+  - 【故障边界与注入】：`measure_nonlinearity` 内部全兜、不抛异常，调用点放在 `Agent/causal_agent/nodes.py` 的 `fold_node` 里 `get_data_summary` 之后、且在该 `try` 块之外——该块异常分支会走 `interrupt()` 挂起等用户输入。结果随 `analysis_parameters` 自动流向预处理报告与 Deep Agent 子图两处消费端。
+  - 【消费端 prompt】：预处理报告任务清单加第 5 条「线性/非线性说明」；`MANDATORY_ALGORITHM_INSTRUCTION` 追加一句解释 `ratio` 含义。刻意不点具体算法名，算法仍由模型从既有 spec 自主选择，以免把自主决策变成照令执行、使后续召回提升无法归因。
+  - 【preprocess_summary 送达 Deep Agent】：此前预处理报告跑在 Deep Agent 之前却从不进入它，现由 `to_deep_agent_input` 把父图的 `preprocess_summary` 显式写进子图那条 system message 的 JSON；报告不投影进子图 state（无代码消费它，投影只多占 checkpoint），`ParentStateUpdate` / `from_deep_agent_output` 的回写白名单不动。
+  - 【测试与验证】：新增 `tests/unit/agent/test_nonlinearity.py`，断言本体在模块自检 `_self_check()` 里（`python -m Agent.Processing.nonlinearity` 可直跑）；`test_deep_agent_state.py` 新增用例锁住 `nonlinearity` 与 `preprocess_summary` 出现在那条 system message 里。25 个 d5 数据集复现归档倍率最大偏差 0.0049，λ=0 误报 0/5、λ=1.0 漏报 0/5，`pytest tests/unit` 全绿。
+  - 【已知边界】：序数程度而非刻度，同一强度 p=5 读 3.29~12.27、p=12 掉一半，故只保留 `ratio = 1` 一条判据线、不做强度分档。

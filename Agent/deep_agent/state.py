@@ -205,6 +205,9 @@ def to_deep_agent_input(
     file_summary = parent_state.get("file_summary")
     if not isinstance(file_summary, Mapping):
         file_summary = {}
+    preprocess_summary = parent_state.get("preprocess_summary")
+    if not isinstance(preprocess_summary, str):
+        preprocess_summary = ""
     data_profile = _as_data_profile(parent_state.get("data_profile"), parent_state)
     messages = [
         *messages,
@@ -219,6 +222,7 @@ def to_deep_agent_input(
                     ),
                     "data_profile": data_profile.model_dump(mode="json"),
                     "analysis_parameters": dict(analysis_parameters),
+                    "preprocess_summary": preprocess_summary,
                 },
                 ensure_ascii=False,
                 sort_keys=True,

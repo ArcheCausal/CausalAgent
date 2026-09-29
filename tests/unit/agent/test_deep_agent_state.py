@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from Agent.deep_agent.state import (
@@ -117,4 +119,35 @@ def test_parent_projection_does_not_copy_job_or_runtime_fields() -> None:
 def test_runtime_only_state_keys_are_rejected() -> None:
     with pytest.raises(TypeError, match="runtime-only"):
         assert_checkpoint_state_safe({"algorithm_executor": object()})
+
+
+def test_linearity_signal_and_preprocess_report_reach_the_algorithm_prompt() -> None:
+    """选算法的模型必须同时看得见 nonlinearity 数值和预处理报告。
+
+    两者都只经由那条 system message 抵达模型：子图 state 里既不存
+    ``preprocess_summary``，父图的其它字段也不会被投影。所以报告必须显式写进
+    JSON，光放父图 state 里是看不见的。
+    """
+
+    nonlinearity = {
+        "ratio": 3.19,
+        "verdict": "nonlinear",
+        "n_vars": 5,
+        "n_rows": 1000,
+        "sampled": False,
+        "reason": None,
+    }
+    projected = to_deep_agent_input(
+        {
+            **ANALYSIS_PARENT,
+            "route_decision": "fold",
+            "preprocess_summary": "非线性度 ratio 3.19，以非线性机制为主。",
+            "analysis_parameters": {"target": "y", "nonlinearity": nonlinearity},
+        }
+    )
+
+    payload = json.loads(projected["messages"][0]["content"])
+    assert payload["preprocess_summary"].startswith("非线性度")
+    assert payload["analysis_parameters"]["nonlinearity"] == nonlinearity
+    assert "nonlinearity.ratio" in MANDATORY_ALGORITHM_INSTRUCTION
 

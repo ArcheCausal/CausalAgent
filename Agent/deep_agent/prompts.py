@@ -43,6 +43,9 @@ MANDATORY_ALGORITHM_INSTRUCTION = (
     "本次运行要求执行因果分析：必须至少调用一个算法工具，并在最终结构化决策中引用"
     "本次返回的算法结果。只有算法工具确实返回未就绪或失败时，才允许提交 "
     "evidence_only 或 no_valid_algorithm。"
+    "analysis_parameters.nonlinearity.ratio 是数据集非线性强度相对噪声上限的倍数"
+    "（≥1 才算检出）：明显大于 1 时优先考虑非线性能力更强的算法；小于 1 只代表"
+    "未检出，不能据此排除非线性机制。"
 )
 
 MANDATORY_WEB_INSTRUCTION = (

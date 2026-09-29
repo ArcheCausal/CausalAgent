@@ -853,6 +853,7 @@ class foldQuery(BaseModel):
 ## fold节点用到的函数
 from Agent.Processing.fold_processing import get_data_summary
 from Agent.Processing.fold_verify import validate_analysis
+from Agent.Processing.nonlinearity import measure_nonlinearity
 from Agent.Report.assets import (
     build_causal_graph_model,
     build_chart_assets,
@@ -992,6 +993,11 @@ async def fold_node(
         return {"messages": [new_message], "fold_decision": "agent"}
 
     state['analysis_parameters'] = data_summary
+    # 刻意放在上面的 try 块之外：那块抛异常会走 interrupt() 挂起等用户输入。
+    # measure_nonlinearity 内部全兜、绝不抛异常，但仍不放进那条路径。
+    state['analysis_parameters']['nonlinearity'] = measure_nonlinearity(
+        df, state['analysis_parameters']
+    )
     file_summary = {
         "user_file_id": input_user_file_id,
         "object_id": input_object_id,
@@ -1144,6 +1150,7 @@ async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
             2.  **目标变量和处理变量的摘录**: 对输入数据中的“target”和“treatment”进行摘取，并告知用户目前处理的变量是这两个变量。
             3.  **风险提示**: 提及数据中存在的潜在问题，例如高缺失值列、常数列、高基数分类变量或疑似ID列。
             4.  **结论**: 给出一个总体评价，说明数据是否已准备好进行下一步的因果分析。
+            5.  **线性/非线性说明**: 根据 `nonlinearity` 字段说明变量间关系以线性还是非线性机制为主及强度；`verdict` 为 `linear` 只表示未检出显著非线性结构，不等于确定线性；`verdict` 为 `insufficient` 时说明本次未能评估。
 
             请使用清晰、专业的语言，让非技术人员也能理解数据的基本状况。
             """),
