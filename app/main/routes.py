@@ -1,7 +1,7 @@
 """
 app.main.routes - 官网页面与共享设置接口
 
-- 官网公开页面：/、/product、/about、/docs、/changelog
+- 官网公开页面：/、/product、/pricing、/about、/docs、/changelog
 - 官网认证页面：/auth/sign-in、/auth/sign-up
 - 官网构建产物：/site-assets/
 - 共享设置接口：/api/setting
@@ -87,6 +87,7 @@ def _serve_site_page():
 
 @main_bp.route('/')
 @main_bp.route('/product')
+@main_bp.route('/pricing')
 @main_bp.route('/about')
 @main_bp.route('/docs')
 @main_bp.route('/changelog')

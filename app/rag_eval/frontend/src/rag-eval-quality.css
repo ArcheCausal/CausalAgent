@@ -31,9 +31,19 @@ body {
 .brand-icon {
   width: 36px;
   height: 36px;
+  border: 0;
   border-radius: var(--ca-radius-small);
-  background: var(--ca-surface-inverse);
-  color: var(--ca-text-inverse);
+  background: transparent;
+  color: inherit;
+  display: grid;
+  place-items: center;
+}
+
+.brand-icon img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .sidebar-caption {

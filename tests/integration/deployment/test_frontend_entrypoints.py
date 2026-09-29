@@ -36,7 +36,7 @@ from tests.support.authorization import (  # noqa: E402
 
 
 ACTIVE_USER = {"id": 4, "username": "operator", "role": "user", "is_active": True}
-SITE_PATHS = ("/", "/product", "/about", "/docs", "/changelog", "/auth/sign-in", "/auth/sign-up")
+SITE_PATHS = ("/", "/product", "/pricing", "/about", "/docs", "/changelog", "/auth/sign-in", "/auth/sign-up")
 
 
 def build_app():
@@ -142,11 +142,13 @@ class WebsiteEntryTests(unittest.TestCase):
             with app.test_client() as client:
                 root_response = client.get("/")
                 product_response = client.get("/product")
+                pricing_response = client.get("/pricing")
                 auth_response = client.get("/auth/sign-in?next=%2Fdashboard")
 
         self.assertEqual(root_response.status_code, 302)
         self.assertEqual(root_response.headers["Location"], "http://127.0.0.1:5175/site-assets/")
         self.assertEqual(product_response.headers["Location"], "http://127.0.0.1:5175/site-assets/product")
+        self.assertEqual(pricing_response.headers["Location"], "http://127.0.0.1:5175/site-assets/pricing")
         self.assertEqual(
             auth_response.headers["Location"],
             "http://127.0.0.1:5175/site-assets/auth/sign-in?next=%2Fdashboard",
@@ -241,11 +243,14 @@ class RagEvalEntryTests(unittest.TestCase):
             with app.test_client() as client:
                 page = client.get("/rag-eval")
                 asset = client.get("/rag-eval/assets/index.js")
+                brand = client.get("/rag-eval/brand/favicon.svg")
 
         self.assertEqual(page.status_code, 302)
         self.assertEqual(page.headers["Location"], "/auth/sign-in?next=%2Frag-eval")
         self.assertEqual(asset.status_code, 302)
         self.assertEqual(asset.headers["Location"], "/auth/sign-in")
+        self.assertEqual(brand.status_code, 302)
+        self.assertEqual(brand.headers["Location"], "/auth/sign-in")
 
     def test_normal_user_is_denied_with_controlled_page(self):
         app = build_app()
@@ -266,6 +271,8 @@ class RagEvalEntryTests(unittest.TestCase):
             write_shell(dist_dir, "rag-shell")
             (dist_dir / "assets").mkdir()
             (dist_dir / "assets" / "index.js").write_text("console.log('rag');", encoding="utf-8")
+            (dist_dir / "brand").mkdir()
+            (dist_dir / "brand" / "favicon.svg").write_text("<svg />", encoding="utf-8")
             with (
                 authorized_as(RAG_ADMIN_USER, ADMIN_PERMISSIONS),
                 patch.object(settings, "RAG_EVAL_FRONTEND_DIST_DIR", str(dist_dir)),
@@ -273,14 +280,18 @@ class RagEvalEntryTests(unittest.TestCase):
                 with app.test_client() as client:
                     page = client.get("/rag-eval")
                     asset = client.get("/rag-eval/assets/index.js")
+                    brand = client.get("/rag-eval/brand/favicon.svg")
                     page_body = page.get_data()
                     asset_body = asset.get_data()
                     asset_cache = asset.headers["Cache-Control"]
+                    brand_body = brand.get_data()
                     page.close()
                     asset.close()
+                    brand.close()
 
         self.assertIn(b"rag-shell", page_body)
         self.assertEqual(asset_body, b"console.log('rag');")
+        self.assertEqual(brand_body, b"<svg />")
         self.assertIn("immutable", asset_cache)
 
     def test_missing_rag_build_returns_stable_503(self):

@@ -11,13 +11,13 @@ import {
   CaPageHeader,
   CaTabs,
 } from "@causalagent/design-system";
+import brandMarkUrl from "../../../../packages/design-system/src/assets/brand/causalagent-mark.svg?url";
 import {
   AlertCircle,
   ArrowLeft,
   ArrowRight,
   ArrowDown,
   ArrowUp,
-  BarChart3,
   Check,
   ChevronDown,
   CircleDot,
@@ -2043,7 +2043,7 @@ function refreshVisibleRun() {
   <div class="app-shell" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
     <aside class="app-sidebar">
       <div class="brand-row">
-        <div class="brand-mark"><span class="brand-icon"><BarChart3 :size="18" /></span><span class="brand-label">因果知识台</span></div>
+        <div class="brand-mark"><span class="brand-icon"><img :src="brandMarkUrl" alt="" width="36" height="36" /></span><span class="brand-label">因果知识台</span></div>
         <button type="button" class="sidebar-toggle" :title="sidebarCollapsed ? '展开导航栏' : '收起导航栏'" :aria-label="sidebarCollapsed ? '展开导航栏' : '收起导航栏'" @click="toggleSidebar"><PanelLeftOpen v-if="sidebarCollapsed" :size="17" /><PanelLeftClose v-else :size="17" /></button>
       </div>
       <div class="sidebar-caption">CAUSAL AGENT</div>
