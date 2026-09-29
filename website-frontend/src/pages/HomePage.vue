@@ -721,7 +721,7 @@ onMounted(() => {
           </article>
         </div>
         <div class="algo-foot">
-          <p class="algo-foot-note">会议与期刊信息取自各仓库自己的说明；其余仓库按方向归类，不在这里列出具体会议。</p>
+          <p class="algo-foot-note"></p>
           <ul class="algo-links">
             <li><a href="https://github.com/DMIRLAB-Group/" target="_blank" rel="noopener">GitHub 组织页<span class="sr-only">（在新窗口打开）</span></a></li>
             <li><a href="https://github.com/DMIRLAB-Group/CDMIR" target="_blank" rel="noopener">CDMIR 仓库<span class="sr-only">（在新窗口打开）</span></a></li>

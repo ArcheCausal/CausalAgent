@@ -661,5 +661,40 @@ class AnalysisContextsMigrationTests(unittest.TestCase):
                 self.assertIn(fragment, text)
 
 
+class RegistrationRoleBackfillMigrationTests(unittest.TestCase):
+    """静态验证注册缺陷遗留角色关系的无损回填。"""
+
+    MIGRATION_PATH = Path(
+        "Database/migrations/versions/d0e1f2a3b4c5_backfill_missing_user_roles.py"
+    )
+
+    def test_migration_extends_analysis_context_head(self):
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        self.assertIn('revision: str = "d0e1f2a3b4c5"', text)
+        self.assertIn(
+            'down_revision: Union[str, Sequence[str], None] = "c9d0e1f2a3b4"',
+            text,
+        )
+
+    def test_upgrade_backfills_user_and_legacy_admin_relations_without_overwrite(self):
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        upgrade = text.split("def downgrade()", 1)[0]
+        self.assertEqual(upgrade.count("INSERT INTO user_roles (user_id, role_id)"), 2)
+        self.assertIn("roles.role_key = 'user'", upgrade)
+        self.assertIn("roles.role_key = 'admin'", upgrade)
+        self.assertIn("users.role = 'admin'", upgrade)
+        self.assertEqual(upgrade.count("user_roles.user_id IS NULL"), 2)
+        self.assertNotIn("UPDATE users", upgrade)
+        self.assertNotIn("DELETE FROM", upgrade)
+
+    def test_downgrade_does_not_delete_indistinguishable_role_relations(self):
+        downgrade = self.MIGRATION_PATH.read_text(encoding="utf-8").split(
+            "def downgrade()",
+            1,
+        )[1]
+        self.assertNotIn("DELETE FROM", downgrade)
+        self.assertNotIn("DROP TABLE", downgrade)
+
+
 if __name__ == "__main__":
     unittest.main()
