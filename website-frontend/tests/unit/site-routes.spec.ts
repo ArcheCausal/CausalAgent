@@ -6,6 +6,7 @@ describe('官网路由解析', () => {
     const cases: ReadonlyArray<[string, string]> = [
       ['/', 'home'],
       ['/product', 'product'],
+      ['/pricing', 'pricing'],
       ['/about', 'about'],
       ['/docs', 'docs'],
       ['/changelog', 'changelog'],
@@ -20,6 +21,7 @@ describe('官网路由解析', () => {
   it('把带尾斜杠的路径归一到同一页面', () => {
     expect(readSiteRoute('/product/').path).toBe('/product')
     expect(readSiteRoute('/product/').name).toBe('product')
+    expect(readSiteRoute('/pricing/').name).toBe('pricing')
     expect(readSiteRoute('/auth/sign-in/').name).toBe('sign-in')
   })
 

@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import { resolve } from 'node:path'
 import { fontLicenseFiles } from '../packages/design-system/vite/font-license-plugin.js'
 
 function filePathFromUrl(url: URL): string {
@@ -12,6 +13,11 @@ const designSystemRoot = filePathFromUrl(new URL('../packages/design-system/src'
 
 export default defineConfig({
   base: '/site-assets/',
+  resolve: {
+    alias: {
+      '@causalagent/design-system': resolve(designSystemRoot),
+    },
+  },
   plugins: [vue(), fontLicenseFiles()],
   server: {
     fs: { allow: [frontendRoot, designSystemRoot] },

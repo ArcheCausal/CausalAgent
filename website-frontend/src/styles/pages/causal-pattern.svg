@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  登录 / 注册页背景纹路：淡淡的因果图（有向无环图）平铺图案。
+  640 x 640 的方块内放了四组小因果结构：分叉（混杂因子）、对撞、链路、汇合。
+
+  想要更淡或更明显，只改下面这几个数值即可（现在是很淡的一档）：
+    - 实线 / 箭头：stroke-opacity 与 marker 里的 fill-opacity（当前 0.05）
+    - 虚线边：stroke-opacity（当前 0.036）
+    - 节点圆圈：stroke-opacity（当前 0.05）
+    - 零散小圆点：fill-opacity（当前 0.042）
+  每个数值都不超过 0.055，是为了让 #6f6f6f 的小号灰字压在纹路上时仍满足 4.5:1 对比度。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640" role="presentation" focusable="false">
+  <defs>
+    <marker id="cg-head" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0.6 1.3L7 4L0.6 6.7Z" fill="#171717" fill-opacity="0.05"/>
+    </marker>
+  </defs>
+
+  <!-- 边：带箭头的有向连接 -->
+  <g fill="none" stroke="#171717" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke-opacity="0.05">
+      <!-- 左上：Z 分出 X、Y，X 再指向 Y（典型混杂结构） -->
+      <path d="M143.6 74.9L63.3 185.9" marker-end="url(#cg-head)"/>
+      <path d="M156.4 75L234.8 185.8" marker-end="url(#cg-head)"/>
+      <path d="M66.5 196L229.5 196" marker-end="url(#cg-head)"/>
+      <!-- 右上：P 分出 Q 与 R，Q 再指向 R（对撞结构） -->
+      <path d="M401.6 78.2L513 127.2" marker-end="url(#cg-head)"/>
+      <path d="M396.5 83.5L456.6 208.7" marker-end="url(#cg-head)"/>
+      <path d="M517.7 141L469.5 209.4" marker-end="url(#cg-head)"/>
+      <!-- 左下：一条两段的传递链 -->
+      <path d="M81.6 382.2L192.6 430.2" marker-end="url(#cg-head)"/>
+      <path d="M198.8 443L120.6 519.6" marker-end="url(#cg-head)"/>
+      <!-- 右下：两条路径汇合到同一个结果 -->
+      <path d="M373.8 346L488.3 322.4" marker-end="url(#cg-head)"/>
+      <path d="M506.3 329L568.9 419.7" marker-end="url(#cg-head)"/>
+      <path d="M566.4 435.4L463.3 493.6" marker-end="url(#cg-head)"/>
+      <path d="M357.6 472.8L440.5 496.7" marker-end="url(#cg-head)"/>
+    </g>
+    <g stroke-opacity="0.036" stroke-dasharray="5 7">
+      <!-- 旁路与未观测路径 -->
+      <path d="M69.2 388.6L49.8 461.5" marker-end="url(#cg-head)"/>
+      <path d="M491.5 328.4L356.5 461.6" marker-end="url(#cg-head)"/>
+    </g>
+  </g>
+
+  <!-- 变量节点 -->
+  <g fill="#ffffff" stroke="#171717" stroke-width="1.5" stroke-opacity="0.05">
+    <circle cx="150" cy="66" r="7"/>
+    <circle cx="56" cy="196" r="6.5"/>
+    <circle cx="242" cy="196" r="6.5"/>
+    <circle cx="392" cy="74" r="6.5"/>
+    <circle cx="524" cy="132" r="6"/>
+    <circle cx="462" cy="220" r="6.5"/>
+    <circle cx="72" cy="378" r="6.5"/>
+    <circle cx="206" cy="436" r="7"/>
+    <circle cx="112" cy="528" r="6"/>
+    <circle cx="46" cy="476" r="5"/>
+    <circle cx="364" cy="348" r="6"/>
+    <circle cx="500" cy="320" r="6.5"/>
+    <circle cx="576" cy="430" r="6"/>
+    <circle cx="452" cy="500" r="6.5"/>
+    <circle cx="348" cy="470" r="6"/>
+  </g>
+
+  <!-- 未连边的孤立节点，让空白处也有图的感觉 -->
+  <g fill="#171717" fill-opacity="0.042">
+    <circle cx="302" cy="170" r="3.5"/>
+    <circle cx="568" cy="246" r="3.5"/>
+    <circle cx="170" cy="272" r="3.5"/>
+    <circle cx="292" cy="566" r="3.5"/>
+    <circle cx="596" cy="562" r="3.5"/>
+    <circle cx="30" cy="308" r="3.5"/>
+  </g>
+</svg>
