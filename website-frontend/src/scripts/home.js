@@ -1549,46 +1549,130 @@ export function initHome() {
       })(pipeBtns[pi], pi);
     }
 
-    /* ---------- 首屏图形：立体因果图 ----------
-       Pearl 体系里最典型的一张图：两个共同原因指向干预变量，干预经两条中介路径到达结果，
-       另有一条直接影响。节点、连线、脉冲都先算三维坐标，再按透视投影落到画布上，靠远近
-       决定大小、深浅与遮挡关系。参数全部写死，换机器、换刷新顺序，画出来都一样。 */
+    /* ---------- 首屏图形：因果地球 ----------
+       一颗由细点阵构成的球体缓慢自转，一张有向无环因果图的十个变量落在球面上，
+       每条因果边是离开球面的弧线。开场时点阵自上而下聚成球体，随后按因果顺序逐条描出边，
+       读起来是“从数据里发现结构”。此后每隔一段时间对一个朝向观众的变量做一次干预 do(·)：
+       球面点阵从该变量荡开一圈涟漪，指向它的入边被切断淡出，影响沿出边依次传到下游，
+       只有下游变量被点亮，读起来是“干预只沿因果方向传导”。
+       除鼠标带来的轻微视差外，画面只由时间决定，参数全部写死。 */
     var canvas = el("hero-network");
     var ctx = canvas && canvas.getContext ? canvas.getContext("2d") : null;
     var fieldWidth = 0;
     var fieldHeight = 0;
+    var fieldFont = "sans-serif";
     var pointer = { x: 0, y: 0 };
     var pointerTarget = { x: 0, y: 0 };
     var TAU = Math.PI * 2;
+    var INK = "23, 23, 23";
 
-    /* 六个变量：x/y/z 是三维坐标，size 是半径，solid 的两个是干预与结果。
-       坐标按当前相机参数反解，投影后六个点落在一个半径约 0.80 的圆上。 */
+    function clamp01(v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+    function easeOut(t) { t = clamp01(t); return 1 - Math.pow(1 - t, 3); }
+    function easeInOut(t) { t = clamp01(t); return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+    function easeOutBack(t) { t = clamp01(t); var c = 1.6; return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); }
+    function ink(a) { return "rgba(" + INK + ", " + (a < 0 ? 0 : a).toFixed(3) + ")"; }
+
+    /* 球面点阵：黄金角螺旋均匀铺点，数量固定 */
+    var GLOBE_DOT_COUNT = 820;
+    var GLOBE_DOTS = [];
+    var GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+    for (var gdi = 0; gdi < GLOBE_DOT_COUNT; gdi++) {
+      var gdy = 1 - ((gdi + 0.5) / GLOBE_DOT_COUNT) * 2;
+      var gdr = Math.sqrt(1 - gdy * gdy);
+      GLOBE_DOTS.push({ x: Math.cos(GOLDEN_ANGLE * gdi) * gdr, y: gdy, z: Math.sin(GOLDEN_ANGLE * gdi) * gdr });
+    }
+
+    function onSphere(lat, lon) {
+      var la = lat * Math.PI / 180;
+      var lo = lon * Math.PI / 180;
+      return { x: Math.cos(la) * Math.sin(lo), y: -Math.sin(la), z: Math.cos(la) * Math.cos(lo) };
+    }
+
+    /* 十个变量：lat/lon 是球面经纬度，size 是相对球半径的节点半径，solid 的两个是干预变量与结果变量 */
     var CAUSAL_NODES = [
-      { id: "scale",  x: -0.466, y: -0.651, z: 0.000, size: 0.030, solid: false },
-      { id: "market", x: -0.909, y:  0.145, z: 0.000, size: 0.028, solid: false },
-      { id: "promo",  x: -0.449, y:  0.770, z: 0.000, size: 0.042, solid: true  },
-      { id: "visit",  x:  0.455, y:  0.635, z: 0.000, size: 0.031, solid: false },
-      { id: "basket", x:  0.932, y: -0.148, z: 0.000, size: 0.029, solid: false },
-      { id: "repeat", x:  0.455, y: -0.780, z: 0.000, size: 0.044, solid: true  }
+      { id: "e",  label: "E", lat: -22, lon: -128, size: 0.040, solid: false },
+      { id: "w",  label: "W", lat:  44, lon:  -66, size: 0.040, solid: false },
+      { id: "z1", label: "Z", lat:  50, lon:   12, size: 0.044, solid: false },
+      { id: "z2", label: "V", lat: -16, lon:  -54, size: 0.042, solid: false },
+      { id: "x",  label: "X", lat:  12, lon:  -14, size: 0.062, solid: true  },
+      { id: "m1", label: "M", lat: -34, lon:   24, size: 0.042, solid: false },
+      { id: "m2", label: "N", lat:  30, lon:   56, size: 0.040, solid: false },
+      { id: "c",  label: "C", lat: -44, lon:  150, size: 0.038, solid: false },
+      { id: "y",  label: "Y", lat:  -4, lon:   84, size: 0.064, solid: true  },
+      { id: "d",  label: "D", lat:  24, lon:  138, size: 0.044, solid: false }
     ];
     var CAUSAL_NODE_BY_ID = {};
     for (var cni = 0; cni < CAUSAL_NODES.length; cni++) {
+      CAUSAL_NODES[cni].v = onSphere(CAUSAL_NODES[cni].lat, CAUSAL_NODES[cni].lon);
       CAUSAL_NODE_BY_ID[CAUSAL_NODES[cni].id] = CAUSAL_NODES[cni];
     }
 
-    /* 八条有向边：bowY 与 bowZ 把曲线的控制点往上下、前后推，让每条弦沿圆向外鼓；period 与 offset 决定脉冲节奏。 */
+    /* 十五条有向边，按开场描线的先后排列 */
     var CAUSAL_EDGES = [
-      { from: "scale",  to: "promo",  bowY: -0.165, bowZ:  0.584, period: 5200, offset: 0.04 },
-      { from: "market", to: "promo",  bowY:  0.019, bowZ:  0.439, period: 6100, offset: 0.44 },
-      { from: "promo",  to: "visit",  bowY:  0.315, bowZ: -0.002, period: 4200, offset: 0.20 },
-      { from: "promo",  to: "basket", bowY:  0.395, bowZ: -0.350, period: 4700, offset: 0.58 },
-      { from: "visit",  to: "repeat", bowY:  0.155, bowZ: -0.584, period: 5000, offset: 0.32 },
-      { from: "basket", to: "repeat", bowY: -0.018, bowZ: -0.440, period: 5600, offset: 0.78 },
-      { from: "promo",  to: "repeat", bowY:  0.252, bowZ: -0.438, period: 6600, offset: 0.12 },
-      { from: "scale",  to: "repeat", bowY: -0.315, bowZ:  0.004, period: 7400, offset: 0.66 }
+      { from: "e",  to: "z2" }, { from: "w",  to: "x"  }, { from: "z1", to: "x"  },
+      { from: "z2", to: "x"  }, { from: "e",  to: "c"  }, { from: "z2", to: "m1" },
+      { from: "x",  to: "m1" }, { from: "x",  to: "m2" }, { from: "z1", to: "y"  },
+      { from: "x",  to: "y"  }, { from: "m1", to: "y"  }, { from: "m2", to: "y"  },
+      { from: "c",  to: "y"  }, { from: "m2", to: "d"  }, { from: "y",  to: "d"  }
     ];
-    var EDGE_STEPS = 20;
-    var VIEW = { yaw: -0.54, pitch: -0.30, dist: 3.4 };
+    var EDGE_STEPS = 44;
+
+    /* 每条边沿大圆插值，中段抬离球面，跨度越大抬得越高；travel 是干预脉冲走完这条边的时长 */
+    for (var cei = 0; cei < CAUSAL_EDGES.length; cei++) {
+      var edgeDef = CAUSAL_EDGES[cei];
+      var ea = CAUSAL_NODE_BY_ID[edgeDef.from].v;
+      var eb = CAUSAL_NODE_BY_ID[edgeDef.to].v;
+      var cosOmega = Math.max(-1, Math.min(1, ea.x * eb.x + ea.y * eb.y + ea.z * eb.z));
+      var omega = Math.acos(cosOmega);
+      var sinOmega = Math.sin(omega) || 1;
+      var lift = 0.08 + 0.30 * omega / Math.PI;
+      edgeDef.world = [];
+      for (var cej = 0; cej <= EDGE_STEPS; cej++) {
+        var et = cej / EDGE_STEPS;
+        var fa = Math.sin((1 - et) * omega) / sinOmega;
+        var fb = Math.sin(et * omega) / sinOmega;
+        var eh = 1 + lift * Math.sin(Math.PI * et);
+        edgeDef.world.push({
+          x: (ea.x * fa + eb.x * fb) * eh,
+          y: (ea.y * fa + eb.y * fb) * eh,
+          z: (ea.z * fa + eb.z * fb) * eh
+        });
+      }
+      edgeDef.travel = 620 + 820 * omega / Math.PI;
+      edgeDef.period = 6200 + (cei * 733) % 3400;
+      edgeDef.offset = (cei * 0.37) % 1;
+    }
+
+    /* 一圈倾斜的轨道环绕在球外，跟着球体一起转，给画面一层前后关系 */
+    var ORBIT_STEPS = 120;
+    var ORBIT_TILT = 0.38;
+    var ORBIT_RADIUS = 1.30;
+    var ORBIT_WORLD = [];
+    for (var ori = 0; ori <= ORBIT_STEPS; ori++) {
+      var orPhi = (ori / ORBIT_STEPS) * TAU;
+      ORBIT_WORLD.push({
+        x: ORBIT_RADIUS * Math.cos(orPhi) * Math.cos(ORBIT_TILT),
+        y: ORBIT_RADIUS * Math.cos(orPhi) * Math.sin(ORBIT_TILT),
+        z: ORBIT_RADIUS * Math.sin(orPhi)
+      });
+    }
+
+    /* 开场与干预节奏（毫秒） */
+    var INTRO_EDGE_START = 1100;
+    var INTRO_EDGE_GAP = 120;
+    var INTRO_EDGE_DRAW = 760;
+    var INTRO_END = 4000;
+    var CYCLE = 7600;
+    var CYCLE_FADE = 1100;
+    var SOURCE_DELAY = 260;
+    var RIPPLE_SPAN = 2600;
+    var SOURCE_ORDER = ["x", "z1", "e", "z2", "w", "m2", "c"];
+    var BASE_YAW = -0.60;
+    var BASE_PITCH = -0.30;
+    var SPIN = TAU / 110000;
+
+    var VIEW = { cyaw: 1, syaw: 0, cp: 1, sp: 0, dist: 5.0, cx: 0, cy: 0, R: 1 };
+    var plan = { index: -1, source: null, arrival: {} };
 
     function sizeCanvas() {
       if (!ctx) { return; }
@@ -1599,32 +1683,33 @@ export function initHome() {
       canvas.width = Math.floor(fieldWidth * dpr);
       canvas.height = Math.floor(fieldHeight * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      fieldFont = window.getComputedStyle(canvas).fontFamily || "sans-serif";
     }
 
-    function clamp01(v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+    function setView(yaw, pitch) {
+      VIEW.cyaw = Math.cos(yaw);
+      VIEW.syaw = Math.sin(yaw);
+      VIEW.cp = Math.cos(pitch);
+      VIEW.sp = Math.sin(pitch);
+    }
 
-    /* 三维点按当前相机转成正交坐标，k 是透视缩放，也用来判断远近 */
+    /* 世界坐标先绕竖轴自转，再按俯仰角倾斜，最后透视投影；z 大于 0 朝向观众 */
     function project(p) {
-      var cy = Math.cos(VIEW.yaw), sy = Math.sin(VIEW.yaw);
-      var x1 = p.x * cy + p.z * sy;
-      var z1 = -p.x * sy + p.z * cy;
-      var cp = Math.cos(VIEW.pitch), sp = Math.sin(VIEW.pitch);
-      var y1 = p.y * cp - z1 * sp;
-      var z2 = p.y * sp + z1 * cp;
+      var x1 = p.x * VIEW.cyaw + p.z * VIEW.syaw;
+      var z1 = -p.x * VIEW.syaw + p.z * VIEW.cyaw;
+      var y1 = p.y * VIEW.cp - z1 * VIEW.sp;
+      var z2 = p.y * VIEW.sp + z1 * VIEW.cp;
       var k = VIEW.dist / (VIEW.dist - z2);
-      return { x: x1, y: y1, k: k };
-    }
-
-    function depthOf(k) { return clamp01((k - 0.80) / 0.45); }
-
-    function bezier3(a, b, ctrl, t) {
-      var u = 1 - t;
       return {
-        x: u * u * a.x + 2 * u * t * ctrl.x + t * t * b.x,
-        y: u * u * a.y + 2 * u * t * ctrl.y + t * t * b.y,
-        z: u * u * a.z + 2 * u * t * ctrl.z + t * t * b.z
+        x: VIEW.cx + x1 * k * VIEW.R,
+        y: VIEW.cy + y1 * k * VIEW.R,
+        k: k,
+        z: z2,
+        hidden: z2 < 0 && (x1 * x1 + y1 * y1) < 1
       };
     }
+
+    function depthOf(z) { return clamp01((z + 0.2) / 1.2); }
 
     function sampleEdge(pts, t) {
       var last = pts.length - 1;
@@ -1635,30 +1720,66 @@ export function initHome() {
       return {
         x: pts[i0].x + (pts[i1].x - pts[i0].x) * f,
         y: pts[i0].y + (pts[i1].y - pts[i0].y) * f,
-        k: pts[i0].k + (pts[i1].k - pts[i0].k) * f
+        k: pts[i0].k + (pts[i1].k - pts[i0].k) * f,
+        z: pts[i0].z + (pts[i1].z - pts[i0].z) * f,
+        hidden: f < 0.5 ? pts[i0].hidden : pts[i1].hidden
       };
     }
 
-    /* 箭头：沿着曲线最后一段的方向，落在目标球的边缘上 */
-    function drawArrowHead(pts, targetR, depth) {
+    /* 只描 t0 到 t1 之间、遮挡状态与 wantHidden 相同的线段；同一次 stroke，交接处不会叠色 */
+    function tracePart(pts, t0, t1, wantHidden, color, width) {
       var last = pts.length - 1;
-      var tip = pts[last];
-      var prev = pts[last - 3];
+      var i0 = clamp01(t0) * last;
+      var i1 = clamp01(t1) * last;
+      if (i1 <= i0) { return; }
+      var open = false;
+      var drew = false;
+      ctx.beginPath();
+      for (var j = Math.floor(i0); j < last && j < i1; j++) {
+        var a = pts[j];
+        var b = pts[j + 1];
+        if ((a.hidden || b.hidden) !== wantHidden) { open = false; continue; }
+        var sa = Math.max(i0, j) - j;
+        var sb = Math.min(i1, j + 1) - j;
+        var ax = a.x + (b.x - a.x) * sa;
+        var ay = a.y + (b.y - a.y) * sa;
+        if (!open) { ctx.moveTo(ax, ay); open = true; }
+        ctx.lineTo(a.x + (b.x - a.x) * sb, a.y + (b.y - a.y) * sb);
+        drew = true;
+      }
+      if (!drew) { return; }
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.stroke();
+    }
+
+    /* 箭头：从曲线末端往回找到离开目标球边缘的位置，沿那一段的方向落笔 */
+    function drawArrowHead(pts, target, alpha) {
+      var last = pts.length - 1;
+      var j = last;
+      var limit = target.r + 2.5;
+      while (j > 2) {
+        var ddx = pts[j].x - target.x;
+        var ddy = pts[j].y - target.y;
+        if (ddx * ddx + ddy * ddy > limit * limit) { break; }
+        j--;
+      }
+      var tip = pts[j];
+      if (tip.hidden || alpha <= 0.01) { return; }
+      var prev = pts[Math.max(0, j - 2)];
       var dx = tip.x - prev.x;
       var dy = tip.y - prev.y;
       var len = Math.sqrt(dx * dx + dy * dy) || 1;
       dx = dx / len;
       dy = dy / len;
-      var size = 4.8 * tip.k;
-      var tipX = tip.x - dx * (targetR + 1.8);
-      var tipY = tip.y - dy * (targetR + 1.8);
-      var baseX = tipX - dx * size;
-      var baseY = tipY - dy * size;
+      var size = 5.0 * tip.k;
+      var baseX = tip.x - dx * size;
+      var baseY = tip.y - dy * size;
       var nx = -dy * size * 0.50;
       var ny = dx * size * 0.50;
-      var col = "rgba(96, 96, 96, " + (0.28 + 0.28 * depth).toFixed(3) + ")";
+      var col = ink(alpha);
       ctx.beginPath();
-      ctx.moveTo(tipX, tipY);
+      ctx.moveTo(tip.x, tip.y);
       ctx.lineTo(baseX + nx, baseY + ny);
       ctx.lineTo(baseX - nx, baseY - ny);
       ctx.closePath();
@@ -1671,43 +1792,29 @@ export function initHome() {
       ctx.stroke();
     }
 
-    /* 脉冲：一个墨点带着逐渐变淡的拖尾沿边前进，读起来是影响在传导 */
-    function drawPulse(pts, edge, time, depth) {
-      var t = ((time / edge.period) + edge.offset) % 1;
-      var head = sampleEdge(pts, t);
-      var alpha = 0.40 + 0.60 * depth;
-      var s, back, a, r;
-      for (s = 5; s >= 1; s--) {
-        a = alpha * (0.30 - s * 0.045);
-        if (a <= 0.01) { continue; }
-        r = (2.6 - s * 0.32) * head.k;
-        if (r <= 0.4) { continue; }
-        back = sampleEdge(pts, t - s * 0.013);
+    /* 墨点带一层柔光，干预脉冲和平时的流动点共用 */
+    function drawInkDot(x, y, r, alpha, glow) {
+      if (glow > 0) {
+        var g = ctx.createRadialGradient(x, y, 0, x, y, r * glow);
+        g.addColorStop(0, ink(0.20 * alpha));
+        g.addColorStop(1, ink(0));
         ctx.beginPath();
-        ctx.arc(back.x, back.y, r, 0, TAU);
-        ctx.fillStyle = "rgba(23, 23, 23, " + a.toFixed(3) + ")";
+        ctx.arc(x, y, r * glow, 0, TAU);
+        ctx.fillStyle = g;
         ctx.fill();
       }
-      var glow = ctx.createRadialGradient(head.x, head.y, 0, head.x, head.y, 11 * head.k);
-      glow.addColorStop(0, "rgba(23, 23, 23, " + (0.18 * alpha).toFixed(3) + ")");
-      glow.addColorStop(1, "rgba(23, 23, 23, 0)");
       ctx.beginPath();
-      ctx.arc(head.x, head.y, 11 * head.k, 0, TAU);
-      ctx.fillStyle = glow;
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(head.x, head.y, 2.6 * head.k, 0, TAU);
-      ctx.fillStyle = "rgba(23, 23, 23, " + (0.80 * alpha).toFixed(3) + ")";
+      ctx.arc(x, y, r, 0, TAU);
+      ctx.fillStyle = ink(alpha);
       ctx.fill();
     }
 
     /* 球体：径向渐变给出左上方的受光面，深的两个再多一层浅投影，把它从纸面上托起来 */
     function drawNodeSphere(node, x, y, r, light) {
       var g;
-      /* 球体外面垫一层很淡的光晕，边缘不再是一圈硬切的圆 */
       g = ctx.createRadialGradient(x, y, r * 0.55, x, y, r * 2.0);
-      g.addColorStop(0, "rgba(23, 23, 23, " + (0.07 * light).toFixed(3) + ")");
-      g.addColorStop(1, "rgba(23, 23, 23, 0)");
+      g.addColorStop(0, ink(0.07 * light));
+      g.addColorStop(1, ink(0));
       ctx.beginPath();
       ctx.arc(x, y, r * 2.0, 0, TAU);
       ctx.fillStyle = g;
@@ -1718,7 +1825,7 @@ export function initHome() {
         g.addColorStop(0.44, "rgba(46, 46, 46, " + (0.98 * light).toFixed(3) + ")");
         g.addColorStop(1, "rgba(15, 15, 15, " + light.toFixed(3) + ")");
         ctx.save();
-        ctx.shadowColor = "rgba(23, 23, 23, " + (0.18 * light).toFixed(3) + ")";
+        ctx.shadowColor = ink(0.18 * light);
         ctx.shadowBlur = r * 2.4;
         ctx.shadowOffsetY = r * 0.5;
         ctx.beginPath();
@@ -1736,75 +1843,310 @@ export function initHome() {
       ctx.arc(x, y, r, 0, TAU);
       ctx.fillStyle = g;
       ctx.fill();
-      ctx.strokeStyle = "rgba(126, 126, 126, " + (0.28 * light).toFixed(3) + ")";
+      ctx.strokeStyle = "rgba(126, 126, 126, " + (0.30 * light).toFixed(3) + ")";
       ctx.lineWidth = 1;
       ctx.stroke();
     }
 
-    function drawGraph(time) {
+    /* 点阵分档批量绘制：透明度相近的点合成一条路径，一次填充 */
+    var DOT_BANDS = 10;
+    var DOT_ALPHA_MAX = 0.62;
+    function drawDots(list) {
+      var bands = [];
+      var b, i;
+      for (b = 0; b < DOT_BANDS; b++) { bands.push([]); }
+      for (i = 0; i < list.length; i++) {
+        b = Math.min(DOT_BANDS - 1, Math.floor(list[i].a / DOT_ALPHA_MAX * DOT_BANDS));
+        if (b >= 0 && list[i].a > 0.012) { bands[b].push(list[i]); }
+      }
+      for (b = 0; b < DOT_BANDS; b++) {
+        if (!bands[b].length) { continue; }
+        var level = (b + 0.5) / DOT_BANDS;
+        var radius = 0.62 + 0.78 * level;
+        ctx.beginPath();
+        for (i = 0; i < bands[b].length; i++) {
+          var d = bands[b][i];
+          var r = radius * d.k;
+          ctx.moveTo(d.x + r, d.y);
+          ctx.arc(d.x, d.y, r, 0, TAU);
+        }
+        ctx.fillStyle = ink(level * DOT_ALPHA_MAX);
+        ctx.fill();
+      }
+    }
+
+    /* 选出本轮被干预的变量，并按边的时长算出影响到达每个下游变量的时刻 */
+    function planCycle(index, placedById) {
+      var source = null;
+      var k, id;
+      for (k = 0; k < SOURCE_ORDER.length; k++) {
+        id = SOURCE_ORDER[(index + k) % SOURCE_ORDER.length];
+        if (placedById[id].z > 0.30) { source = id; break; }
+      }
+      if (!source) {
+        for (k = 0; k < SOURCE_ORDER.length; k++) {
+          id = SOURCE_ORDER[k];
+          if (!source || placedById[id].z > placedById[source].z) { source = id; }
+        }
+      }
+      var arrival = {};
+      arrival[source] = SOURCE_DELAY;
+      for (var pass = 0; pass < CAUSAL_NODES.length; pass++) {
+        for (var e = 0; e < CAUSAL_EDGES.length; e++) {
+          var edge = CAUSAL_EDGES[e];
+          if (arrival[edge.from] === undefined) { continue; }
+          var t = arrival[edge.from] + edge.travel;
+          if (arrival[edge.to] === undefined || t < arrival[edge.to]) { arrival[edge.to] = t; }
+        }
+      }
+      plan.index = index;
+      plan.source = source;
+      plan.arrival = arrival;
+    }
+
+    /* 球面上以某个变量为圆心、角半径为 theta 的小圆 */
+    function surfaceRing(n, theta) {
+      var ax = Math.abs(n.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+      var ux = n.y * ax.z - n.z * ax.y;
+      var uy = n.z * ax.x - n.x * ax.z;
+      var uz = n.x * ax.y - n.y * ax.x;
+      var ul = Math.sqrt(ux * ux + uy * uy + uz * uz) || 1;
+      ux /= ul; uy /= ul; uz /= ul;
+      var vx = n.y * uz - n.z * uy;
+      var vy = n.z * ux - n.x * uz;
+      var vz = n.x * uy - n.y * ux;
+      var ct = Math.cos(theta);
+      var st = Math.sin(theta);
+      var pts = [];
+      for (var s = 0; s <= 64; s++) {
+        var phi = (s / 64) * TAU;
+        var cph = Math.cos(phi);
+        var sph = Math.sin(phi);
+        var q = project({
+          x: n.x * ct + (ux * cph + vx * sph) * st,
+          y: n.y * ct + (uy * cph + vy * sph) * st,
+          z: n.z * ct + (uz * cph + vz * sph) * st
+        });
+        q.hidden = q.z < 0;
+        pts.push(q);
+      }
+      return pts;
+    }
+
+    function drawGraph(time, still) {
       if (!ctx) { return; }
       ctx.clearRect(0, 0, fieldWidth, fieldHeight);
-      var unit = Math.min(fieldWidth * 0.34, fieldHeight * 0.56);
-      var cx = fieldWidth * 0.56 + pointer.x * 14;
-      var cy = fieldHeight * 0.5 + pointer.y * 12;
+      var i, j, p;
+      var intro = still ? 1 : easeOut(time / 1600);
+      var R = Math.min(fieldWidth * 0.30, fieldHeight * 0.34) * (0.92 + 0.08 * intro);
+      VIEW.R = R;
+      VIEW.cx = fieldWidth * 0.56 + pointer.x * 10;
+      VIEW.cy = fieldHeight * 0.5 + pointer.y * 8;
+      /* 球体匀速自转；鼠标只带来很小的转角与位移，图形不会跟着指针乱晃 */
+      var yaw = BASE_YAW - (still ? 0 : time * SPIN) + pointer.x * 0.20;
+      var pitch = BASE_PITCH + (still ? 0 : Math.sin(time * 0.00013) * 0.04) - pointer.y * 0.08;
+      setView(yaw, pitch);
 
-      /* 相机缓慢摆动；鼠标位置只做很小的偏移，图形不会跟着指针乱晃 */
-      VIEW.yaw = -0.54 + Math.sin(time * 0.00016) * 0.13 + pointer.x * 0.07;
-      VIEW.pitch = -0.30 + Math.sin(time * 0.00011) * 0.035 - pointer.y * 0.04;
-
+      /* 变量投影 */
       var placed = [];
       var placedById = {};
-      var i, j;
       for (i = 0; i < CAUSAL_NODES.length; i++) {
         var node = CAUSAL_NODES[i];
-        var q = project(node);
-        var entry = {
-          node: node,
-          x: cx + q.x * unit,
-          y: cy + q.y * unit,
-          r: node.size * unit * q.k * (1 + 0.05 * Math.sin(time * 0.0011 + i * 0.9)),
-          depth: depthOf(q.k),
-          k: q.k
-        };
-        placed.push(entry);
-        placedById[node.id] = entry;
+        var q = project(node.v);
+        q.hidden = q.z < 0;
+        q.node = node;
+        q.pop = still ? 1 : easeOutBack((time - 700 - i * 80) / 620);
+        q.r = node.size * R * q.k * Math.max(0, q.pop);
+        placed.push(q);
+        placedById[node.id] = q;
       }
 
-      /* 先画线与脉冲，节点后画：近处的球自然挡住远处的线 */
+      /* 干预状态：cycle 内的本地时刻、本轮的起点与每个下游变量的到达时刻 */
+      var act = null;
+      if (!still && time >= INTRO_END) {
+        var index = Math.floor((time - INTRO_END) / CYCLE);
+        if (index !== plan.index) { planCycle(index, placedById); }
+        var local = time - INTRO_END - index * CYCLE;
+        act = {
+          local: local,
+          source: plan.source,
+          sourceVec: CAUSAL_NODE_BY_ID[plan.source].v,
+          arrival: plan.arrival,
+          fade: 1 - clamp01((local - (CYCLE - CYCLE_FADE)) / CYCLE_FADE),
+          cut: easeInOut(local / 520) * (1 - clamp01((local - (CYCLE - CYCLE_FADE)) / CYCLE_FADE)),
+          wave: clamp01(local / RIPPLE_SPAN)
+        };
+      }
+
+      /* 点阵：开场时自上而下显影；干预时涟漪扫过的点短暂加深 */
+      var backDots = [];
+      var frontDots = [];
+      var waveFront = act ? 0.05 + 1.75 * easeOut(act.wave) : 0;
+      var waveGain = act ? (1 - act.wave) : 0;
+      for (i = 0; i < GLOBE_DOTS.length; i++) {
+        var gd = GLOBE_DOTS[i];
+        var dq = project(gd);
+        var appear = still ? 1 : clamp01((time - 150 - (gd.y + 1) * 420) / 700);
+        if (appear <= 0) { continue; }
+        var a = dq.z >= 0 ? 0.09 + 0.23 * dq.z : 0.028 + 0.028 * (1 + dq.z);
+        if (waveGain > 0) {
+          var sv = act.sourceVec;
+          var ang = Math.acos(Math.max(-1, Math.min(1, gd.x * sv.x + gd.y * sv.y + gd.z * sv.z)));
+          var band = 1 - Math.abs(ang - waveFront) / 0.16;
+          if (band > 0) { a += band * waveGain * (dq.z >= 0 ? 0.42 : 0.10); }
+        }
+        dq.a = Math.min(DOT_ALPHA_MAX, a * appear);
+        if (dq.z >= 0) { frontDots.push(dq); } else { backDots.push(dq); }
+      }
+
+      /* 边投影与各自的状态 */
+      var edges = [];
       for (i = 0; i < CAUSAL_EDGES.length; i++) {
         var edge = CAUSAL_EDGES[i];
-        var a = CAUSAL_NODE_BY_ID[edge.from];
-        var b = CAUSAL_NODE_BY_ID[edge.to];
-        var ctrl = {
-          x: (a.x + b.x) / 2,
-          y: (a.y + b.y) / 2 + edge.bowY,
-          z: (a.z + b.z) / 2 + edge.bowZ
-        };
         var pts = [];
         var depthSum = 0;
-        for (j = 0; j <= EDGE_STEPS; j++) {
-          var pq = project(bezier3(a, b, ctrl, j / EDGE_STEPS));
-          pts.push({ x: cx + pq.x * unit, y: cy + pq.y * unit, k: pq.k });
-          depthSum += depthOf(pq.k);
+        for (j = 0; j < edge.world.length; j++) {
+          var eq = project(edge.world[j]);
+          pts.push(eq);
+          depthSum += depthOf(eq.z);
         }
-        var depth = depthSum / pts.length;
-        ctx.beginPath();
-        for (j = 0; j < pts.length; j++) {
-          if (j === 0) { ctx.moveTo(pts[j].x, pts[j].y); } else { ctx.lineTo(pts[j].x, pts[j].y); }
+        var reveal = still ? 1 : easeInOut((time - INTRO_EDGE_START - i * INTRO_EDGE_GAP) / INTRO_EDGE_DRAW);
+        var weight = 1;
+        if (act && edge.to === act.source) { weight = 1 - 0.86 * act.cut; }
+        var flow = -1;
+        if (act && act.arrival[edge.from] !== undefined) {
+          flow = (act.local - act.arrival[edge.from]) / edge.travel;
         }
-        ctx.strokeStyle = "rgba(104, 104, 104, " + (0.12 + 0.26 * depth).toFixed(3) + ")";
-        ctx.lineWidth = 1.0 + 0.6 * depth;
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-        ctx.stroke();
-        drawArrowHead(pts, placedById[edge.to].r, depth);
-        drawPulse(pts, edge, time, depth);
+        edges.push({ edge: edge, pts: pts, depth: depthSum / pts.length, reveal: reveal, weight: weight, flow: flow });
       }
 
-      placed.sort(function (m, n) { return m.k - n.k; });
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+
+      /* 第一层：球背面的点、被球体挡住的线段和背面的变量 */
+      drawDots(backDots);
+      for (i = 0; i < edges.length; i++) {
+        var eb = edges[i];
+        if (eb.reveal <= 0) { continue; }
+        tracePart(eb.pts, 0, eb.reveal, true, ink(0.05 * eb.weight), 1);
+        if (eb.flow > 0) { tracePart(eb.pts, 0, Math.min(1, eb.flow), true, ink(0.12 * act.fade), 1.2); }
+      }
       for (i = 0; i < placed.length; i++) {
-        var p = placed[i];
-        drawNodeSphere(p.node, p.x, p.y, p.r, 0.62 + 0.38 * p.depth);
+        p = placed[i];
+        if (p.hidden && p.r > 0) { drawNodeSphere(p.node, p.x, p.y, p.r, 0.26 + 0.20 * (1 + p.z)); }
+      }
+
+      /* 第二层：球体本身，轮廓一圈细线，边缘略深，底下一片很淡的落影 */
+      if (intro > 0) {
+        ctx.save();
+        ctx.translate(VIEW.cx, VIEW.cy + R * 1.24);
+        ctx.scale(1, 0.09);
+        var shadow = ctx.createRadialGradient(0, 0, 0, 0, 0, R * 0.82);
+        shadow.addColorStop(0, ink(0.10 * intro));
+        shadow.addColorStop(1, ink(0));
+        ctx.beginPath();
+        ctx.arc(0, 0, R * 0.82, 0, TAU);
+        ctx.fillStyle = shadow;
+        ctx.fill();
+        ctx.restore();
+        var shade = ctx.createRadialGradient(VIEW.cx - R * 0.36, VIEW.cy - R * 0.42, R * 0.10, VIEW.cx, VIEW.cy, R * 1.02);
+        shade.addColorStop(0, ink(0));
+        shade.addColorStop(0.72, ink(0.014 * intro));
+        shade.addColorStop(1, ink(0.050 * intro));
+        ctx.beginPath();
+        ctx.arc(VIEW.cx, VIEW.cy, R, 0, TAU);
+        ctx.fillStyle = shade;
+        ctx.fill();
+        ctx.strokeStyle = ink(0.08 * intro);
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      /* 轨道环：背面一段被球挡住，只描正面，一颗小点沿环慢慢走 */
+      var orbit = [];
+      for (i = 0; i < ORBIT_WORLD.length; i++) { orbit.push(project(ORBIT_WORLD[i])); }
+      ctx.setLineDash([1.5, 5]);
+      tracePart(orbit, 0, 1, false, ink(0.16 * intro), 1);
+      ctx.setLineDash([]);
+      var sat = sampleEdge(orbit, still ? 0.18 : (time / 21000) % 1);
+      if (!sat.hidden && intro > 0) { drawInkDot(sat.x, sat.y, 1.9 * sat.k, 0.55 * intro, 5); }
+
+      /* 第三层：正面的点阵 */
+      drawDots(frontDots);
+
+      /* 干预涟漪：球面上从被干预的变量荡开两圈 */
+      if (act && act.wave < 1) {
+        for (j = 0; j < 2; j++) {
+          var rp = clamp01((act.local - j * 420) / (RIPPLE_SPAN - 400));
+          if (rp <= 0 || rp >= 1) { continue; }
+          var ring = surfaceRing(act.sourceVec, 0.05 + 1.05 * easeOut(rp));
+          tracePart(ring, 0, 1, false, ink(0.42 * (1 - rp) * (j === 0 ? 1 : 0.6)), 1.1);
+        }
+      }
+
+      /* 第四层：正面的边、箭头、流动点与干预脉冲 */
+      for (i = 0; i < edges.length; i++) {
+        var ef = edges[i];
+        if (ef.reveal <= 0) { continue; }
+        var baseA = (0.13 + 0.25 * ef.depth) * ef.weight;
+        tracePart(ef.pts, 0, ef.reveal, false, ink(baseA), 1.0 + 0.5 * ef.depth);
+        var arrowA = ef.reveal >= 1 ? baseA + 0.10 : 0;
+        if (ef.flow > 0) {
+          var f = Math.min(1, ef.flow);
+          tracePart(ef.pts, 0, f, false, ink(0.62 * act.fade), 1.7);
+          if (ef.flow >= 1) { arrowA = Math.max(arrowA, 0.70 * act.fade); }
+          if (ef.flow < 1) {
+            var head = sampleEdge(ef.pts, f);
+            if (!head.hidden) { drawInkDot(head.x, head.y, 2.8 * head.k, 0.9 * act.fade, 5); }
+          }
+        } else if (ef.reveal >= 1 && ef.weight > 0.5) {
+          var pt = ((time / ef.edge.period) + ef.edge.offset) % 1;
+          var drift = sampleEdge(ef.pts, pt);
+          if (!drift.hidden) { drawInkDot(drift.x, drift.y, 1.7 * drift.k, 0.30 * ef.depth + 0.08, 0); }
+        }
+        drawArrowHead(ef.pts, placedById[ef.edge.to], arrowA);
+      }
+
+      /* 第五层：正面的变量，近的后画；被影响到的变量亮起一圈，并短暂放大 */
+      var front = [];
+      for (i = 0; i < placed.length; i++) { if (!placed[i].hidden && placed[i].r > 0) { front.push(placed[i]); } }
+      front.sort(function (m, n) { return m.z - n.z; });
+      for (i = 0; i < front.length; i++) {
+        p = front[i];
+        var light = 0.62 + 0.38 * depthOf(p.z);
+        var r = p.r;
+        var hit = act ? act.arrival[p.node.id] : undefined;
+        if (hit !== undefined && act.local >= hit) {
+          var since = act.local - hit;
+          var flash = 1 - clamp01(since / 1500);
+          r = r * (1 + 0.22 * Math.sin(Math.PI * clamp01(since / 700)));
+          if (flash > 0) {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, r * (1.3 + 1.9 * easeOut(since / 1500)), 0, TAU);
+            ctx.strokeStyle = ink(0.45 * flash);
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+          }
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, r + 4.5 * p.k, 0, TAU);
+          ctx.strokeStyle = ink(0.34 * act.fade);
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+        drawNodeSphere(p.node, p.x, p.y, r, light);
+      }
+
+      /* 干预标记：被干预的变量旁写出 do(·)，随涟漪淡入淡出 */
+      if (act) {
+        var src = placedById[act.source];
+        var labelA = easeOut(act.local / 420) * (1 - clamp01((act.local - 2900) / 700));
+        if (!src.hidden && labelA > 0.01) {
+          var fontSize = Math.max(11, Math.min(13, R * 0.055));
+          ctx.font = "500 " + fontSize.toFixed(1) + "px " + fieldFont;
+          ctx.textBaseline = "middle";
+          ctx.fillStyle = ink(0.78 * labelA);
+          ctx.fillText("do(" + CAUSAL_NODE_BY_ID[act.source].label + ")", src.x + src.r + 9, src.y - src.r - 6);
+        }
       }
     }
 
@@ -1814,11 +2156,12 @@ export function initHome() {
 
     function heroTick(now) {
       if (!lastTs) { lastTs = now; }
-      elapsed += now - lastTs;
+      /* 切走标签页再回来时，单帧最多推进 64 毫秒，动画接着原来的位置往下走 */
+      elapsed += Math.min(64, now - lastTs);
       lastTs = now;
       pointer.x += (pointerTarget.x - pointer.x) * 0.05;
       pointer.y += (pointerTarget.y - pointer.y) * 0.05;
-      drawGraph(elapsed);
+      drawGraph(elapsed, false);
       rafId = window.requestAnimationFrame(heroTick);
     }
 
@@ -1836,8 +2179,8 @@ export function initHome() {
 
     if (ctx) {
       sizeCanvas();
-      drawGraph(0);
-      window.addEventListener("resize", function () { sizeCanvas(); drawGraph(elapsed); });
+      drawGraph(0, reduceMotion);
+      window.addEventListener("resize", function () { sizeCanvas(); drawGraph(elapsed, reduceMotion); });
       if (!reduceMotion) {
         window.addEventListener("pointermove", function (event) {
           pointerTarget.x = (event.clientX / window.innerWidth - 0.5) * 2;
@@ -1856,6 +2199,7 @@ export function initHome() {
         }
       }
     }
+
 
     /* ---------- 首屏滚动交接：标题退场，工作台界面转为清晰 ---------- */
     var heroShowcase = el("top");

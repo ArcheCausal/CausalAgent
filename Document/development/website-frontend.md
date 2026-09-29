@@ -33,11 +33,11 @@
 
 原型的页面脚本以 `window.gsap` 与 `window.ScrollTrigger` 使用 GSAP，但原型目录导出的 vendor 文件缺失。官网以依赖 `gsap@3.15.0` 提供这两个库，首页与更新日志页挂载时调用 `src/scripts/vendor-gsap.js` 按原型的全局约定把它们挂到 `window`；首页额外移除了滚动停驻吸附逻辑，保留显式锚点跳转和其他页面动效，其余页面不引入 GSAP。GSAP 与滚动触发动效留在官网，不进入共享包。
 
-页面只引用已登记路径或真实系统入口。通告条文本、关闭行为、章节索引、滚动进度、Canvas 因果图、滚动触发渐入与认证页的三维因果图都来自原型脚本。`/docs` 面向使用者，`/changelog` 只记录影响使用方式的变化；仓库内部的 `Document/` 与 `CHANGELOG.md` 不通过官网发布。首页、产品页和认证页使用的标志、专家照片、论文页面与基准图是发布到 `public/assets/` 与 `public/` 的静态资源，通过 `/site-assets/` 同源提供；官网不在运行时加载普通用户应用、RAG 评测台或管理员前端。
+页面只引用已登记路径或真实系统入口。通告条文本、关闭行为、章节索引、滚动进度、滚动触发渐入与认证页的三维因果图来自原型脚本；首页因果地球由官网脚本绘制，以缓慢自转的球面点阵呈现变量和有向关系，并周期性展示 do(·) 干预及其影响传播。系统启用减少动态设置时，因果地球保持静止。`/docs` 面向使用者，`/changelog` 只记录影响使用方式的变化；仓库内部的 `Document/` 与 `CHANGELOG.md` 不通过官网发布。首页、产品页和认证页使用的标志、专家照片、论文页面与基准图是发布到 `public/assets/` 与 `public/` 的静态资源，通过 `/site-assets/` 同源提供；官网不在运行时加载普通用户应用、RAG 评测台或管理员前端。
 
 页头与认证页的品牌标志使用发布在 `public/brand/causalagent-mark.svg` 的仓库品牌图，不再绘制文字字形。官网入口的 favicon 与触摸图标使用 `public/brand/causalagent-mark-rounded.png`，黑色标志置于白色圆角底板上，四角保持透明。首页“隐私、保护与RAG管理”轮播和产品页的配图位置使用登录后采集的真实界面截图：工作台 `public/media/workspace-console.png`、管理员端 `public/media/admin-console.png`、RAG 测评台 `public/media/rag-eval-console.png` 与日志仪表盘 `public/media/observability-logs.png`。四张图统一为 1600×1000（16:10），页面以 `object-fit: cover` 与顶部对齐裁切显示；截图只包含聚合指标和状态，不含知识源清单、内容哈希或用户文件内容。
 
-原型自带的定制中文字体不在约定范围内，页面统一使用共享设计系统的 `--ca-font-sans`，字形度量由此产生的细微差异属于允许保留的差异；滚动交接、Canvas 因果图、滚动触发渐入与 GSAP 相关逻辑留在官网，不进入共享包。
+原型自带的定制中文字体不在约定范围内，页面统一使用共享设计系统的 `--ca-font-sans`，字形度量由此产生的细微差异属于允许保留的差异；滚动交接、首页因果地球 Canvas、滚动触发渐入与 GSAP 相关逻辑留在官网，不进入共享包。
 
 ## 构建与部署
 
