@@ -56,7 +56,7 @@ cleanup worker 之后异步删除 PostgreSQL 父图 checkpoint、Deep Agent 子�
 默认开发 Compose `docker-compose.yml` 当前包含 16 个服务：`mysql-primary`、
 `mysql-replica`、`postgres-checkpoint`、`db-bootstrap`、`app`、`worker`、
 `causal-mcp`、`monitor`、`agent-persistence-cleanup`、`rag-eval-worker`、
-`searxng-init`、`searxng`、`valkey`、`loki`、`alloy` 和 `grafana`。
+`searxng`、`valkey`、`loki`、`alloy` 和 `grafana`。
 `db-bootstrap` 成功后，依赖它的运行服务才启动；开发拓扑没有自动故障切换。
 
 当前生产 Compose `docker-compose.prod.yml` 实际包含生产 MySQL、PostgreSQL checkpoint、

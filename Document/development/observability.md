@@ -93,6 +93,8 @@ MCP 不创建应用文件 handler，MCP transport stdout 只允许协议消息�
 
 ### 3.3 第 1.3 步开发采集拓扑
 
+预发 Compose 使用独立的 observability network 和 staging 数据存储，复用同一份 Alloy、Loki 和 Grafana 配置。除 app、worker、causal-mcp、monitor、db-bootstrap、agent-persistence-cleanup 外，预发的 rag-eval-worker 也带有 Alloy 标签，并以低基数的 worker service 分类采集。数据库、SearXNG、Valkey 和观测容器自身不带采集标签。预发 Grafana 不映射宿主端口，只通过 gateway 的同源 `/grafana/` 访问；其持久数据、Loki 数据和 Alloy positions 分别使用独立 staging 命名卷 `rag_eval_staging_grafana`、`rag_eval_staging_loki` 和 `rag_eval_staging_alloy_positions`。该配置不会改变生产 Compose 的服务或数据边界。
+
 默认开发 Compose 在 [`docker-compose.yml`](../../docker-compose.yml) 中增加独立的 `observability_network`，并锁定以下镜像：`grafana/loki:3.7.4`、`grafana/alloy:v1.18.0` 和 `grafana/grafana:13.1.1`。Loki、Alloy 不映射宿主机端口；Grafana 仅映射到 `127.0.0.1:3000`，要求 `GRAFANA_ADMIN_PASSWORD` 非空，并通过 `GF_USERS_DEFAULT_LANGUAGE=zh-Hans` 将未设置个人偏好的账号默认显示为简体中文；账号自己的语言偏好仍具有更高优先级。Loki 数据、Grafana 数据和 Alloy positions 分别使用命名卷，生产 Compose 不复用这些服务或卷。
 
 采集范围由 Compose 静态标签控制：`app`、`worker`、`causal-mcp`、`monitor`、`db-bootstrap` 和 `agent-persistence-cleanup` 才带有 `causalagent_observability=true`。数据库容器和可观测组件自身没有该标签，因此 Alloy 不会递归采集它们。`causal-mcp` 是独立私有容器，使用 `service=mcp` 的 JSON stderr；兼容 stdio 子进程仍由 worker stderr 采集，不把两条路径混写成同一服务事实。
@@ -123,7 +125,7 @@ docker compose ps
 
 看板由异常总量、异常级别趋势、服务分布、分类分布、Top 10 事件码和最近 200 条异常日志组成。`event_code` 仅在 LogQL 中通过 `| json` 解析和聚合；`request_id`、`job_id`、`node`、`tool` 等关联字段只在日志正文中保留，展开日志或进入 Explore 后继续筛选，不新增为 Dashboard 变量或 Loki 标签。
 
-Grafana 继续使用独立账号和 `127.0.0.1:3000` 本地入口，不复用 CausalAgent 管理员会话，也不写入 `admin_audit_events`。本阶段不提供 Flask/Vue 日志代理、不嵌入管理员页面、不新增告警通知，并保持生产 Compose 不接入可观测拓扑。
+Grafana 继续使用独立账号：开发入口为 `http://127.0.0.1:3000/grafana/`，预发入口为网关同源的 `/grafana/`；两者都不复用 CausalAgent 管理员会话，也不写入 `admin_audit_events`。本阶段不提供 Flask/Vue 日志代理、不嵌入管理员页面、不新增告警通知，并保持生产 Compose 不接入可观测拓扑。
 
 ### 3.5 MCP Job 时间线看板
 

@@ -38,24 +38,50 @@
 | `monitor` | 数据库共享快照采集 |
 | `agent-persistence-cleanup` | 跨库删除 Job 父子图 checkpoint 和用户长期记忆 Store |
 | `rag-eval-worker` | 独立领取 RAG 摄取、候选、评测和治理队列任务 |
-| `searxng-init` | 一次性 init，首次启动时在配置目录内生成临时文件，完成 secret_key 注入和校验后原子发布 `settings.yml`，已存在则跳过 |
 | `kb-indexes-sync` | 一次性同步，把仓库里的多模态 release 复制进命名卷 `kb_multimodal_indexes`；作为 app、worker、rag-eval-worker 的启动依赖先运行 |
 | `searxng` / `valkey` | 固定版本的 SearXNG 联网学术搜索及其缓存/队列依赖 |
 | `loki` / `alloy` / `grafana` | 开发环境运行日志采集、存储和查看；只加入独立的 observability network |
 
-`app`、Agent worker、`causal-mcp`、monitor、RAG evaluation worker 和 agent-persistence-cleanup 依赖 `db-bootstrap` 成功退出；`causal-mcp` 另外等待 `mysql-primary` 健康，并以 `/health`/`/ready` 提供进程、MySQL strong read 和执行器就绪边界。`causal-mcp` 不映射宿主端口，算法在有界容量内按 invocation 使用独立子进程，因此控制面取消只终止目标算法，不回收并行 sibling；`CAUSAL_MCP_SLOW_LOG_SECONDS` 在开发、预发和生产 Compose 中默认 60 秒。因果 MCP 镜像先安装 CPU Torch，再安装固定版本 `cdfm-base==0.1.0` 与现有 CDMIR；`CDFM_MODEL_PATH` 默认指向 `DMIRLAB/CDFM`，开发 smoke 可从 Hugging Face 加载，生产仍应通过不可变镜像/模型内容治理避免漂移。服务通过 `config/database_settings.py` 读取 MySQL 配置，只注入自身 Bearer/HMAC 密钥和算法参数，不注入应用的 `API_KEY`、`BASE_URL`、`MODEL` 或 `SECRET_KEY`；Bearer/HMAC 密钥只通过环境变量或部署 secret 注入。当前 worker 新路径还依赖 `causal-mcp` healthy，启动时按“PostgreSQL checkpoint pool/schema → AsyncPostgresStore setup → 静态 Registry → 进程级 MCP Client pool handshake → RAG readiness → Deep Agent/父图编译”的顺序完成 fail-fast 初始化；slot 不再创建 stdio MCP session。`searxng` 依赖 Valkey 健康和 `searxng-init` 成功退出。联网搜索是 Job 级可选能力，worker readiness 不等待 SearXNG，运行期不可用时新 `web_evidence_search` 返回受控 unavailable/disabled 结果；非搜索 Job 不会因此阻止启动。开发拓扑当前不提供自动故障切换。启动命令见 [`setup.md`](setup.md)。
+`app`、Agent worker、`causal-mcp`、monitor、RAG evaluation worker 和 agent-persistence-cleanup 依赖 `db-bootstrap` 成功退出；`causal-mcp` 另外等待 `mysql-primary` 健康，并以 `/health`/`/ready` 提供进程、MySQL strong read 和执行器就绪边界。`causal-mcp` 不映射宿主端口，算法在有界容量内按 invocation 使用独立子进程，因此控制面取消只终止目标算法，不回收并行 sibling；`CAUSAL_MCP_SLOW_LOG_SECONDS` 在开发、预发和生产 Compose 中默认 60 秒。因果 MCP 镜像先安装 CPU Torch，再安装固定版本 `cdfm-base==0.1.0` 与现有 CDMIR；`CDFM_MODEL_PATH` 默认指向 `DMIRLAB/CDFM`，开发 smoke 可从 Hugging Face 加载，生产仍应通过不可变镜像/模型内容治理避免漂移。服务通过 `config/database_settings.py` 读取 MySQL 配置，只注入自身 Bearer/HMAC 密钥和算法参数，不注入应用的 `API_KEY`、`BASE_URL`、`MODEL` 或 `SECRET_KEY`；Bearer/HMAC 密钥只通过环境变量或部署 secret 注入。当前 worker 新路径还依赖 `causal-mcp` healthy，启动时按“PostgreSQL checkpoint pool/schema → AsyncPostgresStore setup → 静态 Registry → 进程级 MCP Client pool handshake → RAG readiness → Deep Agent/父图编译”的顺序完成 fail-fast 初始化；slot 不再创建 stdio MCP session。`searxng` 依赖 Valkey 健康。联网搜索是 Job 级可选能力，worker readiness 不等待 SearXNG，运行期不可用时新 `web_evidence_search` 返回受控 unavailable/disabled 结果；非搜索 Job 不会因此阻止启动。开发拓扑当前不提供自动故障切换。启动命令见 [`setup.md`](setup.md)。
 
 ## 联网搜索（SearXNG）
 
-仓库只提交 `searxng/core-config/settings.yml.example`。`searxng-init` 服务在首次启动时自动兜底：`settings.yml` 缺失则在同一配置目录内创建临时文件，复制 example、把 `secret_key` 占位符替换为随机 64 位 hex，并在校验通过后通过原子重命名发布；生成失败不会留下半初始化的目标文件。`settings.yml` 已存在时仍然跳过，不覆盖用户配置。
+开发与预发 Compose 使用同一套密钥注入方式：`searxng/core-config/settings.yml` 与 `deploy/staging/searxng/config/settings.yml` 都是提交在仓库里的非密钥配置，只包含引擎白名单、JSON 输出、Valkey 地址等字段，不写 `secret_key`。密钥与其他密钥一致，由环境变量注入：开发 Compose 默认 `local-searxng-secret`，预发由 `.env.staging` 的 `SEARXNG_SECRET` 显式提供。SearXNG 直接读取该变量并覆盖配置文件中的同名字段，因此预发密钥只存在于服务器本地环境文件，不进入 Git。
 
-当前开发 Compose 固定使用 `searxng/searxng:2026.8.21-bbb3c7d82`。升级镜像时必须重新验证当前 `settings.yml.example`、JSON 输出格式、三学术引擎配置和 `/healthz`；不要直接改回 `latest`。`/healthz` 只检查 SearXNG Web 进程和配置加载后的 HTTP 响应，不检查外部学术引擎、DNS 或出站网络；真实搜索可用性仍由 web_search 的运行期重试和降级处理。
+开发与预发 Compose 都固定使用 `searxng/searxng:2026.8.21-bbb3c7d82`。升级镜像时必须重新验证 `settings.yml`、JSON 输出格式、三学术引擎配置和 `/healthz`，并确认 `SEARXNG_SECRET` 仍会覆盖文件中的同名字段；不要直接改回 `latest`。`/healthz` 只检查 SearXNG Web 进程和配置加载后的 HTTP 响应，不检查外部学术引擎、DNS 或出站网络；真实搜索可用性仍由 web_search 的运行期重试和降级处理。
 
-开发 Compose 的可观测组件使用固定版本和独立命名卷：Loki、Alloy 不开放宿主机端口，Grafana 只绑定 `127.0.0.1:3000`。启动 Grafana 前必须设置非空的 `GRAFANA_ADMIN_PASSWORD`；采集范围由应用容器的 `causalagent_observability` 标签筛选，不包含 MySQL、PostgreSQL、Loki、Alloy 或 Grafana 自身。完整字段、标签和真实验收边界见 [`observability.md`](observability.md)。
+开发 Compose 的可观测组件使用固定版本和独立命名卷：Loki、Alloy 不开放宿主机端口，Grafana 只绑定 `127.0.0.1:3000` 并以 `/grafana/` 为入口子路径。启动 Grafana 前必须设置非空的 `GRAFANA_ADMIN_PASSWORD`；采集范围由应用容器的 `causalagent_observability` 标签筛选，不包含 MySQL、PostgreSQL、Loki、Alloy 或 Grafana 自身。完整字段、标签和真实验收边界见 [`observability.md`](observability.md)。
 
 ## 预发部署
 
-`docker-compose.staging.yml` 是隔离预发拓扑，保留 `gateway`、`scripts/staging_environment_guard.py` 启动 guard 和独立 `rag-eval-worker`，并使用独立 MySQL 主从、PostgreSQL checkpoint、卷和 gateway 日志。所有 Python 服务先通过 guard 校验项目/DSN/数据库/卷名中的 production/prod 标识，`db-bootstrap` 成功后才启动应用服务；worker 还等待 `causal-mcp` healthy，并要求显式的 Deep Agent model/base/API key/context window 与 MCP service token/signing key。gateway 负责入口和日志轮转。staging 的多模态 index 使用可写命名卷 `kb_multimodal_indexes_staging`，active/previous runtime、assets 与 retrieval policy 仍为只读挂载。它不自动加入开发专用 SearXNG/Valkey 或 Loki/Alloy/Grafana。
+`docker-compose.staging.yml` 是隔离预发拓扑，包含网关、应用、Agent 与 RAG worker、私有 MCP、MySQL 主从、PostgreSQL checkpoint、SearXNG/Valkey 和 Loki/Alloy/Grafana。数据库、搜索、Grafana 和观测数据都使用 staging 专属命名卷；应用服务与观测服务分属两个 Docker 网络。所有 Python 服务先通过 `scripts/staging_environment_guard.py` 校验项目/DSN/数据库/卷名中的 production/prod 标识，`db-bootstrap` 成功后才启动应用服务；worker 还等待 `causal-mcp` healthy，并要求显式的 Deep Agent model/base/API key/context window 与 MCP service token/signing key。SearXNG 使用 `deploy/staging/searxng/config/` 下已提交的非密钥 `settings.yml`。Grafana 数据保存在命名卷 `rag_eval_staging_grafana`，不依赖宿主目录权限。多模态 index 使用可写命名卷 `kb_multimodal_indexes_staging`，active/previous runtime、assets 与 retrieval policy 仍为只读挂载。
+
+公网只发布 gateway 的 8088 端口。Grafana 不再映射宿主端口，由 gateway 反代到同源 `/grafana/`；SearXNG、Valkey、Loki、Alloy、MySQL、PostgreSQL、app、worker 和 MCP 均不发布宿主端口。该入口是明文 HTTP，仅用于测试服务器，管理员凭据会在链路上以明文传输；云安全组和主机防火墙只允许需要的公网入口端口。
+
+### CI 与人工镜像发布
+
+`.github/workflows/lightweight-ci.yml` 在面向 `main`/`develop` 的 PR 和分支更新上运行后端单元测试、五个前端工程自检/构建、Compose 与预发部署合同、Alloy 配置验证，以及 app、MCP、MySQL primary、MySQL replica 四个 Dockerfile 的 BuildKit 静态检查。该流程不推送镜像。完整镜像构建只由 `.github/workflows/publish-staging-images.yml` 的 `workflow_dispatch` 触发，并拒绝 `develop` 以外的分支；它把 app、MCP、MySQL primary、MySQL replica 分别构建并直接推送 GHCR，不创建镜像 artifact，也不通过 SSH 部署服务器。每个镜像使用 `sha-<commit 前 7 位>` 标签，摘要中同时给出 `sha256` digest；服务器配置必须使用 digest。
+
+仓库默认分支是 `main`，因此首次手动触发前，发布 workflow 文件必须先合并到 `main`；触发时在 Actions 页面选择 `develop`。公开仓库的公开 GHCR Container 镜像按 GitHub Packages 计费规则免费存储和传输（见 [GitHub Packages 计费说明](https://docs.github.com/en/billing/concepts/product-billing/github-packages)）。新建 GHCR 包后，维护者需在包设置中将可见性改为 Public，之后测试服务器才可匿名拉取。构建使用普通 `ubuntu-latest` runner，并在构建前后记录磁盘余量；MCP 首次构建是否能在 runner 可用磁盘内完成，以该次 workflow 实际结果为准。镜像直接推送 GHCR，不导出为 Actions artifact。
+
+GitHub 当前的公开 Linux x64 标准 runner 配置为 4 核、16 GB 内存和 14 GB SSD，公开仓库使用标准 runner 不计费；具体规格以 [GitHub-hosted runners 文档](https://docs.github.com/en/actions/reference/runners/github-hosted-runners) 为准。GHCR 第一次发布的新包默认为 Private，维护者需按 [包访问与可见性说明](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility) 手动改成 Public。
+
+服务器首次部署时，在仓库目录复制模板并只在服务器编辑真实配置：
+
+~~~bash
+cp .env.staging.example .env.staging
+chmod 600 .env.staging
+~~~
+
+把四个 STAGING_*_IMAGE 替换为发布摘要中的完整 GHCR @sha256:... 值；为 MySQL root/app/write/read/replication、PostgreSQL、Flask、模型、视觉、Embedding、MCP、SearXNG 和 Grafana 设置互不重复的真实凭据，并把 SearXNG 的 `SEARXNG_SECRET` 填为独立随机值。不要在服务器以外复制 .env.staging，也不要把它提交到 Git。.gitignore 会排除该文件，.dockerignore 也会排除环境文件与本地数据，避免本地构建时把它们放进镜像上下文。
+
+~~~bash
+docker compose --env-file .env.staging -f docker-compose.staging.yml config --quiet
+docker compose --env-file .env.staging -f docker-compose.staging.yml pull
+docker compose --env-file .env.staging -f docker-compose.staging.yml up -d
+~~~
+
+不要运行 docker compose down -v；它会删除预发数据库、checkpoint、搜索和观测数据。首次启动后还需在云安全组与主机防火墙核实只有 gateway 端口对公网开放。
 
 ## 生产部署
 
@@ -92,7 +118,7 @@ docker cp causalagent_app:/app/Agent/knowledge_base/multimodal_indexes/<release_
 
 ## 源码 Release 与 CD 流程
 
-`.github/workflows/lightweight-ci.yml` 仍只提供轻量 CI：Python 语法检查、两个结构化输出测试和 Pull Request 分支策略；它不会构建/推送 Docker 镜像、部署 staging/production 或执行回滚。当前新增的 `.github/workflows/release-windows.yml` 只负责面向开发者的 Windows Developer Preview 制品，不代表服务端已经完成 CD。
+`.github/workflows/lightweight-ci.yml` 负责代码、前端、Compose、预发部署合同和 Dockerfile 静态检查；`.github/workflows/publish-staging-images.yml` 只由人工触发构建和推送测试镜像，不部署服务器或执行回滚。`.github/workflows/release-windows.yml` 只负责面向开发者的 Windows Developer Preview 制品，不代表服务端已经完成 CD。
 公开说明维护在 [`.github/release-notes`](../../.github/release-notes)，workflow 在对应版本文件存在时优先读取该说明；其他 tag 才使用内置的通用 Draft 文案。
 
 正常发布时，先把 workflow 和目标版本代码合并到 `main`，再创建指向 `main` 历史的严格 SemVer tag。tag push 会在 GitHub 托管的 `windows-latest` runner 上检出该 tag，创建独立 `.venv-desktop`、运行桌面逻辑测试、构建 onefile、检查冻结通道与桌面环境，并生成 EXE 和 `SHA256SUMS.txt`。只有全部门禁通过后才创建 Draft Pre-release；维护者验收 Draft 后手动发布。构建发生在 GitHub runner，不是在触发者的电脑上。

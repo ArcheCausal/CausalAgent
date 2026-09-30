@@ -25,6 +25,17 @@
 
 `tests/README.md` 是后端测试目录和 Docker 单元测试环境的补充入口；新增测试时先判断是否需要真实跨模块依赖，再选择 unit 或 integration。
 
+## GitHub Actions CI
+
+`lightweight-ci.yml` 在面向 `main`、`develop` 的 Pull Request 和分支更新上运行完整后端 unit、五个前端工程的自检/构建、开发与预发 Compose 静态校验、预发服务暴露与 Alloy 标签合同、Alloy 配置验证，以及四个 Dockerfile 的 BuildKit 静态检查。Docker unit 镜像按 `tests/README.md` 中的固定 lock 构建；Compose 校验只展开配置，不启动服务。静态 Dockerfile 检查不会生成或推送镜像；实际 app、MCP、MySQL 主从镜像只由人工触发的发布工作流构建。
+
+本地复现预发静态检查：
+
+~~~bash
+docker compose --env-file .env.staging.example -f docker-compose.staging.yml config --quiet
+python -m pytest -p no:cacheprovider tests/integration/deployment/test_staging_compose.py
+~~~
+
 ## 普通用户 Vue 前端
 
 在仓库根目录执行：
@@ -46,13 +57,13 @@ Pop-Location
 
 `playwright.mock.config.ts` 在本地默认复用 5174 端口上已有的开发服务器（`reuseExistingServer`），运行前必须确认该端口服务的是当前工作区；若该端口被其他检出占用，应在确认后改用临时端口的等价配置，或停止占用该端口的进程。
 
-前端页面入口和 Docker 静态契约由本地/发布前手工执行，不接入现有 CI：
+前端页面入口与运行镜像 builder/runtime 契约仍需本地或发布前额外核对；当前 CI 的 Dockerfile 检查仅验证 BuildKit 静态规则：
 
 ```powershell
 python -m pytest -p no:cacheprovider tests/integration/deployment/test_frontend_entrypoints.py
 python -m py_compile app/main/routes.py app/chat/page_routes.py app/rag_eval/page_routes.py config/settings.py tests/integration/deployment/test_frontend_entrypoints.py
 docker compose -f docker-compose.yml config --quiet
-docker compose -f docker-compose.staging.yml config --quiet
+docker compose --env-file .env.staging.example -f docker-compose.staging.yml config --quiet
 docker compose -f docker-compose.prod.yml config --quiet
 ```
 
@@ -198,19 +209,19 @@ checkpoint 清理不得触碰 `store`/`store_migrations` 表，用户长期记�
 
 ## SearXNG 部署验证
 
-SearXNG 初始化脚本的纯脚本行为由 `tests/unit/deployment/test_searxng_init_settings.py` 覆盖，包含生成、幂等、缺失 example 和生成中断不发布半成品。Compose 部署契约由 `tests/integration/deployment/test_searxng_compose.py` 静态检查，确认镜像不是 `latest`、存在 `/healthz` healthcheck，且默认 `app`/`worker` 不依赖 SearXNG。
+SearXNG 不再有初始化脚本：开发与预发 Compose 都直接使用已提交的非密钥 `settings.yml`，密钥由 `SEARXNG_SECRET` 环境变量注入。Compose 部署契约由 `tests/integration/deployment/test_searxng_compose.py` 静态检查，确认镜像不是 `latest`、存在 `/healthz` healthcheck、注入 `SEARXNG_SECRET` 且配置目录只读挂载，同时默认 `app`/`worker` 不依赖 SearXNG。
 
 需要 Docker Engine 才能执行真实容器验证：
 
 ```bash
 docker compose -f docker-compose.yml config
 docker compose -f docker-compose.yml up -d searxng
-docker compose -f docker-compose.yml ps searxng searxng-init valkey
+docker compose -f docker-compose.yml ps searxng valkey
 ```
 
 容器验证应另外确认 `/healthz` 返回成功、JSON 搜索格式可用，以及停止 SearXNG 后开启 `web_search_enabled` 的 Job 仍按运行期重试和统一降级协议收敛。该真实网络证据不能由 unit 或静态 Compose 测试替代。
 
-可使用隔离临时配置目录执行 init、healthcheck 和幂等性验证；脚本结束时只清理本次生成的 Compose project 和临时目录，不触碰开发环境现有配置：
+可使用隔离临时配置目录验证 `SEARXNG_SECRET` 注入与 `/healthz`；脚本结束时只清理本次生成的 Compose project 和临时目录，不触碰开发环境现有配置：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tests/run_searxng_docker_validation.ps1

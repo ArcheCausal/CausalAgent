@@ -26,7 +26,7 @@ docker compose -f docker-compose.yml pull loki alloy grafana
 docker compose -f docker-compose.yml run --rm --no-deps alloy validate /etc/alloy/config.alloy
 ```
 
-日志查看地址为 `http://127.0.0.1:3000`。完整的日志启动、停止、生产边界和验收步骤见
+日志查看地址为 `http://127.0.0.1:3000/grafana/`（Grafana 以 `/grafana/` 为子路径）。完整的日志启动、停止、生产边界和验收步骤见
 [`observability.md`](observability.md) 与 [`deployment.md`](deployment.md)。
 
 首次启动、空卷重建或数据库环境重建时，Compose 会先运行 `db-bootstrap`。需要单独重跑一次性初始化时执行：
@@ -35,12 +35,12 @@ docker compose -f docker-compose.yml run --rm --no-deps alloy validate /etc/allo
 docker compose -f docker-compose.yml run --rm db-bootstrap
 ```
 
-首次启动时，`searxng-init` 会在配置目录内生成临时文件，完成复制、随机 `secret_key` 注入和校验后原子发布 `searxng/core-config/settings.yml`，无需手动复制；文件已存在则跳过且不会覆盖用户配置。`searxng` 使用固定版本镜像并提供 `/healthz` 浅层 healthcheck。默认 `app`/`worker` 不依赖 SearXNG 健康，联网搜索不可用时由 Job 运行期重试并降级。
+开发与预发 Compose 都直接使用已提交的非密钥 `settings.yml`（开发为 `searxng/core-config/settings.yml`，预发为 `deploy/staging/searxng/config/settings.yml`），密钥由 `SEARXNG_SECRET` 环境变量注入并覆盖配置文件中的同名字段；开发 Compose 默认 `local-searxng-secret`，预发由 `.env.staging` 显式提供。`searxng` 使用固定版本镜像并提供 `/healthz` 浅层 healthcheck。默认 `app`/`worker` 不依赖 SearXNG 健康，联网搜索不可用时由 Job 运行期重试并降级。
 
 查看搜索服务的启动和健康状态：
 
 ```bash
-docker compose -f docker-compose.yml ps searxng searxng-init valkey
+docker compose -f docker-compose.yml ps searxng valkey
 ```
 
 需要验证 Compose 合并后的部署契约时，使用 `docker compose config`；不要使用 `down -v` 清理共享数据库或搜索数据卷。
@@ -61,7 +61,7 @@ docker compose -f docker-compose.yml up -d app worker rag-eval-worker
 
 这条路径不能改回只读挂载，也不能直接挂宿主目录：Chroma 打开索引时会写入 `acquire_write` 写锁记录，只读挂载下第一次 RAG 查询就会降级为 `rag_unavailable`，直挂宿主目录则会把锁记录写进仓库里被跟踪的 release 文件。完整说明见 [`deployment.md`](deployment.md)。
 
-开发 Compose 使用 `mysql-primary`、`mysql-replica`、`postgres-checkpoint`、`app`、`worker`、`causal-mcp`、`monitor`、`agent-persistence-cleanup`、`rag-eval-worker`、`kb-indexes-sync`、`searxng-init`、`searxng`、`valkey`、`loki`、`alloy` 和 `grafana`；固定端口和数据卷属于共享 Docker daemon 资源，多个 worktree 同时运行时必须采用独立 project/端口策略，不能误用 `down -v`。
+开发 Compose 使用 `mysql-primary`、`mysql-replica`、`postgres-checkpoint`、`app`、`worker`、`causal-mcp`、`monitor`、`agent-persistence-cleanup`、`rag-eval-worker`、`kb-indexes-sync`、`searxng`、`valkey`、`loki`、`alloy` 和 `grafana`；固定端口和数据卷属于共享 Docker daemon 资源，多个 worktree 同时运行时必须采用独立 project/端口策略，不能误用 `down -v`。
 
 ## 本地 Python
 
