@@ -324,6 +324,13 @@ class AppConfig:
             default="http://export.arxiv.org/api/query",
         ).rstrip("/")
 
+        # 浏览器访问 Grafana 的地址：开发默认本机映射端口，预发由网关反代到 /grafana/。
+        self.GRAFANA_PUBLIC_URL = self._get_config(
+            "GRAFANA_PUBLIC_URL",
+            required=False,
+            default="http://127.0.0.1:3000/grafana/",
+        )
+
         # 初始化完成后，自动设置 LangSmith
         self._setup_langsmith()
 

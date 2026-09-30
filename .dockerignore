@@ -30,6 +30,7 @@ venv.bak/
 # --- 敏感信息---
 secrets.json
 .env
+.env.*
 .env.local
 *.pem
 *.key
