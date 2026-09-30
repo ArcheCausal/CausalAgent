@@ -42,6 +42,9 @@ def test_observability_network_ports_and_password_boundary():
     assert '"127.0.0.1:3000:3000"' in grafana
     assert "GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set" in grafana
     assert "GF_USERS_DEFAULT_LANGUAGE: zh-Hans" in grafana
+    # Grafana 在开发环境同样以 /grafana/ 为子路径，浏览器访问 /grafana/ 入口。
+    assert "GF_SERVER_ROOT_URL: /grafana/" in grafana
+    assert 'GF_SERVER_SERVE_FROM_SUB_PATH: "true"' in grafana
     assert "ports:" not in loki
     assert "ports:" not in alloy
     assert "/var/run/docker.sock:/var/run/docker.sock:ro" in alloy
