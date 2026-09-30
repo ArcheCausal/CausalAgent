@@ -21,7 +21,6 @@ import {
 import { onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { adminApi, loadIdentity } from './api'
-import brandLogoUrl from '../../packages/design-system/src/assets/brand/causalagent-mark.svg?url'
 
 const route = useRoute()
 const username = ref('正在确认…')
@@ -32,7 +31,9 @@ const SIDEBAR_STORAGE_KEY = 'causalagent.admin.sidebar.collapsed'
 const FLASK_ORIGIN = import.meta.env.VITE_FLASK_ORIGIN?.replace(/\/$/, '') || ''
 const CHAT_URL = `${FLASK_ORIGIN}/dashboard`
 const RAG_EVAL_URL = `${FLASK_ORIGIN}/rag-eval`
-const GRAFANA_URL = 'http://127.0.0.1:3000/'
+const grafanaUrl = ref('')
+const grafanaConfigError = ref(false)
+const BRAND_LOGO_URL = '/api/admin/brand/logo'
 
 const navigation = [
   {
@@ -58,12 +59,23 @@ const navigation = [
 /** 从浏览器恢复桌面侧栏偏好并确认实时管理员身份。 */
 onMounted(async () => {
   collapsed.value = window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === 'true'
-  try {
-    const identity = await loadIdentity()
-    username.value = identity.username || '管理员'
+  const [identityResult, runtimeConfigResult] = await Promise.allSettled([
+    loadIdentity(),
+    adminApi.runtimeConfig(),
+  ])
+
+  if (identityResult.status === 'fulfilled') {
+    username.value = identityResult.value.username || '管理员'
     identityReady.value = true
-  } catch {
+  } else {
     identityReady.value = false
+    return
+  }
+
+  if (runtimeConfigResult.status === 'fulfilled') {
+    grafanaUrl.value = runtimeConfigResult.value.grafana_url
+  } else {
+    grafanaConfigError.value = true
   }
 })
 
@@ -102,7 +114,7 @@ watch(
         <Menu :size="20" :stroke-width="1.5" aria-hidden="true" />
       </button>
       <div class="mobile-brand-icon" aria-hidden="true">
-        <img :src="brandLogoUrl" alt="">
+        <img :src="BRAND_LOGO_URL" alt="CausalAgent">
       </div>
       <strong>CausalAgent 管理后台</strong>
     </header>
@@ -122,7 +134,7 @@ watch(
     >
       <div class="brand-block">
         <div class="brand-image-wrap">
-          <img :src="brandLogoUrl" alt="">
+          <img :src="BRAND_LOGO_URL" alt="CausalAgent">
         </div>
         <div class="brand-copy" aria-label="CausalAgent 管理后台">
           <strong>CausalAgent</strong>
@@ -181,8 +193,9 @@ watch(
           <CaButton
             class="grafana-entry-button"
             variant="secondary"
-            :href="GRAFANA_URL"
-            :disabled="!identityReady"
+            :href="grafanaUrl"
+            :disabled="!identityReady || !grafanaUrl"
+            :title="grafanaConfigError ? 'Grafana 地址暂时不可用' : undefined"
           >
             <span class="grafana-entry-icon" aria-hidden="true">
               <ArrowLeftRight :size="18" :stroke-width="1.5" />
