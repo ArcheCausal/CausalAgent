@@ -131,6 +131,7 @@ celerybeat.pid
 .env
 .env.*
 !.env.example
+!.env.staging.example
 .venv
 .venv-desktop/
 env/
@@ -179,7 +180,6 @@ cython_debug/
 # Sensitive configuration files
 secrets.json
 config.json
-searxng/core-config/settings.yml
 
 #  demo
 杂项/

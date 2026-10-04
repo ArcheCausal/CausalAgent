@@ -29,6 +29,7 @@
 | `GET` | `/admin/assets/<filename>` | 受保护的管理员前端构建资源 |
 | `GET` | `/admin/brand/<filename>` | 受保护的管理员品牌图标与应用清单资源 |
 | `GET` | `/api/admin/brand/logo` | 受保护的品牌图片 |
+| `GET` | `/api/admin/runtime-config` | 由部署环境决定的前端地址（当前为 Grafana 入口） |
 
 未登录访问管理员页面时跳转 `/auth/sign-in?next=<管理页面>`；缺少 `admin.access` 权限返回 `403`（错误码 `admin_required`）。
 

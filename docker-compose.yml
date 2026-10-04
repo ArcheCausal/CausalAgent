@@ -135,6 +135,7 @@ services:
       - CHAT_FRONTEND_DIST_DIR=${CHAT_FRONTEND_DIST_DIR:-/opt/causalagent-chat}
       - CHAT_VITE_DEV_SERVER_URL=${CHAT_VITE_DEV_SERVER_URL:-}
       - RAG_EVAL_FRONTEND_DIST_DIR=${RAG_EVAL_FRONTEND_DIST_DIR:-/opt/causalagent-rag-eval}
+      - GRAFANA_PUBLIC_URL=${GRAFANA_PUBLIC_URL:-http://127.0.0.1:3000/grafana/}
       - WEB_WORKERS=${WEB_WORKERS:-1}
       - WEB_THREADS=${WEB_THREADS:-12}
       - WEB_TIMEOUT=${WEB_TIMEOUT:-120}
@@ -568,29 +569,19 @@ services:
       - causalagent_replica_network
     restart: unless-stopped
 
-  searxng-init:
-    image: python:3.11-slim
-    container_name: causalagent_searxng_init
-    restart: "no"
-    volumes:
-      - ./searxng/core-config:/etc/searxng
-      - ./searxng/init:/init:ro
-    entrypoint: ["sh", "/init/init_settings.sh"]
-
   searxng:
     image: searxng/searxng:2026.8.21-bbb3c7d82
     container_name: causalagent_searxng
     restart: unless-stopped
     environment:
       - SEARXNG_BASE_URL=http://searxng:8080/
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-local-searxng-secret}
     volumes:
-      - ./searxng/core-config:/etc/searxng
+      - ./searxng/core-config:/etc/searxng:ro
       - searxng_core_data:/var/cache/searxng
     depends_on:
       valkey:
         condition: service_healthy
-      searxng-init:
-        condition: service_completed_successfully
     healthcheck:
       test:
         - CMD
@@ -664,6 +655,8 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_USERS_DEFAULT_LANGUAGE: zh-Hans
+      GF_SERVER_ROOT_URL: /grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
     ports:
       - "127.0.0.1:3000:3000"
     volumes:

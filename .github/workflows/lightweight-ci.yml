@@ -1,4 +1,4 @@
-name: Lightweight CI
+name: CI validation
 
 on:
   pull_request:
@@ -67,6 +67,130 @@ jobs:
           python -m pytest --quiet
           tests/unit/agent/test_llm_structured_output_usage.py
           tests/unit/agent/test_llm_structured_output_config.py
+
+  backend-unit-tests:
+    name: Backend unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Report runner disk capacity
+        run: df -h /
+
+      - name: Build the repository unit-test image
+        run: docker compose -f docker-compose.test.yml build unit-test
+
+      - name: Run all backend unit tests
+        run: docker compose -f docker-compose.test.yml run --rm unit-test
+
+  frontend-builds:
+    name: Frontend checks (${{ matrix.directory }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - directory: admin-frontend
+            script: npm run check
+            playwright: false
+          - directory: chat-frontend
+            script: npm run check
+            playwright: true
+          - directory: website-frontend
+            script: npm run check
+            playwright: false
+          - directory: app/rag_eval/frontend
+            script: |-
+              npm run typecheck
+              npm test
+              npm run build
+            playwright: false
+          - directory: packages/design-system
+            script: npm run check
+            playwright: false
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ${{ matrix.directory }}/package-lock.json
+
+      - name: Install locked dependencies
+        working-directory: ${{ matrix.directory }}
+        run: npm ci
+
+      - name: Install Chromium for chat Mock E2E
+        if: matrix.playwright
+        working-directory: ${{ matrix.directory }}
+        run: npx playwright install --with-deps chromium
+
+      - name: Run checks and production build
+        working-directory: ${{ matrix.directory }}
+        run: ${{ matrix.script }}
+
+  staging-compose-contract:
+    name: Compose and deployment contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test runner
+        run: python -m pip install --disable-pip-version-check -r requirements-test.txt
+
+      - name: Validate development and staging Compose files
+        env:
+          CHECKPOINT_POSTGRES_PASSWORD: compose-static-validation
+          GRAFANA_ADMIN_PASSWORD: compose-static-validation
+        run: |
+          docker compose --env-file .env.example -f docker-compose.yml config --quiet
+          docker compose --env-file .env.staging.example -f docker-compose.staging.yml config --quiet
+
+      - name: Validate staging deployment and observability contracts
+        run: >-
+          python -m pytest -p no:cacheprovider
+          tests/integration/deployment/test_staging_compose.py
+          tests/integration/deployment/test_searxng_compose.py
+          tests/integration/test_observability_compose.py
+          tests/test_staging_environment_guard.py
+
+      - name: Validate Alloy configuration
+        run: >-
+          docker run --rm
+          -v "$PWD/observability/alloy/config.alloy:/etc/alloy/config.alloy:ro"
+          grafana/alloy:v1.18.0
+          validate /etc/alloy/config.alloy
+
+  dockerfile-static-checks:
+    name: Dockerfile checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Check app, MCP, and MySQL Dockerfiles
+        run: |
+          docker buildx build --check --file Dockerfile .
+          docker buildx build --check --file Agent/CausalAgentMCP/Dockerfile .
+          docker buildx build --check --file Database/mysql/Dockerfile.primary Database/mysql
+          docker buildx build --check --file Database/mysql/Dockerfile.replica Database/mysql
 
   pull-request-policy:
     name: Pull request policy

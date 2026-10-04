@@ -1,1 +1,2 @@
 pytest>=8,<9
+PyYAML>=6,<7

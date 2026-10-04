@@ -131,6 +131,11 @@ export interface Identity {
   csrf_token?: string
 }
 
+/** 由部署环境决定的前端地址；开发指向本机端口，预发指向网关同源路径。 */
+export interface RuntimeConfig {
+  grafana_url: string
+}
+
 export interface CursorPage<T> {
   items: T[]
   limit: number

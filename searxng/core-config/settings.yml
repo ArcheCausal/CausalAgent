@@ -1,3 +1,5 @@
+# 开发 SearXNG 非密钥配置。
+# secret_key 不写在本文件，由 .env 的 SEARXNG_SECRET 注入并覆盖。
 use_default_settings:
   engines:
     keep_only:
@@ -6,8 +8,6 @@ use_default_settings:
       - openalex
 
 server:
-  # 复制本文件为 settings.yml，并用 `openssl rand -hex 32` 生成随机值替换下面的占位符
-  secret_key: "ultrasecretkey"
   limiter: false
   image_proxy: true
 
@@ -27,4 +27,3 @@ engines:
     timeout: 15
   - name: openalex
     disabled: false
-

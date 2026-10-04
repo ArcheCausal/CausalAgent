@@ -79,7 +79,7 @@ ADMIN_VITE_DEV_SERVER_URL=http://127.0.0.1:5173
 
 Flask 仍先完成管理员页面鉴权，再跳转到 Vite。Vite 只代理 `/api` 到 Flask，不替代 Python 后端。普通部署应保持该配置为空。
 
-管理员侧栏页脚提供“进入聊天”（同源 `/dashboard`）和“RAG 评测台”（同源 `/rag-eval`）两个入口，并在“进入聊天”上方提供“进入 Grafana”入口，浏览器直接跳转到 `http://127.0.0.1:3000/`。Grafana 地址对应默认开发 Compose 仅绑定本机的服务，不经过 Flask，也不共享管理员 Session；生产或远程部署不得使用硬编码的 127.0.0.1:3000。
+管理员侧栏页脚提供“进入聊天”（同源 `/dashboard`）和“RAG 评测台”（同源 `/rag-eval`）两个入口，并在“进入聊天”上方提供“进入 Grafana”入口。Grafana 地址不再硬编码，由后端 `/api/admin/runtime-config` 按部署环境下发 `GRAFANA_PUBLIC_URL`：开发为 `http://127.0.0.1:3000/grafana/`，预发为同源 `/grafana/`（经网关 8088 反代）。Grafana 始终以 `/grafana/` 为子路径提供，它与 CausalAgent 使用各自的账号体系，不共享管理员 Session，也不写入管理员审计表。预发入口是明文 HTTP，仅用于测试服务器。
 
 ## 发布产物
 

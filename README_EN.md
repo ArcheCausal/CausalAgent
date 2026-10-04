@@ -207,7 +207,7 @@ After the default development Compose stack starts, use these entry points:
 | User workspace | [http://127.0.0.1:5001/dashboard](http://127.0.0.1:5001/dashboard) | Upload data, start analyses, and view reports after signing in |
 | RAG workbench | [http://127.0.0.1:5001/rag-eval](http://127.0.0.1:5001/rag-eval) | Source ingestion, staged indexes, evaluation, and release management; administrators only |
 | Admin console | [http://127.0.0.1:5001/admin/database](http://127.0.0.1:5001/admin/database) | Default entry for authenticated administrators |
-| Grafana | [http://127.0.0.1:3000](http://127.0.0.1:3000) | Log search and dashboards |
+| Grafana | [http://127.0.0.1:3000/grafana/](http://127.0.0.1:3000/grafana/) | Log search and dashboards |
 
 The website, the user workspace, the RAG workbench, and the admin console are four separately built frontends. The RAG workbench is an isolated build, evaluation, and release workspace and requires the `rag_eval.access` permission; it is not the same as RAG queries inside the normal chat flow.
 

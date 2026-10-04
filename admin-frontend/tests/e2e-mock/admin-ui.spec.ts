@@ -32,6 +32,9 @@ test('完整看板和在线配置在 Vue 生产路由语义下可交互', async 
       csrf_token: 'mock-csrf',
     },
   }))
+  await page.route('**/api/admin/runtime-config', route => route.fulfill({
+    json: { success: true, data: { grafana_url: '/grafana/' } },
+  }))
   await page.route('**/api/admin/db/dashboard', route => route.fulfill({
     json: {
       success: true,
@@ -207,7 +210,7 @@ test('完整看板和在线配置在 Vue 生产路由语义下可交互', async 
   await page.goto('/admin/database')
   await expect(page.getByRole('heading', { name: '数据库状态看板' })).toBeVisible()
   await expect(page.getByRole('link', { name: '进入 Grafana' }))
-    .toHaveAttribute('href', 'http://127.0.0.1:3000/')
+    .toHaveAttribute('href', '/grafana/')
   await expect(page.getByRole('link', { name: '进入聊天' })).toHaveAttribute('href', '/dashboard')
   await expect(page.getByRole('link', { name: 'RAG 评测台' })).toHaveAttribute('href', '/rag-eval')
   for (const text of ['Revision', '主库', '第一从库', '阻塞项', '连接使用率']) {
@@ -299,6 +302,9 @@ test('3.2 业务页面、受控写入、敏感揭示和可收缩导航在 mock �
       role: 'admin',
       csrf_token: 'business-csrf',
     },
+  }))
+  await page.route('**/api/admin/runtime-config', route => route.fulfill({
+    json: { success: true, data: { grafana_url: '/grafana/' } },
   }))
   await page.route('**/api/admin/brand/logo', route => route.fulfill({
     status: 200,

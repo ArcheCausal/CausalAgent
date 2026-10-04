@@ -166,6 +166,13 @@ def admin_brand_logo():
     return response
 
 
+@admin_bp.route("/runtime-config")
+@admin_required
+def admin_runtime_config():
+    """返回由部署环境决定的前端地址；开发为本机端口，预发为网关同源路径。"""
+    return api_success({"grafana_url": settings.GRAFANA_PUBLIC_URL})
+
+
 @admin_bp.route("/db/health")
 @admin_required
 def db_health():

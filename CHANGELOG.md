@@ -1683,3 +1683,19 @@
   - 【默认角色关系】：注册用户时在同一数据库事务内写入 `user` 角色关系，使新账号按既有角色权限获得普通工作区访问能力，无需提升为管理员。
   - 【遗留账号修复】：新增数据迁移，为缺少关系的历史账号补齐默认 `user` 角色，并保持兼容字段为 `admin` 的账号拥有管理员关系。
   - 【回归覆盖】：新增注册事务与迁移链回归用例，锁定用户创建、默认角色写入和事务提交顺序以及无损回填边界。
+- 【预发部署与镜像发布】：新增独立的预发 Compose、搜索与可观测性服务、隔离网络和持久化卷。
+  - 【GHCR 镜像】：新增仅允许从 develop 手动触发的镜像发布流程，按 commit 生成 sha 标签并推送 app、MCP、MySQL 主库和从库镜像，同时输出不可变 digest。
+  - 【部署配置】：新增不含真实密钥的 .env.staging.example，规划服务器专用 .env.staging，并限制公网入口为 gateway。
+  - 【CI 合同】：增加 Compose、Dockerfile、预发部署和 Alloy 配置检查，镜像直接推送 GHCR，不通过 SSH 部署或导出镜像 artifact。
+  - 【搜索密钥注入】：开发与预发统一提交非密钥 settings.yml，删除 searxng-init 初始化容器、init_settings.sh 与对应的 init 单元测试；SEARXNG_SECRET 与其他密钥一样由环境变量注入，配置目录只读挂载。
+  - 【搜索与观测数据】：Grafana、Loki 和 Alloy 数据统一使用 staging 命名卷。
+  - 【预发参数对齐】：预发应用服务的并发、超时、连接池、监控、RAG 评测和 LangSmith 配置与 .env.example 取值一致。
+  - 【Grafana 同源入口】：Grafana 统一以 /grafana/ 为子路径；预发由 gateway 反代到同源路径且不再映射宿主端口，开发保留本机映射端口。管理员侧栏地址改由后端 /api/admin/runtime-config 下发 GRAFANA_PUBLIC_URL，不再硬编码 127.0.0.1:3000。
+- 【管理员前端品牌资源】：管理员侧栏 Logo 改为使用受保护的 /api/admin/brand/logo 接口，并补充可访问名称。
+
+---
+2026.9.30
+- 【汇报演示】：新增 CausalAgent 蓝色学术风 HTML 汇报 Demo，包含首页研究定位页与系统架构页，支持键盘和页码按钮翻页。
+  - 【首页】：展示自然语言问题、因果推理、证据约束与结构化报告之间的研究闭环。
+  - 【架构页】：展示 Web、Agent worker、LangGraph / Deep Agent、因果工具、RAG / Web evidence、MySQL 与 PostgreSQL 的当前协作边界。
+- 【审查修复】：补充预发网关对 Grafana 的启动依赖、CI 的 YAML 测试依赖和管理员 API 的 request ID；修正 SearXNG 密钥校验误判，并让 Grafana 运行期配置失败不阻塞管理员页面。

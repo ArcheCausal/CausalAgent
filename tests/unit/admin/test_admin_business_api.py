@@ -158,6 +158,29 @@ class AdminBusinessApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.get_json()["code"], "admin_required")
 
+    def test_runtime_config_returns_grafana_url_for_admins_only(self):
+        """运行期地址按部署环境下发，且同样受管理员权限边界约束。"""
+        app = build_app()
+        with (
+            authorized_as(ADMIN, ADMIN_PERMISSIONS),
+            app.test_client() as client,
+        ):
+            response = client.get("/api/admin/runtime-config")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertIn("request_id", payload)
+        self.assertIn("grafana_url", payload["data"])
+
+        with (
+            authorized_as(NORMAL_USER, USER_PERMISSIONS),
+            app.test_client() as client,
+        ):
+            forbidden = client.get("/api/admin/runtime-config")
+
+        self.assertEqual(forbidden.status_code, 403)
+
     def test_sensitive_success_fails_closed_when_audit_is_unavailable(self):
         """敏感详情已生成但成功审计失败时不得把正文返回给管理员。"""
         app = build_app()

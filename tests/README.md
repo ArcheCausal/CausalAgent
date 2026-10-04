@@ -1,5 +1,9 @@
 # 后端测试说明
 
+文档职责：记录测试目录、测试层级和跨模块验证入口。
+
+适用范围：新增或修改测试、CI 测试门禁和部署合同检查时使用；具体模块的专项验证说明以对应的 Document 页面为准。
+
 测试目录先按测试层级划分，再在层级内按业务模块划分：
 
 ```text
@@ -23,7 +27,7 @@ tests/
 
 `unit` 和 `integration` 表示依赖范围，`admin`、`auth`、`database` 等目录表示业务归属。新增测试时先判断是否需要真实跨模块依赖，再选择业务目录。仓库测试同时包含 pytest 风格函数与 `unittest.TestCase`，统一由 pytest 负责发现和执行。
 
-`integration/deployment/` 只做不启动容器的 Compose 部署契约检查；SearXNG 的 init、healthcheck 和幂等性真实容器验证通过 `tests/run_searxng_docker_validation.ps1` 手工执行，不属于默认 pytest 范围。
+`integration/deployment/` 只做不启动容器的 Compose 部署契约检查，包括预发服务、网络、卷、镜像 digest 和公网端口边界；SearXNG 的 `SEARXNG_SECRET` 注入和 `/healthz` 真实容器验证通过 `tests/run_searxng_docker_validation.ps1` 手工执行，不属于默认 pytest 范围。
 
 ## 前端与页面入口
 
@@ -34,7 +38,7 @@ tests/
 ```powershell
 python -m pytest -p no:cacheprovider tests/integration/deployment/test_frontend_entrypoints.py
 docker compose -f docker-compose.yml config --quiet
-docker compose -f docker-compose.staging.yml config --quiet
+docker compose --env-file .env.staging.example -f docker-compose.staging.yml config --quiet
 docker compose -f docker-compose.prod.yml config --quiet
 ```
 

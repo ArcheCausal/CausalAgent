@@ -227,7 +227,7 @@ graph TD;
 | 用户工作区 | [http://127.0.0.1:5001/dashboard](http://127.0.0.1:5001/dashboard) | 登录后上传数据、发起分析和查看报告 |
 | RAG 评测台 | [http://127.0.0.1:5001/rag-eval](http://127.0.0.1:5001/rag-eval) | 知识源摄取、staged index、评测与 release 管理，仅管理员可访问 |
 | 管理后台 | [http://127.0.0.1:5001/admin/database](http://127.0.0.1:5001/admin/database) | 管理员登录后的默认入口 |
-| Grafana | [http://127.0.0.1:3000](http://127.0.0.1:3000) | 日志查询和仪表盘 |
+| Grafana | [http://127.0.0.1:3000/grafana/](http://127.0.0.1:3000/grafana/) | 日志查询和仪表盘 |
 
 注：官网、用户工作区、RAG 评测台和管理后台是四个独立构建的前端；RAG 评测台是隔离的知识库构建、评测和发布工作台，只有拥有 `rag_eval.access` 权限的账号能打开。
 
@@ -360,7 +360,7 @@ docker compose -f docker-compose.yml up -d
 docker compose -f docker-compose.yml ps
 ```
 
-打开 [http://127.0.0.1:3000](http://127.0.0.1:3000) 进入 Grafana，使用 `GRAFANA_ADMIN_USER`（默认值为 `admin`）和 `.env` 中设置的密码登录。Loki 数据源和 CausalAgent 日志仪表盘会由 Compose 自动 provision。需要直接查看容器输出时执行：
+打开 [http://127.0.0.1:3000/grafana/](http://127.0.0.1:3000/grafana/) 进入 Grafana，使用 `GRAFANA_ADMIN_USER`（默认值为 `admin`）和 `.env` 中设置的密码登录。Loki 数据源和 CausalAgent 日志仪表盘会由 Compose 自动 provision。需要直接查看容器输出时执行：
 
 ```bash
 docker compose -f docker-compose.yml logs -f app worker monitor alloy loki grafana

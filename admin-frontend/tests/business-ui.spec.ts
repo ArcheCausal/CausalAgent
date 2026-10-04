@@ -4,13 +4,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App.vue'
 import SensitiveContentDialog from '../src/components/SensitiveContentDialog.vue'
 
-const { loadIdentityMock } = vi.hoisted(() => ({
+const { loadIdentityMock, runtimeConfigMock } = vi.hoisted(() => ({
   loadIdentityMock: vi.fn(async () => ({
     isLoggedIn: true,
     username: 'admin',
     role: 'admin',
     csrf_token: 'csrf',
   })),
+  runtimeConfigMock: vi.fn(async () => ({ grafana_url: '/grafana/' })),
 }))
 
 vi.mock('../src/api', async (importOriginal) => {
@@ -20,6 +21,7 @@ vi.mock('../src/api', async (importOriginal) => {
     loadIdentity: loadIdentityMock,
     adminApi: {
       ...original.adminApi,
+      runtimeConfig: runtimeConfigMock,
       logout: vi.fn(),
     },
   }
@@ -46,6 +48,8 @@ describe('3.1 管理员界面交互边界', () => {
   beforeEach(() => {
     window.localStorage.clear()
     loadIdentityMock.mockClear()
+    runtimeConfigMock.mockReset()
+    runtimeConfigMock.mockResolvedValue({ grafana_url: '/grafana/' })
   })
 
   it('敏感正文在对话框打开前不请求，打开后只以文本节点展示', async () => {
@@ -122,7 +126,7 @@ describe('3.1 管理员界面交互边界', () => {
     expect(wrapper.findAll('.nav-icon svg').every(icon => icon.attributes('stroke-width') === '1.5'))
       .toBe(true)
     expect(wrapper.find('.grafana-entry-button').attributes('href'))
-      .toBe('http://127.0.0.1:3000/')
+      .toBe('/grafana/')
     expect(wrapper.find('.grafana-entry-button').text()).toContain('进入 Grafana')
     expect(wrapper.find('.sidebar-toggle svg').exists()).toBe(true)
     await wrapper.find('.sidebar-toggle').trigger('click')
@@ -159,5 +163,27 @@ describe('3.1 管理员界面交互边界', () => {
     expect(wrapper.find('.admin-sidebar').classes()).toContain('mobile-open')
     await wrapper.find('.sidebar-backdrop').trigger('click')
     expect(wrapper.find('.admin-sidebar').classes()).not.toContain('mobile-open')
+  })
+
+  it('Grafana 运行期配置失败时不阻塞管理员页面', async () => {
+    runtimeConfigMock.mockRejectedValueOnce(new Error('runtime config unavailable'))
+    const router = createRouter({
+      history: createMemoryHistory('/admin/'),
+      routes: [{ path: '/database', component: { template: '<div>database</div>' } }],
+    })
+    await router.push('/database')
+    await router.isReady()
+
+    const wrapper = mount(App, {
+      global: {
+        plugins: [router],
+        stubs: elementStubs,
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('.page-loading').exists()).toBe(false)
+    expect(wrapper.find('.grafana-entry-button').exists()).toBe(true)
+    expect(wrapper.find('.grafana-entry-button').attributes('href')).toBe('')
   })
 })

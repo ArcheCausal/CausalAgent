@@ -20,6 +20,7 @@ import type {
   MonitorOverrideMap,
   MonitorSettings,
   QuickAuditSnapshot,
+  RuntimeConfig,
   SensitiveContentChunk,
   UserDeleteImpact,
   UserOperationAction,
@@ -242,6 +243,11 @@ async function downloadRequest(url: string): Promise<void> {
 }
 
 export const adminApi = {
+  /** 读取由部署环境决定的运行期地址。 */
+  runtimeConfig: () => apiRequest<RuntimeConfig>(
+    '/api/admin/runtime-config',
+    { cache: 'no-store' },
+  ),
   /** 读取一次完整聚合看板。 */
   dashboard: () => apiRequest<DashboardData>('/api/admin/db/dashboard', { cache: 'no-store' }),
   /** 登记普通共享刷新。 */

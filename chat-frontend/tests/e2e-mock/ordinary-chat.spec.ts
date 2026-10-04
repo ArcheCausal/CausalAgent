@@ -194,8 +194,7 @@ test('退出登录后回到官网首页', async ({ page }) => {
 
   await page.setViewportSize({ width: 1600, height: 1000 })
   await page.goto('/')
-  await page.getByRole('button', { name: '打开菜单' }).click()
-  await page.getByRole('button', { name: /^[A-Z]$/ }).click()
+  await page.getByRole('button', { name: '用户信息' }).click()
   const homeNavigation = page.waitForRequest((request) => new URL(request.url()).pathname === '/')
   await page.getByRole('button', { name: '退出登录' }).click()
 
