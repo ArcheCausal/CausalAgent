@@ -1699,3 +1699,9 @@
   - 【首页】：展示自然语言问题、因果推理、证据约束与结构化报告之间的研究闭环。
   - 【架构页】：展示 Web、Agent worker、LangGraph / Deep Agent、因果工具、RAG / Web evidence、MySQL 与 PostgreSQL 的当前协作边界。
 - 【审查修复】：补充预发网关对 Grafana 的启动依赖、CI 的 YAML 测试依赖和管理员 API 的 request ID；修正 SearXNG 密钥校验误判，并让 Grafana 运行期配置失败不阻塞管理员页面。
+
+---
+2026.10.6
+- 【CI 存量失败修复】：修复 lightweight-ci 中三个长期失败的任务。
+  - 【Light tests】：该任务只安装 pytest，但被测模块 Agent/llm_structured_output.py 在顶层导入了 langchain_openai 和 pydantic。ChatOpenAI 仅用于类型标注，改为 TYPE_CHECKING 下延迟导入；pydantic 是运行时真实依赖，在安装步骤中显式安装锁定版本。
+  - 【前端检查】：admin-frontend 与 app/rag_eval/frontend 的类型检查会解析 packages/design-system 的源码组件，而 CI 只在各自目录安装依赖。矩阵增加 design_system 标记，命中时先安装设计系统依赖，并在 npm 缓存路径中登记其 lock 文件。
