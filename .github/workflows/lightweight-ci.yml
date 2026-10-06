@@ -60,7 +60,10 @@ jobs:
           cache-dependency-path: requirements-base.txt
 
       - name: Install test runner
-        run: python -m pip install --disable-pip-version-check "pytest>=8,<9"
+        run: >-
+          python -m pip install --disable-pip-version-check
+          "pytest>=8,<9"
+          "pydantic==2.13.5"
 
       - name: Run dependency-free tests
         run: >-
@@ -96,21 +99,26 @@ jobs:
           - directory: admin-frontend
             script: npm run check
             playwright: false
+            design_system: true
           - directory: chat-frontend
             script: npm run check
             playwright: true
+            design_system: false
           - directory: website-frontend
             script: npm run check
             playwright: false
+            design_system: false
           - directory: app/rag_eval/frontend
             script: |-
               npm run typecheck
               npm test
               npm run build
             playwright: false
+            design_system: true
           - directory: packages/design-system
             script: npm run check
             playwright: false
+            design_system: false
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -120,7 +128,14 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: ${{ matrix.directory }}/package-lock.json
+          cache-dependency-path: |
+            ${{ matrix.directory }}/package-lock.json
+            packages/design-system/package-lock.json
+
+      - name: Install shared design-system dependencies
+        if: matrix.design_system
+        working-directory: packages/design-system
+        run: npm ci
 
       - name: Install locked dependencies
         working-directory: ${{ matrix.directory }}
