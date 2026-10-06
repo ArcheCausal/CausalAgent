@@ -1702,6 +1702,12 @@
 
 ---
 2026.10.6
+- 【仓库归属迁移到组织】把仓库从个人账号转移到 CausalAgent-team 组织后，同步仓库内指向旧地址的引用。
+  - 【README】：中英文 README 的 clone 地址与 Star History 图表来源改为组织地址，图表在新地址下仍返回有效图像。
+  - 【生产 Compose】：首次部署注释中的 clone 地址改为组织地址。
+  - 【管理员文档】：管理员系统总览引用的历史 PR 链接改为组织地址。
+  - 【预发镜像合同测试】：预发 Compose 契约不再断言固定组织名，改为校验 ghcr.io 下任意拥有者的摘要锁定镜像，使组织改名不会导致测试失败。
+- 【组织改名兼容】：镜像发布流程继续从运行环境解析拥有者，仓库内不再出现写死的组织名。
 - 【CI 存量失败修复】：修复 lightweight-ci 中三个长期失败的任务。
   - 【Light tests】：该任务只安装 pytest，但被测模块 Agent/llm_structured_output.py 在顶层导入了 langchain_openai 和 pydantic。ChatOpenAI 仅用于类型标注，改为 TYPE_CHECKING 下延迟导入；pydantic 是运行时真实依赖，在安装步骤中显式安装锁定版本。
   - 【前端检查】：admin-frontend 与 app/rag_eval/frontend 的类型检查会解析 packages/design-system 的源码组件，而 CI 只在各自目录安装依赖。矩阵增加 design_system 标记，命中时先安装设计系统依赖，并在 npm 缓存路径中登记其 lock 文件。

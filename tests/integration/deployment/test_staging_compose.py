@@ -62,7 +62,7 @@ def test_staging_includes_search_observability_and_digest_pinned_database_images
         "mysql-replica",
     ):
         service = services[service_name]
-        assert re.fullmatch(r"ghcr[.]io/causalagent-team/[^@]+@sha256:[0-9a-f]{64}", service["image"])
+        assert re.fullmatch(r"ghcr[.]io/[^/]+/[^@]+@sha256:[0-9a-f]{64}", service["image"])
 
     for service_name in ("mysql-primary", "mysql-replica"):
         assert "build" not in services[service_name]

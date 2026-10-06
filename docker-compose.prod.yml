@@ -691,7 +691,7 @@ volumes:
 # 
 # 首次部署：
 #   1. 在服务器上准备代码和配置
-#      git clone https://github.com/Heyflyingpig/CausalAgent.git
+#      git clone https://github.com/CausalAgent-team/CausalAgent.git
 #      cd CausalAgent
 #   
 #   2. 创建生产环境配置

@@ -4,7 +4,7 @@
 
 适用范围：面向管理员前后端、数据库治理和后台进程的整体理解；接口、部署和测试细节分别以 [API 契约](api.md)、[开发说明](development.md) 和 [测试说明](testing.md) 为准。
 
-> 当前事实基线：阶段一管理员后台及截至 2026-08-24 的后续修复；历史来源包括 PR [#23](https://github.com/Heyflyingpig/CausalAgent/pull/23)、[#27](https://github.com/Heyflyingpig/CausalAgent/pull/27) 和 [#28](https://github.com/Heyflyingpig/CausalAgent/pull/28)。
+> 当前事实基线：阶段一管理员后台及截至 2026-08-24 的后续修复；历史来源包括 PR [#23](https://github.com/CausalAgent-team/CausalAgent/pull/23)、[#27](https://github.com/CausalAgent-team/CausalAgent/pull/27) 和 [#28](https://github.com/CausalAgent-team/CausalAgent/pull/28)。
 
 ## 一、定位与架构
 

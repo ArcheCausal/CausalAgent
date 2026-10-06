@@ -232,7 +232,7 @@ The multi-stage `Dockerfile` builds the ordinary-user Vue app and the administra
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/Heyflyingpig/CausalAgent
+   git clone https://github.com/CausalAgent-team/CausalAgent
    cd CausalAgent
    ```
 
@@ -389,5 +389,5 @@ Supported keywords include `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Heyflyingpig/CausalAgent&type=Date)](https://star-history.com/#Heyflyingpig/CausalAgent&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=CausalAgent-team/CausalAgent&type=Date)](https://star-history.com/#CausalAgent-team/CausalAgent&Date)
 
