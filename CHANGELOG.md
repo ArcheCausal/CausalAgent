@@ -1711,3 +1711,8 @@
 - 【CI 存量失败修复】：修复 lightweight-ci 中三个长期失败的任务。
   - 【Light tests】：该任务只安装 pytest，但被测模块 Agent/llm_structured_output.py 在顶层导入了 langchain_openai 和 pydantic。ChatOpenAI 仅用于类型标注，改为 TYPE_CHECKING 下延迟导入；pydantic 是运行时真实依赖，在安装步骤中显式安装锁定版本。
   - 【前端检查】：admin-frontend 与 app/rag_eval/frontend 的类型检查会解析 packages/design-system 的源码组件，而 CI 只在各自目录安装依赖。矩阵增加 design_system 标记，命中时先安装设计系统依赖，并在 npm 缓存路径中登记其 lock 文件。
+- 【组织改名同步】组织名由 CausalAgent-team 改为 ArcheCausal 后，同步仓库内指向旧组织名的引用。
+  - 【README】：中英文 README 的 clone 地址与 Star History 图表来源改为 ArcheCausal 地址。
+  - 【生产 Compose】：首次部署注释中的 clone 地址改为 ArcheCausal 地址。
+  - 【管理员文档】：管理员系统总览引用的历史 PR 链接改为 ArcheCausal 地址。
+  - 【预发镜像】：预发环境变量模板中的 GHCR 镜像前缀改为 ghcr.io/archecausal。镜像发布流程继续从运行环境解析拥有者，镜像合同测试不校验固定拥有者，两者都不需要跟着改。
