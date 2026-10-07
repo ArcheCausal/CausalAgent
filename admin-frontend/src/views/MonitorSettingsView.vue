@@ -1,8 +1,16 @@
 <script setup lang="ts">
+import {
+  CaBadge,
+  CaButton,
+  CaCard,
+  CaErrorState,
+  CaPageHeader,
+} from '@causalagent/design-system'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { adminApi, ApiError } from '../api'
 import { formatDate } from '../lib/dashboard'
+import { statusTone } from '../lib/statusTone'
 import type {
   AuditEvent,
   MonitorField,
@@ -183,11 +191,6 @@ function actionLabel(action: string): string {
   return action.endsWith('.reset') ? '重置全部覆盖' : '保存监控配置'
 }
 
-/** 将审计结果映射为 Element Plus 状态色。 */
-function resultType(result: AuditEvent['result']): 'success' | 'warning' | 'danger' {
-  return result === 'success' ? 'success' : result === 'rejected' ? 'warning' : 'danger'
-}
-
 /** 把可空或布尔审计值转换为配置语义文本。 */
 function auditValue(value: unknown): string {
   if (value === null || value === undefined) return '继承'
@@ -213,18 +216,20 @@ onMounted(async () => {
 </script>
 
 <template>
-  <header class="page-header">
-    <div>
-      <h1>采集配置</h1>
-      <p class="page-description">覆盖七项监控参数。monitor将在更新后5秒内完成热加载。</p>
-    </div>
-    <div class="header-actions">
-      <el-button :disabled="!canWrite" :loading="resetting" @click="resetAll">重置全部</el-button>
-      <el-button type="primary" :disabled="!canWrite" :loading="saving" @click="save">保存配置</el-button>
-    </div>
-  </header>
+  <section class="admin-page">
+  <CaPageHeader
+    title="采集配置"
+    description="覆盖七项监控参数。monitor将在更新后5秒内完成热加载。"
+    :level="1"
+    size="md"
+  >
+    <template #actions>
+      <CaButton variant="secondary" :disabled="!canWrite" :loading="resetting" @click="resetAll">重置全部</CaButton>
+      <CaButton variant="primary" :disabled="!canWrite" :loading="saving" @click="save">保存配置</CaButton>
+    </template>
+  </CaPageHeader>
 
-  <el-alert v-if="pageError" :title="pageError" type="error" show-icon :closable="false" />
+  <CaErrorState v-if="pageError" class="page-notice" title="读取配置失败" :description="pageError" />
   <el-alert
     v-if="settings?.state === 'degraded'"
     class="page-notice"
@@ -235,7 +240,7 @@ onMounted(async () => {
     :closable="false"
   />
 
-  <section class="panel settings-panel" v-loading="loading">
+  <CaCard as="section" class="panel settings-panel" variant="outline" padding="md" v-loading="loading">
     <div class="settings-summary" v-if="settings">
       <span>版本 {{ settings.version ?? '不可用' }}</span>
       <span>最后修改：{{ settings.updated_at ? formatDate(settings.updated_at) : '尚未修改' }}</span>
@@ -246,7 +251,7 @@ onMounted(async () => {
       <div class="setting-copy">
         <div class="setting-title">
           <strong>{{ field.label }}</strong>
-          <el-tag size="small" effect="plain">{{ sourceLabel(field.key) }}</el-tag>
+          <CaBadge tone="neutral">{{ sourceLabel(field.key) }}</CaBadge>
         </div>
         <p>{{ field.description }}</p>
         <small v-if="settings">
@@ -286,9 +291,9 @@ onMounted(async () => {
         </template>
       </div>
     </div>
-  </section>
+  </CaCard>
 
-  <section class="panel">
+  <CaCard as="section" class="panel" variant="outline" padding="md">
     <div class="panel-header">
       <div>
         <h2>配置变更记录</h2>
@@ -303,7 +308,7 @@ onMounted(async () => {
         show-overflow-tooltip
       />
       <el-table-column label="动作" min-width="150"><template #default="{ row }">{{ actionLabel(row.action) }}</template></el-table-column>
-      <el-table-column label="结果" min-width="100"><template #default="{ row }"><el-tag :type="resultType(row.result)" round>{{ row.result }}</el-tag></template></el-table-column>
+      <el-table-column label="结果" min-width="100"><template #default="{ row }"><CaBadge :tone="statusTone(row.result)">{{ row.result }}</CaBadge></template></el-table-column>
       <el-table-column label="变更内容" min-width="360"><template #default="{ row }">{{ changeSummary(row) }}</template></el-table-column>
       <el-table-column
         prop="error_code"
@@ -314,7 +319,8 @@ onMounted(async () => {
       <el-table-column prop="request_id" label="Request ID" min-width="260" />
     </el-table>
     <div class="history-more" v-if="nextBeforeId">
-      <el-button :loading="historyLoading" @click="loadHistory(true)">加载更多</el-button>
+      <CaButton variant="secondary" :loading="historyLoading" @click="loadHistory(true)">加载更多</CaButton>
     </div>
+  </CaCard>
   </section>
 </template>

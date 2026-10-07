@@ -49,6 +49,13 @@ def test_searxng_has_pinned_image_and_shallow_healthcheck():
     healthcheck = searxng["healthcheck"]
     assert healthcheck["test"]
     assert "/healthz" in " ".join(healthcheck["test"])
+    assert "searxng-init" not in config["services"]
+    # 密钥由 SEARXNG_SECRET 环境变量注入，配置目录只读挂载。
+    assert searxng["environment"]["SEARXNG_SECRET"]
+    assert any(
+        mount["target"] == "/etc/searxng" and mount.get("read_only") is True
+        for mount in searxng["volumes"]
+    )
 
 
 def test_default_app_and_worker_do_not_depend_on_searxng():
@@ -71,9 +78,8 @@ def test_default_compose_keeps_agent_and_rag_workers_separate():
         "app",
         "worker",
         "monitor",
-        "checkpoint-cleanup",
+        "agent-persistence-cleanup",
         "rag-eval-worker",
-        "searxng-init",
         "searxng",
         "valkey",
         "loki",

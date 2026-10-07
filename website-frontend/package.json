@@ -1,0 +1,28 @@
+{
+  "name": "causalagent-website-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "typecheck": "vue-tsc -b",
+    "test:unit": "vitest run tests/unit",
+    "build": "vue-tsc -b && vite build",
+    "check": "npm run typecheck && npm run test:unit && npm run build"
+  },
+  "dependencies": {
+    "gsap": "3.15.0",
+    "vue": "3.5.40",
+    "zod": "4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "@vitejs/plugin-vue": "6.0.8",
+    "@vue/test-utils": "2.4.11",
+    "jsdom": "29.1.1",
+    "typescript": "5.9.3",
+    "vite": "8.1.5",
+    "vitest": "4.1.10",
+    "vue-tsc": "3.3.8"
+  }
+}

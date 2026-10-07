@@ -2,9 +2,7 @@
 # 仅能搭配隔离 `.env.staging` 使用；每个 Python 进程启动前都会执行环境门禁。
 services:
   mysql-primary:
-    build:
-      context: ./Database/mysql
-      dockerfile: Dockerfile.primary
+    image: ${STAGING_MYSQL_PRIMARY_IMAGE:?STAGING_MYSQL_PRIMARY_IMAGE must be an immutable image digest}
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-rag_eval_staging}
@@ -27,9 +25,7 @@ services:
       retries: 10
 
   mysql-replica:
-    build:
-      context: ./Database/mysql
-      dockerfile: Dockerfile.replica
+    image: ${STAGING_MYSQL_REPLICA_IMAGE:?STAGING_MYSQL_REPLICA_IMAGE must be an immutable image digest}
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
       MYSQL_REPLICATION_USER: ${MYSQL_REPLICATION_USER:-replica}
@@ -62,10 +58,14 @@ services:
 
   db-bootstrap:
     image: ${STAGING_APP_IMAGE:?STAGING_APP_IMAGE must be an immutable image digest}
+    labels:
+      causalagent_observability: "true"
+      causalagent_service: maintenance
+      causalagent_environment: staging
     command: ["sh", "-c", "python scripts/staging_environment_guard.py && exec python -m Database.bootstrap"]
     environment: &app_environment
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME is required}
-      STAGING_VOLUME_NAMES: rag_eval_staging_mysql_primary,rag_eval_staging_mysql_replica,rag_eval_staging_postgres_checkpoint,rag_eval_staging_runs,rag_eval_staging_sources,rag_eval_staging_datasets,rag_eval_staging_gateway_logs
+      STAGING_VOLUME_NAMES: rag_eval_staging_mysql_primary,rag_eval_staging_mysql_replica,rag_eval_staging_postgres_checkpoint,rag_eval_staging_runs,rag_eval_staging_sources,rag_eval_staging_datasets,rag_eval_staging_gateway_logs,rag_eval_staging_artifacts,rag_eval_staging_reports,rag_eval_staging_searxng_cache,rag_eval_staging_valkey,rag_eval_staging_loki,rag_eval_staging_alloy_positions,rag_eval_staging_grafana,kb_multimodal_indexes_staging
       MYSQL_HOST: mysql-primary
       MYSQL_WRITE_HOST: mysql-primary
       MYSQL_READ_HOSTS: mysql-replica
@@ -80,27 +80,83 @@ services:
       MYSQL_READ_PASSWORD: ${MYSQL_READ_PASSWORD:?MYSQL_READ_PASSWORD is required}
       MYSQL_REPLICA_STATUS_USER: ${MYSQL_REPLICA_STATUS_USER:?MYSQL_REPLICA_STATUS_USER is required}
       MYSQL_REPLICA_STATUS_PASSWORD: ${MYSQL_REPLICA_STATUS_PASSWORD:?MYSQL_REPLICA_STATUS_PASSWORD is required}
+      MYSQL_POOL_SIZE_WRITE: ${MYSQL_POOL_SIZE_WRITE:-5}
+      MYSQL_POOL_SIZE_READ: ${MYSQL_POOL_SIZE_READ:-5}
+      MYSQL_CONNECT_TIMEOUT_SECONDS: ${MYSQL_CONNECT_TIMEOUT_SECONDS:-5}
+      MYSQL_POOL_ACQUIRE_TIMEOUT_SECONDS: ${MYSQL_POOL_ACQUIRE_TIMEOUT_SECONDS:-3}
+      MYSQL_POOL_ACQUIRE_RETRY_MS: ${MYSQL_POOL_ACQUIRE_RETRY_MS:-50}
+      MYSQL_REPLICA_STATUS_CACHE_SECONDS: ${MYSQL_REPLICA_STATUS_CACHE_SECONDS:-2}
+      MYSQL_REPLICA_MAX_LAG_SECONDS: ${MYSQL_REPLICA_MAX_LAG_SECONDS:-2}
+      MYSQL_QUERY_WARN_MS: ${MYSQL_QUERY_WARN_MS:-500}
       CHECKPOINT_POSTGRES_HOST: postgres-checkpoint
       CHECKPOINT_POSTGRES_PORT: "5432"
       CHECKPOINT_POSTGRES_DATABASE: ${CHECKPOINT_POSTGRES_DATABASE:-rag_eval_staging_checkpoint}
       CHECKPOINT_POSTGRES_USER: ${CHECKPOINT_POSTGRES_USER:?CHECKPOINT_POSTGRES_USER is required}
       CHECKPOINT_POSTGRES_PASSWORD: ${CHECKPOINT_POSTGRES_PASSWORD:?CHECKPOINT_POSTGRES_PASSWORD is required}
+      CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS: ${CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS:-5}
+      CHECKPOINT_POSTGRES_POOL_MIN_SIZE: ${CHECKPOINT_POSTGRES_POOL_MIN_SIZE:-1}
+      CHECKPOINT_POSTGRES_POOL_MAX_SIZE: ${CHECKPOINT_POSTGRES_POOL_MAX_SIZE:-5}
+      AGENT_PERSISTENCE_CLEANUP_POLL_INTERVAL_SECONDS: ${AGENT_PERSISTENCE_CLEANUP_POLL_INTERVAL_SECONDS:-1}
+      AGENT_PERSISTENCE_CLEANUP_HEARTBEAT_INTERVAL_SECONDS: ${AGENT_PERSISTENCE_CLEANUP_HEARTBEAT_INTERVAL_SECONDS:-10}
+      AGENT_PERSISTENCE_CLEANUP_LEASE_SECONDS: ${AGENT_PERSISTENCE_CLEANUP_LEASE_SECONDS:-300}
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
       API_KEY: ${API_KEY:?API_KEY is required}
       BASE_URL: ${BASE_URL:?BASE_URL is required}
       MODEL: ${MODEL:?MODEL is required}
       FLASK_ENV: staging
+      ENVIRONMENT: staging
+      ADMIN_VITE_DEV_SERVER_URL: ${ADMIN_VITE_DEV_SERVER_URL:-}
+      ADMIN_BATCH_MAX_TARGETS: ${ADMIN_BATCH_MAX_TARGETS:-20}
+      ADMIN_DELETE_MAX_RELATED_ROWS: ${ADMIN_DELETE_MAX_RELATED_ROWS:-10000}
+      ADMIN_DB_LOCK_WAIT_TIMEOUT_SECONDS: ${ADMIN_DB_LOCK_WAIT_TIMEOUT_SECONDS:-5}
+      DB_INSPECTION_QUERY_TIMEOUT_MS: ${DB_INSPECTION_QUERY_TIMEOUT_MS:-3000}
+      DB_DASHBOARD_CONNECTION_WARNING_PERCENT: ${DB_DASHBOARD_CONNECTION_WARNING_PERCENT:-70}
+      DB_DASHBOARD_CONNECTION_CRITICAL_PERCENT: ${DB_DASHBOARD_CONNECTION_CRITICAL_PERCENT:-85}
+      DB_MONITOR_AUTO_REFRESH_ENABLED: ${DB_MONITOR_AUTO_REFRESH_ENABLED:-true}
+      DB_MONITOR_REALTIME_INTERVAL_SECONDS: ${DB_MONITOR_REALTIME_INTERVAL_SECONDS:-10}
+      DB_MONITOR_SQL_INTERVAL_SECONDS: ${DB_MONITOR_SQL_INTERVAL_SECONDS:-60}
+      DB_MONITOR_TABLE_CAPACITY_INTERVAL_SECONDS: ${DB_MONITOR_TABLE_CAPACITY_INTERVAL_SECONDS:-900}
+      DB_MONITOR_SLOW_QUERY_WARNING_DELTA: ${DB_MONITOR_SLOW_QUERY_WARNING_DELTA:-1}
+      DB_MONITOR_INTEGRITY_ENABLED: ${DB_MONITOR_INTEGRITY_ENABLED:-false}
+      DB_MONITOR_INTEGRITY_INTERVAL_SECONDS: ${DB_MONITOR_INTEGRITY_INTERVAL_SECONDS:-86400}
+      LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-CausalAgent-Default-Project}
+      WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-searxng}
+      SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3.7-text-embedding}
+      CHAT_FRONTEND_DIST_DIR: ${CHAT_FRONTEND_DIST_DIR:-/opt/causalagent-chat}
+      CHAT_VITE_DEV_SERVER_URL: ${CHAT_VITE_DEV_SERVER_URL:-}
+      WEBSITE_FRONTEND_DIST_DIR: ${WEBSITE_FRONTEND_DIST_DIR:-/opt/causalagent-website}
+      WEBSITE_VITE_DEV_SERVER_URL: ${WEBSITE_VITE_DEV_SERVER_URL:-}
+      RAG_EVAL_FRONTEND_DIST_DIR: ${RAG_EVAL_FRONTEND_DIST_DIR:-/opt/causalagent-rag-eval}
+      GRAFANA_PUBLIC_URL: ${GRAFANA_PUBLIC_URL:-/grafana/}
+      WEB_WORKERS: ${WEB_WORKERS:-1}
+      WEB_THREADS: ${WEB_THREADS:-12}
+      WEB_TIMEOUT: ${WEB_TIMEOUT:-120}
+      SSE_POLL_INTERVAL_SECONDS: ${SSE_POLL_INTERVAL_SECONDS:-0.05}
+      JOB_WORKERS: ${JOB_WORKERS:-2}
+      JOB_HEARTBEAT_INTERVAL_SECONDS: ${JOB_HEARTBEAT_INTERVAL_SECONDS:-10}
+      JOB_STALE_AFTER_SECONDS: ${JOB_STALE_AFTER_SECONDS:-120}
+      JOB_DRAINING_STALE_AFTER_SECONDS: ${JOB_DRAINING_STALE_AFTER_SECONDS:-420}
+      JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-3}
+      JOB_CHAT_HISTORY_LIMIT: ${JOB_CHAT_HISTORY_LIMIT:-50}
+      MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-20}
       VISION_ALLOW_REMOTE_DATA: "true"
       VISION_API_KEY: ${VISION_API_KEY:?VISION_API_KEY is required for staging remote VLM}
       VISION_BASE_URL: ${VISION_BASE_URL:?VISION_BASE_URL is required for staging remote VLM}
       VISION_MODEL: ${VISION_MODEL:-qwen-vl-plus}
-      RAG_EVAL_EVALUATION_WORKERS: "5"
-      RAG_EVAL_INGESTION_CONCURRENCY_LIMIT: "1"
-      RAG_EVAL_CANDIDATE_GENERATION_CONCURRENCY_LIMIT: "1"
-      RAG_EVAL_TUNING_DATASET_GOVERNANCE_CONCURRENCY_LIMIT: "1"
-      RAG_EVAL_DATASET_GOVERNANCE_CONCURRENCY_LIMIT: "1"
-      RAG_EVAL_EVALUATION_CONCURRENCY_LIMIT: "3"
-      RAG_EVAL_RAG_QUERY_CONCURRENCY_LIMIT: "2"
+      RAG_EVAL_EVALUATION_WORKERS: "${RAG_EVAL_EVALUATION_WORKERS:-5}"
+      RAG_EVAL_INGESTION_CONCURRENCY_LIMIT: "${RAG_EVAL_INGESTION_CONCURRENCY_LIMIT:-1}"
+      RAG_EVAL_CANDIDATE_GENERATION_CONCURRENCY_LIMIT: "${RAG_EVAL_CANDIDATE_GENERATION_CONCURRENCY_LIMIT:-1}"
+      RAG_EVAL_TUNING_DATASET_GOVERNANCE_CONCURRENCY_LIMIT: "${RAG_EVAL_TUNING_DATASET_GOVERNANCE_CONCURRENCY_LIMIT:-1}"
+      RAG_EVAL_DATASET_GOVERNANCE_CONCURRENCY_LIMIT: "${RAG_EVAL_DATASET_GOVERNANCE_CONCURRENCY_LIMIT:-1}"
+      RAG_EVAL_EVALUATION_CONCURRENCY_LIMIT: "${RAG_EVAL_EVALUATION_CONCURRENCY_LIMIT:-3}"
+      RAG_EVAL_RAG_QUERY_CONCURRENCY_LIMIT: "${RAG_EVAL_RAG_QUERY_CONCURRENCY_LIMIT:-2}"
+      RAG_EVAL_EVALUATION_POLL_INTERVAL_SECONDS: ${RAG_EVAL_EVALUATION_POLL_INTERVAL_SECONDS:-1}
+      RAG_EVAL_EVALUATION_HEARTBEAT_INTERVAL_SECONDS: ${RAG_EVAL_EVALUATION_HEARTBEAT_INTERVAL_SECONDS:-10}
+      RAG_EVAL_EVALUATION_JOB_STALE_AFTER_SECONDS: ${RAG_EVAL_EVALUATION_JOB_STALE_AFTER_SECONDS:-120}
       RAG_EVAL_ROOT: /app/tmp/rag_eval
       RAG_EVAL_DATASET_ROOT: /app/tmp/rag_eval/datasets/registered
       JOB_DRAIN_TIMEOUT_SECONDS: ${JOB_DRAIN_TIMEOUT_SECONDS:-60}
@@ -109,8 +165,59 @@ services:
       mysql-primary: {condition: service_healthy}
       postgres-checkpoint: {condition: service_healthy}
 
+  causal-mcp:
+    image: ${STAGING_MCP_IMAGE:?STAGING_MCP_IMAGE must be an immutable image digest}
+    labels:
+      causalagent_observability: "true"
+      causalagent_service: mcp
+      causalagent_environment: staging
+    command: python -m Agent.CausalAgentMCP.app
+    environment:
+      MYSQL_HOST: mysql-primary
+      MYSQL_WRITE_HOST: mysql-primary
+      MYSQL_READ_HOSTS: ""
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-rag_eval_staging}
+      MYSQL_USER: ${MYSQL_USER:?MYSQL_USER is required}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      MYSQL_WRITE_USER: ${MYSQL_WRITE_USER:?MYSQL_WRITE_USER is required}
+      MYSQL_WRITE_PASSWORD: ${MYSQL_WRITE_PASSWORD:?MYSQL_WRITE_PASSWORD is required}
+      MYSQL_READ_USER: ${MYSQL_READ_USER:?MYSQL_READ_USER is required}
+      MYSQL_READ_PASSWORD: ${MYSQL_READ_PASSWORD:?MYSQL_READ_PASSWORD is required}
+      CAUSAL_MCP_SERVICE_TOKEN: ${CAUSAL_MCP_SERVICE_TOKEN:?CAUSAL_MCP_SERVICE_TOKEN is required}
+      CAUSAL_MCP_SIGNING_KEY_CURRENT: ${CAUSAL_MCP_SIGNING_KEY_CURRENT:?CAUSAL_MCP_SIGNING_KEY_CURRENT is required}
+      CAUSAL_MCP_SIGNING_KEY_PREVIOUS: ${CAUSAL_MCP_SIGNING_KEY_PREVIOUS:-}
+      CAUSAL_MCP_SIGNING_KEY_ID: ${CAUSAL_MCP_SIGNING_KEY_ID:-current}
+      ENVIRONMENT: staging
+      CAUSAL_MCP_PROCESS_WORKERS: ${CAUSAL_MCP_PROCESS_WORKERS:-2}
+      CAUSAL_MCP_QUEUE_CAPACITY: ${CAUSAL_MCP_QUEUE_CAPACITY:-4}
+      CAUSAL_MCP_ENQUEUE_TIMEOUT_SECONDS: ${CAUSAL_MCP_ENQUEUE_TIMEOUT_SECONDS:-5}
+      CAUSAL_MCP_ALGORITHM_DEADLINE_SECONDS: ${CAUSAL_MCP_ALGORITHM_DEADLINE_SECONDS:-600}
+      CAUSAL_MCP_SLOW_LOG_SECONDS: ${CAUSAL_MCP_SLOW_LOG_SECONDS:-60}
+      CDFM_MODEL_PATH: ${CDFM_MODEL_PATH:-DMIRLAB/CDFM}
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    networks: [rag_eval_staging]
+    depends_on:
+      mysql-primary: {condition: service_healthy}
+      db-bootstrap: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
   app:
     image: ${STAGING_APP_IMAGE:?STAGING_APP_IMAGE must be an immutable image digest}
+    labels:
+      causalagent_observability: "true"
+      causalagent_service: web
+      causalagent_environment: staging
     command: ["sh", "-c", "python scripts/staging_environment_guard.py && exec gunicorn --bind 0.0.0.0:5001 --workers 1 --threads 12 --timeout 120 CausalAgent:app"]
     environment: *app_environment
     volumes:
@@ -121,7 +228,7 @@ services:
       - rag_eval_staging_reports:/app/tmp/rag_eval/reports
       - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
       - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
-      - ./Agent/knowledge_base/multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes:ro
+      - kb_multimodal_indexes_staging:/app/Agent/knowledge_base/multimodal_indexes
       - ./Agent/knowledge_base/multimodal_runtime:/app/Agent/knowledge_base/multimodal_runtime:ro
       - ./Agent/knowledge_base/multimodal_assets:/app/Agent/knowledge_base/multimodal_assets:ro
       - ./Agent/knowledge_base/rag/runtime:/app/Agent/knowledge_base/rag/runtime:ro
@@ -129,29 +236,59 @@ services:
     depends_on:
       mysql-replica: {condition: service_healthy}
       db-bootstrap: {condition: service_completed_successfully}
+      kb-indexes-sync: {condition: service_completed_successfully}
     logging: &bounded_logging
       driver: json-file
       options: {max-size: 10m, max-file: "3"}
 
   worker:
     image: ${STAGING_APP_IMAGE:?STAGING_APP_IMAGE must be an immutable image digest}
+    labels:
+      causalagent_observability: "true"
+      causalagent_service: worker
+      causalagent_environment: staging
     command: ["sh", "-c", "python scripts/staging_environment_guard.py && exec python -m app.agent.worker"]
-    environment: *app_environment
+    environment:
+      <<: *app_environment
+      CAUSAL_MCP_URL: http://causal-mcp:8080/mcp
+      CAUSAL_MCP_SERVICE_TOKEN: ${CAUSAL_MCP_SERVICE_TOKEN:?CAUSAL_MCP_SERVICE_TOKEN is required}
+      CAUSAL_MCP_SIGNING_KEY_CURRENT: ${CAUSAL_MCP_SIGNING_KEY_CURRENT:?CAUSAL_MCP_SIGNING_KEY_CURRENT is required}
+      CAUSAL_MCP_SIGNING_KEY_ID: ${CAUSAL_MCP_SIGNING_KEY_ID:-current}
+      CAUSAL_MCP_CLIENT_POOL_SIZE: ${CAUSAL_MCP_CLIENT_POOL_SIZE:-2}
+      CAUSAL_MCP_MAX_IN_FLIGHT_PER_CLIENT: ${CAUSAL_MCP_MAX_IN_FLIGHT_PER_CLIENT:-1}
+      CAUSAL_MCP_POOL_ACQUIRE_TIMEOUT_SECONDS: ${CAUSAL_MCP_POOL_ACQUIRE_TIMEOUT_SECONDS:-5}
+      CAUSAL_MCP_CONTROL_POOL_SIZE: ${CAUSAL_MCP_CONTROL_POOL_SIZE:-1}
+      CAUSAL_MCP_CONTROL_MAX_IN_FLIGHT_PER_CLIENT: ${CAUSAL_MCP_CONTROL_MAX_IN_FLIGHT_PER_CLIENT:-2}
+      CAUSAL_MCP_CONTROL_ACQUIRE_TIMEOUT_SECONDS: ${CAUSAL_MCP_CONTROL_ACQUIRE_TIMEOUT_SECONDS:-1}
+      CAUSAL_MCP_CANCEL_TIMEOUT_SECONDS: ${CAUSAL_MCP_CANCEL_TIMEOUT_SECONDS:-6}
+      CAUSAL_MCP_HTTP_MAX_CONNECTIONS: ${CAUSAL_MCP_HTTP_MAX_CONNECTIONS:-8}
+      CAUSAL_MCP_HTTP_MAX_KEEPALIVE_CONNECTIONS: ${CAUSAL_MCP_HTTP_MAX_KEEPALIVE_CONNECTIONS:-4}
+      CAUSAL_MCP_HTTP_READ_TIMEOUT_SECONDS: ${CAUSAL_MCP_HTTP_READ_TIMEOUT_SECONDS:-660}
+      DEEP_AGENT_MODEL: ${DEEP_AGENT_MODEL:?DEEP_AGENT_MODEL is required}
+      DEEP_AGENT_BASE_URL: ${DEEP_AGENT_BASE_URL:?DEEP_AGENT_BASE_URL is required}
+      DEEP_AGENT_API_KEY: ${DEEP_AGENT_API_KEY:?DEEP_AGENT_API_KEY is required}
+      DEEP_AGENT_CONTEXT_WINDOW_TOKENS: ${DEEP_AGENT_CONTEXT_WINDOW_TOKENS:?DEEP_AGENT_CONTEXT_WINDOW_TOKENS is required}
     volumes:
       - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
       - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
-      - ./Agent/knowledge_base/multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes:ro
+      - kb_multimodal_indexes_staging:/app/Agent/knowledge_base/multimodal_indexes
       - ./Agent/knowledge_base/multimodal_runtime:/app/Agent/knowledge_base/multimodal_runtime:ro
       - ./Agent/knowledge_base/multimodal_assets:/app/Agent/knowledge_base/multimodal_assets:ro
       - ./Agent/knowledge_base/rag/runtime:/app/Agent/knowledge_base/rag/runtime:ro
     networks: [rag_eval_staging]
     depends_on:
       db-bootstrap: {condition: service_completed_successfully}
+      causal-mcp: {condition: service_healthy}
+      kb-indexes-sync: {condition: service_completed_successfully}
     stop_grace_period: 75s
     logging: *bounded_logging
 
   monitor:
     image: ${STAGING_APP_IMAGE:?STAGING_APP_IMAGE must be an immutable image digest}
+    labels:
+      causalagent_observability: "true"
+      causalagent_service: monitor
+      causalagent_environment: staging
     command: ["sh", "-c", "python scripts/staging_environment_guard.py && exec python -m Database.monitor_worker"]
     environment: *app_environment
     networks: [rag_eval_staging]
@@ -159,9 +296,13 @@ services:
       db-bootstrap: {condition: service_completed_successfully}
     logging: *bounded_logging
 
-  checkpoint-cleanup:
+  agent-persistence-cleanup:
     image: ${STAGING_APP_IMAGE:?STAGING_APP_IMAGE must be an immutable image digest}
-    command: ["sh", "-c", "python scripts/staging_environment_guard.py && exec python -m Database.checkpoint_cleanup_worker"]
+    labels:
+      causalagent_observability: "true"
+      causalagent_service: maintenance
+      causalagent_environment: staging
+    command: ["sh", "-c", "python scripts/staging_environment_guard.py && exec python -m Database.agent_persistence_cleanup_worker"]
     environment: *app_environment
     networks: [rag_eval_staging]
     depends_on:
@@ -170,6 +311,10 @@ services:
 
   rag-eval-worker:
     image: ${STAGING_APP_IMAGE:?STAGING_APP_IMAGE must be an immutable image digest}
+    labels:
+      causalagent_observability: "true"
+      causalagent_service: worker
+      causalagent_environment: staging
     command: ["sh", "-c", "python scripts/staging_environment_guard.py && exec python -m app.rag_eval.worker"]
     environment: *app_environment
     volumes:
@@ -196,15 +341,123 @@ services:
       - ./deploy/staging/rotate_gateway_logs.sh:/usr/local/bin/rotate_gateway_logs.sh:ro
       - rag_eval_staging_gateway_logs:/var/log/nginx
     stop_grace_period: 30s
-    networks: [rag_eval_staging]
+    networks: [rag_eval_staging, rag_eval_staging_observability]
     depends_on:
       app: {condition: service_started}
+      grafana: {condition: service_started}
+    logging: *bounded_logging
+
+  searxng:
+    image: searxng/searxng:2026.8.21-bbb3c7d82
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?SEARXNG_SECRET is required}
+    volumes:
+      - ./deploy/staging/searxng/config:/etc/searxng:ro
+      - rag_eval_staging_searxng_cache:/var/cache/searxng
+    depends_on:
+      valkey: {condition: service_healthy}
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/searxng/.venv/bin/python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    networks: [rag_eval_staging]
+    logging: *bounded_logging
+
+  valkey:
+    image: valkey/valkey:9-alpine
+    command: valkey-server --save 30 1 --loglevel warning
+    restart: unless-stopped
+    volumes: [rag_eval_staging_valkey:/data]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks: [rag_eval_staging]
+    logging: *bounded_logging
+
+  loki:
+    image: grafana/loki:3.7.4
+    command: -config.file=/etc/loki/config.yml
+    volumes:
+      - ./observability/loki/loki-config.yml:/etc/loki/config.yml:ro
+      - rag_eval_staging_loki:/loki
+    networks: [rag_eval_staging_observability]
+    cpus: "1.0"
+    mem_limit: 1g
+    restart: unless-stopped
+    logging: *bounded_logging
+
+  alloy:
+    image: grafana/alloy:v1.18.0
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - --disable-reporting
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - rag_eval_staging_alloy_positions:/var/lib/alloy/data
+    networks: [rag_eval_staging_observability]
+    depends_on:
+      loki: {condition: service_started}
+    cpus: "0.5"
+    mem_limit: 256m
+    restart: unless-stopped
+    logging: *bounded_logging
+
+  grafana:
+    image: grafana/grafana:13.1.1
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_USERS_DEFAULT_LANGUAGE: zh-Hans
+      GF_SERVER_ROOT_URL: /grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    volumes:
+      - rag_eval_staging_grafana:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks: [rag_eval_staging_observability]
+    depends_on:
+      loki: {condition: service_started}
+    cpus: "0.5"
+    mem_limit: 512m
+    restart: unless-stopped
+    logging: *bounded_logging
+
+  kb-indexes-sync:
+    image: python:3.11-slim
+    container_name: causalagent_kb_indexes_sync_staging
+    volumes:
+      - ./Agent/knowledge_base/multimodal_indexes:/src:ro
+      - kb_multimodal_indexes_staging:/app/Agent/knowledge_base/multimodal_indexes
+    command:
+      - sh
+      - -c
+      - cp -a /src/. /app/Agent/knowledge_base/multimodal_indexes/
+    networks: [rag_eval_staging]
     logging: *bounded_logging
 
 networks:
   rag_eval_staging: {driver: bridge}
+  rag_eval_staging_observability: {driver: bridge, internal: true}
 
 volumes:
+  kb_multimodal_indexes_staging: {driver: local}
   rag_eval_staging_mysql_primary: {driver: local}
   rag_eval_staging_mysql_replica: {driver: local}
   rag_eval_staging_postgres_checkpoint: {driver: local}
@@ -214,3 +467,8 @@ volumes:
   rag_eval_staging_artifacts: {driver: local}
   rag_eval_staging_reports: {driver: local}
   rag_eval_staging_gateway_logs: {driver: local}
+  rag_eval_staging_searxng_cache: {driver: local}
+  rag_eval_staging_valkey: {driver: local}
+  rag_eval_staging_loki: {driver: local}
+  rag_eval_staging_alloy_positions: {driver: local}
+  rag_eval_staging_grafana: {driver: local}

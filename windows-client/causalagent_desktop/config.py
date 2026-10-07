@@ -17,7 +17,7 @@ from typing import Mapping, Sequence
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 
-DEFAULT_DEVELOPMENT_URL = "http://127.0.0.1:5001/"
+DEFAULT_DEVELOPMENT_URL = "http://127.0.0.1:5001/dashboard"
 DEFAULT_DEVELOPER_PREVIEW_URL = DEFAULT_DEVELOPMENT_URL
 DEFAULT_RELEASE_ORIGIN = "https://causalagent.example.com"
 DEVELOPMENT_ORIGINS = frozenset(
@@ -340,7 +340,7 @@ def build_config(
     configured_url = args.url or env.get("CAUSALAGENT_DESKTOP_URL")
     if not configured_url:
         configured_url = (
-            f"{release_origin}/"
+            f"{release_origin}/dashboard"
             if mode is DesktopMode.RELEASE
             else DEFAULT_DEVELOPER_PREVIEW_URL
             if mode is DesktopMode.DEVELOPER_PREVIEW

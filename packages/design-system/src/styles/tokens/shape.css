@@ -1,0 +1,14 @@
+/* CausalAgent 设计系统：形状层
+
+   圆角分四档：小控件 8px、卡片 20px、大卡片 24px、列表容器 28px，
+   可点元素和标签一律用全圆角。描边只有 1px 一种宽度。 */
+@layer ca-tokens {
+  :root {
+    --ca-radius-small: 8px;
+    --ca-radius-card: 20px;
+    --ca-radius-large: 24px;
+    --ca-radius-list: 28px;
+    --ca-radius-full: 9999px;
+    --ca-border-width: 1px;
+  }
+}

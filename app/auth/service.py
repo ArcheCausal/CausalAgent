@@ -7,6 +7,7 @@ app.auth.service - 用户认证服务
 
 '''
 from app.db import get_read_connection, get_write_connection, record_database_failure
+from app.auth.rbac import ROLE_USER, replace_user_roles
 import mysql.connector
 import logging
 import bcrypt
@@ -157,14 +158,13 @@ def register_user(username, plain_password):
 
     try:
         with get_write_connection() as conn:
-            cursor = conn.cursor()
+            cursor = conn.cursor(dictionary=True)
             # 使用 bcrypt 对明文密码进行哈希（包含自动生成的盐值）
             hashed_password = hash_password(plain_password)
             cursor.execute("INSERT INTO users (username, password_hash) VALUES (%s, %s)",
                            (username, hashed_password))
+            replace_user_roles(cursor, int(cursor.lastrowid), (ROLE_USER,))
             conn.commit()
-            # user_id = cursor.lastrowid # 如果需要获取新用户的ID
-            # cursor.close()
         return True, "注册成功！"
     except mysql.connector.Error as e: # <-- 修改异常类型
         # MySQL 的 IntegrityError 对于 UNIQUE 约束冲突通常是 ER_DUP_ENTRY (errno 1062)

@@ -3,7 +3,14 @@ from .state import CausalAgentState
 from observability.logging_runtime import log_context, log_event
 
 
-ROUTE_DECISIONS = {"fold", "postprocess", "normal_chat", "inquiry_answer"}
+ROUTE_DECISIONS = {
+    "fold",
+    "postprocess",
+    "report",
+    "normal_chat",
+    "inquiry_answer",
+    "context_switch",
+}
 FOLD_DECISIONS = {"preprocess", "agent", "normal_chat"}
 LOGGER = logging.getLogger(__name__)
 

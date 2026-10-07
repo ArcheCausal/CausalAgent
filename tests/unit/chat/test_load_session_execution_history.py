@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
+import pytest
 from flask import Flask
 
 
@@ -143,6 +144,102 @@ class DeniedHistoryConnection(HistoryConnection):
         self.rolled_back = True
 
 
+# 早期版本把 Agent 内部图格式写进了 causal_graph 附件。
+STORED_INTERNAL_GRAPH = {
+    "type": "causal_graph",
+    "layout": "report",
+    "summary": "报告正文",
+    "graph_source": "original",
+    "data": {
+        "graph_semantics": "dag_target_to_source",
+        "nodes": ["A", "B"],
+        "edges": [
+            {"source": "A", "target": "B", "edge_type": "directed", "weight": 2.0}
+        ],
+    },
+}
+
+
+class GraphAttachmentHistoryCursor(HistoryCursor):
+    def fetchall(self):
+        if "FROM chat_messages" in self.current_sql:
+            rows = super().fetchall()
+            for row in rows:
+                if row["id"] == 11:
+                    row["has_attachment"] = True
+            return rows
+        if "FROM chat_attachments" in self.current_sql:
+            return [
+                {
+                    "message_id": 11,
+                    "attachment_type": "causal_graph",
+                    "content": json.dumps(STORED_INTERNAL_GRAPH, ensure_ascii=False),
+                }
+            ]
+        return super().fetchall()
+
+
+class GraphAttachmentHistoryConnection(HistoryConnection):
+    def __init__(self):
+        super().__init__()
+        self.cursor_value = GraphAttachmentHistoryCursor()
+
+
+STORED_REPORT_DOCUMENT = {
+    "schema_version": 1,
+    "report_id": "report_hist",
+    "title": "因果分析报告",
+    "blocks": [
+        {"id": "markdown_summary", "type": "markdown", "content": "结论正文", "evidence_refs": []}
+    ],
+    "assets": {
+        "chart_histogram_age": {
+            "asset_key": "chart_histogram_age",
+            "type": "chart",
+            "chart_type": "histogram",
+            "data": {"bins": [0, 1, 2], "counts": [3, 4]},
+            "metadata": {"variable": "age"},
+            "options": {"show_tooltip": True},
+        }
+    },
+    "sources": [{"source_id": "src_1", "kind": "file", "title": "data.csv", "file_id": 12}],
+    "evidence_refs": [],
+}
+
+
+class ReportAttachmentHistoryCursor(HistoryCursor):
+    def __init__(self, content: str | None = None):
+        super().__init__()
+        self.content = (
+            json.dumps(STORED_REPORT_DOCUMENT, ensure_ascii=False)
+            if content is None
+            else content
+        )
+
+    def fetchall(self):
+        if "FROM chat_messages" in self.current_sql:
+            rows = super().fetchall()
+            for row in rows:
+                if row["id"] == 11:
+                    row["has_attachment"] = True
+            return rows
+        if "FROM chat_attachments" in self.current_sql:
+            return [
+                {
+                    "message_id": 11,
+                    "attachment_type": "report_document",
+                    "content": self.content,
+                }
+            ]
+        return super().fetchall()
+
+
+class ReportAttachmentHistoryConnection(HistoryConnection):
+    def __init__(self, content: str | None = None):
+        super().__init__()
+        self.cursor_value = ReportAttachmentHistoryCursor(content)
+
+
 def _app():
     app = Flask(__name__)
     app.secret_key = "history-test"
@@ -207,3 +304,82 @@ def test_load_session_rejects_unknown_or_unauthorized_session_before_history_que
     assert response.status_code == 404
     assert connection.rolled_back is True
     assert len(connection.cursor_value.statements) == 2
+
+
+def test_load_session_projects_stored_graph_for_frontend():
+    """历史附件里的内部图格式必须在读取时投影成前端可渲染的载荷。"""
+    connection = GraphAttachmentHistoryConnection()
+    with (
+        patch("app.chat.routes.get_current_session_user", return_value={"id": 7, "username": "owner"}),
+        patch("app.db.get_read_connection", return_value=connection),
+        _app().test_client() as client,
+    ):
+        response = client.get("/api/load_session?session=session-1")
+
+    assert response.status_code == 200
+    ai_message = response.get_json()["messages"][1]
+    assert ai_message["text"]["summary"] == "报告正文"
+    graph = ai_message["text"]["data"]
+    assert graph["nodes"] == [{"id": "A", "label": "A"}, {"id": "B", "label": "B"}]
+    assert graph["edges"] == [
+        {
+            "from": "A",
+            "to": "B",
+            "arrows": "to",
+            "dashes": False,
+            "weight": 2.0,
+            "label": "2",
+        }
+    ]
+
+
+def test_load_session_restores_structured_report_document():
+    """历史接口把 report_document 附件恢复成前端直接可渲染的结构化报告。"""
+    connection = ReportAttachmentHistoryConnection()
+    with (
+        patch("app.chat.routes.get_current_session_user", return_value={"id": 7, "username": "owner"}),
+        patch("app.db.get_read_connection", return_value=connection),
+        _app().test_client() as client,
+    ):
+        response = client.get("/api/load_session?session=session-1")
+
+    assert response.status_code == 200
+    ai_message = response.get_json()["messages"][1]
+    report = ai_message["text"]
+    assert report["type"] == "report"
+    assert report["layout"] == "report"
+    assert report["render_mode"] == "structured"
+    assert report["document"]["report_id"] == "report_hist"
+    assert report["document"]["blocks"][0]["content"] == "结论正文"
+    assert report["document"]["assets"]["chart_histogram_age"]["chart_type"] == "histogram"
+    assert report["document"]["sources"][0]["source_id"] == "src_1"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{不是合法 JSON",
+        json.dumps({"report_id": 5, "title": "缺少块", "blocks": []}),
+    ],
+)
+def test_load_session_degrades_broken_report_attachment(content):
+    """损坏或 schema 非法的报告附件不能直接进入前端，只回退到消息预览正文。"""
+    connection = ReportAttachmentHistoryConnection(content)
+    with (
+        patch("app.chat.routes.get_current_session_user", return_value={"id": 7, "username": "owner"}),
+        patch("app.db.get_read_connection", return_value=connection),
+        patch("app.chat.routes.log_event") as log_event,
+        _app().test_client() as client,
+    ):
+        response = client.get("/api/load_session?session=session-1")
+
+    assert response.status_code == 200
+    ai_message = response.get_json()["messages"][1]
+    assert ai_message["text"] == "回答"
+    degraded_calls = [
+        call for call in log_event.call_args_list
+        if call.args and call.args[1] == "chat.attachment.degraded"
+    ]
+    assert degraded_calls
+    assert degraded_calls[0].kwargs["details"]["attachment_type"] == "report_document"
+    assert degraded_calls[0].kwargs["details"]["reason_code"] == "protocol_error"

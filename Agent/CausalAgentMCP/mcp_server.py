@@ -212,7 +212,6 @@ async def causal_pc(
     )
 
 
-@mcp.tool()
 async def causal_olc(
     user_id: int,
     job_id: str,

@@ -15,6 +15,7 @@ from Agent.knowledge_base.embedding_runtime import (
     EmbeddingApiError,
     EmbeddingCircuitOpenError,
     EmbeddingConfiguration,
+    classify_embedding_api_error,
 )
 from Agent.knowledge_base.multimodal.pipeline import MultimodalKnowledgeBaseMaintenance
 from Agent.knowledge_base.multimodal.release import (
@@ -409,6 +410,19 @@ class PortableReleaseTests(unittest.TestCase):
         with self.assertRaises(EmbeddingCircuitOpenError):
             breaker.call(lambda: "must-not-run")
         self.assertTrue(breaker.is_open)
+
+    def test_free_tier_only_error_is_classified_as_quota_billing(self) -> None:
+        class FreeTierOnlyError(Exception):
+            status_code = 400
+            body = {
+                "code": "AllocationQuota.FreeTierOnly",
+                "message": "Free quota exhausted.",
+            }
+
+        self.assertEqual(
+            classify_embedding_api_error(FreeTierOnlyError("Bad request")),
+            "quota_billing",
+        )
 
     def test_runtime_loads_embedding_from_active_manifest_without_global_resolver(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -33,7 +33,7 @@ class StagingComposeContractTests(unittest.TestCase):
             self.assertIn(key, example)
 
     def test_worker_compose_contract_has_bounded_drain_and_release_mounts(self) -> None:
-        """worker Compose 应传递 drain 配置并暴露只读 release 目录。"""
+        """worker Compose 应传递 drain 配置，并暴露只读 runtime 与检索策略目录。"""
         for filename in ("docker-compose.yml", "docker-compose.replica.yml"):
             compose = (REPOSITORY_ROOT / filename).read_text(encoding="utf-8")
             self.assertIn("JOB_DRAIN_TIMEOUT_SECONDS=${JOB_DRAIN_TIMEOUT_SECONDS:-60}", compose)
@@ -43,8 +43,25 @@ class StagingComposeContractTests(unittest.TestCase):
         self.assertIn("JOB_DRAIN_TIMEOUT_SECONDS: ${JOB_DRAIN_TIMEOUT_SECONDS:-60}", staging)
         self.assertIn("stop_grace_period: 75s", staging)
         for path in (
-            "./Agent/knowledge_base/multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes:ro",
             "./Agent/knowledge_base/multimodal_runtime:/app/Agent/knowledge_base/multimodal_runtime:ro",
             "./Agent/knowledge_base/rag/runtime:/app/Agent/knowledge_base/rag/runtime:ro",
         ):
             self.assertIn(path, staging)
+
+    def test_multimodal_index_mounts_use_writable_named_volumes(self) -> None:
+        """多模态索引目录必须挂到可写命名卷，不能只读挂载或直挂宿主仓库。"""
+        expectations = {
+            "docker-compose.yml": ("kb_multimodal_indexes", 4),
+            "docker-compose.replica.yml": ("kb_multimodal_indexes", 4),
+            "docker-compose.prod.yml": ("kb_multimodal_indexes_prod", 3),
+            "docker-compose.staging.yml": ("kb_multimodal_indexes_staging", 3),
+        }
+        target = "/app/Agent/knowledge_base/multimodal_indexes"
+        host_mount = "./Agent/knowledge_base/multimodal_indexes:" + target
+        for filename, (volume_key, expected_mounts) in expectations.items():
+            with self.subTest(filename=filename):
+                compose = (REPOSITORY_ROOT / filename).read_text(encoding="utf-8")
+                self.assertEqual(compose.count(volume_key + ":" + target), expected_mounts)
+                self.assertNotIn(volume_key + ":" + target + ":ro", compose)
+                self.assertNotIn(host_mount, compose)
+                self.assertIn("\n  " + volume_key + ":", compose)

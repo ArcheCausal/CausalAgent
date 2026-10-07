@@ -1,4 +1,7 @@
+import ast
+import inspect
 import os
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -18,7 +21,12 @@ TEST_ENV = {
 for key, value in TEST_ENV.items():
     os.environ.setdefault(key, value)
 
-from app.auth.service import find_user, find_user_by_id, record_successful_login
+from app.auth.service import (
+    find_user,
+    find_user_by_id,
+    record_successful_login,
+    register_user,
+)
 
 
 class FakeCursor:
@@ -166,6 +174,42 @@ class AuthServiceReadTests(unittest.TestCase):
                     {"reason_code": reason_code},
                 )
                 self.assertNotIn(str(error), repr(log_event.call_args_list))
+
+
+class RegistrationContractTests(unittest.TestCase):
+    """注册事务必须先建用户、再授予默认角色、最后提交。"""
+
+    def test_register_assigns_default_user_role_before_commit(self):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(register_user)))
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+
+        user_insert = next(
+            node
+            for node in calls
+            if isinstance(node.func, ast.Attribute)
+            and node.func.attr == "execute"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and "INSERT INTO users" in node.args[0].value
+        )
+        role_assignment = next(
+            node
+            for node in calls
+            if isinstance(node.func, ast.Name)
+            and node.func.id == "replace_user_roles"
+        )
+        commit = next(
+            node
+            for node in calls
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "commit"
+        )
+
+        self.assertLess(user_insert.lineno, role_assignment.lineno)
+        self.assertLess(role_assignment.lineno, commit.lineno)
+        self.assertIsInstance(role_assignment.args[2], ast.Tuple)
+        role_name = role_assignment.args[2].elts[0]
+        self.assertIsInstance(role_name, ast.Name)
+        self.assertEqual(role_name.id, "ROLE_USER")
 
 
 if __name__ == "__main__":

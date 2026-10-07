@@ -299,7 +299,17 @@ def classify_embedding_api_error(error: BaseException) -> str:
     """把 embedding API 错误分类为 release 无关的稳定 reason code。"""
     status = _status_code(error)
     text = _error_text(error)
-    if status == 402 or any(marker in text for marker in ("insufficient_quota", "billing", "quota_exceeded", "payment required")):
+    if status == 402 or any(
+        marker in text
+        for marker in (
+            "insufficient_quota",
+            "billing",
+            "quota_exceeded",
+            "payment required",
+            "free quota exhausted",
+            "allocationquota.freetieronly",
+        )
+    ):
         return "quota_billing"
     if status == 401:
         return "auth_failed"

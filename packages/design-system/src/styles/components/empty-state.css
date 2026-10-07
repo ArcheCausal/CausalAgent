@@ -1,0 +1,54 @@
+/* 空状态
+
+   原型里的空态是一行次要文字（.output-empty，左对齐、限宽 46ch）。
+   应用页面通常在面板中央给出标题加说明，因此这里默认居中，
+   需要还原原型的左对齐写法时用 align="start"。 */
+.ca-empty {
+  display: grid;
+  justify-items: center;
+  gap: var(--ca-space-8);
+  padding: var(--ca-space-24);
+  text-align: center;
+}
+
+.ca-empty--start {
+  justify-items: start;
+  padding: 0;
+  text-align: left;
+}
+
+.ca-empty__icon {
+  display: grid;
+  place-items: center;
+  margin-bottom: var(--ca-space-8);
+  color: var(--ca-text-subtle);
+}
+
+.ca-empty__icon > svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+
+.ca-empty__title {
+  margin: 0;
+  color: var(--ca-text-default);
+  font-size: var(--ca-text-subheading);
+  line-height: var(--ca-leading-subheading);
+}
+
+.ca-empty__description {
+  margin: 0;
+  max-width: var(--ca-measure-narrow);
+  color: var(--ca-text-muted);
+  font-size: var(--ca-text-body-sm);
+  line-height: var(--ca-leading-body-sm);
+}
+
+.ca-empty__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ca-space-16);
+  margin-top: var(--ca-space-8);
+}

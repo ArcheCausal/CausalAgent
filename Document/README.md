@@ -16,6 +16,7 @@
 
 - [`architecture/overview.md`](architecture/overview.md)：进程边界、主要数据流、运行拓扑和组件职责。
 - [`architecture/agent-runtime.md`](architecture/agent-runtime.md)：Web、Job worker、LangGraph、MCP、RAG、Web Search、结构化输出和用户事件流。
+- [`architecture/mcp-runtime.md`](architecture/mcp-runtime.md)：MCP 客户端池、服务端算法执行池、Worker 通信、HTTP/TCP 与精确取消机制。
 - [`architecture/job-file-lifecycle.md`](architecture/job-file-lifecycle.md)：Session、Job、输入账本、文件库、checkpoint 与跨库清理生命周期。
 - [`architecture/rag-evaluation.md`](architecture/rag-evaluation.md)：隔离评测、来源、staged index、active release、评测 worker 与生产切换边界。
 
@@ -35,12 +36,23 @@
 
 ### 开发
 
-- [`development/setup.md`](development/setup.md)：本地、Docker 和管理员前端开发入口。
+- [`development/setup.md`](development/setup.md)：本地、Docker 和四个前端的开发入口。
 - [`development/testing.md`](development/testing.md)：后端、前端、迁移、Web Search/Observability、RAG 多模态与隔离评测的验证矩阵。
-- [`development/deployment.md`](development/deployment.md)：镜像构建、15 服务开发 Compose、staging gateway/guard 边界、生产现有拓扑和 release 发布边界。
+- [`development/deployment.md`](development/deployment.md)：镜像构建、16 服务开发 Compose、staging gateway/guard 边界、生产现有拓扑和 release 发布边界。
+- [`development/website-frontend.md`](development/website-frontend.md)：官网公开页面与登录注册页面的入口、认证回跳、内容组织、构建和验收边界。
+- [`development/chat-frontend.md`](development/chat-frontend.md)：普通用户应用 Vue 前端的 `/dashboard` 入口、地址与会话映射、SSE、状态边界、构建、验收和回退。
 - [`../windows-client/README.md`](../windows-client/README.md)：Windows WebView2 桌面壳的独立依赖、配置、打包和 smoke 验收入口。
 - [`development/observability.md`](development/observability.md)：日志字段、事件目录、上下文关联、降噪、敏感信息边界和验收状态。
+- [`development/agent-tool-routing-history.md`](development/agent-tool-routing-history.md)：因果 MCP、RAG 与联网搜索从旧父图到 Deep Agent 的工具选择契约历史与调研结论。
 - [`documentation.md`](documentation.md)：文档归属、维护、链接和日志规则。
+
+### 前端设计系统
+
+- [`design-system/README.md`](design-system/README.md)：共享设计系统的文档入口、代码位置和归属原则。
+- [`design-system/design-decision.md`](design-system/design-decision.md)：已确认的视觉方向、对比度边界、字体与动效规则，以及各端允许保留的差异。
+- [`design-system/tokens.md`](design-system/tokens.md)：token 的命名、数值、与官网原型变量的对应关系和使用规则。
+- [`design-system/components.md`](design-system/components.md)：共享组件的属性、变体、状态要求和使用边界。
+- [`design-system/current-state.md`](design-system/current-state.md)：四个前端改造前的样式现状和迁移顺序。
 
 ### RAG、联网搜索与评测
 
@@ -54,7 +66,7 @@
 - [`admin/architecture.md`](admin/architecture.md)：Flask 管理员 API、Vue 页面、鉴权和共享能力消费关系。
 - [`admin/api.md`](admin/api.md)：管理员页面和 API 的完整契约。
 - [`admin/development.md`](admin/development.md)：管理员前端构建、开发入口和发布依赖。
-- [`admin/testing.md`](admin/testing.md)：管理员专项单元、Mock E2E 和隔离主从验收。
+- [`admin/testing.md`](admin/testing.md)：管理员专项代码级测试与部署静态契约。
 
 ## 归属原则
 

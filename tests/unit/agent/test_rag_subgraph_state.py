@@ -11,6 +11,7 @@ from typing import TypedDict
 
 import pytest
 from langchain_core.tools import tool
+from langgraph.errors import NodeCancelledError
 from langgraph.graph import END, StateGraph
 
 
@@ -28,21 +29,10 @@ for _key, _value in {
 
 
 def _install_import_stubs():
-    """隔离 RAG State 测试不需要的数据库、绘图和向量库调用。"""
+    """隔离 RAG State 测试不需要的数据库和向量库调用。"""
     agent_connect = types.ModuleType("Database.agent_connect")
     agent_connect.require_frozen_file_for_job = lambda *args, **kwargs: None
     sys.modules.setdefault("Database.agent_connect", agent_connect)
-
-    data_visualize = types.ModuleType("Agent.Processing.data_visualize")
-    data_visualize.generate_visualizations = lambda *args, **kwargs: {}
-    sys.modules.setdefault("Agent.Processing.data_visualize", data_visualize)
-
-    query_rag = types.ModuleType("Agent.knowledge_base.query_rag")
-    query_rag.get_rag_excerpt = lambda *args, **kwargs: ""
-    query_rag.format_rag_summary_for_prompt = lambda *args, **kwargs: ""
-    query_rag.get_rag_response = lambda *args, **kwargs: {}
-    sys.modules.setdefault("Agent.knowledge_base.query_rag", query_rag)
-
 
 _install_import_stubs()
 
@@ -87,9 +77,8 @@ def _parent_input() -> dict:
         "route_decision": "postprocess",
         "fold_decision": "preprocess",
         "postprocess_result": None,
-        "final_report": None,
-        "visualization_mapping": None,
-        "visualizations": None,
+        "chart_assets": None,
+        "report_document": None,
     }
 
 
@@ -558,7 +547,7 @@ def test_rag_finalize_result_keeps_public_event_projection():
     })
 
     assert [event["type"] for event in events] == ["tool_call_result"]
-    assert events[0]["summary"] == "调用失败"
+    assert events[0]["summary"] == "暂不可用"
 
 
 @pytest.mark.parametrize("cancel_exception", [JobExecutionRevoked("revoked"), asyncio.CancelledError()])
@@ -584,8 +573,13 @@ def test_rag_query_task_does_not_convert_cancellation(monkeypatch, cancel_except
         graph.add_node("invoke_task", invoke_task)
         graph.set_entry_point("invoke_task")
         graph.add_edge("invoke_task", END)
-        with pytest.raises(type(cancel_exception)):
-            await graph.compile().ainvoke({"result": None})
+        if isinstance(cancel_exception, asyncio.CancelledError):
+            with pytest.raises(NodeCancelledError) as error_info:
+                await graph.compile().ainvoke({"result": None})
+            assert isinstance(error_info.value.__cause__, asyncio.CancelledError)
+        else:
+            with pytest.raises(type(cancel_exception)):
+                await graph.compile().ainvoke({"result": None})
 
     asyncio.run(scenario())
 

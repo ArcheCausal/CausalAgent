@@ -26,7 +26,11 @@ from app.auth.service import (
     managed_password_error,
     verify_password,
 )
-from app.agent.checkpoint_cleanup import enqueue_checkpoint_cleanup_many
+from app.auth.rbac import replace_user_roles, role_keys_for_primary_role
+from app.agent.persistence_cleanup import (
+    enqueue_checkpoint_cleanup_many,
+    enqueue_user_memory_cleanup,
+)
 from app.db import get_read_connection, get_write_connection, record_database_failure
 from app.request_context import get_request_id
 from config.settings import settings
@@ -748,6 +752,11 @@ def execute_user_operation(
                         """,
                         (value, target["id"]),
                     )
+                    replace_user_roles(
+                        cursor,
+                        int(target["id"]),
+                        role_keys_for_primary_role(value),
+                    )
                 new_values = {
                     **old_values,
                     "role": value,
@@ -873,6 +882,11 @@ def _user_impact(cursor, user: dict[str, Any]) -> dict[str, Any]:
             ) AS checkpoint_cleanup_pending,
             (
                 SELECT COUNT(*)
+                FROM user_memory_cleanup_outbox
+                WHERE user_id = %s AND status <> 'succeeded'
+            ) AS user_memory_cleanup_pending,
+            (
+                SELECT COUNT(*)
                 FROM analysis_jobs
                 WHERE user_id = %s
                   AND (
@@ -881,7 +895,7 @@ def _user_impact(cursor, user: dict[str, Any]) -> dict[str, Any]:
                   )
             ) AS active_jobs
         """,
-        (user_id,) * 9,
+        (user_id,) * 10,
     )
     counts = {
         key: int(value or 0)
@@ -961,7 +975,7 @@ def delete_user(
     actor: dict[str, Any],
     idempotency_key: str | None,
 ) -> dict[str, Any]:
-    """在主库事务中删除用户业务数据，并登记 PostgreSQL checkpoint 清理。"""
+    """在主库事务中删除用户业务数据，并登记 checkpoint 与长期记忆清理。"""
     request_body = _require_body(body)
     if request_body.get("confirmed") is not True:
         raise AdminApiError(
@@ -1084,6 +1098,32 @@ def delete_user(
             [str(row["job_id"]) for row in job_rows],
             operation_id=operation_id,
         )
+        memory_cleanup_count = (
+            1
+            if enqueue_user_memory_cleanup(
+                cursor,
+                user_id,
+                operation_id=operation_id,
+            )
+            else 0
+        )
+        cleanup_total = cleanup_count + memory_cleanup_count
+        persistence_cleanup = {
+            "checkpoint_cleanup": {
+                "status": "pending" if cleanup_count else "succeeded",
+                "total": cleanup_count,
+                "succeeded": 0,
+                "failed": 0,
+                "pending": cleanup_count,
+            },
+            "user_memory_cleanup": {
+                "status": "pending" if memory_cleanup_count else "succeeded",
+                "total": memory_cleanup_count,
+                "succeeded": 0,
+                "failed": 0,
+                "pending": memory_cleanup_count,
+            },
+        }
         cursor.execute(
             "SELECT id FROM file_objects WHERE owner_user_id = %s FOR UPDATE",
             (user_id,),
@@ -1119,13 +1159,7 @@ def delete_user(
             "deleted_archived_sessions": deleted_archives,
             "deleted_user_files": deleted_user_files,
             "deleted_file_objects": deleted_file_objects,
-            "checkpoint_cleanup": {
-                "status": "pending" if cleanup_count else "succeeded",
-                "total": cleanup_count,
-                "succeeded": 0,
-                "failed": 0,
-                "pending": cleanup_count,
-            },
+            **persistence_cleanup,
         }
         _insert_operation_item(
             cursor,
@@ -1156,14 +1190,8 @@ def delete_user(
             "username": user["username"],
             "deleted": True,
             "impact": impact,
-            "status": "running" if cleanup_count else "succeeded",
-            "checkpoint_cleanup": {
-                "status": "pending" if cleanup_count else "succeeded",
-                "total": cleanup_count,
-                "succeeded": 0,
-                "failed": 0,
-                "pending": cleanup_count,
-            },
+            "status": "running" if cleanup_total else "succeeded",
+            **persistence_cleanup,
             "replayed": False,
         }
         cursor.execute(
@@ -1174,7 +1202,7 @@ def delete_user(
             """,
             (_json_dumps(result), operation_id),
         )
-        if not cleanup_count:
+        if not cleanup_total:
             _complete_operation(
                 cursor,
                 operation_id=operation_id,

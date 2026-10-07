@@ -4,13 +4,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App.vue'
 import SensitiveContentDialog from '../src/components/SensitiveContentDialog.vue'
 
-const { loadIdentityMock } = vi.hoisted(() => ({
+const { loadIdentityMock, runtimeConfigMock } = vi.hoisted(() => ({
   loadIdentityMock: vi.fn(async () => ({
     isLoggedIn: true,
     username: 'admin',
     role: 'admin',
     csrf_token: 'csrf',
   })),
+  runtimeConfigMock: vi.fn(async () => ({ grafana_url: '/grafana/' })),
 }))
 
 vi.mock('../src/api', async (importOriginal) => {
@@ -20,12 +21,19 @@ vi.mock('../src/api', async (importOriginal) => {
     loadIdentity: loadIdentityMock,
     adminApi: {
       ...original.adminApi,
+      runtimeConfig: runtimeConfigMock,
       logout: vi.fn(),
     },
   }
 })
 
 const elementStubs = {
+  CaButton: {
+    props: ['href', 'disabled', 'loading'],
+    template: '<component :is="href ? \'a\' : \'button\'" :href="href"><slot /></component>',
+  },
+  CaEmptyState: { template: '<div class="empty-stub"><slot /></div>' },
+  CaLoadingState: { template: '<div class="skeleton-stub" />' },
   ElAlert: { template: '<div class="alert-stub"><slot /></div>' },
   ElButton: { template: '<button><slot /></button>' },
   ElDialog: {
@@ -33,8 +41,6 @@ const elementStubs = {
     emits: ['update:modelValue'],
     template: '<section v-if="modelValue" class="dialog-stub"><slot /><slot name="footer" /></section>',
   },
-  ElEmpty: { template: '<div class="empty-stub" />' },
-  ElSkeleton: { template: '<div class="skeleton-stub" />' },
   ElTooltip: { template: '<span class="tooltip-stub"><slot /></span>' },
 }
 
@@ -42,6 +48,8 @@ describe('3.1 管理员界面交互边界', () => {
   beforeEach(() => {
     window.localStorage.clear()
     loadIdentityMock.mockClear()
+    runtimeConfigMock.mockReset()
+    runtimeConfigMock.mockResolvedValue({ grafana_url: '/grafana/' })
   })
 
   it('敏感正文在对话框打开前不请求，打开后只以文本节点展示', async () => {
@@ -96,7 +104,7 @@ describe('3.1 管理员界面交互边界', () => {
     expect(wrapper.find('.sensitive-notice').exists()).toBe(false)
   })
 
-  it('桌面侧栏在 248/76 模式间切换并持久化，Logo 始终复用受保护原图', async () => {
+  it('桌面侧栏在 264/80 模式间切换并持久化，Logo 始终复用受保护原图', async () => {
     const router = createRouter({
       history: createMemoryHistory('/admin/'),
       routes: [{ path: '/database', component: { template: '<div>database</div>' } }],
@@ -115,10 +123,10 @@ describe('3.1 管理员界面交互边界', () => {
     expect(wrapper.findAll('img[src="/api/admin/brand/logo"]')).toHaveLength(2)
     expect(wrapper.findAll('.nav-icon svg')).toHaveLength(8)
     expect(wrapper.findAll('.nav-icon').every(icon => icon.text() === '')).toBe(true)
-    expect(wrapper.findAll('.nav-icon svg').every(icon => icon.attributes('stroke-width') === '1.8'))
+    expect(wrapper.findAll('.nav-icon svg').every(icon => icon.attributes('stroke-width') === '1.5'))
       .toBe(true)
     expect(wrapper.find('.grafana-entry-button').attributes('href'))
-      .toBe('http://127.0.0.1:3000/')
+      .toBe('/grafana/')
     expect(wrapper.find('.grafana-entry-button').text()).toContain('进入 Grafana')
     expect(wrapper.find('.sidebar-toggle svg').exists()).toBe(true)
     await wrapper.find('.sidebar-toggle').trigger('click')
@@ -155,5 +163,27 @@ describe('3.1 管理员界面交互边界', () => {
     expect(wrapper.find('.admin-sidebar').classes()).toContain('mobile-open')
     await wrapper.find('.sidebar-backdrop').trigger('click')
     expect(wrapper.find('.admin-sidebar').classes()).not.toContain('mobile-open')
+  })
+
+  it('Grafana 运行期配置失败时不阻塞管理员页面', async () => {
+    runtimeConfigMock.mockRejectedValueOnce(new Error('runtime config unavailable'))
+    const router = createRouter({
+      history: createMemoryHistory('/admin/'),
+      routes: [{ path: '/database', component: { template: '<div>database</div>' } }],
+    })
+    await router.push('/database')
+    await router.isReady()
+
+    const wrapper = mount(App, {
+      global: {
+        plugins: [router],
+        stubs: elementStubs,
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('.page-loading').exists()).toBe(false)
+    expect(wrapper.find('.grafana-entry-button').exists()).toBe(true)
+    expect(wrapper.find('.grafana-entry-button').attributes('href')).toBe('')
   })
 })

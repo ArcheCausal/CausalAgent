@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { CaBadge, CaCard } from '@causalagent/design-system'
 import { displayStatus, metaText, statusLabel } from '../lib/dashboard'
+import { statusTone } from '../lib/statusTone'
 import type { SnapshotMeta } from '../types'
 
 const props = defineProps<{
@@ -15,15 +17,22 @@ const completeMetaText = computed(() => metaText(props.meta))
 </script>
 
 <template>
-  <article class="status-card" :class="`status-${status}`">
+  <CaCard
+    as="article"
+    class="status-card"
+    :class="`status-${status}`"
+    :data-status="status"
+    variant="outline"
+    padding="sm"
+  >
     <div class="card-heading">
       <span>{{ label }}</span>
-      <el-tag :type="status === 'healthy' ? 'success' : status === 'error' ? 'danger' : status === 'warning' ? 'warning' : 'info'" effect="light" round>
+      <CaBadge :tone="statusTone(status)">
         {{ statusLabel(status) }}
-      </el-tag>
+      </CaBadge>
     </div>
     <strong class="card-value">{{ value }}</strong>
     <p class="card-detail">{{ detail || meta.warning || '暂无补充信息' }}</p>
     <small class="card-meta" :title="completeMetaText">{{ completeMetaText }}</small>
-  </article>
+  </CaCard>
 </template>

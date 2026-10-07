@@ -19,6 +19,7 @@ for key, value in {
 
 from langchain_core.messages import AIMessage
 
+from Agent.Report.document import build_degraded_report_document
 from Agent.causal_agent.web_search_node import WEB_SEARCH_MAX_RESULTS
 from app.agent.worker.result_presenter import _extract_references, process_final_result
 from app.chat.response_storage import prepare_ai_response_for_storage
@@ -68,31 +69,47 @@ class TestProcessFinalResultReferences:
     def test_report_mounts_references(self):
         state = {
             "messages": [AIMessage(content="report", name="report")],
-            "final_report": "body",
+            "report_document": build_degraded_report_document("body"),
             "web_search_result": _web_search_result(5),
         }
         result = process_final_result(state)
+        assert result["type"] == "report"
+        assert result["render_mode"] == "structured"
         assert result["references"] == _projected(5)
 
     def test_report_omits_references_when_absent(self):
         state = {
             "messages": [AIMessage(content="report", name="report")],
-            "final_report": "body",
+            "report_document": build_degraded_report_document("body"),
         }
         result = process_final_result(state)
         assert "references" not in result
 
-    def test_degraded_text_report_still_mounts_references(self):
+    def test_report_without_document_falls_back_to_controlled_message(self):
+        """没有结构化报告文档时走受控默认消息，不再挂载旧报告引用。"""
         state = {
-            "final_report": "body",
+            "messages": [AIMessage(content="report", name="report")],
             "web_search_result": _web_search_result(2),
         }
         result = process_final_result(state)
         assert result["type"] == "text"
-        assert result["references"] == _projected(2)
+        assert result["summary"] == "抱歉，我在处理时遇到了问题。"
+        assert "references" not in result
 
 
 class TestPrepareStorageReferences:
+    def test_report_writes_document_and_reference_attachments(self):
+        ai_response = {
+            "type": "report",
+            "layout": "report",
+            "render_mode": "structured",
+            "document": build_degraded_report_document("报告正文").model_dump(mode="json"),
+            "references": _projected(5),
+        }
+        content, attachments = prepare_ai_response_for_storage(ai_response)
+        assert content == "因果分析报告"
+        assert [a["type"] for a in attachments] == ["report_document", "web_search_references"]
+
     def test_creates_web_search_references_attachment(self):
         ai_response = {
             "type": "causal_graph",

@@ -4,6 +4,7 @@ import hashlib
 import queue
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ import app.rag_eval.routes as routes
 import app.rag_eval.isolated_runs as isolated_runs
 from app.rag_eval.dataset_registry import DatasetRevisionConflict
 from Agent.knowledge_base.rag.operation_datasets import benchmark_v2
+from tests.support.authorization import rag_eval_route_authorization
 
 
 class _FakeIsolatedRunManager:
@@ -193,8 +195,12 @@ class IsolatedRagEvalRouteTests(unittest.TestCase):
         self.manager_patch.start()
         self.catalog_patch.start()
         self.dataset_registry_patch.start()
+        self.authorization_stack = ExitStack()
+        for authorization_context in rag_eval_route_authorization():
+            self.authorization_stack.enter_context(authorization_context)
 
     def tearDown(self):
+        self.authorization_stack.close()
         self.catalog_patch.stop()
         self.manager_patch.stop()
         self.dataset_registry_patch.stop()

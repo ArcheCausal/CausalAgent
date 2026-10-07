@@ -2,7 +2,9 @@
 
 文档职责：记录 MySQL 写库、业务读库、复制状态观测、strong/eventual read 和连接池的当前实现。
 
-适用范围：修改 `app/db.py`、账号权限、读写路由、复制回退或连接容量时使用；管理员看板只描述消费结果，内部采集机制见 [`monitoring.md`](monitoring.md)。
+适用范围：修改 `app/db.py`、`config/database_settings.py`、账号权限、读写路由、复制回退或连接容量时使用；管理员看板只描述消费结果，内部采集机制见 [`monitoring.md`](monitoring.md)。
+
+`config/database_settings.py` 是 MySQL 连接层的独立配置边界。`app.db` 只依赖其中的 `DatabaseConfig`/`database_settings`，因此被 `causal-mcp` 导入时不会初始化 `config.settings`，也不会要求 `API_KEY`、`BASE_URL` 或 `MODEL`。`config.settings.AppConfig` 仍保留同名 `MYSQL_*` 字段供 App、Admin、Worker 和 Monitor 的兼容调用方使用，并继续对应用和模型配置 fail-fast。
 
 ## 连接职责
 
@@ -27,7 +29,7 @@ PostgreSQL checkpoint 使用 `CHECKPOINT_POSTGRES_*` 配置，管理员和 monit
 | 路径 | 一致性要求 | 说明 |
 | --- | --- | --- |
 | Job 创建/领取/心跳/状态、事件和输入写入 | 主库事务 | 这是队列、fencing 和 SSE 事件的权威状态 |
-| 用户登录、会话恢复、角色/启用状态和 `auth_version` | strong 主库 | 不能用副本或 Session 缓存完成授权 |
+| 用户登录、会话恢复、启用状态、`auth_version` 和 `user_roles`/`role_permissions` 权限 | strong 主库 | 不能用副本或 Session 缓存完成授权 |
 | Session 列表等允许短暂延迟的普通读取 | eventual，可回退 | 只读且不影响资源归属判断 |
 | Session/Job/File 所有权校验、删除、文件访问计数 | strong/主库事务 | 防止副本延迟造成越权或错误删除 |
 | 管理员列表和在线配置 | strong 主库或共享快照 | 管理员页面不依赖弱一致授权 |

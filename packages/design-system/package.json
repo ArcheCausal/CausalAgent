@@ -1,0 +1,35 @@
+{
+  "name": "@causalagent/design-system",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "description": "CausalAgent 官网与应用端共用的品牌基础和基础组件，以源码形式被各前端引入",
+  "exports": {
+    ".": "./src/index.ts",
+    "./styles.css": "./src/styles/index.css",
+    "./tokens.css": "./src/styles/tokens/index.css",
+    "./base.css": "./src/styles/base.css",
+    "./fonts/*": "./src/fonts/*"
+  },
+  "sideEffects": [
+    "*.css"
+  ],
+  "scripts": {
+    "typecheck": "vue-tsc --noEmit",
+    "test:unit": "vitest run",
+    "check": "npm run typecheck && npm run test:unit"
+  },
+  "peerDependencies": {
+    "vue": ">=3.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "6.0.8",
+    "@vue/test-utils": "2.4.11",
+    "jsdom": "29.1.1",
+    "typescript": "5.9.3",
+    "vite": "8.1.5",
+    "vitest": "4.1.10",
+    "vue": "3.5.40",
+    "vue-tsc": "3.3.8"
+  }
+}

@@ -21,21 +21,10 @@ for key, value in {
 
 
 def _install_import_stubs():
-    """隔离后处理测试不需要的数据库、绘图和向量库依赖。"""
+    """隔离后处理测试不需要的数据库和向量库依赖。"""
     agent_connect = types.ModuleType("Database.agent_connect")
     agent_connect.require_frozen_file_for_job = lambda *args, **kwargs: None
     sys.modules["Database.agent_connect"] = agent_connect
-
-    data_visualize = types.ModuleType("Agent.Processing.data_visualize")
-    data_visualize.generate_visualizations = lambda *args, **kwargs: {}
-    sys.modules["Agent.Processing.data_visualize"] = data_visualize
-
-    query_rag = types.ModuleType("Agent.knowledge_base.query_rag")
-    query_rag.get_rag_excerpt = lambda *args, **kwargs: ""
-    query_rag.format_rag_summary_for_prompt = lambda *args, **kwargs: ""
-    query_rag.get_rag_response = lambda *args, **kwargs: {}
-    sys.modules["Agent.knowledge_base.query_rag"] = query_rag
-
 
 _install_import_stubs()
 

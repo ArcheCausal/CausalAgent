@@ -1,0 +1,45 @@
+/* 标签页
+
+   取自原型 .tabs：胶囊按钮，选中项是灰底加正文色，未选中是次要文字色。 */
+.ca-tabs {
+  display: flex;
+  gap: var(--ca-space-4);
+}
+
+.ca-tabs__tab {
+  padding: 5px 12px;
+  border: 0;
+  border-radius: var(--ca-radius-full);
+  background: transparent;
+  color: var(--ca-text-muted);
+  font-family: inherit;
+  font-size: var(--ca-text-caption);
+  font-weight: var(--ca-weight-regular);
+  line-height: var(--ca-leading-caption);
+  cursor: pointer;
+  transition:
+    background var(--ca-motion-fast) var(--ca-ease-out),
+    color var(--ca-motion-fast) var(--ca-ease-out);
+}
+
+.ca-tabs__tab[aria-selected="true"] {
+  background: var(--ca-surface-muted);
+  color: var(--ca-text-default);
+}
+
+@media (hover: hover) {
+  .ca-tabs__tab:hover {
+    color: var(--ca-text-default);
+  }
+}
+
+.ca-tabs__panel[tabindex]:focus-visible {
+  outline-offset: 3px;
+}
+
+/* 触控设备把可点区域补到 44px，视觉尺寸不变 */
+@media (pointer: coarse) {
+  .ca-tabs__tab {
+    min-height: 44px;
+  }
+}

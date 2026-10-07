@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from typing import Literal, Optional, Any, List, Tuple, Dict
 import logging
 import json
+import re
 import io
 import pandas as pd
 import numpy as np
@@ -21,6 +22,15 @@ from Agent.llm_structured_output import StructuredOutputError, ainvoke_structure
 from .fault_tolerance import (
     RAG_DEGRADATION_SUMMARY,
     build_rag_degradation_result,
+)
+from .analysis_context import (
+    MAX_CONTEXT_QUESTION_CHARS,
+    build_context_index,
+    context_algorithm_summary,
+    context_facts_text,
+    context_graph,
+    index_prompt_view,
+    match_context_hint,
 )
 from observability.logging_runtime import log_event
 
@@ -69,6 +79,12 @@ from Agent.causal_agent.web_search_node import (
 
 # 数据库
 from Database.agent_connect import require_frozen_file_for_job
+from Database.analysis_contexts import (
+    apply_fold_context,
+    create_context_for_new_file,
+    find_user_file_by_name,
+    switch_to_context,
+)
 
 
 def resume_value_to_message_content(value: Any) -> str:
@@ -99,14 +115,73 @@ def llm_prompt_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
         safe_messages.append(message)
     return safe_messages
 
-class RouteQuery(BaseModel):
-    """定义Agent决策的选项。"""
-    route: Literal["postprocess", "fold", "normal_chat","inquiry_answer"] = Field(
-        ...,
-        description="根据用户的对话历史和意图，选择下一步应该走的路径。"
+class AgentIntentDecision(BaseModel):
+    """agent 节点的结构化意图判断。
+
+    模型只表达意图、用户提到的上下文线索和澄清问题；分析上下文 ID、用户文件 ID
+    和最终图路由都由后端根据 State 与数据库解析后写入。
+    """
+
+    intent: Literal[
+        "normal_chat",
+        "start_analysis",
+        "answer_report",
+        "revise_report",
+        "rerun_analysis",
+        "switch_analysis_context",
+        "clarify",
+    ] = Field(..., description="用户在当前这一轮的意图分类。")
+    context_hint: Optional[str] = Field(
+        None,
+        description=(
+            "仅当用户提到某个文件名、报告主题或历史分析时填写，内容必须是用户原话里的"
+            "描述性文字；不要填写编号、ID 或数据库标识。"
+        ),
+    )
+    clarification_question: Optional[str] = Field(
+        None,
+        description="仅当 intent 为 clarify 时填写要反问用户的问题。",
     )
 
-# agentnode节点用于做初步的decision
+
+# 意图到路由的映射由后端固定，模型不能直接决定图路由。
+INTENT_ROUTES: Dict[str, str] = {
+    "normal_chat": "normal_chat",
+    "start_analysis": "fold",
+    "answer_report": "inquiry_answer",
+    "revise_report": "report",
+    "rerun_analysis": "fold",
+    "switch_analysis_context": "context_switch",
+    "clarify": "inquiry_answer",
+}
+
+DEFAULT_CONTEXT_CLARIFICATION = (
+    "我需要先确认您指的是哪一次分析。请说明文件名、目标变量或报告主题，我再继续。"
+)
+
+# 上下文解析失败的固定澄清文案：保证 inquiry_answer 一定能反问用户，
+# 而不是把澄清请求交回模型自由发挥。
+CLARIFICATION_DEFAULTS = {
+    "clarify": DEFAULT_CONTEXT_CLARIFICATION,
+    "inactive_context": "这个历史分析已经不再有效，请重新选择要进行的分析。",
+    "no_match": (
+        "我没有在本次会话里找到匹配的历史分析。请说明文件名、目标变量或报告主题，"
+        "我再继续。"
+    ),
+    "file_not_in_library": (
+        "我按文件名没有在您的文件库里找到这个文件。请先确认上传成功，"
+        "再说一次文件名，或者直接在输入框里选择该文件重新发起分析。"
+    ),
+}
+
+_CSV_NAME_PATTERN = re.compile(r"[\w\-.]+\.csv", flags=re.IGNORECASE)
+
+# 意图判断只需要少量上下文：单条消息和整体都设上限，避免上一轮的长报告或长解释
+# 整段重复进入提示词。
+INTENT_HISTORY_MESSAGE_CHARS = 400
+INTENT_HISTORY_TOTAL_CHARS = 2000
+
+
 def _latest_human_text(state: CausalAgentState) -> str:
     """Return the latest human message content from the graph state."""
     for message in reversed(state.get("messages", [])):
@@ -116,7 +191,52 @@ def _latest_human_text(state: CausalAgentState) -> str:
     return ""
 
 
-def _is_explicit_causal_analysis_request(text: str) -> bool:
+def _recent_history_text(state: CausalAgentState, limit: int = 20) -> str:
+    """把最近的有界聊天历史渲染成单行文本，供意图判断使用。
+
+    每条消息限制长度，整体也限制长度并优先保留最近的对话；超出部分只保留开头，
+    保证意图判断的输入规模稳定。
+    """
+    rendered: list[str] = []
+    for message in list(state.get("messages", []))[-max(1, int(limit)) :]:
+        content = getattr(message, "content", "")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        text = content.strip()
+        if len(text) > INTENT_HISTORY_MESSAGE_CHARS:
+            text = text[:INTENT_HISTORY_MESSAGE_CHARS] + "…"
+        role = "用户" if isinstance(message, HumanMessage) else "助手"
+        rendered.append(f"{role}：{text}")
+    kept: list[str] = []
+    total = 0
+    for line in reversed(rendered):
+        if kept and total + len(line) > INTENT_HISTORY_TOTAL_CHARS:
+            break
+        kept.append(line)
+        total += len(line)
+    return "\n".join(reversed(kept))
+
+
+def _frozen_filename(state: CausalAgentState) -> Optional[str]:
+    """读取当前 Job 冻结文件的文件名。"""
+    file_summary = state.get("file_summary") or {}
+    filename = file_summary.get("filename")
+    return filename if isinstance(filename, str) and filename.strip() else None
+
+
+def _names_other_file(text: str, frozen_filename: Optional[str]) -> bool:
+    """判断消息是否点名了当前 Job 冻结文件之外的其他 CSV 文件。"""
+    for name in _CSV_NAME_PATTERN.findall(text):
+        if frozen_filename and name.casefold() == frozen_filename.casefold():
+            continue
+        return True
+    return False
+
+
+def _is_explicit_causal_analysis_request(
+    text: str,
+    frozen_filename: Optional[str] = None,
+) -> bool:
     """Detect requests that should deterministically enter the causal analysis flow."""
     normalized = text.lower()
     has_data_target = any(token in normalized for token in (".csv", "csv", "pc")) or any(
@@ -130,14 +250,127 @@ def _is_explicit_causal_analysis_request(text: str) -> bool:
         token in text
         for token in ("分析", "执行", "运行", "读取", "处理", "生成报告", "立即", "使用")
     )
-    return has_data_target and has_causal_intent and has_action
+    if not (has_data_target and has_causal_intent and has_action):
+        return False
+    # 点名了另一个文件时必须交给意图模型与上下文切换处理，否则会拿当前 Job 冻结的
+    # 文件去回答另一个文件的问题。
+    return not _names_other_file(text, frozen_filename)
+
+
+def _current_context(state: CausalAgentState) -> dict:
+    """读取当前分析上下文的只读投影。"""
+    context = state.get("analysis_context")
+    return context if isinstance(context, dict) else {}
+
+
+def _has_available_report(state: CausalAgentState) -> bool:
+    """判断当前 Job 是否已有可回答的报告事实。"""
+    if _report_document_from_state(state) is not None:
+        return True
+    context = _current_context(state)
+    return bool(context.get("latest_report_message_id") or context.get("latest_report_title"))
+
+
+def _coerce_agent_decision(value: Any) -> Optional[AgentIntentDecision]:
+    """把 State 里的字典还原为结构化意图；非法内容按缺失处理。"""
+    if isinstance(value, AgentIntentDecision):
+        return value
+    if not isinstance(value, dict):
+        return None
+    try:
+        return AgentIntentDecision.model_validate(value)
+    except Exception:
+        return None
+
+
+def _clarification_question(state: CausalAgentState) -> Optional[str]:
+    """读取本轮需要反问用户的问题，优先使用上下文解析的结果。"""
+    for source in (state.get("context_resolution"), state.get("agent_decision")):
+        if not isinstance(source, dict):
+            continue
+        question = source.get("clarification_question")
+        if isinstance(question, str) and question.strip():
+            return question.strip()
+    return None
+
+
+def _resolve_agent_route(
+    state: CausalAgentState,
+    decision: Optional[AgentIntentDecision],
+    *,
+    has_report: bool,
+) -> tuple[str, str, Optional[str]]:
+    """把结构化意图映射为后端路由，返回路由、报告模式和澄清问题。"""
+    if decision is None:
+        return "normal_chat", "normal_generation", None
+    intent = decision.intent
+    if intent == "clarify":
+        question = (decision.clarification_question or "").strip()
+        return (
+            "inquiry_answer",
+            "normal_generation",
+            question or DEFAULT_CONTEXT_CLARIFICATION,
+        )
+    if intent in {"answer_report", "revise_report"} and not has_report:
+        # 没有可引用的报告时不能进入报告回答或报告修订。
+        _log_node_degradation("missing_report_context", "normal_chat")
+        return "normal_chat", "normal_generation", None
+    if intent == "revise_report":
+        return "report", "full_regeneration_from_context", None
+    if intent == "switch_analysis_context":
+        return "context_switch", "normal_generation", None
+    if intent == "rerun_analysis":
+        hint = (decision.context_hint or "").strip()
+        route = "context_switch" if hint else "fold"
+        return route, "normal_generation", None
+    if intent == "start_analysis":
+        return "fold", "normal_generation", None
+    return INTENT_ROUTES.get(intent, "normal_chat"), "normal_generation", None
+
+
+AGENT_INTENT_PROMPT = """
+            你是一个专业的AI助手路由中枢，负责判断用户在当前这一轮想做什么。
+            你只输出意图、上下文线索和必要的澄清问题；具体走哪个图节点、使用哪个
+            分析上下文，都由后端根据你的意图和系统状态决定。
+
+            # 用户这一轮的消息
+            {messages}
+
+            # 最近对话历史
+            {recent_history}
+
+            # 当前状态
+            - 本轮是否已经拿到可用的分析结果：{has_tool_results}
+            - 当前是否已有可回答的报告：{has_report}
+
+            # 当前分析上下文
+            {context_summary}
+
+            # 同一会话里的历史分析
+            {context_index}
+
+            # 可选意图（只能选一个）
+            1. start_analysis：用户要求对数据做新的因果分析。
+            2. answer_report：用户针对已有报告或已有分析结果提问。
+            3. revise_report：用户要求修改或重写已有报告。
+            4. rerun_analysis：用户要求重新执行分析，或换参数重跑。
+            5. switch_analysis_context：用户想回到另一个文件或另一次历史分析。
+            6. normal_chat：与因果分析无关的普通对话。
+            7. clarify：信息不足以判断用户指哪一次分析，需要反问用户。
+
+            # 输出要求
+            - 只按 AgentIntentDecision 的结构返回 JSON，不要包含 Markdown 或解释文字。
+            - context_hint 只在用户提到文件名、报告主题或历史分析时填写，必须使用用户
+              原话里的描述性文字。
+            - 不要输出任何编号、ID、文件主键或数据库字段。
+            - clarification_question 只在 intent 为 clarify 时填写，其他情况留空。
+            """
 
 
 async def agent_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
-
     """
-    Agent节点，是图的起点，用于判断是否需要进入causal循环，
-    根据当前状态强制LLM做出四选一的决策，然后将该决策转化为消息。
+    Agent 节点是图的起点：先用确定性规则处理明确的失败与明确的分析请求，
+    再用一次结构化调用判断意图，最后由后端把意图映射为图路由。
     """
     causal_analysis_result = state.get('causal_analysis_result') or {}
     if causal_analysis_result and causal_analysis_result.get("success") is False:
@@ -156,69 +389,455 @@ async def agent_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
     has_tool_results = causal_analysis_result.get("success") is True
 
     latest_human_text = _latest_human_text(state)
-    if not has_tool_results and _is_explicit_causal_analysis_request(latest_human_text):
+    if not has_tool_results and _is_explicit_causal_analysis_request(
+        latest_human_text,
+        _frozen_filename(state),
+    ):
         response_message = AIMessage(content="决策：信息不全，启动文件加载模块。", name="agent")
-        return {"messages": [response_message], "route_decision": "fold"}
-    agent_prompt = """
-            你是一个专业的AI助手路由中枢。你的任务是根据用户的对话历史和当前状态，决定下一步的最佳路径。
-            
-            # 用户需求或者对话历史:{messages}
-            # 当前状态摘要:
-            - 是否已获得分析工具的结果: {has_tool_results}
-            - 是否已获取到了最终的报告：{final_report}
+        return {
+            "messages": [response_message],
+            "route_decision": "fold",
+            "agent_decision": {"intent": "start_analysis"},
+            "report_revision_mode": "normal_generation",
+        }
 
-            # 你的决策选项:
-            1. `postprocess`: 如果已经获得了因果分析结果 ({has_tool_results} is True)，可以选择此路径以进入后处理模块。
-            2. `fold`: 如果用户想要进行因果分析 (例如，对话中提到“分析”、“处理数据”或与“因果推断”相关的用语)，但我们还没有分析结果 ({has_tool_results} is False)，选择此路径以启动文件加载模块。
-            3. `normal_chat`: 如果用户的提问只是一个与因果领域不相关的消息，不需要调用任何复杂的因果分析工具，选择此路径。
-            4. `inquiry_answer`: 如果已经获取到了最终的报告（{final_report} is not None），选择此路径以直接根据报告回答用户的问题。
-            
-            请根据下面的对话历史，做出你的选择。
-            你必须按照RouteQuery返回一个只包含 "route" 键的 JSON 对象格式来返回你的决策。
-            **绝对不要**在你的回复中包含任何Markdown格式（例如 ```json ... ```）。
-            例如:
-            {{
-                "route": "postprocess"
-            }}
-            """
-    # 构建引导LLM决策的Prompt 
+    has_report = _has_available_report(state)
+    context = _current_context(state)
     prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", agent_prompt),
-            ("human", "请根据上述指示生成路径。"),
+            ("system", AGENT_INTENT_PROMPT),
+            ("human", "请根据上述指示判断意图。"),
         ]
     )
-    
+    decision: Optional[AgentIntentDecision] = None
     try:
-        structured_response = await ainvoke_structured(
+        decision = await ainvoke_structured(
             llm=llm,
-            schema=RouteQuery,
+            schema=AgentIntentDecision,
             prompt=prompt,
             inputs={
                 "messages": latest_human_text,
+                "recent_history": _recent_history_text(state),
                 "has_tool_results": has_tool_results,
-                "final_report": state.get("final_report", None)
+                "has_report": has_report,
+                "context_summary": context_facts_text(context) if context else "当前没有已保存的分析上下文。",
+                "context_index": index_prompt_view(state.get("analysis_context_index"))
+                or "没有其他历史分析。",
             },
             node_name="agent",
         )
-        route_decision = structured_response.route
-
     except StructuredOutputError:
         _log_node_degradation("structured_output_error", "normal_chat")
-        route_decision = "normal_chat"
 
-    # 根据LLM的结构化决策，生成用于路由的消息 
-    if route_decision == 'postprocess':
-        response_message = AIMessage(content="决策：信息完备，进入后处理模块。", name="agent")
-    elif route_decision == 'fold':
-        response_message = AIMessage(content="决策：信息不全，启动文件加载模块。", name="agent")
-    elif route_decision == 'inquiry_answer':
-        response_message = AIMessage(content="决策：报告已获取，进入根据报告追问模块。", name="agent")
-    else: # 'normal_chat'
+    route_decision, revision_mode, _clarification = _resolve_agent_route(
+        state,
+        decision,
+        has_report=has_report,
+    )
+
+    # 根据后端映射出的路由生成用于审计的展示消息。
+    if route_decision == "fold":
+        response_message = AIMessage(content="决策：进入因果分析流程。", name="agent")
+    elif route_decision == "report":
+        response_message = AIMessage(content="决策：按当前分析上下文重新生成报告。", name="agent")
+    elif route_decision == "inquiry_answer":
+        response_message = AIMessage(content="决策：根据当前分析上下文回答。", name="agent")
+    elif route_decision == "context_switch":
+        response_message = AIMessage(content="决策：切换分析上下文。", name="agent")
+    else:  # 'normal_chat'
         response_message = AIMessage(content="决策：普通问答。", name="agent")
 
-    # 只返回新消息，不修改 state["messages"]
-    return {"messages": [response_message], "route_decision": route_decision}
+    update: dict = {
+        "messages": [response_message],
+        "route_decision": route_decision,
+        "report_revision_mode": revision_mode,
+    }
+    if decision is not None:
+        decision_dump = decision.model_dump()
+        if _clarification:
+            # 模型只给意图而没写澄清问题时，用后端默认问题补齐，
+            # 保证 inquiry_answer 真的反问用户而不是当成普通追问。
+            decision_dump["clarification_question"] = _clarification
+        update["agent_decision"] = decision_dump
+    return update
+
+
+def _apply_frozen_input(runtime: Any, snapshot: Optional[dict]) -> None:
+    """把服务端刚提交的冻结文件快照同步到本次 invocation 的输入引用。"""
+    if not snapshot:
+        return
+    identity = getattr(getattr(runtime, "context", None), "trusted_identity", None)
+    frozen_input = getattr(identity, "frozen_input", None)
+    if frozen_input is None:
+        return
+    frozen_input.apply_snapshot(
+        user_file_id=snapshot.get("input_user_file_id"),
+        object_id=snapshot.get("input_object_id"),
+        content_hash=snapshot.get("input_file_hash"),
+        filename=snapshot.get("input_filename"),
+    )
+
+
+def _context_projection(context_row: dict) -> dict:
+    """把上下文行投影成可写入 State 的只读视图。"""
+    keys = (
+        "analysis_context_id",
+        "filename",
+        "target",
+        "treatment",
+        "analysis_question",
+        "latest_algorithm_summary",
+        "latest_rag_evidence",
+        "latest_web_evidence",
+        "latest_report_message_id",
+        "latest_report_id",
+        "latest_report_title",
+        "updated_at",
+    )
+    return {
+        key: context_row[key]
+        for key in keys
+        if context_row.get(key) is not None
+    }
+
+
+def _context_has_confirmed_facts(context_row: dict) -> bool:
+    """判断上下文是否已经有可以复用的分析结论或报告。"""
+    return bool(
+        context_row.get("latest_algorithm_summary")
+        or context_row.get("latest_report_message_id")
+        or context_row.get("latest_report_title")
+    )
+
+
+def _switch_followup_route(*, intent: Optional[str], context_row: dict) -> str:
+    """按原意图和目标上下文的事实决定切换之后的下一步。"""
+    if intent == "rerun_analysis":
+        return "fold"
+    if _context_has_confirmed_facts(context_row):
+        return "inquiry_answer"
+    return "fold"
+
+
+def _context_candidates_text(candidates: list) -> str:
+    """把歧义候选渲染成一条可读清单。"""
+    lines = []
+    for entry in candidates:
+        if not isinstance(entry, dict):
+            continue
+        parts = [str(entry.get("filename") or "未记录")]
+        if entry.get("target"):
+            parts.append(f"目标变量 {entry['target']}")
+        if entry.get("treatment"):
+            parts.append(f"处理变量 {entry['treatment']}")
+        if entry.get("latest_report_title"):
+            parts.append(f"报告 {entry['latest_report_title']}")
+        lines.append("、".join(parts))
+    return "\n".join(f"- {line}" for line in lines)
+
+
+def _rebuild_context_index(
+    previous_index: Any,
+    previous_context: Any,
+    switched_to_id: Optional[str],
+    *,
+    limit: int = 8,
+) -> list:
+    """切换后用内存中的旧索引与旧当前上下文重建历史索引，不额外读库。"""
+    entries: list = []
+    if isinstance(previous_context, dict) and previous_context.get("analysis_context_id"):
+        entries.extend(build_context_index([previous_context]))
+    if isinstance(previous_index, list):
+        entries.extend(entry for entry in previous_index if isinstance(entry, dict))
+    unique: list = []
+    seen: set = set()
+    for entry in entries:
+        context_id = entry.get("analysis_context_id")
+        if not context_id or context_id in seen or context_id == switched_to_id:
+            continue
+        seen.add(context_id)
+        unique.append(entry)
+    return unique[: max(0, int(limit))]
+
+
+def _switched_context_state(
+    *,
+    context_row: dict,
+    previous_context: Any,
+    previous_index: Any,
+    file_snapshot: Optional[dict],
+    route: str,
+    resolution: dict,
+) -> dict:
+    """构造切换成功后的状态更新，只保留目标上下文确认过的事实。"""
+    projection = _context_projection(context_row)
+    update: dict = {
+        "analysis_context": projection,
+        "analysis_context_index": _rebuild_context_index(
+            previous_index,
+            previous_context,
+            projection.get("analysis_context_id"),
+        ),
+        "context_resolution": resolution,
+        "route_decision": route,
+        "report_revision_mode": "normal_generation",
+        "messages": [
+            AIMessage(content="决策：已切换分析上下文。", name="context_switch")
+        ],
+        "analysis_parameters": None,
+        "causal_analysis_result": None,
+        "knowledge_base_result": None,
+        "web_search_result": None,
+        "postprocess_result": None,
+        "preprocess_summary": None,
+        "chart_assets": None,
+        "report_document": None,
+        "deep_agent_algorithm_results": {},
+        "deep_agent_action_ledger": {},
+        "deep_agent_rag_evidence": {},
+        "deep_agent_web_evidence": {},
+        "deep_agent_decision": None,
+        "deep_agent_structured_response": None,
+        "deep_agent_retry_instruction": "",
+        "finalization_retry_count": 0,
+        "finalization_status": None,
+        "finalization_error": None,
+    }
+    if file_snapshot:
+        update["file_summary"] = {
+            "user_file_id": file_snapshot.get("input_user_file_id"),
+            "object_id": file_snapshot.get("input_object_id"),
+            "file_hash": file_snapshot.get("input_file_hash"),
+            "filename": file_snapshot.get("input_filename"),
+        }
+    return update
+
+
+def _clarification_update(
+    *,
+    question: Optional[str],
+    status: str,
+    details: Optional[dict] = None,
+) -> dict:
+    """构造回到澄清回答的状态更新；不修改 active 分析上下文。"""
+    resolution: dict = {
+        "status": status,
+        "clarification_question": (
+            question
+            or CLARIFICATION_DEFAULTS.get(status)
+            or DEFAULT_CONTEXT_CLARIFICATION
+        ),
+    }
+    if details:
+        resolution.update(details)
+    return {
+        "messages": [
+            AIMessage(content="决策：需要先向用户澄清分析上下文。", name="context_switch")
+        ],
+        "route_decision": "inquiry_answer",
+        "context_resolution": resolution,
+    }
+
+
+def _extract_filename_hint(hint: Any) -> Optional[str]:
+    """从用户描述里取出疑似文件名。"""
+    text = hint if isinstance(hint, str) else ""
+    match = _CSV_NAME_PATTERN.search(text)
+    return match.group(0) if match else None
+
+
+async def context_switch_node(
+    state: CausalAgentState,
+    *,
+    runtime: Any,
+    config: Any = None,
+) -> dict:
+    """解析用户提到的历史分析或文件，并切换 Session 默认分析上下文。
+
+    唯一命中才切换；多个命中、文件缺失、没有命中都会回到澄清问题，并且在用户确认前
+    不修改 active_analysis_context_id。切换由带 Job fencing 的服务函数在一个事务里
+    完成，节点重复执行得到同一个结果。
+    """
+    run_context = getattr(runtime, "context", None)
+    identity = getattr(run_context, "trusted_identity", None)
+    decision = state.get("agent_decision")
+    decision_dict = decision if isinstance(decision, dict) else {}
+    hint = decision_dict.get("context_hint")
+    intent = decision_dict.get("intent")
+    if identity is None:
+        _log_node_degradation("missing_trusted_identity", "clarify")
+        return _clarification_update(question=None, status="clarify")
+
+    user_id = int(identity.user_id)
+    session_id = str(identity.session_id)
+    previous_context = state.get("analysis_context")
+    previous_index = state.get("analysis_context_index")
+    candidates = match_context_hint(hint, previous_index)
+    # 目标可能就是当前上下文：用户没有点名别处，或点名的就是当前上下文时，
+    # 不新建上下文，但需要确认当前 Job 的冻结输入与这个上下文一致。
+    hint_text = hint.strip() if isinstance(hint, str) else ""
+    current_context = previous_context if isinstance(previous_context, dict) else {}
+    current_entry = (
+        build_context_index([current_context])[0]
+        if current_context.get("analysis_context_id")
+        else {}
+    )
+    targets_current = bool(current_entry) and (
+        (not hint_text and intent == "rerun_analysis")
+        or bool(hint_text and match_context_hint(hint_text, [current_entry]))
+    )
+    if not candidates and targets_current:
+        candidates = [current_entry]
+    if len(candidates) > 1:
+        return _clarification_update(
+            question=(
+                "同一份文件下存在多个分析，我不确定您指哪一次：\n"
+                f"{_context_candidates_text(candidates)}\n"
+                "请说明目标变量或报告标题，我再继续。"
+            ),
+            status="ambiguous_context",
+            details={"candidate_count": len(candidates)},
+        )
+    if len(candidates) == 1:
+        target_context_id = str(candidates[0].get("analysis_context_id") or "")
+        if not target_context_id:
+            return _clarification_update(question=None, status="clarify")
+        result = await asyncio.to_thread(
+            switch_to_context,
+            user_id=user_id,
+            session_id=session_id,
+            job_id=str(identity.job_id),
+            worker_id=identity.worker_id,
+            attempt_count=int(identity.attempt_count),
+            lease_epoch=int(identity.lease_epoch),
+            context_id=target_context_id,
+        )
+        status = result.get("status")
+        if status == "switched":
+            context_row = result["context"]
+            _apply_frozen_input(runtime, result.get("file_snapshot"))
+            route = _switch_followup_route(intent=intent, context_row=context_row)
+            return _switched_context_state(
+                context_row=context_row,
+                previous_context=previous_context,
+                previous_index=previous_index,
+                file_snapshot=result.get("file_snapshot"),
+                route=route,
+                resolution={
+                    "status": "switched",
+                    "analysis_context_id": target_context_id,
+                    "file_changed": bool(result.get("file_changed")),
+                    "followup_route": route,
+                },
+            )
+        if status == "file_missing":
+            return _clarification_update(
+                question=(
+                    "这次历史分析对应的文件已经不在您的文件库里，我无法继续使用它。"
+                    "请重新上传该文件后再发起分析。"
+                ),
+                status="file_missing",
+            )
+        return _clarification_update(question=None, status="inactive_context")
+
+    filename = _extract_filename_hint(hint)
+    if filename:
+        files = await asyncio.to_thread(find_user_file_by_name, user_id, filename)
+        if len(files) == 1:
+            result = await asyncio.to_thread(
+                create_context_for_new_file,
+                user_id=user_id,
+                session_id=session_id,
+                job_id=str(identity.job_id),
+                worker_id=identity.worker_id,
+                attempt_count=int(identity.attempt_count),
+                lease_epoch=int(identity.lease_epoch),
+                user_file_id=int(files[0]["user_file_id"]),
+            )
+            if result.get("status") in {"created", "reused"}:
+                _apply_frozen_input(runtime, result.get("file_snapshot"))
+                return _switched_context_state(
+                    context_row=(
+                        result.get("context")
+                        or {
+                            "analysis_context_id": result["analysis_context_id"],
+                            "filename": (result.get("file_snapshot") or {}).get(
+                                "input_filename"
+                            ),
+                        }
+                    ),
+                    previous_context=previous_context,
+                    previous_index=previous_index,
+                    file_snapshot=result.get("file_snapshot"),
+                    route="fold",
+                    resolution={
+                        "status": result.get("status"),
+                        "analysis_context_id": result["analysis_context_id"],
+                        "followup_route": "fold",
+                    },
+                )
+        if len(files) > 1:
+            return _clarification_update(
+                question=(
+                    f"您的文件库里有多个名为 {filename} 的文件，请说明要使用哪一个。"
+                ),
+                status="ambiguous_file",
+                details={"candidate_count": len(files)},
+            )
+        if not files:
+            return _clarification_update(
+                question=None,
+                status="file_not_in_library",
+                details={"filename": filename},
+            )
+    return _clarification_update(question=None, status="no_match")
+
+async def _bind_analysis_context(
+    state: CausalAgentState,
+    runtime: Any,
+    *,
+    target: Optional[str],
+    treatment: Optional[str],
+) -> dict:
+    """fold 确定参数后把 Job 绑定到正确的分析上下文。
+
+    绑定上下文还没有参数时回填；参数与绑定上下文不同时优先复用同一文件上参数一致的
+    历史上下文，没有才新建并切换 active 指针。没有可信 Job 身份时不做任何写入。
+    """
+    identity = getattr(getattr(runtime, "context", None), "trusted_identity", None)
+    if identity is None:
+        return {}
+    question = _latest_human_text(state).strip()
+    result = await asyncio.to_thread(
+        apply_fold_context,
+        user_id=int(identity.user_id),
+        session_id=str(identity.session_id),
+        job_id=str(identity.job_id),
+        worker_id=identity.worker_id,
+        attempt_count=int(identity.attempt_count),
+        lease_epoch=int(identity.lease_epoch),
+        target=target,
+        treatment=treatment,
+        analysis_question=question[:MAX_CONTEXT_QUESTION_CHARS] or None,
+    )
+    if not result:
+        return {}
+    update: dict = {
+        "context_resolution": {
+            "status": "fold_bound",
+            "analysis_context_id": result.get("analysis_context_id"),
+            "action": result.get("action"),
+        },
+        "analysis_context_index": _rebuild_context_index(
+            state.get("analysis_context_index"),
+            state.get("analysis_context"),
+            result.get("analysis_context_id"),
+        ),
+    }
+    context = result.get("context")
+    if isinstance(context, dict):
+        update["analysis_context"] = context
+    return update
 
 class foldQuery(BaseModel):
     """只从用户对话中提取因果分析所需的关键参数。"""
@@ -234,7 +853,21 @@ class foldQuery(BaseModel):
 ## fold节点用到的函数
 from Agent.Processing.fold_processing import get_data_summary
 from Agent.Processing.fold_verify import validate_analysis
-from Agent.Processing.data_visualize import generate_visualizations
+from Agent.Processing.nonlinearity import measure_nonlinearity
+from Agent.Report.assets import (
+    build_causal_graph_model,
+    build_chart_assets,
+    build_report_resources,
+    coerce_chart_assets,
+    describe_chart_asset,
+)
+from Agent.Report.document import (
+    ChartAsset,
+    ReportDraft,
+    ReportDocument,
+    build_report_document,
+    report_document_summary,
+)
 
 
 FILE_LOAD_INTERRUPT_MESSAGE = (
@@ -252,7 +885,12 @@ def _normalize_optional_llm_text(value: str | None) -> str | None:
     return value
 
 
-async def fold_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
+async def fold_node(
+    state: CausalAgentState,
+    llm: ChatOpenAI,
+    *,
+    runtime: Any = None,
+) -> dict:
     """
     文件加载、解析与验证节点。
     1.  使用LLM从对话中提取目标和处理变量。
@@ -355,6 +993,11 @@ async def fold_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         return {"messages": [new_message], "fold_decision": "agent"}
 
     state['analysis_parameters'] = data_summary
+    # 刻意放在上面的 try 块之外：那块抛异常会走 interrupt() 挂起等用户输入。
+    # measure_nonlinearity 内部全兜、绝不抛异常，但仍不放进那条路径。
+    state['analysis_parameters']['nonlinearity'] = measure_nonlinearity(
+        df, state['analysis_parameters']
+    )
     file_summary = {
         "user_file_id": input_user_file_id,
         "object_id": input_object_id,
@@ -387,12 +1030,23 @@ async def fold_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
             recommend_message = AIMessage(content=f"决策：信息完备，进入预处理节点。提示：\n- {recommends}")
             new_messages.append(recommend_message)
         
-        return {"messages": new_messages, 
-                "analysis_parameters": state['analysis_parameters'], 
+        update = {"messages": new_messages,
+                "analysis_parameters": state['analysis_parameters'],
                 "file_summary": file_summary,
                 "tool_call_request": False,
                 "fold_decision": "preprocess",
                 }
+        # 参数确定后再把 Job 绑定到正确的分析上下文；同一文件、不同目标变量
+        # 会得到不同的上下文，而不是覆盖历史上下文。
+        update.update(
+            await _bind_analysis_context(
+                state,
+                runtime,
+                target=target,
+                treatment=treatment,
+            )
+        )
+        return update
     
     else:
         # 对于issue中有存在变量缺失的情况的，进行修正询问，对于数据有问题，进行数据补充询问
@@ -434,8 +1088,8 @@ async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
     """
     项目预处理模块:
     1.  从状态(state)中加载 DataFrame 和数据摘要。
-    2.  调用 `generate_visualizations` 生成数据图表。
-        - 如果缺少可视化库 (seaborn, matplotlib)，会跳过此步并向用户发出警告。
+    2.  调用 `build_chart_assets` 生成结构化图表资源。
+        - 图表资源生成失败时会跳过此步并记录日志，不阻断后续流程。
     3.  调用 LLM 对数据摘要进行自然语言总结。
     4.  将图表和总结存入状态，然后直接进入下一步。
     """
@@ -464,19 +1118,20 @@ async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         pd.read_csv,
         io.BytesIO(file_row["file_content"]),
     )
-    # 生成可视化图表 
-    visualizations = {}
+    # 生成结构化图表资源
     try:
-        visualizations = await asyncio.to_thread(generate_visualizations, df, analysis_parameters)
-        state["visualizations"] = visualizations
+        chart_assets = await asyncio.to_thread(build_chart_assets, df, analysis_parameters)
+        state["chart_assets"] = {
+            asset_key: asset.model_dump(mode="json")
+            for asset_key, asset in chart_assets.items()
+        }
     except Exception:
         _log_node_degradation(
-            "visualization_error",
-            "skip_visualization",
+            "chart_asset_error",
+            "skip_chart_assets",
             exc_info=True,
         )
-        # 可视化失败不阻断流程，记录日志即可
-        # 不需要添加消息到state，继续执行后续步骤
+        # 图表资源生成失败不阻断流程，记录日志后继续执行后续步骤
     
     # 3. 调用LLM进行自然语言总结
     prompt = ChatPromptTemplate.from_messages(
@@ -495,6 +1150,7 @@ async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
             2.  **目标变量和处理变量的摘录**: 对输入数据中的“target”和“treatment”进行摘取，并告知用户目前处理的变量是这两个变量。
             3.  **风险提示**: 提及数据中存在的潜在问题，例如高缺失值列、常数列、高基数分类变量或疑似ID列。
             4.  **结论**: 给出一个总体评价，说明数据是否已准备好进行下一步的因果分析。
+            5.  **线性/非线性说明**: 根据 `nonlinearity` 字段说明变量间关系以线性还是非线性机制为主及强度；`verdict` 为 `linear` 只表示未检出显著非线性结构，不等于确定线性；`verdict` 为 `insufficient` 时说明本次未能评估。
 
             请使用清晰、专业的语言，让非技术人员也能理解数据的基本状况。
             """),
@@ -521,7 +1177,7 @@ async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
     return {
         "messages": [summary_message],
         "preprocess_summary": state["preprocess_summary"],
-        "visualizations": state.get("visualizations", {})
+        "chart_assets": state.get("chart_assets", {}),
     }
 
 
@@ -1238,9 +1894,6 @@ async def postprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         }
 
 ## 调用元数据
-from Agent.Report.Metadata_sum import metadata_summary, metadata_mapping
-
-
 def _causal_method_context_for_report(analysis_result: Dict[str, Any]) -> str:
     """为报告节点生成算法专用解释边界。"""
     if not isinstance(analysis_result, dict):
@@ -1279,27 +1932,251 @@ def _causal_method_context_for_report(analysis_result: Dict[str, Any]) -> str:
     )
 
 
+def _report_language_instruction() -> str:
+    """返回报告语言优先级，交由模型按用户请求决定具体语言。"""
+
+    return (
+        "报告输出语言规则（按优先级）：用户明确指定报告语言时，严格使用该语言；"
+        "未指定时，使用用户当前请求的主要语言；无法判断时默认使用中文。"
+        "不要因为系统提示、知识库、工具结果或变量名的语言改变报告语言。"
+    )
+
+
+REPORT_GRAPH_ASSET_KEY = "graph_main"
+
+
+def _report_revision_instruction(regeneration: bool) -> str:
+    """按报告模式给出受控说明：修订只能复用当前上下文已确认的事实。"""
+    if not regeneration:
+        return "本次是首次生成报告，请根据当前分析结果完整撰写。"
+    return (
+        "本次是按当前分析上下文重新生成完整报告。只能使用上面列出的当前分析上下文事实"
+        "（文件、分析参数、算法结果、因果边和检索证据）；不得修改算法图，不得新增上下文"
+        "中没有的因果结论、数值或数据；上下文没有图表资源时不要生成 chart 块。"
+    )
+
+
+def _report_graph_asset(state: CausalAgentState):
+    """选择报告使用的因果图资源：优先采用通过校验的修订图，否则回退原始算法图。"""
+    analysis_result = state.get("causal_analysis_result")
+    if not isinstance(analysis_result, dict) or not analysis_result.get("success"):
+        # 报告修订只使用当前分析上下文里已经确认的规范化图。
+        context = _current_context(state)
+        graph_data = context_graph(context)
+        if graph_data is None:
+            return None
+        summary = context_algorithm_summary(context) or {}
+        return build_causal_graph_model(
+            graph_data,
+            graph_id=REPORT_GRAPH_ASSET_KEY,
+            algorithm=str(summary.get("algorithm") or ""),
+            graph_source="analysis_context",
+        )
+    postprocess_result = state.get("postprocess_result") or {}
+    revised_graph = postprocess_result.get("revised_graph")
+    has_valid_revised_graph = (
+        isinstance(revised_graph, dict)
+        and isinstance(revised_graph.get("nodes"), list)
+        and isinstance(revised_graph.get("edges"), list)
+        and not postprocess_result.get("error")
+    )
+    selected_graph = (
+        revised_graph if has_valid_revised_graph else analysis_result.get("data")
+    )
+    algorithm = analysis_result.get("algorithm")
+    return build_causal_graph_model(
+        selected_graph,
+        graph_id=REPORT_GRAPH_ASSET_KEY,
+        algorithm=str(algorithm) if algorithm else "",
+        graph_source="postprocessed" if has_valid_revised_graph else "original",
+        revision_summary=str(postprocess_result.get("revision_summary") or ""),
+    )
+
+
+def _prompt_json(value: Any) -> str:
+    """把结构化提示词输入渲染成稳定的 JSON 文本。
+
+    ChatPromptTemplate 对字典和列表只做 str()，会得到单引号、None 和无缩进的 Python
+    字面量；这里统一转成 JSON，和预处理节点的 data_summary 写法保持一致。
+    """
+
+    return json.dumps(value, ensure_ascii=False, indent=2)
+
+
+_REPORT_METADATA_COLUMN_FIELDS = (
+    "inferred_type",
+    "unique_count",
+    "is_constant",
+    "missing_ratio",
+    "causal_suitability",
+    "possible_id",
+    "stats",
+    "issues",
+)
+
+_REPORT_METADATA_QUALITY_FIELDS = (
+    "total_missing_ratio",
+    "constant_columns",
+    "high_missing_columns",
+)
+
+
+def _report_metadata_for_prompt(analysis_parameters: Any) -> str:
+    """给报告模型的数据概览：规模、列清单和每列的类型与质量标记。
+
+    只保留报告需要的事实，去掉 ``value_counts`` 等取值分布，使提示词长度随列数线性
+    增长而不是随每列的取值数量增长。
+    """
+
+    params = analysis_parameters if isinstance(analysis_parameters, dict) else {}
+    column_profiles = params.get("column_profiles")
+    columns = [str(column) for column in (params.get("columns") or [])]
+    if not columns and isinstance(column_profiles, dict):
+        columns = [str(column) for column in column_profiles]
+
+    profiles: dict[str, dict] = {}
+    if isinstance(column_profiles, dict):
+        for column, profile in column_profiles.items():
+            if not isinstance(profile, dict):
+                continue
+            profiles[str(column)] = {
+                field: profile[field]
+                for field in _REPORT_METADATA_COLUMN_FIELDS
+                if field in profile
+            }
+
+    quality = params.get("quality_assessment")
+    quality_summary: dict[str, Any] = {}
+    if isinstance(quality, dict):
+        quality_summary = {
+            field: quality[field]
+            for field in _REPORT_METADATA_QUALITY_FIELDS
+            if field in quality
+        }
+
+    return _prompt_json({
+        "n_rows": params.get("n_rows"),
+        "n_cols": params.get("n_cols", len(columns) or None),
+        "columns": columns,
+        "column_profiles": profiles,
+        "quality_assessment": quality_summary,
+    })
+
+
+def _report_asset_manifest(assets: dict[str, Any]) -> list[dict[str, str]]:
+    """给模型看的资源清单：只有资源键、块类型和简短描述，不含数据点。"""
+    manifest: list[dict[str, str]] = []
+    for asset_key, asset in assets.items():
+        if isinstance(asset, ChartAsset):
+            manifest.append(
+                {
+                    "asset_key": asset_key,
+                    "block_type": "chart",
+                    "description": describe_chart_asset(asset),
+                }
+            )
+            continue
+        algorithm = asset.metadata.get("algorithm") or "未知算法"
+        graph_source = asset.metadata.get("graph_source") or "original"
+        manifest.append(
+            {
+                "asset_key": asset_key,
+                "block_type": "causal_graph",
+                "description": f"因果图（算法 {algorithm}，来源 {graph_source}）",
+            }
+        )
+    return manifest
+
+
+def _report_evidence_manifest(evidence_refs: list[Any]) -> list[dict[str, str]]:
+    """给模型看的证据清单：只有证据 ID 和简短描述。"""
+    return [
+        {"evidence_id": evidence.evidence_id, "description": evidence.description}
+        for evidence in evidence_refs
+    ]
+
+
+def _report_document_from_state(state: CausalAgentState):
+    """从 State 读取结构化报告文档；缺失或类型不符时返回 None。"""
+    document = state.get("report_document")
+    return document if isinstance(document, ReportDocument) else None
+
+
+def _report_followup_context(state: CausalAgentState) -> dict[str, str]:
+    """报告追问只使用摘要、资源和证据说明，不把图表数据和图模型塞进提示词。"""
+    document = _report_document_from_state(state)
+    if document is None:
+        context = _current_context(state)
+        return {
+            "report_summary": context_facts_text(context) if context else "",
+            "asset_notes": "",
+            "source_notes": "",
+            "evidence_notes": "",
+        }
+    asset_notes: list[str] = []
+    for asset_key, asset in document.assets.items():
+        if isinstance(asset, ChartAsset):
+            asset_notes.append(f"- {asset_key}: {describe_chart_asset(asset)}")
+        else:
+            algorithm = asset.metadata.get("algorithm") or "未知算法"
+            asset_notes.append(f"- {asset_key}: 因果图（算法 {algorithm}）")
+    source_notes = [
+        f"- {source.source_id}: {source.kind} {source.title}"
+        + (f" {source.url}" if source.url else "")
+        for source in document.sources
+    ]
+    evidence_notes = [
+        f"- {evidence.evidence_id}: {evidence.description}"
+        for evidence in document.evidence_refs
+    ]
+    return {
+        "report_summary": report_document_summary(document),
+        "asset_notes": "\n".join(asset_notes),
+        "source_notes": "\n".join(source_notes),
+        "evidence_notes": "\n".join(evidence_notes),
+    }
+
+
 async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
+    """报告模块：生成结构化报告文档。
+
+    模型只产出 ReportDraft（报告标题、块结构、Markdown 文本和资源/证据引用）；
+    图表资源、因果图模型、来源和证据全部由后端注入并校验。资源引用、块 ID 或
+    证据引用非法时抛出 ReportSchemaError，进入图节点受控错误路径，不保存部分报告。
     """
-    报告模块：
-    主要是对所有的参数生成一份报告
-    
-    """
-    # 分离 system prompt 和 messages placeholder
-    system_prompt_template = (
-        """
+    chart_assets = coerce_chart_assets(state.get("chart_assets"))
+    assets: dict[str, Any] = dict(chart_assets)
+    graph_asset = _report_graph_asset(state)
+    if graph_asset is not None:
+        assets[graph_asset.graph_id] = graph_asset
+
+    regeneration = state.get("report_revision_mode") == "full_regeneration_from_context"
+    context = _current_context(state)
+
+    resources = build_report_resources(
+        file_summary=state.get("file_summary"),
+        web_search_result=state.get("web_search_result"),
+        rag_evidence=state.get("deep_agent_rag_evidence"),
+        web_evidence=state.get("deep_agent_web_evidence"),
+    )
+
+    system_prompt_template = """
          system role: {system_role}
-         #输出语言：**请用英文回复**
-         
-         你的任务是根据用户的对话历史和当前状态，按照要求的报告格式生成一份综合的，完整的因果领域报告
+         #输出语言：{report_language}
+
+         你的任务是根据用户的对话历史和当前状态，生成一份综合、完整的因果领域报告。
          # 当前状态摘要
          1. 预处理结果：{preprocess_summary}
          2. 预处理元数据：{preprocess_meta_data}
-         2. 因果分析结果：{causal_analysis_result}
-        3. 知识库结果：{knowledge_base_result}
-        4. 联网搜索结果：{web_search_result}
-        5. 后处理结果：{postprocess_result}
-        6. 算法解释补充：{method_context}
+         3. 因果分析结果：{causal_analysis_result}
+         4. 知识库结果：{knowledge_base_result}
+         5. 联网搜索结果：{web_search_result}
+         6. 后处理结果：{postprocess_result}
+         7. 算法解释补充：{method_context}
+         8. 当前分析上下文事实：{analysis_context_facts}
+
+        ## 报告模式
+        {revision_instruction}
 
         ## 因果分析结果解读规则
         - 如果因果分析结果包含 error_type，请明确说明算法未能产生有效因果图，不要声称“没有因果关系”。
@@ -1307,31 +2184,39 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         - 只有当算法 success 为 true 且边列表为空时，才可以表述为“未发现显著因果边/因果关系”。
         - 如果算法解释补充中出现 DirectLiNGAM，请明确说明线性、非高斯、误差独立、DAG 和无潜在混杂假设。
         - DirectLiNGAM 的带权边只能解释为模型假设下的候选因果关系，不得写成实验已验证事实。
-         
+
+        ## 报告文档结构
+        你必须返回一个 JSON 对象，只包含 title 和 blocks 两个字段：
+        - title：报告标题。
+        - blocks：报告块数组。每个块必须有唯一的 id 和 type，允许的类型只有四种：
+          1. section：{{"id": "...", "type": "section", "title": "章节标题", "children": [子块]}}
+          2. markdown：{{"id": "...", "type": "markdown", "content": "Markdown 文本", "evidence_refs": []}}
+          3. chart：{{"id": "...", "type": "chart", "title": "图表标题", "asset_key": "资源键"}}
+          4. causal_graph：{{"id": "...", "type": "causal_graph", "title": "图标题", "asset_key": "资源键"}}
+
+        ## 硬性规则
+        - 只有 markdown 块的 content 字段可以包含 Markdown，例如标题、列表、有序列表、表格、引用、代码块、加粗和链接。
+        - 禁止生成 HTML 标签、CSS、Base64 图片、图片标签或图表占位符，图表与因果图一律使用资源块表达。
+        - chart 和 causal_graph 块的 asset_key 必须来自下面“可用资源”列出的资源键，不得自行编造。
+        - markdown 块的 evidence_refs 只能引用下面“可用证据”列出的证据 ID；没有可用证据时请留空数组。
+        - 块 id 在整篇报告中必须唯一，使用稳定的英文或拼音短名。
+        - 不要重新计算或编造数据，图表数据由系统根据真实数据注入。
+
+        ## 可用资源
+        {asset_manifest}
+
+        ## 可用证据
+        {evidence_manifest}
+
         ## 报告结构要求
-        1. **数据概览**：基于上述数据概览进行总结
-
-        2. **数据可视化**：在合适的位置插入图表，帮助读者理解数据分布
-            - 如果用户没有提到具体的变量类型，必须插入所有变量的图表，变量需要从预处理元数据中获取
-            - 如果用户提到了具体的变量类型，则只插入该变量的图表，变量类型需要从预处理元数据中获取
-        3. **分析过程**：详细描述因果分析的步骤和方法
-        4. **分析结果**：总结主要发现和因果关系
-
-        ## 图表插入规则
-        - 当你想要插入某个图表时，直接在文本中使用对应的占位符(占位符见预处理元数据)
-        - 例如：要展示年龄分布，就写 [[CHART:histogram_age]]
-        - 占位符需要单独成行，前后空一行
-        - 在占位符前后添加必要的文字说明，解释这个图表展示了什么
-        ### 示例格式:
-        #### 年龄分布特征
-        从收集的数据来看，用户年龄主要集中在...
-
-        [[CHART:histogram_age]]
-
-        上图展示了年龄的分布情况，我们可以观察到...、
+        1. 数据概览：基于数据概览进行总结。
+        2. 数据可视化：在合适的位置使用 chart 块展示数据分布，并在图表前后补充文字说明。
+           - 如果用户没有提到具体的变量类型，必须包含“可用资源”中的全部图表。
+           - 如果用户提到了具体的变量类型，则只包含该类型的图表。
+        3. 分析过程：详细描述因果分析的步骤和方法。
+        4. 分析结果：总结主要发现和因果关系；当“可用资源”中存在因果图时，使用 causal_graph 块展示。
         """
-    )
-    
+
     prompt = ChatPromptTemplate.from_messages(
         [
             ("system", system_prompt_template),
@@ -1339,21 +2224,6 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         ]
     )
 
-    # 格式化字符串输出
-    runnable = prompt | llm | StrOutputParser()
-    
-    meta_data = await asyncio.to_thread(
-        metadata_summary,
-        state.get("analysis_parameters", {}),
-        state.get("visualizations", {}),
-    )
-    mapping_data = await asyncio.to_thread(
-        metadata_mapping,
-        meta_data,
-        state.get("visualizations", {}),
-    )
-    
-    # 在invoke时，将模板变量和消息历史分开传入
     knowledge_summary = format_rag_summary_for_prompt(
         state.get("knowledge_base_result", {}),
         max_questions=3,
@@ -1363,42 +2233,49 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         state.get("web_search_result", {}),
     )
 
-    response = await runnable.ainvoke({
-        "messages": llm_prompt_messages(state["messages"]),
-        "preprocess_meta_data": meta_data,
-        "preprocess_summary": state.get("preprocess_summary", {}),
-        "causal_analysis_result": state.get("causal_analysis_result", {}),
-        "knowledge_base_result": knowledge_summary,
-        "web_search_result": web_summary,
-        "postprocess_result": state.get("postprocess_result", {}),
-        "method_context": _causal_method_context_for_report(
-            state.get("causal_analysis_result", {})
-        ),
-        "system_role": causal_report_prompt()
-    })
-
-    report_complete_message = AIMessage(
-        content="决策：因果分析报告已生成完成。",
-        name="report"
+    draft = await ainvoke_structured(
+        llm=llm,
+        schema=ReportDraft,
+        prompt=prompt,
+        inputs={
+            "messages": llm_prompt_messages(state["messages"]),
+            "preprocess_meta_data": _report_metadata_for_prompt(
+                state.get("analysis_parameters")
+            ),
+            "preprocess_summary": state.get("preprocess_summary", {}),
+            "causal_analysis_result": state.get("causal_analysis_result", {}),
+            "knowledge_base_result": knowledge_summary,
+            "web_search_result": web_summary,
+            "postprocess_result": state.get("postprocess_result", {}),
+            "method_context": _causal_method_context_for_report(
+                state.get("causal_analysis_result", {})
+            ),
+            "report_language": _report_language_instruction(),
+            "system_role": causal_report_prompt(),
+            "analysis_context_facts": (
+                context_facts_text(context) if context else "当前没有已保存的分析上下文。"
+            ),
+            "revision_instruction": _report_revision_instruction(regeneration),
+            "asset_manifest": _prompt_json(_report_asset_manifest(assets)),
+            "evidence_manifest": _prompt_json(
+                _report_evidence_manifest(resources.evidence_refs)
+            ),
+        },
+        node_name="report",
     )
-    # 占位符替换：将报告中的占位符替换为实际的 HTML 图片标签
 
-    ## 注释:避免数据库中存入最终报告的html图片标签，导致数据库爆炸
-    # final_report = response
-    # try:
-    #     for placeholder, base64_str in mapping_data.items():
+    document = build_report_document(
+        draft,
+        assets=assets,
+        sources=resources.sources,
+        evidence_refs=resources.evidence_refs,
+    )
 
-    #         html_img = f'<img src="data:image/png;base64,{base64_str}" alt="{placeholder}" style="max-width:100%; height:auto; display:block; margin:20px 0;" />'
-    #         final_report = final_report.replace(placeholder, html_img)
-        
-    # except Exception:
-    #     # 如果替换失败，仍然返回原始报告（不含图片）
-    #     final_report = response
-    # 只返回新消息和最终报告
     return {
-        "final_report": response,  
-        "visualization_mapping": mapping_data,
-        "messages": [report_complete_message]
+        "report_document": document,
+        "messages": [
+            AIMessage(content="决策：因果分析报告已生成完成。", name="report")
+        ],
     }
 
 async def normal_chat_node(state: CausalAgentState,llm: ChatOpenAI) -> dict:
@@ -1428,8 +2305,14 @@ async def normal_chat_node(state: CausalAgentState,llm: ChatOpenAI) -> dict:
 
 async def inquiry_answer_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
     """
-    根据报告追问用户的问题
+    根据当前分析上下文和报告回答用户问题，或转达上下文澄清问题。
+
+    本节点不决定是否重新执行算法，也不修改报告；澄清问题由后端解析结果直接输出，
+    不经过模型改写。
     """
+    clarification = _clarification_question(state)
+    if clarification:
+        return {"messages": [AIMessage(content=clarification, name="inquiry_answer")]}
     prompt_template = (
         """
         system role: {system_role}
@@ -1438,9 +2321,15 @@ async def inquiry_answer_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         2. 知识库结果：{knowledge_base_result}
         3. 联网搜索结果：{web_search_result}
         4. 后处理结果：{postprocess_result}
-        5. 报告：{final_report}
+        5. 报告摘要：{report_summary}
+        6. 报告资源说明：{asset_notes}
+        7. 报告来源说明：{source_notes}
+        8. 报告证据说明：{evidence_notes}
+        9. 当前分析上下文事实：{analysis_context_facts}
         
         # 你的任务：根据历史摘要和所有分析结果，回答用户问题
+        - 只使用上面列出的事实回答，不要推测没有出现过的因果结论或数值。
+        - 不要决定重新执行算法，也不要改写报告正文。
         - 用户的问题：{messages}
         
         """
@@ -1460,6 +2349,8 @@ async def inquiry_answer_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
     web_summary = format_web_search_summary_for_prompt(
         state.get("web_search_result", {}),
     )
+    followup_context = _report_followup_context(state)
+    context = _current_context(state)
 
     response = await runnable.ainvoke({
         "messages": llm_prompt_messages(state["messages"]),
@@ -1467,7 +2358,13 @@ async def inquiry_answer_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         "knowledge_base_result": knowledge_summary,
         "web_search_result": web_summary,
         "postprocess_result": state.get("postprocess_result", {}),
-        "final_report": state.get("final_report", {}),
+        "report_summary": followup_context["report_summary"],
+        "asset_notes": followup_context["asset_notes"],
+        "source_notes": followup_context["source_notes"],
+        "evidence_notes": followup_context["evidence_notes"],
+        "analysis_context_facts": (
+            context_facts_text(context) if context else "当前没有已保存的分析上下文。"
+        ),
         "system_role": causal_prompt()
     })
     # 只返回新消息

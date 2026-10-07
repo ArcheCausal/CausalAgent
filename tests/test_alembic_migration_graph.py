@@ -24,4 +24,14 @@ class AlembicMigrationGraphTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("present more than once", result.stderr)
         heads = [line for line in result.stdout.splitlines() if line.strip()]
-        self.assertEqual(heads, ["s4d5e6f7a8b9 (head)"])
+        self.assertEqual(len(heads), 1, heads)
+        self.assertTrue(heads[0].endswith("(head)"), heads)
+        head_revision = heads[0].split()[0]
+        self.assertTrue(
+            any(
+                f'revision: str = "{head_revision}"' in path.read_text(encoding="utf-8")
+                or f"revision: str = '{head_revision}'" in path.read_text(encoding="utf-8")
+                for path in (REPOSITORY_ROOT / "Database" / "migrations" / "versions").glob("*.py")
+            ),
+            head_revision,
+        )

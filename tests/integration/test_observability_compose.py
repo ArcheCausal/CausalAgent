@@ -42,6 +42,9 @@ def test_observability_network_ports_and_password_boundary():
     assert '"127.0.0.1:3000:3000"' in grafana
     assert "GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set" in grafana
     assert "GF_USERS_DEFAULT_LANGUAGE: zh-Hans" in grafana
+    # Grafana 在开发环境同样以 /grafana/ 为子路径，浏览器访问 /grafana/ 入口。
+    assert "GF_SERVER_ROOT_URL: /grafana/" in grafana
+    assert 'GF_SERVER_SERVE_FROM_SUB_PATH: "true"' in grafana
     assert "ports:" not in loki
     assert "ports:" not in alloy
     assert "/var/run/docker.sock:/var/run/docker.sock:ro" in alloy
@@ -55,7 +58,14 @@ def test_observability_network_ports_and_password_boundary():
 
 def test_only_intended_development_containers_are_labelled_for_collection():
     compose = COMPOSE_PATH.read_text(encoding="utf-8")
-    intended = {"app", "worker", "db-bootstrap", "checkpoint-cleanup", "monitor"}
+    intended = {
+        "app",
+        "worker",
+        "causal-mcp",
+        "db-bootstrap",
+        "agent-persistence-cleanup",
+        "monitor",
+    }
 
     for service_name in intended:
         block = _service_block(compose, service_name)
@@ -176,9 +186,50 @@ def test_grafana_dashboard_only_surfaces_warning_and_above():
         "user_id",
         "session_id",
         "job_id",
+        "invocation_id",
         "worker_slot",
         "node",
         "tool",
         "instance",
     }
     assert forbidden_variables.isdisjoint(variables)
+
+
+def test_mcp_job_timeline_uses_json_fields_without_high_cardinality_labels():
+    dashboard_path = (
+        PROJECT_ROOT
+        / "observability/grafana/dashboards/causalagent-mcp-jobs.json"
+    )
+    dashboard = json.loads(dashboard_path.read_text(encoding="utf-8"))
+
+    assert dashboard["uid"] == "causalagent-mcp-jobs"
+    assert dashboard["title"] == "CausalAgent MCP Job 时间线"
+    assert dashboard["refresh"] == "10s"
+    assert dashboard["time"] == {"from": "now-1h", "to": "now"}
+    assert {panel["title"] for panel in dashboard["panels"]} == {
+        "慢调用数量",
+        "失败与取消",
+        "MCP 生命周期趋势",
+        "MCP Job 时间线",
+    }
+
+    variables = {item["name"]: item for item in dashboard["templating"]["list"]}
+    assert set(variables) == {"environment", "job_id", "tool"}
+    assert variables["environment"]["type"] == "query"
+    assert variables["job_id"]["type"] == "textbox"
+    assert variables["tool"]["type"] == "textbox"
+
+    targets = [target for panel in dashboard["panels"] for target in panel["targets"]]
+    expressions = [target["expr"] for target in targets]
+    assert all('{service_name=~"worker|mcp"' in expression for expression in expressions)
+    assert all("| json" in expression for expression in expressions)
+    assert all('job_id=~"${job_id:regex}"' in expression for expression in expressions)
+    assert all('tool=~"${tool:regex}"' in expression for expression in expressions)
+    assert not any("job_id=" in expression.split("}", 1)[0] for expression in expressions)
+    assert not any("tool=" in expression.split("}", 1)[0] for expression in expressions)
+
+    timeline = next(
+        panel for panel in dashboard["panels"] if panel["title"] == "MCP Job 时间线"
+    )
+    assert timeline["options"]["sortOrder"] == "Ascending"
+    assert timeline["targets"][0]["maxLines"] == 500

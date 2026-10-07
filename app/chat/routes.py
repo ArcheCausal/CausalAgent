@@ -5,9 +5,10 @@ from flask import Blueprint, request, jsonify
 from app.auth.session_guard import get_current_session_user
 import logging
 import json
-from app.chat.response_storage import render_summary_for_display
+from app.chat.response_storage import project_causal_graph, render_summary_for_display
+from Agent.Report.document import ReportSchemaError, parse_report_document
 from app.chat.execution_phases import assemble_execution_phases
-from app.agent.checkpoint_cleanup import enqueue_checkpoint_cleanup_many
+from app.agent.persistence_cleanup import enqueue_checkpoint_cleanup_many
 from app.db import record_database_failure
 from app.request_context import (
     bind_request_log_context,
@@ -172,7 +173,7 @@ def load_session_content():
 
             cursor.execute(
                 """
-                SELECT job_id, status, created_at, finished_at
+                SELECT job_id, status, created_at, finished_at, input_filename
                 FROM analysis_jobs
                 WHERE session_id = %s AND user_id = %s
                 ORDER BY created_at, id
@@ -206,6 +207,9 @@ def load_session_content():
                 )
                 event_rows = cursor.fetchall()
 
+            jobs_by_id = {str(row["job_id"]): row for row in job_rows}
+            inputs_by_id = {int(row["input_id"]): row for row in input_rows}
+
             phases_by_message_id = assemble_execution_phases(
                 messages=chat_rows,
                 jobs=job_rows,
@@ -223,10 +227,25 @@ def load_session_content():
                     "analysis_job_input_id": row.get("analysis_job_input_id"),
                 }
 
+                if sender == "user" and row.get("analysis_job_input_id") is not None:
+                    input_row = inputs_by_id.get(int(row["analysis_job_input_id"]))
+                    job_id = row.get("analysis_job_id")
+                    if (
+                        input_row
+                        and input_row.get("input_type") == "initial"
+                        and int(input_row.get("chat_message_id") or 0) == int(row["id"])
+                        and job_id
+                        and str(input_row.get("job_id")) == str(job_id)
+                    ):
+                        filename = jobs_by_id.get(str(job_id), {}).get("input_filename")
+                        if isinstance(filename, str) and filename.strip():
+                            message["file_attachment"] = {"filename": filename}
+
                 # 如果是AI消息，且有附件，则优先使用附件内容
                 if sender == "ai" and row["has_attachment"]:
                     causal_graph_data = None
                     visualization_mapping = None
+                    report_document = None
 
                     ## attachment格式：{"type": "causal_graph", "content": {...}}
                     for attachment in attachments_by_message.get(int(row["id"]), []):
@@ -255,8 +274,41 @@ def load_session_content():
                                     },
                                 )
 
-                    if causal_graph_data:
+                        elif attachment["attachment_type"] == "report_document":
+                            try:
+                                report_document = parse_report_document(
+                                    json.loads(attachment["content"])
+                                )
+                            except (json.JSONDecodeError, ReportSchemaError):
+                                log_event(
+                                    LOGGER,
+                                    "chat.attachment.degraded",
+                                    details={
+                                        "attachment_type": "report_document",
+                                        "reason_code": "protocol_error",
+                                    },
+                                )
+
+                    if report_document is not None:
+                        # 结构化报告历史恢复：附件 JSON 通过后端 schema 校验后
+                        # 包装成前端使用的报告载荷，非法内容只回退到消息预览正文。
+                        message["text"] = {
+                            "type": "report",
+                            "layout": "report",
+                            "render_mode": "structured",
+                            "document": report_document,
+                        }
+                    elif causal_graph_data:
                         message_content = causal_graph_data
+
+                        # 早期版本把 Agent 内部图格式写进了附件，读取历史会话时
+                        # 同样投影成前端可渲染的 vis-network 载荷。
+                        if isinstance(message_content, dict):
+                            projected_graph = project_causal_graph(
+                                message_content.get("data")
+                            )
+                            if projected_graph is not None:
+                                message_content["data"] = projected_graph
 
                         if visualization_mapping and "summary" in message_content:
                             message_content["summary"] = render_summary_for_display(

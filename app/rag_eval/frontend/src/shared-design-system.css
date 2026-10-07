@@ -1,0 +1,498 @@
+/* 共享设计系统迁移：保留评测流程布局，统一纸面、墨色、形状和状态语言。 */
+:root {
+  accent-color: var(--ca-ink);
+}
+
+body {
+  color: var(--ca-text-default);
+  background: var(--ca-surface-page);
+  font-family: var(--ca-font-sans);
+}
+
+button, input, select, textarea {
+  font-family: var(--ca-font-sans);
+  font-weight: var(--ca-weight-regular);
+}
+
+.app-sidebar {
+  flex-basis: var(--ca-rail-width);
+  width: var(--ca-rail-width);
+  padding: var(--ca-space-24) var(--ca-space-16) var(--ca-space-16);
+  border-right: var(--ca-border-width) solid var(--ca-border-default);
+  background: var(--ca-surface-page);
+  backdrop-filter: none;
+  transition: flex-basis var(--ca-motion-fast) var(--ca-ease-out), width var(--ca-motion-fast) var(--ca-ease-out), padding var(--ca-motion-fast) var(--ca-ease-out);
+}
+
+.brand-mark,
+.nav-item,
+.sidebar-footer,
+.topbar-meta,
+.count-label,
+.page-footer {
+  color: var(--ca-text-muted);
+}
+
+.brand-mark,
+.topbar h1,
+.topbar h2,
+.panel h2,
+.panel h3,
+.panel strong,
+.candidate-flow-hero h2,
+.release-intro h2,
+.release-action-bar strong {
+  color: var(--ca-text-default);
+  font-weight: var(--ca-weight-regular);
+}
+
+.brand-icon,
+.icon-badge,
+.placeholder-icon,
+.candidate-flow-icon {
+  border: var(--ca-border-width) solid var(--ca-border-default);
+  border-radius: var(--ca-radius-small);
+  background: var(--ca-surface-muted);
+  color: var(--ca-text-default);
+}
+
+.sidebar-toggle,
+.icon-button {
+  border-color: var(--ca-border-default);
+  border-radius: var(--ca-radius-small);
+  background: var(--ca-surface-panel);
+  color: var(--ca-text-muted);
+}
+
+.sidebar-toggle:hover,
+.icon-button:hover,
+.nav-item:hover,
+.nav-subitem:hover:not(.active) {
+  border-color: var(--ca-border-strong);
+  background: var(--ca-surface-muted);
+  color: var(--ca-text-default);
+  box-shadow: none;
+  transform: none;
+}
+
+.nav-subitem.active {
+  border-color: var(--ca-border-default);
+  background: var(--ca-surface-page);
+  color: var(--ca-text-default);
+  box-shadow: inset 3px 0 0 var(--ca-ink);
+}
+
+.nav-item.active {
+  border-color: var(--ca-border-default);
+  border-radius: var(--ca-radius-full);
+  background: var(--ca-surface-muted);
+  color: var(--ca-text-default);
+  font-weight: var(--ca-weight-regular);
+  box-shadow: none;
+}
+
+.nav-item svg,
+.nav-item.active svg,
+.sidebar-status-dot,
+.live-dot {
+  color: var(--ca-text-default);
+}
+
+.nav-badge,
+.sidebar-status-dot,
+.live-dot {
+  background: var(--ca-surface-muted);
+  box-shadow: none;
+}
+
+.topbar {
+  max-width: var(--ca-page-max-width);
+  padding: var(--ca-space-32) var(--ca-space-24) var(--ca-space-24);
+  border-bottom: var(--ca-border-width) solid var(--ca-border-default);
+}
+
+.comparison-main .topbar,
+.comparison-main .content,
+.content {
+  max-width: var(--ca-page-max-width);
+}
+
+.content {
+  padding: var(--ca-space-24) var(--ca-space-24) var(--ca-space-48);
+}
+
+.topbar .ca-page-header {
+  width: 100%;
+}
+
+.topbar .ca-page-header__description,
+.kicker,
+.eyebrow {
+  color: var(--ca-text-muted);
+}
+
+.topbar-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--ca-space-12);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.topbar-meta .ca-badge {
+  position: relative;
+  justify-content: center;
+  padding-inline: var(--ca-space-24);
+  border-color: var(--ca-border-default);
+  background: var(--ca-surface-muted);
+  color: var(--ca-text-default);
+}
+
+.topbar-meta .ca-badge .live-dot {
+  position: absolute;
+  top: 50%;
+  left: var(--ca-space-12);
+  transform: translateY(-50%);
+}
+
+.panel,
+.stage-line,
+.release-action-bar,
+.candidate-card,
+.candidate-review-summary,
+.gold-replace-dialog,
+.comparison-empty,
+.comparison-table-wrap,
+.quick-action,
+.comparison-mode,
+.report-run-item {
+  border: var(--ca-border-width) solid var(--ca-border-default);
+  border-radius: var(--ca-radius-card);
+  background: var(--ca-surface-panel);
+  box-shadow: var(--ca-shadow-panel);
+}
+
+.panel:hover,
+.quick-action:hover,
+.comparison-mode:hover,
+.comparison-mode.selected,
+.report-run-item:hover,
+.report-run-item.selected {
+  border-color: var(--ca-border-strong);
+  background: var(--ca-surface-muted);
+}
+
+.panel-header {
+  border-bottom-color: var(--ca-border-default);
+}
+
+.stage-line {
+  max-width: none;
+  background: var(--ca-surface-muted);
+  box-shadow: none;
+}
+
+.stage-marker,
+.stage-marker strong,
+.stage-marker.active,
+.stage-marker.active span,
+.stage-marker span {
+  color: var(--ca-text-muted);
+}
+
+.stage-marker.active span {
+  border-color: var(--ca-ink);
+  background: var(--ca-surface-inverse);
+  color: var(--ca-text-inverse);
+}
+
+.stage-connector,
+.nav-submenu {
+  background: var(--ca-surface-page);
+  border-color: var(--ca-border-default);
+}
+
+.primary-button,
+.secondary-button {
+  min-height: 40px;
+  border-radius: var(--ca-radius-full);
+  font-weight: var(--ca-weight-regular);
+  transition: background var(--ca-motion-fast) var(--ca-ease-out), border-color var(--ca-motion-fast) var(--ca-ease-out), color var(--ca-motion-fast) var(--ca-ease-out), transform var(--ca-motion-fast) var(--ca-ease-enter);
+}
+
+.primary-button {
+  background: var(--ca-surface-inverse);
+  color: var(--ca-text-inverse);
+}
+
+.primary-button:hover:not(:disabled) {
+  background: var(--ca-ink-hover);
+}
+
+.secondary-button {
+  border-color: var(--ca-border-strong);
+  background: var(--ca-surface-panel);
+  color: var(--ca-text-default);
+}
+
+.secondary-button:hover:not(:disabled) {
+  border-color: var(--ca-ink);
+  background: var(--ca-surface-muted);
+  color: var(--ca-text-default);
+}
+
+.secondary-button.danger,
+.secondary-button.danger:hover:not(:disabled) {
+  border-color: var(--ca-border-strong);
+  background: var(--ca-surface-panel);
+  color: var(--ca-text-default);
+}
+
+.source-name-editor input,
+.candidate-run-options input,
+.custom-range-row input,
+.review-gate-body input,
+.strategy-profile-controls select,
+.strategy-profile-controls input,
+.config-selectors select,
+.report-filters select,
+.config-grid select,
+.comparison-controls select,
+.sample-diff-toolbar select,
+.diff-controls select,
+.run-options select,
+.governance-selector select,
+textarea {
+  border-color: var(--ca-border-default);
+  border-radius: var(--ca-radius-small);
+  background: var(--ca-surface-panel);
+  color: var(--ca-text-default);
+}
+
+.source-name-editor input:focus,
+.candidate-run-options input:focus,
+.custom-range-row input:focus,
+.review-gate-body input:focus,
+.strategy-profile-controls select:focus,
+.strategy-profile-controls input:focus,
+.config-selectors select:focus,
+.config-grid select:focus,
+.comparison-controls select:focus,
+.sample-diff-toolbar select:focus,
+.diff-controls select:focus,
+.run-options select:focus,
+.governance-selector select:focus,
+textarea:focus {
+  border-color: var(--ca-focus-ring);
+  box-shadow: 0 0 0 3px var(--ca-surface-muted);
+  outline: none;
+}
+
+.alert,
+.notice-bar,
+.ai-waiting-notice,
+.evaluation-toast,
+.guide-state,
+.source-capability-note,
+.candidate-generation-note,
+.bound-index,
+.candidate-plan-summary,
+.custom-range-panel,
+.review-feedback,
+.gold-dataset-summary,
+.release-action-bar,
+.vlm-consent-summary {
+  border-color: var(--ca-border-default);
+  border-radius: var(--ca-radius-small);
+  background: var(--ca-surface-muted);
+  color: var(--ca-text-default);
+  box-shadow: none;
+}
+
+.alert.danger-alert,
+.review-feedback.error,
+.governance-failure,
+.release-check-row.fail {
+  border-color: var(--ca-border-strong);
+  background: var(--ca-surface-inverse);
+  color: var(--ca-text-inverse);
+}
+
+.alert.success-alert,
+.review-feedback.success,
+.guide-state.ready,
+.release-check-row.pass,
+.gold-dataset-summary:not(.empty) {
+  border-color: var(--ca-border-default);
+  background: var(--ca-surface-muted);
+  color: var(--ca-text-default);
+}
+
+.status-pill,
+.review-status,
+.gate-state-label,
+.classification-badge {
+  border-color: var(--ca-border-default);
+  border-radius: var(--ca-radius-full);
+  background: var(--ca-surface-muted);
+  color: var(--ca-text-muted);
+  font-weight: var(--ca-weight-regular);
+}
+
+.status-pill.active,
+.status-pill.success,
+.status-pill.muted,
+.review-status.approved,
+.review-status.needs_revision,
+.classification-badge.improved,
+.classification-badge.unchanged {
+  border-color: var(--ca-border-default);
+  background: var(--ca-surface-muted);
+  color: var(--ca-text-default);
+}
+
+.status-pill.danger,
+.review-status.rejected,
+.classification-badge.regressed {
+  border-color: var(--ca-ink);
+  background: var(--ca-surface-inverse);
+  color: var(--ca-text-inverse);
+}
+
+.progress-track,
+.progress-stage-track,
+.candidate-review-progress {
+  background: var(--ca-surface-muted);
+}
+
+.progress-track span,
+.progress-stage-track span,
+.candidate-review-progress span,
+.progress-stage-card.running .progress-stage-track span,
+.progress-stage-card.done .progress-stage-track span,
+.progress-stage-card.error .progress-stage-track span {
+  background: var(--ca-ink);
+}
+
+.event-type,
+.source-copy strong,
+.summary-metrics b,
+.bound-index code,
+.candidate-plan-summary b,
+.quick-step,
+.markdown-preview a {
+  color: var(--ca-text-default);
+}
+
+.event-row,
+.source-copy small,
+.run-options,
+.candidate-run-options small,
+.event-time,
+.release-source-note,
+.release-empty,
+.comparison-empty,
+.markdown-preview,
+.report-run-item {
+  color: var(--ca-text-muted);
+}
+
+.comparison-table th,
+.markdown-preview th,
+.report-tabs .ca-tabs__tab[aria-selected="true"] {
+  background: var(--ca-surface-muted);
+  color: var(--ca-text-default);
+}
+
+.comparison-table th,
+.comparison-table td,
+.markdown-preview th,
+.markdown-preview td,
+.report-tabs {
+  border-color: var(--ca-border-default);
+}
+
+.report-tabs {
+  padding: var(--ca-space-8) var(--ca-space-16);
+  border-bottom: var(--ca-border-width) solid var(--ca-border-default);
+}
+
+.report-tabs .ca-tabs__tab {
+  border-radius: var(--ca-radius-full);
+  color: var(--ca-text-muted);
+  font-weight: var(--ca-weight-regular);
+}
+
+.report-tabs .ca-tabs__tab[aria-selected="true"] {
+  color: var(--ca-text-default);
+}
+
+.markdown-preview pre {
+  border-radius: var(--ca-radius-small);
+  background: var(--ca-surface-inverse);
+}
+
+.gold-replace-backdrop {
+  background: color-mix(in srgb, var(--ca-surface-inverse) 28%, transparent);
+}
+
+.gold-replace-dialog {
+  box-shadow: var(--ca-shadow-panel);
+}
+
+.app-shell strong,
+.app-shell b,
+.app-shell h1,
+.app-shell h2,
+.app-shell h3,
+.app-shell h4 {
+  font-weight: var(--ca-weight-regular);
+}
+
+@media (max-width: 900px) {
+  .app-sidebar {
+    flex-basis: var(--ca-rail-width);
+    width: var(--ca-rail-width);
+  }
+
+  .topbar,
+  .content {
+    padding-right: var(--ca-space-16);
+    padding-left: var(--ca-space-16);
+  }
+}
+
+@media (max-width: 580px) {
+  .app-sidebar,
+  .app-shell.sidebar-collapsed .app-sidebar {
+    background: var(--ca-surface-page);
+    border-bottom-color: var(--ca-border-default);
+  }
+
+  .topbar,
+  .content {
+    padding-right: var(--ca-space-16);
+    padding-left: var(--ca-space-16);
+  }
+
+  .topbar-meta {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .panel,
+  .stage-line,
+  .release-action-bar,
+  .candidate-card,
+  .candidate-review-summary,
+  .gold-replace-dialog,
+  .comparison-empty,
+  .comparison-table-wrap,
+  .quick-action,
+  .comparison-mode,
+  .report-run-item {
+    border-radius: var(--ca-radius-card);
+  }
+}

@@ -1,0 +1,31 @@
+/* CausalAgent 设计系统：语义层
+
+   页面和组件只使用这一层的变量，不再直接引用基础灰阶。
+   对比度规则（来自原型页面的事实要求）：
+   --ca-text-muted 对白底约 5.0:1，白底上的次要文字用这一档；
+   --ca-text-subtle 对白底只有约 2.6:1，只允许用于占位文字、禁用态和装饰性图标；
+   反色面上的次要文字用 --ca-text-inverse-muted，更次要的说明用 --ca-text-inverse-subtle。 */
+@layer ca-tokens {
+  :root {
+    --ca-surface-page: var(--ca-paper);
+    --ca-surface-panel: var(--ca-paper);
+    --ca-surface-muted: var(--ca-vellum);
+    --ca-surface-inverse: var(--ca-ink);
+    --ca-surface-notice: var(--ca-notice);
+
+    --ca-text-default: var(--ca-ink);
+    --ca-text-muted: var(--ca-slate);
+    --ca-text-muted-strong: var(--ca-pewter);
+    --ca-text-subtle: var(--ca-ash);
+    --ca-text-inverse: var(--ca-paper);
+    --ca-text-inverse-muted: var(--ca-stone);
+    --ca-text-inverse-subtle: var(--ca-ash);
+
+    --ca-border-default: var(--ca-hairline);
+    --ca-border-strong: var(--ca-stone);
+    --ca-border-inverse: var(--ca-hairline-inverse);
+
+    --ca-focus-ring: var(--ca-ink);
+    --ca-focus-ring-inverse: var(--ca-paper);
+  }
+}

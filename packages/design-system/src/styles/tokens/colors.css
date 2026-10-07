@@ -1,0 +1,34 @@
+/* CausalAgent 设计系统：颜色层
+
+   数值来自已确认的官网视觉方向（Document/design-system/design-decision.md），
+   命名按语义重新组织，变量名与原型页的对应关系见 Document/design-system/tokens.md。
+
+   颜色字面值只允许出现在本文件；token、组件和业务页面必须引用变量。
+   基础灰阶用 ink 到 paper 的一条灰阶代替品牌彩色，原型页面唯一的彩色是通告条底色。 */
+@layer ca-tokens {
+  :root {
+    --ca-paper: #ffffff;
+    --ca-vellum: #f3f3f3;
+    --ca-hairline: #e5e7eb;
+    --ca-stone: #c7c7c7;
+    --ca-ash: #a0a0a0;
+    --ca-slate: #6f6f6f;
+    --ca-pewter: #5e5e5e;
+    --ca-carbon: #222222;
+    --ca-ink: #171717;
+    --ca-ink-hover: #000000;
+
+    --ca-notice: #ffe9bf;
+
+    /* 反色面上的分隔线，取自原型衡量章的 rgba(255, 255, 255, 0.18) */
+    --ca-hairline-inverse: rgb(255 255 255 / 22%);
+
+    /* 图表：只用既有灰阶分层，不引入彩色 */
+    --ca-chart-ink: var(--ca-ink);
+    --ca-chart-pewter: var(--ca-pewter);
+    --ca-chart-slate: var(--ca-slate);
+    --ca-chart-stone: var(--ca-stone);
+    --ca-chart-grid: var(--ca-hairline);
+    --ca-chart-wash: var(--ca-vellum);
+  }
+}

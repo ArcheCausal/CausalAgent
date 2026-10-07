@@ -33,5 +33,5 @@ services:
   monitor:
     container_name: causalagent31e2e_monitor
 
-  checkpoint-cleanup:
-    container_name: causalagent31e2e_checkpoint_cleanup
+  agent-persistence-cleanup:
+    container_name: causalagent31e2e_agent_persistence_cleanup

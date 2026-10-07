@@ -110,7 +110,7 @@ def test_release_uses_https_origin_and_forces_debug_off(tmp_path: Path) -> None:
     )
 
     assert config.mode is DesktopMode.RELEASE
-    assert config.url == f"{DEFAULT_RELEASE_ORIGIN}/"
+    assert config.url == f"{DEFAULT_RELEASE_ORIGIN}/dashboard"
     assert config.allowed_origins == frozenset({DEFAULT_RELEASE_ORIGIN})
     assert config.debug is False
     assert config.storage_path == tmp_path / "CausalAgent" / "WebView"

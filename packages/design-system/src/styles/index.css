@@ -1,0 +1,16 @@
+/* CausalAgent 设计系统：完整样式入口
+
+   顺序固定为品牌字体、token、品牌基础、组件。
+   业务页面只引入本文件一次，不要再单独引入组件样式。 */
+@import "./fonts.css";
+@import "./tokens/index.css";
+@import "./base.css";
+@import "./components/button.css";
+@import "./components/card.css";
+@import "./components/badge.css";
+@import "./components/page-header.css";
+@import "./components/tabs.css";
+@import "./components/input.css";
+@import "./components/empty-state.css";
+@import "./components/loading-state.css";
+@import "./components/error-state.css";

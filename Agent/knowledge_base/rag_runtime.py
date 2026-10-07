@@ -7,7 +7,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -65,6 +65,8 @@ class RagRuntimeConfig:
     embedding_config: Mapping[str, Any]
     release_id: str = "current"
     embedding_scope: str = "production"
+    document_names: Mapping[str, str] = field(default_factory=dict)
+    """document_id → release manifest 相对路径；只用于知识库来源展示名。"""
 
     def __post_init__(self) -> None:
         """冻结调用方传入的 embedding 配置副本，避免嵌套对象被修改。"""
@@ -73,6 +75,17 @@ class RagRuntimeConfig:
         if "missing" in safe_config:
             safe_config["missing"] = tuple(safe_config["missing"])
         object.__setattr__(self, "embedding_config", MappingProxyType(safe_config))
+        object.__setattr__(
+            self,
+            "document_names",
+            MappingProxyType(
+                {
+                    str(key): str(value)
+                    for key, value in dict(self.document_names or {}).items()
+                    if str(key) and str(value)
+                }
+            ),
+        )
 
     @classmethod
     def from_environment(cls) -> "RagRuntimeConfig":
@@ -91,7 +104,22 @@ class RagRuntimeConfig:
             ),
             embedding_config=MappingProxyType(safe_embedding_config),
             release_id=str(release["index_version"]),
+            document_names=release.get("document_names") or {},
         )
+
+
+def _document_names_from_manifest(manifest: Mapping[str, Any]) -> dict[str, str]:
+    """投影 release manifest 的 document_id → 相对路径，作为知识库来源展示名。"""
+
+    names: dict[str, str] = {}
+    for source in manifest.get("sources") or []:
+        if not isinstance(source, dict):
+            continue
+        document_id = source.get("document_id")
+        relative_path = source.get("relative_path")
+        if isinstance(document_id, str) and document_id and isinstance(relative_path, str) and relative_path:
+            names[document_id] = relative_path
+    return names
 
 
 def _resolve_multimodal_release(embedding_config: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -218,6 +246,7 @@ def _resolve_multimodal_release(embedding_config: Mapping[str, Any] | None = Non
         "collection_name": collection_name,
         "index_version": release_id or manifest.get("index_version"),
         "embedding_config": resolved_embedding,
+        "document_names": _document_names_from_manifest(manifest),
     }
 
 

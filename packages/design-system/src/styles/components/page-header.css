@@ -1,0 +1,63 @@
+/* 页面标题区
+
+   md 对应原型 .section-title 的 36px，sm 对应分析台 .task-head 的 18px，
+   lg 对应原型 .pipe-left h2 的 48px 与标题字距。 */
+.ca-page-header {
+  display: grid;
+  gap: var(--ca-space-8);
+}
+
+.ca-page-header--divider {
+  padding-bottom: var(--ca-space-16);
+  border-bottom: var(--ca-border-width) solid var(--ca-border-default);
+}
+
+.ca-page-header__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ca-space-16);
+}
+
+.ca-page-header__title {
+  margin: 0;
+  color: var(--ca-text-default);
+}
+
+.ca-page-header--sm .ca-page-header__title {
+  font-size: var(--ca-text-subheading);
+  line-height: var(--ca-leading-subheading);
+}
+
+.ca-page-header--md .ca-page-header__title {
+  font-size: var(--ca-text-heading-sm);
+  line-height: var(--ca-leading-heading-sm);
+}
+
+.ca-page-header--lg .ca-page-header__title {
+  font-size: var(--ca-text-heading);
+  line-height: var(--ca-leading-heading);
+  letter-spacing: -0.01em;
+}
+
+.ca-page-header__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ca-space-16);
+  margin-left: auto;
+}
+
+.ca-page-header__description {
+  margin: 0;
+  max-width: var(--ca-measure-lede);
+  color: var(--ca-text-muted);
+  font-size: var(--ca-text-body);
+  line-height: var(--ca-leading-body);
+}
+
+.ca-page-header--sm .ca-page-header__description {
+  max-width: var(--ca-measure-body);
+  font-size: var(--ca-text-body-sm);
+  line-height: var(--ca-leading-body-sm);
+}

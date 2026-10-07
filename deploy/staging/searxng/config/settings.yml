@@ -1,0 +1,29 @@
+# 预发 SearXNG 非密钥配置。
+# secret_key 不写在本文件，由 .env.staging 的 SEARXNG_SECRET 注入并覆盖。
+use_default_settings:
+  engines:
+    keep_only:
+      - arxiv
+      - crossref
+      - openalex
+
+server:
+  limiter: false
+  image_proxy: true
+
+search:
+  formats:
+    - html
+    - json
+
+redis:
+  url: redis://valkey:6379/0
+
+engines:
+  - name: arxiv
+    disabled: false
+  - name: crossref
+    disabled: false
+    timeout: 15
+  - name: openalex
+    disabled: false

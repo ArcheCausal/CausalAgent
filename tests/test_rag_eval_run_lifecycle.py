@@ -2,12 +2,15 @@ import json
 import queue
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
 from flask import Flask
 
 import app.rag_eval.routes as routes
+
+from tests.support.authorization import rag_eval_route_authorization
 
 
 class _FakeRunManager:
@@ -55,8 +58,12 @@ class RunLifecycleRouteTests(unittest.TestCase):
         self.client = self.app.test_client()
         self.manager_patch = patch.object(routes, "isolated_run_manager", self.manager)
         self.manager_patch.start()
+        self.authorization_stack = ExitStack()
+        for authorization_context in rag_eval_route_authorization():
+            self.authorization_stack.enter_context(authorization_context)
 
     def tearDown(self):
+        self.authorization_stack.close()
         self.manager_patch.stop()
         self.temporary.cleanup()
 

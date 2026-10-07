@@ -32,6 +32,12 @@ ADMIN = {
 }
 
 
+from tests.support.authorization import (
+    ADMIN_PERMISSIONS,
+    USER_PERMISSIONS,
+    authorized_as,
+)
+
 def build_app():
     """构造只注册管理员 API 和 request ID 的最小 Flask 应用。"""
     app = Flask(__name__)
@@ -55,7 +61,7 @@ class AdminWriteApiTests(unittest.TestCase):
             "replayed": False,
         }
         with (
-            patch("app.auth.authorization.get_current_session_user", return_value=ADMIN),
+            authorized_as(ADMIN),
             patch(
                 "app.admin.routes.execute_user_operation",
                 return_value=payload,
@@ -110,7 +116,7 @@ class AdminWriteApiTests(unittest.TestCase):
             "blockers": [],
         }
         with (
-            patch("app.auth.authorization.get_current_session_user", return_value=ADMIN),
+            authorized_as(ADMIN),
             patch(
                 "app.admin.routes.get_user_delete_impact",
                 return_value=impact,
@@ -159,7 +165,7 @@ class AdminWriteApiTests(unittest.TestCase):
         """文件物理删除响应只返回去敏操作结果。"""
         app = build_app()
         with (
-            patch("app.auth.authorization.get_current_session_user", return_value=ADMIN),
+            authorized_as(ADMIN),
             patch(
                 "app.admin.routes.delete_managed_file",
                 return_value={

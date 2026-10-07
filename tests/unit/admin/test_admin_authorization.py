@@ -46,6 +46,12 @@ ADMIN_POST_ENDPOINTS = (
 ADMIN_PAGE = "/admin/database"
 
 
+from tests.support.authorization import (
+    ADMIN_PERMISSIONS,
+    USER_PERMISSIONS,
+    authorized_as,
+)
+
 def build_app():
     """构建只注册管理接口和后台页面蓝图的最小测试应用。"""
     app = Flask(__name__)
@@ -123,7 +129,7 @@ class AdminAuthorizationTests(unittest.TestCase):
     def test_missing_session_returns_api_401_and_page_redirect(self):
         """无有效会话时 API 返回 401，后台页面回到统一登录入口。"""
         app = build_app()
-        with patch("app.auth.authorization.get_current_session_user", return_value=None):
+        with authorized_as(None, ()):
             with app.test_client() as client:
                 for endpoint in ADMIN_GET_ENDPOINTS:
                     response = client.get(endpoint)
@@ -137,11 +143,11 @@ class AdminAuthorizationTests(unittest.TestCase):
                 self.assertEqual(page_response.status_code, 302)
                 self.assertEqual(
                     page_response.headers["Location"],
-                    "/?next=%2Fadmin%2Fdatabase",
+                    "/auth/sign-in?next=%2Fadmin%2Fdatabase",
                 )
                 asset_response = client.get("/admin/assets/app.js")
                 self.assertEqual(asset_response.status_code, 302)
-                self.assertEqual(asset_response.headers["Location"], "/")
+                self.assertEqual(asset_response.headers["Location"], "/auth/sign-in")
                 for endpoint in ADMIN_POST_ENDPOINTS:
                     response = client.post(endpoint)
                     self.assertEqual(response.status_code, 401, endpoint)
@@ -155,7 +161,7 @@ class AdminAuthorizationTests(unittest.TestCase):
         """普通用户登录后仍不能读取管理接口或后台 HTML。"""
         app = build_app()
         user = {"id": 1, "username": "normal", "role": "user", "is_active": True}
-        with patch("app.auth.authorization.get_current_session_user", return_value=user):
+        with authorized_as(user, USER_PERMISSIONS):
             with app.test_client() as client:
                 for endpoint in ADMIN_GET_ENDPOINTS:
                     response = client.get(endpoint)
@@ -188,7 +194,7 @@ class AdminAuthorizationTests(unittest.TestCase):
         """防御性校验不得放行未启用的管理员对象。"""
         app = build_app()
         admin = {"id": 2, "username": "disabled", "role": "admin", "is_active": False}
-        with patch("app.auth.authorization.get_current_session_user", return_value=admin):
+        with authorized_as(admin):
             with app.test_client() as client:
                 response = client.get("/api/admin/db/health")
 
@@ -206,7 +212,7 @@ class AdminAuthorizationTests(unittest.TestCase):
         patches = admin_service_patches()
         with ExitStack() as stack:
             stack.enter_context(
-                patch("app.auth.authorization.get_current_session_user", return_value=admin)
+                authorized_as(admin)
             )
             for service_patch in patches:
                 stack.enter_context(service_patch)
@@ -269,7 +275,7 @@ class AdminAuthorizationTests(unittest.TestCase):
         for raw_target in rejected:
             with self.subTest(raw_target=raw_target):
                 self.assertIsNone(safe_admin_return_target(raw_target))
-                self.assertEqual(admin_login_url(raw_target), "/")
+                self.assertEqual(admin_login_url(raw_target), "/auth/sign-in")
 
     def test_legacy_admin_response_shapes_remain_compatible(self):
         """旧接口继续保留 health 对象、slow 对象和 worker 列表数据类型。"""
@@ -278,7 +284,7 @@ class AdminAuthorizationTests(unittest.TestCase):
         patches = admin_service_patches()
         with ExitStack() as stack:
             stack.enter_context(
-                patch("app.auth.authorization.get_current_session_user", return_value=admin)
+                authorized_as(admin)
             )
             for service_patch in patches:
                 stack.enter_context(service_patch)
@@ -302,7 +308,7 @@ class AdminAuthorizationTests(unittest.TestCase):
         app = build_app()
         admin = {"id": 2, "username": "admin", "role": "admin", "is_active": True}
         with (
-            patch("app.auth.authorization.get_current_session_user", return_value=admin),
+            authorized_as(admin),
             patch(
                 "app.admin.routes.request_snapshot_refresh",
                 return_value={"groups": [], "requested_at": "2026-07-22T00:00:00.000Z"},
@@ -328,7 +334,7 @@ class AdminAuthorizationTests(unittest.TestCase):
         """管理员写请求必须携带 Session 绑定令牌，并可由请求 ID 关联。"""
         app = build_app()
         admin = {"id": 2, "username": "admin", "role": "admin", "is_active": True}
-        with patch("app.auth.authorization.get_current_session_user", return_value=admin):
+        with authorized_as(admin):
             with app.test_client() as client:
                 with client.session_transaction() as flask_session:
                     flask_session["csrf_token"] = "expected-token"
@@ -349,7 +355,7 @@ class AdminAuthorizationTests(unittest.TestCase):
         """慢查询上限和完整性模式必须在服务端白名单范围内。"""
         app = build_app()
         admin = {"id": 2, "username": "admin", "role": "admin", "is_active": True}
-        with patch("app.auth.authorization.get_current_session_user", return_value=admin):
+        with authorized_as(admin):
             with app.test_client() as client:
                 self.assertEqual(client.get("/api/admin/db/slow-queries?limit=abc").status_code, 400)
                 self.assertEqual(client.get("/api/admin/db/slow-queries?limit=101").status_code, 400)

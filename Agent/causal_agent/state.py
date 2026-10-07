@@ -10,6 +10,16 @@ from typing_extensions import NotRequired
 
 from langchain_core.messages import BaseMessage, ToolMessage
 
+from Agent.Report.document import ReportDocument
+from Agent.deep_agent_tools.models import (
+    AlgorithmResult,
+    DataProfile,
+    EvidenceResult,
+    FinalAnalysisDecision,
+    InvocationRecord,
+    WebEvidenceResult,
+)
+
 
 class FileSummary(TypedDict, total=False):
     """当前 Job 的冻结文件元数据和受限数据摘要。"""
@@ -40,9 +50,13 @@ class CausalAgentState(TypedDict):
         knowledge_base_result: 结构化RAG结果，包含问题、证据链和汇总摘要。
         preprocess_summary: 预处理阶段的自然语言总结。
         postprocess_result: 后处理补充结果。
-        final_report: 最终报告内容。
-        visualization_mapping: 图表占位符映射。
-        visualizations: 可视化原始结果。
+        chart_assets: 预处理阶段生成的结构化图表资源。
+        report_document: 后端装配完成的结构化报告文档。
+        report_revision_mode: 报告节点本次是首次生成还是按当前上下文重新生成。
+        agent_decision: agent 节点的结构化意图判断结果。
+        analysis_context: 当前 AnalysisContext 的只读投影。
+        analysis_context_index: 同一 Session 其他历史上下文的简要索引。
+        context_resolution: context_switch 节点解析出的上下文命中结果。
     """
 
     messages: Annotated[List[BaseMessage], add]
@@ -52,15 +66,34 @@ class CausalAgentState(TypedDict):
     session_id: str
     job_id: NotRequired[str]
     file_summary: NotRequired[Optional[FileSummary]]
+    data_profile: NotRequired[Optional[DataProfile]]
 
     route_decision: NotRequired[
-        Literal["fold", "postprocess", "normal_chat", "inquiry_answer"]
+        Literal[
+            "fold",
+            "postprocess",
+            "report",
+            "normal_chat",
+            "inquiry_answer",
+            "context_switch",
+        ]
     ]
     fold_decision: NotRequired[Literal["preprocess", "agent", "normal_chat"]]
 
     tool_call_request: Optional[bool]
 
     analysis_parameters: Optional[dict]
+
+    # Agent 的结构化意图判断结果；只保留意图、上下文提示和澄清问题，
+    # 数据库 ID、文件 ID 和最终路由都由后端解析后写入。
+    agent_decision: NotRequired[dict[str, Any]]
+
+    # 当前 AnalysisContext 的投影，以及同一 Session 其他历史上下文的索引。
+    analysis_context: NotRequired[dict[str, Any]]
+    analysis_context_index: NotRequired[List[Dict[str, Any]]]
+
+    # context_switch 解析结果：命中、歧义或无匹配，以及解析出的上下文 ID。
+    context_resolution: NotRequired[dict[str, Any]]
 
     causal_analysis_result: Optional[dict]
     knowledge_base_result: Optional[Dict[str, Any]]
@@ -69,10 +102,25 @@ class CausalAgentState(TypedDict):
     preprocess_summary: Optional[str]
     postprocess_result: Optional[dict]
 
-    final_report: Optional[str]
-    visualization_mapping: Optional[dict]
+    chart_assets: NotRequired[Optional[dict]]
+    report_document: NotRequired[Optional[ReportDocument]]
+    report_revision_mode: NotRequired[
+        Literal["normal_generation", "full_regeneration_from_context"]
+    ]
 
-    visualizations: Optional[dict]
+    # 新 Deep Agent 路径的父子 State 投影；这些字段不包含 runtime-only 对象。
+    deep_agent_algorithm_results: NotRequired[dict[str, AlgorithmResult]]
+    deep_agent_action_ledger: NotRequired[dict[str, InvocationRecord]]
+    deep_agent_rag_evidence: NotRequired[dict[str, EvidenceResult]]
+    deep_agent_web_evidence: NotRequired[dict[str, WebEvidenceResult]]
+    deep_agent_decision: NotRequired[Optional[FinalAnalysisDecision]]
+    deep_agent_structured_response: NotRequired[Optional[FinalAnalysisDecision]]
+    deep_agent_run_id: NotRequired[str]
+    deep_agent_status: NotRequired[Literal["running", "completed", "revoked", "failed"]]
+    deep_agent_retry_instruction: NotRequired[str]
+    finalization_retry_count: NotRequired[int]
+    finalization_status: NotRequired[Literal["valid", "degraded"]]
+    finalization_error: NotRequired[str]
 
 
 class RagSubgraphState(TypedDict, total=False):

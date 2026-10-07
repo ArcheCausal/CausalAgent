@@ -1,0 +1,23 @@
+:root {
+  --color-page: #ffffff;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f3f3f3;
+  --color-border: #e5e7eb;
+  --color-text: #171717;
+  --color-text-muted: #6f6f6f;
+  --color-primary: #171717;
+  --color-primary-hover: #000000;
+  --color-danger: #171717;
+  --color-focus: rgb(23 23 23 / 22%);
+  --sidebar-width: 280px;
+  --sidebar-collapsed-width: 64px;
+  --content-width: 880px;
+  --content-gap: 24px;
+  --input-radius: 20px;
+  --motion-duration: 200ms;
+  --shadow-card: 0 8px 18px rgb(0 0 0 / 5%);
+  --app-graph-line: 0.05;
+  --app-graph-node: 0.05;
+  --app-graph-dot: 0.1;
+  --font-sans: var(--ca-font-sans);
+}

@@ -1,0 +1,216 @@
+/* 按钮
+
+   primary 是原型 .pill，quiet 是原型 .ghost。
+   secondary 在原型里没有胶囊形态，取自同一语言的描边控件（分段控件、圆形按钮），
+   属于同一视觉语言的延伸，改动前先看 Document/design-system/components.md。
+
+   加载态沿用原型“只有线，没有转圈”的表达：标签位置不变、颜色变透明，
+   原位换成一条两像素的墨线来回推进，宽度因此不会跳动。 */
+.ca-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: var(--ca-space-8) var(--ca-space-16);
+  border: var(--ca-border-width) solid transparent;
+  border-radius: var(--ca-radius-full);
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: var(--ca-text-body-sm);
+  font-weight: var(--ca-weight-regular);
+  line-height: var(--ca-leading-body-sm);
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--ca-motion-fast) var(--ca-ease-out),
+    color var(--ca-motion-fast) var(--ca-ease-out),
+    border-color var(--ca-motion-fast) var(--ca-ease-out),
+    box-shadow var(--ca-motion-hover) var(--ca-ease-out),
+    transform var(--ca-motion-fast) var(--ca-ease-enter);
+}
+
+.ca-btn__content {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ca-btn__icon {
+  display: inline-flex;
+  flex: none;
+}
+
+.ca-btn__icon > svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+/* 主操作：墨黑填充 */
+.ca-btn--primary {
+  background: var(--ca-ink);
+  color: var(--ca-text-inverse);
+}
+
+/* 次操作：纸面加细描边 */
+.ca-btn--secondary {
+  border-color: var(--ca-border-strong);
+  color: var(--ca-text-default);
+}
+
+/* 文字操作：与正文同色，靠下划线表示可点 */
+.ca-btn--quiet {
+  padding: var(--ca-space-8) 0;
+  border-radius: var(--ca-radius-small);
+  color: var(--ca-text-default);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: var(--ca-border-width);
+}
+
+.ca-btn--sm {
+  padding: 4px var(--ca-space-12);
+  font-size: var(--ca-text-caption);
+  line-height: var(--ca-leading-caption);
+}
+
+.ca-btn--lg {
+  padding: var(--ca-space-12) var(--ca-space-24);
+  font-size: var(--ca-text-body);
+  line-height: var(--ca-leading-body);
+}
+
+.ca-btn--quiet.ca-btn--sm,
+.ca-btn--quiet.ca-btn--lg {
+  padding-right: 0;
+  padding-left: 0;
+}
+
+@media (hover: hover) {
+  .ca-btn--primary:hover {
+    background: var(--ca-ink-hover);
+    transform: translateY(-1px);
+  }
+
+  .ca-btn--secondary:hover {
+    border-color: var(--ca-ink);
+    transform: translateY(-1px);
+  }
+
+  .ca-btn--quiet:hover {
+    color: var(--ca-ink-hover);
+    box-shadow: var(--ca-shadow-raise);
+  }
+}
+
+.ca-btn--primary:active,
+.ca-btn--secondary:active {
+  transform: translateY(1px);
+}
+
+/* 禁用：灰底加内描边，去掉位移反馈 */
+.ca-btn[disabled],
+.ca-btn[aria-disabled="true"] {
+  cursor: not-allowed;
+  transform: none;
+}
+
+.ca-btn--primary[disabled],
+.ca-btn--primary[aria-disabled="true"] {
+  background: var(--ca-surface-muted);
+  color: var(--ca-text-muted-strong);
+  box-shadow: inset 0 0 0 var(--ca-border-width) var(--ca-border-default);
+}
+
+.ca-btn--secondary[disabled],
+.ca-btn--secondary[aria-disabled="true"] {
+  border-color: var(--ca-border-default);
+  color: var(--ca-text-subtle);
+}
+
+.ca-btn--quiet[disabled],
+.ca-btn--quiet[aria-disabled="true"] {
+  color: var(--ca-text-subtle);
+  text-decoration-color: var(--ca-text-subtle);
+  box-shadow: none;
+}
+
+@media (hover: hover) {
+  .ca-btn--primary[disabled]:hover,
+  .ca-btn--primary[aria-disabled="true"]:hover {
+    background: var(--ca-surface-muted);
+    transform: none;
+  }
+
+  .ca-btn--secondary[disabled]:hover,
+  .ca-btn--secondary[aria-disabled="true"]:hover {
+    border-color: var(--ca-border-default);
+    transform: none;
+  }
+
+  .ca-btn--quiet[disabled]:hover,
+  .ca-btn--quiet[aria-disabled="true"]:hover {
+    color: var(--ca-text-subtle);
+    box-shadow: none;
+  }
+}
+
+/* 加载：文字保留宽度但不可见，原位显示两像素推进线 */
+.ca-btn.is-loading .ca-btn__content {
+  color: transparent;
+}
+
+.ca-btn__progress {
+  position: absolute;
+  inset: 50% var(--ca-space-16) auto;
+  height: 2px;
+  margin-top: -1px;
+  overflow: hidden;
+  border-radius: var(--ca-radius-full);
+  background: var(--ca-border-default);
+}
+
+.ca-btn--quiet .ca-btn__progress {
+  right: 0;
+  left: 0;
+}
+
+.ca-btn--primary .ca-btn__progress {
+  background: var(--ca-border-inverse);
+}
+
+.ca-btn__progress i {
+  display: block;
+  width: 40%;
+  height: 100%;
+  border-radius: var(--ca-radius-full);
+  background: var(--ca-ink);
+  animation: ca-btn-progress 1100ms var(--ca-ease-out) infinite;
+}
+
+.ca-btn--primary .ca-btn__progress i {
+  background: var(--ca-text-inverse);
+}
+
+@keyframes ca-btn-progress {
+  from {
+    transform: translateX(-110%);
+  }
+
+  to {
+    transform: translateX(260%);
+  }
+}
+
+/* 减少动态时保留一条静止的墨线，避免加载态看起来像已完成 */
+@media (prefers-reduced-motion: reduce) {
+  .ca-btn__progress i {
+    width: 40%;
+    transform: none;
+    animation: none;
+  }
+}

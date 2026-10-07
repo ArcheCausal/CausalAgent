@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
         ("app/agent/worker/bootstrap.py", "worker.startup.ready"),
         ("Database/monitor_worker.py", "monitor.startup.ready"),
         ("Database/bootstrap.py", "maintenance.startup.ready"),
-        ("Database/checkpoint_cleanup_worker.py", "maintenance.startup.ready"),
+        ("Database/agent_persistence_cleanup_worker.py", "maintenance.startup.ready"),
         ("Agent/CausalAgentMCP/mcp_server.py", "mcp.startup.ready"),
     ],
 )

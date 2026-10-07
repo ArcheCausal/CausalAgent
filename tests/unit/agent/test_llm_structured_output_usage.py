@@ -33,3 +33,38 @@ def test_all_business_structured_outputs_use_the_shared_invokers():
     assert "JsonOutputParser" not in combined
     assert "Agent.tool_node.structured_output" not in combined
     assert "include_raw=True" not in combined
+
+
+def test_structured_output_failure_exposes_only_a_safe_cause_code():
+    """结构化输出失败只归类出稳定代码，不把异常正文带进调用方。"""
+    import json
+
+    from Agent.llm_structured_output import (
+        NoToolCallError,
+        StructuredOutputError,
+        classify_structured_output_cause,
+    )
+
+    class ValidationError(Exception):
+        """用类名模拟 pydantic 校验失败。"""
+
+    assert classify_structured_output_cause(ValidationError("bad")) == "schema_invalid"
+    assert (
+        classify_structured_output_cause(json.JSONDecodeError("bad", "doc", 0))
+        == "json_invalid"
+    )
+    assert classify_structured_output_cause(RuntimeError("boom")) == "unknown"
+    assert (
+        classify_structured_output_cause(NoToolCallError("empty"))
+        == "tool_call_invalid"
+    )
+
+    error = StructuredOutputError(
+        node_name="report",
+        schema_name="ReportDraft",
+        cause=ValidationError("doc.value: Input should be a valid integer"),
+    )
+
+    assert error.original_exception_type == "ValidationError"
+    assert error.safe_cause_code == "schema_invalid"
+    assert "Input should be a valid integer" not in str(error)

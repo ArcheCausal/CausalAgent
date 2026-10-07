@@ -612,6 +612,11 @@ EXPECTED_FOREIGN_KEYS = (
         "fk_checkpoint_cleanup_outbox_operation",
         (("operation_id", "admin_operations", "operation_id"),),
     ),
+    (
+        "user_memory_cleanup_outbox",
+        "fk_user_memory_cleanup_outbox_operation",
+        (("operation_id", "admin_operations", "operation_id"),),
+    ),
 )
 
 EXPECTED_UNIQUE_INDEXES = (
@@ -784,10 +789,10 @@ def _operational_integrity_definitions(timeout_ms: int) -> list[dict[str, Any]]:
             "healthy_when": "one",
             "description": (
                 "确认 chat_attachments.attachment_type 为 ENUM，"
-                "且包含 visualization 与 web_search_references 类型。"
+                "且包含 visualization、web_search_references 与 report_document 类型。"
             ),
             "failure_warning": (
-                "chat_attachments.attachment_type 不是包含 visualization 与 web_search_references 的 ENUM"
+                "chat_attachments.attachment_type 不是包含 visualization、web_search_references 与 report_document 的 ENUM"
             ),
             "sql": f"""SELECT {hint} COUNT(*) AS count_value
                 FROM information_schema.columns
@@ -796,7 +801,8 @@ def _operational_integrity_definitions(timeout_ms: int) -> list[dict[str, Any]]:
                   AND column_name = 'attachment_type'
                   AND data_type = 'enum'
                   AND column_type LIKE '%''visualization''%'
-                  AND column_type LIKE '%''web_search_references''%'""",
+                  AND column_type LIKE '%''web_search_references''%'
+                  AND column_type LIKE '%''report_document''%'""",
         },
         {
             "key": "constraint_checkpoint_cleanup_outbox_claim",
@@ -822,11 +828,42 @@ def _operational_integrity_definitions(timeout_ms: int) -> list[dict[str, Any]]:
             "healthy_when": "zero",
             "description": (
                 "统计 checkpoint_cleanup_outbox 中 status=failed 的 PostgreSQL "
-                "checkpoint 清理任务；数量为 0 时健康。"
+                "父子图 checkpoint 清理任务；数量为 0 时健康。"
             ),
             "failure_warning": "存在失败的 PostgreSQL checkpoint 清理任务",
             "sql": f"""SELECT {hint} COUNT(*) AS count_value
                 FROM checkpoint_cleanup_outbox
+                WHERE status = 'failed'""",
+        },
+        {
+            "key": "constraint_user_memory_cleanup_outbox_claim",
+            "label": "约束用户长期记忆清理 outbox 领取索引",
+            "severity": "blocking",
+            "healthy_when": "one",
+            "description": (
+                "确认 user_memory_cleanup_outbox 存在"
+                " idx_user_memory_cleanup_outbox_claim 领取索引。"
+            ),
+            "failure_warning": "用户长期记忆清理 outbox 领取索引缺失",
+            "sql": f"""SELECT {hint} CASE WHEN COUNT(DISTINCT index_name) = 1
+                    THEN 1 ELSE 0 END AS count_value
+                FROM information_schema.statistics
+                WHERE table_schema = DATABASE()
+                  AND table_name = 'user_memory_cleanup_outbox'
+                  AND index_name = 'idx_user_memory_cleanup_outbox_claim'""",
+        },
+        {
+            "key": "user_memory_cleanup_failed",
+            "label": "失败的用户长期记忆清理任务",
+            "severity": "warning",
+            "healthy_when": "zero",
+            "description": (
+                "统计 user_memory_cleanup_outbox 中 status=failed 的 Store "
+                "长期记忆清理任务；数量为 0 时健康。"
+            ),
+            "failure_warning": "存在失败的用户长期记忆清理任务",
+            "sql": f"""SELECT {hint} COUNT(*) AS count_value
+                FROM user_memory_cleanup_outbox
                 WHERE status = 'failed'""",
         },
     ])

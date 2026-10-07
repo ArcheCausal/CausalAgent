@@ -1,4 +1,4 @@
-"""阶段一数据生命周期与 checkpoint cleanup outbox 修复 CLI。
+"""阶段一数据生命周期与 Agent 持久化清理 outbox 修复 CLI。
 
 默认只生成有限修复清单；只有同时提供 ``--apply`` 和精确数据库名确认时，
 才会在单个主库事务中删除本批已再次验证仍然孤立的记录。migration 不调用
@@ -17,12 +17,13 @@ from config.settings import settings
 
 DEFAULT_BATCH_LIMIT = 100
 MAX_BATCH_LIMIT = 1000
+OUTBOX_TABLES = ("checkpoint_cleanup_outbox", "user_memory_cleanup_outbox")
 
 
 def _parse_args() -> argparse.Namespace:
     """解析 dry-run、有限批次和显式数据库确认参数。"""
     parser = argparse.ArgumentParser(
-    description="列出 archived session 孤立记录或重置失败的 checkpoint cleanup outbox",
+    description="列出 archived session 孤立记录或重置失败的 Agent 持久化清理 outbox",
     )
     parser.add_argument("--limit", type=int, default=DEFAULT_BATCH_LIMIT)
     parser.add_argument(
@@ -58,24 +59,23 @@ def _scan(cursor, *, limit: int, for_update: bool) -> dict[str, list[Any]]:
         (limit,),
     )
     archived_sessions = [row["id"] for row in cursor.fetchall()]
-    cursor.execute(
-        f"""
-        SELECT id
-        FROM checkpoint_cleanup_outbox
-        WHERE status = 'failed'
-           OR (status = 'processing'
-               AND lease_expires_at IS NOT NULL
-               AND lease_expires_at < UTC_TIMESTAMP(6))
-        ORDER BY id
-        LIMIT %s{lock_clause}
-        """,
-        (limit,),
-    )
-    checkpoint_cleanup_outbox = [int(row["id"]) for row in cursor.fetchall()]
-    return {
-        "archived_sessions": archived_sessions,
-        "checkpoint_cleanup_outbox": checkpoint_cleanup_outbox,
-    }
+    candidates: dict[str, list[Any]] = {"archived_sessions": archived_sessions}
+    for table in OUTBOX_TABLES:
+        cursor.execute(
+            f"""
+            SELECT id
+            FROM {table}
+            WHERE status = 'failed'
+               OR (status = 'processing'
+                   AND lease_expires_at IS NOT NULL
+                   AND lease_expires_at < UTC_TIMESTAMP(6))
+            ORDER BY id
+            LIMIT %s{lock_clause}
+            """,
+            (limit,),
+        )
+        candidates[table] = [int(row["id"]) for row in cursor.fetchall()]
+    return candidates
 
 
 def build_repair_plan(limit: int) -> dict[str, Any]:
@@ -102,24 +102,26 @@ def apply_repair_plan(limit: int) -> dict[str, Any]:
         connection.start_transaction(isolation_level="READ COMMITTED")
         candidates = _scan(cursor, limit=limit, for_update=True)
 
-        reset_cleanup = 0
-        for outbox_id in candidates["checkpoint_cleanup_outbox"]:
-            cursor.execute(
-                """
-                UPDATE checkpoint_cleanup_outbox
-                SET status = 'pending', attempts = 0,
-                    available_at = UTC_TIMESTAMP(6),
-                    lease_expires_at = NULL, last_error = NULL,
-                    completed_at = NULL
-                WHERE id = %s
-                  AND (status = 'failed'
-                       OR (status = 'processing'
-                           AND lease_expires_at IS NOT NULL
-                           AND lease_expires_at < UTC_TIMESTAMP(6)))
-                """,
-                (outbox_id,),
-            )
-            reset_cleanup += cursor.rowcount
+        reset_cleanup: dict[str, int] = {}
+        for table in OUTBOX_TABLES:
+            reset_cleanup[table] = 0
+            for outbox_id in candidates[table]:
+                cursor.execute(
+                    f"""
+                    UPDATE {table}
+                    SET status = 'pending', attempts = 0,
+                        available_at = UTC_TIMESTAMP(6),
+                        lease_expires_at = NULL, last_error = NULL,
+                        completed_at = NULL
+                    WHERE id = %s
+                      AND (status = 'failed'
+                           OR (status = 'processing'
+                               AND lease_expires_at IS NOT NULL
+                               AND lease_expires_at < UTC_TIMESTAMP(6)))
+                    """,
+                    (outbox_id,),
+                )
+                reset_cleanup[table] += cursor.rowcount
 
         deleted_archives = 0
         for archived_id in candidates["archived_sessions"]:
@@ -140,7 +142,9 @@ def apply_repair_plan(limit: int) -> dict[str, Any]:
             "limit_per_category": limit,
             "deleted": {
                 "archived_sessions": deleted_archives,
-                "checkpoint_cleanup_outbox_reset": reset_cleanup,
+                "outbox_reset": {
+                    table: reset_cleanup[table] for table in OUTBOX_TABLES
+                },
             },
         }
     except Exception:

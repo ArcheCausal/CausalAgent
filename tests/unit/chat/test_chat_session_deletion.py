@@ -147,6 +147,13 @@ class DeleteSessionTests(unittest.TestCase):
             statements[6],
             ("DELETE FROM sessions WHERE id = %s AND user_id = %s", ("session-1", 7)),
         )
+        # 只删除会话时保留用户长期记忆，不为用户级 namespace 登记清理。
+        self.assertFalse(
+            any(
+                "user_memory_cleanup_outbox" in statement
+                for statement, _ in statements
+            )
+        )
 
     def test_active_job_blocks_all_delete_statements(self):
         """有 queued/running job 时回滚并拒绝删除 checkpoint 和会话数据。"""

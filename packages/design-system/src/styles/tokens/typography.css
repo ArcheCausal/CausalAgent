@@ -1,0 +1,29 @@
+/* CausalAgent 设计系统：字体层。各字符集使用随包提供的字形子集。 */
+@layer ca-tokens {
+  :root {
+    --ca-font-sans: "Geist Sans", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
+    /* 代码与 SQL 摘要用等宽字体；原型页面没有代码区块，这一档为应用端补充 */
+    --ca-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+    --ca-weight-regular: 400;
+
+    --ca-text-caption: 12px;
+    --ca-text-body-sm: 14px;
+    --ca-text-body: 16px;
+    --ca-text-subheading: 18px;
+    --ca-text-lede: 20px;
+    --ca-text-heading-sm: 36px;
+    --ca-text-heading: 48px;
+    --ca-text-heading-lg: 60px;
+    --ca-text-display: 72px;
+
+    --ca-leading-caption: 1.5;
+    --ca-leading-body-sm: 1.43;
+    --ca-leading-body: 1.5;
+    --ca-leading-subheading: 1.38;
+    --ca-leading-lede: 1.6;
+    --ca-leading-heading-sm: 1.25;
+    --ca-leading-heading: 1.11;
+    --ca-leading-heading-lg: 1.1;
+    --ca-leading-display: 1.2;
+  }
+}

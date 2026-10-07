@@ -168,13 +168,71 @@ class JobIdempotencyTests(unittest.TestCase):
         self.assertFalse(was_existing)
         self.assertEqual(insert_params[3], JOB_REQUEST_ID)
         self.assertEqual(insert_params[9], 1)
-        self.assertEqual(insert_params[-2], JOB_REQUEST_KEY)
+        self.assertEqual(insert_params[-3], JOB_REQUEST_KEY)
         self.assertEqual(
-            insert_params[-1],
+            insert_params[-2],
             _request_fingerprint("session-1", "hello", None, True),
         )
+        # 没有冻结文件的 Job 不绑定分析上下文，普通聊天 Job 保持为空。
+        self.assertIsNone(insert_params[-1])
         self.assertEqual(connection.commits, 1)
         self.assertEqual(connection.rollbacks, 0)
+
+    def test_create_job_creates_analysis_context_for_frozen_file(self):
+        """请求带冻结文件时，Job 创建事务必须同时建立并绑定分析上下文。"""
+        connection = FakeConnection(
+            fetch_results=[
+                None,
+                None,
+                {"id": "session-1"},
+                {
+                    "input_user_file_id": 11,
+                    "input_object_id": 22,
+                    "input_file_hash": "a" * 64,
+                    "input_filename": "data.csv",
+                },
+                {"active_analysis_context_id": None},
+                {"message_count": 0, "title": ""},
+            ]
+        )
+        created = {"job_id": "job-new", "status": "queued"}
+
+        with (
+            patch("app.agent.job_service.get_write_connection", return_value=connection),
+            patch("app.agent.job_service.get_job_for_user", return_value=created),
+        ):
+            create_job(
+                7,
+                "session-1",
+                "分析这份数据",
+                JOB_REQUEST_KEY,
+                input_user_file_id=11,
+                request_id=JOB_REQUEST_ID,
+            )
+
+        context_insert = next(
+            params
+            for sql, params in connection.fake_cursor.statements
+            if "INSERT INTO analysis_contexts" in sql
+        )
+        job_insert = next(
+            params
+            for sql, params in connection.fake_cursor.statements
+            if "INSERT INTO analysis_jobs" in sql
+        )
+        input_insert = next(
+            params
+            for sql, params in connection.fake_cursor.statements
+            if "INSERT INTO analysis_job_inputs" in sql
+        )
+        self.assertEqual(context_insert[1], "session-1")
+        self.assertEqual(context_insert[2], 7)
+        self.assertEqual(context_insert[3], 11)
+        self.assertEqual(context_insert[4], 22)
+        # Job 与 initial 输入账本都绑定同一个上下文。
+        self.assertEqual(job_insert[-1], context_insert[0])
+        self.assertEqual(input_insert[-1], context_insert[0])
+        self.assertEqual(connection.commits, 1)
 
     def test_duplicate_key_race_returns_committed_job_after_insert_conflict(self):
         """唯一键并发冲突后应读取已经提交的原 job，而不是再次入队。"""

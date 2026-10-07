@@ -1,7 +1,16 @@
 <script setup lang="ts">
+import {
+  CaBadge,
+  CaButton,
+  CaCard,
+  CaEmptyState,
+  CaErrorState,
+  CaPageHeader,
+} from '@causalagent/design-system'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ApiError, adminApi } from '../api'
 import { formatDate, statusLabel } from '../lib/dashboard'
+import { statusTone } from '../lib/statusTone'
 import type { DeepAuditSnapshot, QuickAuditCheck, QuickAuditSnapshot } from '../types'
 
 const quick = ref<QuickAuditSnapshot | null>(null)
@@ -107,21 +116,18 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section>
-    <header class="page-header">
-      <div>
-        <h1>Schema与审计</h1>
-      </div>
-      <div class="header-actions">
-        <el-button :loading="loading" @click="loadAudits">重新读取</el-button>
-        <el-button type="primary" :loading="running" @click="runDeep">运行 deep 审计</el-button>
-      </div>
-    </header>
+  <section class="admin-page">
+    <CaPageHeader title="Schema与审计" :level="1" size="md">
+      <template #actions>
+        <CaButton variant="secondary" :loading="loading" @click="loadAudits">重新读取</CaButton>
+        <CaButton variant="primary" :loading="running" @click="runDeep">运行 deep 审计</CaButton>
+      </template>
+    </CaPageHeader>
 
-    <el-alert v-if="error" class="page-notice" type="error" :closable="false" :title="error" />
+    <CaErrorState v-if="error" class="page-notice" title="审计读取失败" :description="error" />
     <el-alert v-if="notice" class="page-notice" type="success" :closable="false" :title="notice" />
 
-    <section class="panel">
+    <CaCard as="section" class="panel" variant="outline" padding="md">
       <div class="panel-header">
         <div>
           <h2>Quick 完整性</h2>
@@ -132,26 +138,26 @@ onBeforeUnmount(() => {
         <el-table-column prop="label" label="检查" min-width="220" />
         <el-table-column label="状态" width="110">
           <template #default="{ row }">
-            <el-tag :type="row.status === 'healthy' ? 'success' : 'danger'">
+            <CaBadge :tone="statusTone(row.status)">
               {{ row.status }}
-            </el-tag>
+            </CaBadge>
           </template>
         </el-table-column>
         <el-table-column label="说明" min-width="280" show-overflow-tooltip>
           <template #default="{ row }">{{ quickCheckDescription(row) }}</template>
         </el-table-column>
       </el-table>
-    </section>
+    </CaCard>
 
-    <section class="panel">
+    <CaCard as="section" class="panel" variant="outline" padding="md">
       <div class="panel-header">
         <div>
           <h2>Deep 审计</h2>
         </div>
         <div class="source-meta">
-          <el-tag :type="deep?.status === 'healthy' ? 'success' : deep?.status === 'error' ? 'danger' : 'warning'">
+          <CaBadge :tone="statusTone(deep?.status)">
             {{ statusLabel(deep?.status || 'unknown') }}
-          </el-tag>
+          </CaBadge>
           <span>{{ formatDate(deep?.observed_at) }}</span>
         </div>
       </div>
@@ -172,9 +178,9 @@ onBeforeUnmount(() => {
         >
           <template #title>
             <div class="audit-check-title">
-              <el-tag :type="check.status === 'healthy' ? 'success' : check.status === 'error' ? 'danger' : 'warning'">
+              <CaBadge :tone="statusTone(check.status)">
                 {{ statusLabel(check.status) }}
-              </el-tag>
+              </CaBadge>
               <strong>{{ check.label }}</strong>
               <span>{{ check.summary }}</span>
             </div>
@@ -182,7 +188,7 @@ onBeforeUnmount(() => {
           <pre class="audit-details" v-text="formatDetails(check.details)" />
         </el-collapse-item>
       </el-collapse>
-      <el-empty v-if="!loading && !(deep?.checks || []).length" description="尚未运行 deep 审计" />
-    </section>
+      <CaEmptyState v-if="!loading && !(deep?.checks || []).length" description="尚未运行 deep 审计" />
+    </CaCard>
   </section>
 </template>

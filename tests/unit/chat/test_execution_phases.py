@@ -182,6 +182,48 @@ def test_error_boundary_marks_phase_failed_and_keeps_public_nodes():
     assert [event["event_id"] for event in phases[10]["events"]] == [100]
 
 
+def test_completed_deep_agent_phase_replays_tool_and_public_decision_events():
+    phases = assemble_execution_phases(
+        messages=[
+            _message(10, "user", input_id=1),
+            _message(11, "ai", input_id=1, source_event_id=106),
+        ],
+        jobs=[{"job_id": "job-1", "status": "succeeded"}],
+        inputs=[_input(1, 0, chat_message_id=10)],
+        events=[
+            _event(100, "node_start", seconds=1, payload={
+                "step_id": "deep-step", "node_name": "deep_agent",
+            }),
+            _event(101, "decision", seconds=2, payload={
+                "step_id": "deep-step", "node_name": "deep_agent",
+                "decision_kind": "algorithm", "tool_name": "causal_pc",
+                "summary": "连续数据适合使用 PC。", "private": "hidden",
+            }),
+            _event(102, "tool_call_start", seconds=3, payload={
+                "step_id": "deep-step", "node_name": "deep_agent",
+                "tool_name": "causal_pc", "argument_keys": ["alpha"],
+            }),
+            _event(103, "tool_call_result", seconds=4, payload={
+                "step_id": "deep-step", "node_name": "deep_agent",
+                "tool_name": "causal_pc", "summary": "调用完成",
+                "status": "succeeded",
+            }),
+            _event(104, "node_end", seconds=5, payload={
+                "step_id": "deep-step", "node_name": "deep_agent",
+                "duration": 4, "status": "completed",
+            }),
+            _event(106, "final_result", seconds=6),
+        ],
+        snapshot_at=BASE + timedelta(seconds=7),
+    )
+
+    events = phases[10]["events"]
+    assert [event["event_id"] for event in events] == [100, 101, 102, 103, 104]
+    assert events[1]["decision_kind"] == "algorithm"
+    assert events[1]["summary"] == "连续数据适合使用 PC。"
+    assert "private" not in repr(events)
+
+
 def test_legacy_messages_without_job_links_remain_outside_phases():
     phases = assemble_execution_phases(
         messages=[{

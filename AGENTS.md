@@ -17,10 +17,16 @@
 - 默认不主动提交、推送、建 PR 或改分支；完成后提供建议的提交信息、批次和 PR/MR 文案，完整功能实现后，写入日志文件之后，单独输出一份更改的完整日志给用户，
 - 解释复杂内容时善用可视化
 - 保持简洁直接，区分事实和猜测
-- 基于可靠来源工作，必要时调用相关skills获取官方文档和事实
+- 基于可靠来源工作，必要时调用相关skills/mcp获取官方文档和事实，可用的官方文档和事实有：
+  - langchain MCP
+  - langchain-reference MCP
+
 - 不偏离用户目标和约束
 - 合理使用子Agent，避免无意义并行
 - 修改代码保持克制，不做无关重构
+- 禁止私自用 Git 回滚任何代码
+- 不允许在实现或者测试的时候使用任何 mock、假的、欺骗的、只为了通过测试而 workaround 的方式来欺骗我
+- 你在发现任何文档或者代码有错误的时候，你的更新不要保留任何错误痕迹。我们不需要任何错误的记录。
 
 ## 文档体系
 
@@ -40,11 +46,13 @@ AGENTS.md 只写“修改时必须怎么做”的执行约束，不复制完整�
 - Agent/AGENTS.md：LangGraph、结构化输出、MCP、RAG 和因果工具。
 - admin-frontend/AGENTS.md：TypeScript、管理员 API、构建和浏览器验证。
 - observability/AGENTS.md：共享日志运行时、事件目录、降噪、脱敏和采集拓扑。
+- packages/design-system/AGENTS.md：设计 token、品牌基础样式、共享组件契约和本包自检。
 
 ## 跨模块不可省略的约束
 
 - 修改 Job 或文件流程时，必须核对 Session 真实存在/归属、analysis_job_inputs 输入账本、文件快照、active Job 唯一约束、worker lease/fencing、SSE Last-Event-ID 和 checkpoint cleanup outbox。
 - 修改数据库 schema、读写路径或 Compose 时，必须分别核对 migration、check_database_readiness()、strong/eventual read、主从回退、PostgreSQL checkpoint 和 Docker 服务依赖。
+- 修改多模态索引目录的挂载、发布写入位置或容器卷时，必须核对 Agent/knowledge_base/multimodal_indexes 的双重角色（运行期读取与发布写入）、命名卷与宿主 release 的同步方向、multimodal_runtime/active_index.json 与卷内内容的一致性、readiness 检查与实际打开向量库的差异，并同步 Document/development/deployment.md 的挂载说明。
 - 修改 Agent、MCP、RAG 或 worker 初始化时，必须核对 worker runtime/bootstrap、slot 资源、显式 State 路由、结构化输出配置、工具失败路径和公共事件适配器。
 - 修改管理员后端或前端时，必须核对实时主库授权、CSRF、request ID、分页上限、敏感读取审计、受控写入幂等和 401/403/empty/error 状态。
 - 修改目录、启动方式、schema 或部署事实时，必须同步检查唯一权威 Document/ 页面和局部 AGENTS.md。
@@ -60,6 +68,7 @@ AGENTS.md 只写“修改时必须怎么做”的执行约束，不复制完整�
 ## 日志与 Git
 
 - CHANGELOG.md 是根目录追加式开发日志；历史正文禁止改写，只允许在文件末尾追加新记录。
+- 不需要说明验证结果，只需要说明更改的功能即可
   - 日志系统命名规则：
     ```
     ---

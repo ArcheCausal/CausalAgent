@@ -41,6 +41,7 @@ from Database.monitoring import (
 )
 from app.agent.job_service import get_worker_snapshot_report
 from app.db import get_read_connection_with_source
+from config.database_settings import database_settings
 from config.settings import AppConfig, settings
 from observability.noise_control import FailureTransitionTracker
 
@@ -458,15 +459,29 @@ class DatabaseInspectionTests(unittest.TestCase):
         self.assertTrue(removed_keys.isdisjoint(keys))
         self.assertIn("checkpoint_cleanup_failed", keys)
         self.assertIn("checkpoint_cleanup_outbox", sql_by_key["checkpoint_cleanup_failed"])
+        self.assertIn("user_memory_cleanup_failed", keys)
+        self.assertIn(
+            "user_memory_cleanup_outbox",
+            sql_by_key["user_memory_cleanup_failed"],
+        )
+        self.assertIn(
+            "idx_user_memory_cleanup_outbox_claim",
+            sql_by_key["constraint_user_memory_cleanup_outbox_claim"],
+        )
         self.assertTrue(any("information_schema" in sql for sql in sql_by_key.values()))
         checkpoint_fk_sql = sql_by_key["constraint_fk_checkpoint_cleanup_outbox_operation"]
         self.assertIn("information_schema.key_column_usage", checkpoint_fk_sql)
         self.assertIn("ordinal_position = 1", checkpoint_fk_sql)
         self.assertIn("column_name = 'operation_id'", checkpoint_fk_sql)
         self.assertIn("referenced_column_name = 'operation_id'", checkpoint_fk_sql)
+        memory_fk_sql = sql_by_key["constraint_fk_user_memory_cleanup_outbox_operation"]
+        self.assertIn("information_schema.key_column_usage", memory_fk_sql)
+        self.assertIn("ordinal_position = 1", memory_fk_sql)
         descriptions = {definition["key"]: definition["description"] for definition in definitions}
         self.assertIn("visualization", descriptions["constraint_chat_attachment_type_enum"])
+        self.assertIn("report_document", descriptions["constraint_chat_attachment_type_enum"])
         self.assertIn("数量为 0 时健康", descriptions["checkpoint_cleanup_failed"])
+        self.assertIn("长期记忆", descriptions["user_memory_cleanup_failed"])
 
     def test_migration_preflight_skips_tables_not_present_in_current_schema(self):
         """新库或较早 schema 尚无未来表时，预检标为不适用而不是失败。"""
@@ -549,8 +564,8 @@ class DatabaseInspectionTests(unittest.TestCase):
         primary_pool = Mock()
         primary_pool.get_connection.return_value = primary_connection
         with (
-            patch.object(settings, "MYSQL_WRITE_HOST", "internal-primary-host"),
-            patch.object(settings, "MYSQL_READ_HOSTS", []),
+            patch.object(database_settings, "MYSQL_WRITE_HOST", "internal-primary-host"),
+            patch.object(database_settings, "MYSQL_READ_HOSTS", []),
             patch("app.db._get_read_pool", return_value=primary_pool),
         ):
             connection, source = get_read_connection_with_source("strong")
@@ -563,7 +578,7 @@ class DatabaseInspectionTests(unittest.TestCase):
         replica_pool = Mock()
         replica_pool.get_connection.return_value = replica_connection
         with (
-            patch.object(settings, "MYSQL_READ_HOSTS", ["internal-replica-host"]),
+            patch.object(database_settings, "MYSQL_READ_HOSTS", ["internal-replica-host"]),
             patch("app.db.should_use_replica", return_value=True),
             patch("app.db.random.shuffle"),
             patch("app.db._get_read_pool", return_value=replica_pool),

@@ -20,6 +20,7 @@ from app.agent.worker.runtime import (
     ProcessRuntime,
     create_process_runtime,
     create_slot_runtime,
+    initialize_production_runtime,
 )
 from app.db import check_database_readiness
 from config.settings import settings
@@ -43,7 +44,7 @@ async def run_slot(
     process_runtime: ProcessRuntime,
     stop_event: asyncio.Event | None = None,
 ) -> None:
-    """启动一个 slot，并让其独占 MCP session、tools 和 graph。"""
+    """启动一个 slot；新链路只独占 Job context，不再独占 MCP session。"""
     stop_event = stop_event or asyncio.Event()
     worker_id = f"{socket.gethostname()}:{slot_index}"
     with log_context(worker_slot=slot_index):
@@ -181,24 +182,28 @@ async def main_async() -> None:
             await verify_checkpoint_schema(checkpoint_pool)
             phase = "process_runtime"
             dependency = "worker_runtime"
-            process_runtime = create_process_runtime()
-            if not process_runtime.rag_available:
-                log_event(
-                    LOGGER,
-                    "rag.startup.unavailable",
-                    details={"reason_code": process_runtime.rag_error_code or "unavailable"},
+            async with AsyncExitStack() as process_stack:
+                process_runtime = await initialize_production_runtime(
+                    checkpoint_pool,
+                    process_stack,
                 )
-
-            slot_count = max(1, settings.JOB_WORKERS)
-            log_event(LOGGER, "worker.startup.ready")
-            startup_ready = True
-            slot_tasks = [
-                asyncio.create_task(
-                    run_slot(index + 1, checkpoint_pool, process_runtime, stop_event)
-                )
-                for index in range(slot_count)
-            ]
-            await _run_slots_until_shutdown(slot_tasks, stop_event)
+                phase = "rag_readiness"
+                if not process_runtime.rag_available:
+                    log_event(
+                        LOGGER,
+                        "rag.startup.unavailable",
+                        details={"reason_code": process_runtime.rag_error_code or "unavailable"},
+                    )
+                slot_count = max(1, settings.JOB_WORKERS)
+                log_event(LOGGER, "worker.startup.ready")
+                startup_ready = True
+                slot_tasks = [
+                    asyncio.create_task(
+                        run_slot(index + 1, checkpoint_pool, process_runtime, stop_event)
+                    )
+                    for index in range(slot_count)
+                ]
+                await _run_slots_until_shutdown(slot_tasks, stop_event)
     except asyncio.CancelledError:
         raise
     except Exception:

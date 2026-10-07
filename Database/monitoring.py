@@ -18,6 +18,11 @@ from Database.inspection import (
     inspect_slow_queries,
 )
 from Database.monitor_settings import get_monitor_settings
+from app.agent.persistence_cleanup import (
+    CHECKPOINT_TASK,
+    MAX_CLEANUP_ATTEMPTS,
+    USER_MEMORY_TASK,
+)
 from app.db import get_read_connection_with_source, get_write_connection
 from observability.logging_runtime import log_event
 from observability.noise_control import FailureTransitionTracker
@@ -25,8 +30,15 @@ from observability.noise_control import FailureTransitionTracker
 
 LOGGER = logging.getLogger(__name__)
 DASHBOARD_SNAPSHOT_KEYS = ("realtime", "sql_performance", "capacity", "integrity")
-CLEANUP_SNAPSHOT_KEYS = ("checkpoint_cleanup_runtime", "checkpoint_cleanup_outbox")
-SNAPSHOT_KEYS = (*DASHBOARD_SNAPSHOT_KEYS, "deep_audit", "checkpoint_cleanup_outbox")
+CLEANUP_RUNTIME_SNAPSHOT_KEY = "agent_persistence_cleanup_runtime"
+CLEANUP_OUTBOX_SNAPSHOT_KEY = "agent_persistence_cleanup_outbox"
+CLEANUP_SNAPSHOT_KEYS = (CLEANUP_RUNTIME_SNAPSHOT_KEY, CLEANUP_OUTBOX_SNAPSHOT_KEY)
+SNAPSHOT_KEYS = (*DASHBOARD_SNAPSHOT_KEYS, "deep_audit", CLEANUP_OUTBOX_SNAPSHOT_KEY)
+CLEANUP_OUTBOX_TABLES = {
+    CHECKPOINT_TASK: ("checkpoint_cleanup_outbox", "thread_id"),
+    USER_MEMORY_TASK: ("user_memory_cleanup_outbox", "user_id"),
+}
+CLEANUP_OUTBOX_ITEM_LIMIT = 100
 DEFAULT_REFRESH_GROUPS = ("realtime", "sql_performance", "capacity")
 SLOW_QUERY_LIMIT = 20
 _SNAPSHOT_FAILURES = FailureTransitionTracker()
@@ -181,15 +193,15 @@ def _interval_seconds(
     """从统一配置取得某类快照的采集周期。"""
     effective = policy or get_monitor_settings()["effective"]
     heartbeat_interval = _coerce_interval_seconds(
-        os.getenv("CHECKPOINT_CLEANUP_HEARTBEAT_INTERVAL_SECONDS")
+        os.getenv("AGENT_PERSISTENCE_CLEANUP_HEARTBEAT_INTERVAL_SECONDS")
     ) or 10
     intervals = {
         "realtime": effective["realtime_interval_seconds"],
         "sql_performance": effective["sql_interval_seconds"],
         "capacity": effective["table_capacity_interval_seconds"],
         "integrity": effective["integrity_interval_seconds"],
-        "checkpoint_cleanup_runtime": heartbeat_interval,
-        "checkpoint_cleanup_outbox": effective["realtime_interval_seconds"],
+        CLEANUP_RUNTIME_SNAPSHOT_KEY: heartbeat_interval,
+        CLEANUP_OUTBOX_SNAPSHOT_KEY: effective["realtime_interval_seconds"],
     }
     return int(intervals[snapshot_key])
 
@@ -230,7 +242,7 @@ def _read_snapshot_records() -> dict[str, dict[str, Any]]:
             FROM database_monitor_snapshots
             WHERE snapshot_key IN (
                 'realtime', 'sql_performance', 'capacity', 'integrity', 'deep_audit',
-                'checkpoint_cleanup_runtime', 'checkpoint_cleanup_outbox'
+                'agent_persistence_cleanup_runtime', 'agent_persistence_cleanup_outbox'
             )
         """)
         rows = cursor.fetchall()
@@ -262,7 +274,7 @@ def _enrich_snapshot(
     requested_at = _parse_utc((row or {}).get("refresh_requested_at"))
     effective = policy or get_monitor_settings()["effective"]
     interval = _interval_seconds(snapshot_key, effective)
-    if snapshot_key == "checkpoint_cleanup_runtime":
+    if snapshot_key == CLEANUP_RUNTIME_SNAPSHOT_KEY:
         interval = _coerce_interval_seconds(
             result.get("heartbeat_interval_seconds")
         ) or interval
@@ -299,14 +311,14 @@ def get_dashboard_snapshots() -> dict[str, Any]:
     # 旧环境在 monitor/cleanup worker 首次写入前没有这两行；保持旧 dashboard
     # 响应的键集合，前端对缺失快照按未知状态渲染。快照一旦产生便稳定返回。
     if any(key in records for key in CLEANUP_SNAPSHOT_KEYS):
-        dashboard["checkpoint_cleanup_runtime"] = _enrich_snapshot(
-            "checkpoint_cleanup_runtime",
-            records.get("checkpoint_cleanup_runtime"),
+        dashboard[CLEANUP_RUNTIME_SNAPSHOT_KEY] = _enrich_snapshot(
+            CLEANUP_RUNTIME_SNAPSHOT_KEY,
+            records.get(CLEANUP_RUNTIME_SNAPSHOT_KEY),
             policy=effective,
         )
-        dashboard["checkpoint_cleanup_outbox"] = _enrich_snapshot(
-            "checkpoint_cleanup_outbox",
-            records.get("checkpoint_cleanup_outbox"),
+        dashboard[CLEANUP_OUTBOX_SNAPSHOT_KEY] = _enrich_snapshot(
+            CLEANUP_OUTBOX_SNAPSHOT_KEY,
+            records.get(CLEANUP_OUTBOX_SNAPSHOT_KEY),
             policy=effective,
         )
     return dashboard | {
@@ -443,7 +455,7 @@ def _collect_payload(
         from Database.deep_audit import get_deep_audit_report
 
         return get_deep_audit_report()
-    if snapshot_key == "checkpoint_cleanup_outbox":
+    if snapshot_key == CLEANUP_OUTBOX_SNAPSHOT_KEY:
         return get_cleanup_outbox_report()
     raise ValueError(f"未知监控快照类型: {snapshot_key}")
 
@@ -480,16 +492,11 @@ def _collection_failure_payload(
             "auto_scheduled": False,
             "checks": [],
         })
-    if snapshot_key == "checkpoint_cleanup_outbox":
+    if snapshot_key == CLEANUP_OUTBOX_SNAPSHOT_KEY:
         payload.update({
             "summary": {
-                "pending": None,
-                "due_pending": None,
-                "processing": None,
-                "expired_processing": None,
-                "failed": None,
-                "latest_completed_at": None,
-                "earliest_pending_at": None,
+                task_type: _empty_cleanup_summary()
+                for task_type in CLEANUP_OUTBOX_TABLES
             },
             "items": [],
         })
@@ -773,11 +780,24 @@ def get_worker_snapshot_from_cache() -> dict[str, Any]:
 
 
 def get_cleanup_runtime_snapshot() -> dict[str, Any]:
-    """读取 cleanup worker 最近一次心跳共享快照。"""
+    """读取 Agent 持久化清理 worker 最近一次心跳共享快照。"""
     dashboard = get_dashboard_snapshots()
-    return dashboard.get("checkpoint_cleanup_runtime") or _empty_snapshot(
-        "checkpoint_cleanup_runtime"
+    return dashboard.get(CLEANUP_RUNTIME_SNAPSHOT_KEY) or _empty_snapshot(
+        CLEANUP_RUNTIME_SNAPSHOT_KEY
     )
+
+
+def _empty_cleanup_summary() -> dict[str, Any]:
+    """构造单类 cleanup outbox 尚未采集时的空汇总。"""
+    return {
+        "pending": None,
+        "due_pending": None,
+        "processing": None,
+        "expired_processing": None,
+        "failed": None,
+        "latest_completed_at": None,
+        "earliest_pending_at": None,
+    }
 
 
 def _cleanup_item_rank(row: dict[str, Any]) -> int:
@@ -794,83 +814,30 @@ def _cleanup_item_rank(row: dict[str, Any]) -> int:
 
 
 def get_cleanup_outbox_report() -> dict[str, Any]:
-    """采集最多 100 条脱敏 cleanup outbox 记录和状态汇总。"""
+    """采集两类 cleanup outbox 的脱敏汇总和最多 100 条待处理或异常条目。"""
     try:
         connection, source = get_read_connection_with_source(consistency="strong")
         with connection as conn:
             cursor = conn.cursor(dictionary=True)
-            cursor.execute(
-                """
-                SELECT
-                    UTC_TIMESTAMP(6) AS database_now,
-                    SUM(status = 'pending') AS pending,
-                    SUM(status = 'pending' AND available_at <= UTC_TIMESTAMP(6)) AS due_pending,
-                    SUM(status = 'processing') AS processing,
-                    SUM(status = 'processing' AND lease_expires_at IS NOT NULL
-                        AND lease_expires_at < UTC_TIMESTAMP(6)) AS expired_processing,
-                    SUM(status = 'failed') AS failed,
-                    MAX(completed_at) AS latest_completed_at,
-                    MIN(CASE WHEN status = 'pending' THEN available_at END) AS earliest_pending_at
-                FROM checkpoint_cleanup_outbox
-                """
+            cursor.execute("SELECT UTC_TIMESTAMP(6) AS database_now")
+            database_now = (
+                _parse_utc((cursor.fetchone() or {}).get("database_now")) or _utc_now()
             )
-            summary = cursor.fetchone() or {}
-            cursor.execute(
-                """
-                SELECT
-                    id, thread_id, operation_id, status, attempts,
-                    available_at, lease_expires_at, created_at, completed_at,
-                    (last_error IS NOT NULL AND last_error <> '') AS has_error,
-                    UTC_TIMESTAMP(6) AS database_now
-                FROM checkpoint_cleanup_outbox
-                WHERE status IN ('pending', 'processing', 'failed')
-                ORDER BY
-                    CASE
-                        WHEN status = 'failed' THEN 0
-                        WHEN status = 'processing' AND lease_expires_at < UTC_TIMESTAMP(6) THEN 1
-                        WHEN status = 'processing' THEN 2
-                        WHEN status = 'pending' AND available_at <= UTC_TIMESTAMP(6) THEN 3
-                        ELSE 4
-                    END,
-                    id ASC
-                LIMIT 100
-                """
-            )
-            raw_rows = cursor.fetchall()
-        database_now = _parse_utc(summary.get("database_now")) or _utc_now()
-        items: list[dict[str, Any]] = []
-        for row in raw_rows:
-            lease_expires = _parse_utc(row.get("lease_expires_at"))
-            available_at = _parse_utc(row.get("available_at"))
-            created_at = _parse_utc(row.get("created_at"))
-            completed_at = _parse_utc(row.get("completed_at"))
-            item = {
-                "outbox_id": int(row.get("id") or 0),
-                "id": int(row.get("id") or 0),
-                "thread_id": str(row.get("thread_id") or ""),
-                "operation_id": row.get("operation_id"),
-                "status": row.get("status"),
-                "attempts": int(row.get("attempts") or 0),
-                "max_attempts": 3,
-                "available_at": _iso_utc(available_at) if available_at else None,
-                "lease_expires_at": _iso_utc(lease_expires) if lease_expires else None,
-                "created_at": _iso_utc(created_at) if created_at else None,
-                "completed_at": _iso_utc(completed_at) if completed_at else None,
-                "has_error": bool(row.get("has_error")),
-                "is_due": bool(available_at and available_at <= database_now),
-                "lease_expired": bool(
-                    row.get("status") == "processing"
-                    and lease_expires
-                    and lease_expires < database_now
-                ),
-            }
-            item["error_state"] = (
-                "failed" if item["status"] == "failed"
-                else "lease_expired" if item["lease_expired"]
-                else None
-            )
-            item["priority"] = _cleanup_item_rank(item)
-            items.append(item)
+            summaries: dict[str, dict[str, Any]] = {}
+            items: list[dict[str, Any]] = []
+            for task_type, (table, target_column) in CLEANUP_OUTBOX_TABLES.items():
+                summaries[task_type] = _collect_cleanup_summary(cursor, table)
+                items.extend(
+                    _collect_cleanup_items(
+                        cursor,
+                        task_type=task_type,
+                        table=table,
+                        target_column=target_column,
+                        database_now=database_now,
+                    )
+                )
+        items.sort(key=lambda item: (item["priority"], item["task_type"], item["outbox_id"]))
+        items = items[:CLEANUP_OUTBOX_ITEM_LIMIT]
         status = "error" if any(
             item["status"] == "failed" or item["lease_expired"] for item in items
         ) else "warning" if items else "healthy"
@@ -881,24 +848,109 @@ def get_cleanup_outbox_report() -> dict[str, Any]:
             "source_alias": source.get("source_alias", "primary"),
             "is_estimate": False,
             "warning": "存在失败或租约过期的 cleanup 任务" if status == "error" else None,
-            "summary": {
-                "pending": int(summary.get("pending") or 0),
-                "due_pending": int(summary.get("due_pending") or 0),
-                "processing": int(summary.get("processing") or 0),
-                "expired_processing": int(summary.get("expired_processing") or 0),
-                "failed": int(summary.get("failed") or 0),
-                "latest_completed_at": (
-                    _iso_utc(latest_completed_at)
-                    if (latest_completed_at := _parse_utc(summary.get("latest_completed_at")))
-                    else None
-                ),
-                "earliest_pending_at": (
-                    _iso_utc(earliest_pending_at)
-                    if (earliest_pending_at := _parse_utc(summary.get("earliest_pending_at")))
-                    else None
-                ),
-            },
+            "summary": summaries,
             "items": items,
         }
     except Exception as exc:
-        return _collection_failure_payload("checkpoint_cleanup_outbox", exc)
+        return _collection_failure_payload(CLEANUP_OUTBOX_SNAPSHOT_KEY, exc)
+
+
+def _collect_cleanup_summary(cursor, table: str) -> dict[str, Any]:
+    """采集单张 cleanup outbox 表的状态汇总。"""
+    cursor.execute(
+        f"""
+        SELECT
+            SUM(status = 'pending') AS pending,
+            SUM(status = 'pending' AND available_at <= UTC_TIMESTAMP(6)) AS due_pending,
+            SUM(status = 'processing') AS processing,
+            SUM(status = 'processing' AND lease_expires_at IS NOT NULL
+                AND lease_expires_at < UTC_TIMESTAMP(6)) AS expired_processing,
+            SUM(status = 'failed') AS failed,
+            MAX(completed_at) AS latest_completed_at,
+            MIN(CASE WHEN status = 'pending' THEN available_at END) AS earliest_pending_at
+        FROM {table}
+        """
+    )
+    summary = cursor.fetchone() or {}
+    latest_completed_at = _parse_utc(summary.get("latest_completed_at"))
+    earliest_pending_at = _parse_utc(summary.get("earliest_pending_at"))
+    return {
+        "pending": int(summary.get("pending") or 0),
+        "due_pending": int(summary.get("due_pending") or 0),
+        "processing": int(summary.get("processing") or 0),
+        "expired_processing": int(summary.get("expired_processing") or 0),
+        "failed": int(summary.get("failed") or 0),
+        "latest_completed_at": _iso_utc(latest_completed_at) if latest_completed_at else None,
+        "earliest_pending_at": _iso_utc(earliest_pending_at) if earliest_pending_at else None,
+    }
+
+
+def _collect_cleanup_items(
+    cursor,
+    *,
+    task_type: str,
+    table: str,
+    target_column: str,
+    database_now: datetime,
+) -> list[dict[str, Any]]:
+    """采集单张 cleanup outbox 表里待处理或异常的脱敏条目。"""
+    cursor.execute(
+        f"""
+        SELECT
+            id, {target_column} AS target, operation_id, status, attempts,
+            available_at, lease_expires_at, created_at, completed_at,
+            (last_error IS NOT NULL AND last_error <> '') AS has_error
+        FROM {table}
+        WHERE status IN ('pending', 'processing', 'failed')
+        ORDER BY
+            CASE
+                WHEN status = 'failed' THEN 0
+                WHEN status = 'processing' AND lease_expires_at < UTC_TIMESTAMP(6) THEN 1
+                WHEN status = 'processing' THEN 2
+                WHEN status = 'pending' AND available_at <= UTC_TIMESTAMP(6) THEN 3
+                ELSE 4
+            END,
+            id ASC
+        LIMIT {CLEANUP_OUTBOX_ITEM_LIMIT}
+        """
+    )
+    items: list[dict[str, Any]] = []
+    for row in cursor.fetchall():
+        lease_expires = _parse_utc(row.get("lease_expires_at"))
+        available_at = _parse_utc(row.get("available_at"))
+        created_at = _parse_utc(row.get("created_at"))
+        completed_at = _parse_utc(row.get("completed_at"))
+        item = {
+            "task_type": task_type,
+            "outbox_id": int(row.get("id") or 0),
+            "id": int(row.get("id") or 0),
+            "thread_id": (
+                str(row.get("target")) if task_type == CHECKPOINT_TASK else None
+            ),
+            "user_id": (
+                int(row.get("target")) if task_type == USER_MEMORY_TASK else None
+            ),
+            "operation_id": row.get("operation_id"),
+            "status": row.get("status"),
+            "attempts": int(row.get("attempts") or 0),
+            "max_attempts": MAX_CLEANUP_ATTEMPTS,
+            "available_at": _iso_utc(available_at) if available_at else None,
+            "lease_expires_at": _iso_utc(lease_expires) if lease_expires else None,
+            "created_at": _iso_utc(created_at) if created_at else None,
+            "completed_at": _iso_utc(completed_at) if completed_at else None,
+            "has_error": bool(row.get("has_error")),
+            "is_due": bool(available_at and available_at <= database_now),
+            "lease_expired": bool(
+                row.get("status") == "processing"
+                and lease_expires
+                and lease_expires < database_now
+            ),
+        }
+        item["error_state"] = (
+            "failed" if item["status"] == "failed"
+            else "lease_expired" if item["lease_expired"]
+            else None
+        )
+        item["priority"] = _cleanup_item_rank(item)
+        items.append(item)
+    return items

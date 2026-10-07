@@ -12,12 +12,13 @@ monitor 入口是 `python -m Database.monitor_worker`。它把采集结果写入
 
 | 快照组 | 典型内容 | 默认周期 |
 | --- | --- | --- |
-| `realtime` | 主库/从库状态、连接、Job/worker 和 cleanup 运行摘要 | 10 秒 |
+| `realtime` | 主库/从库状态、连接和 Job/worker 运行摘要 | 10 秒 |
 | `sql_performance` | Performance Schema digest、`Slow_queries` 窗口增量 | 60 秒 |
 | `capacity` | revision、表容量等可带估算性质的容量信息 | 900 秒 |
 | `integrity` | 运行期 quick integrity | 默认不定时；启用后 86400 秒 |
 | `deep_audit` | schema-aware 手动深审计 | 仅手动 |
-| `checkpoint_cleanup_outbox` | 脱敏 outbox 汇总和有限明细 | 按 realtime 采集 |
+| `agent_persistence_cleanup_outbox` | checkpoint 与用户记忆两类脱敏 outbox 汇总和有限明细 | 按 realtime 采集 |
+| `agent_persistence_cleanup_runtime` | 清理 worker 心跳、当前任务类型和本次启动统计 | 按 worker 心跳周期（默认 10 秒） |
 
 数据库看板的 GET 只读最近快照，不在 Web 请求中现场运行完整采集。`POST /api/admin/db/refresh` 和 `POST /api/admin/db/integrity/run` 只登记 `refresh_requested_at`，实际工作由 monitor 进程完成。
 
@@ -59,12 +60,12 @@ SQL digest 区块表示“SQL 性能摘要/高负载 SQL”，不是慢查询日
 
 ## Integrity 与 Deep Audit
 
-quick integrity 复用独立 PostgreSQL 只读连接，确认 checkpoint 连通性、官方表集合和 setup migration 版本，同时检查 MySQL cleanup outbox 的外键/领取索引与失败清理任务。它不再查询已经迁移走的 MySQL checkpoint 表，也不要求 `chat_messages` 必须分区。
+quick integrity 复用独立 PostgreSQL 只读连接，确认 checkpoint 连通性、官方表集合和 setup migration 版本，同时检查 MySQL 两张 cleanup outbox 的外键/领取索引与失败清理任务。它不再查询已经迁移走的 MySQL checkpoint 表，也不要求 `chat_messages` 必须分区。
 
 deep audit 只接受手动请求，不定时调度，不自动修复。它覆盖 Alembic revision、关键 schema、utf8mb4/UTC/隔离级别、账号职责结论、Job/Event、cleanup outbox、归档关系、`active_session_key` 和逐从库状态；每项有超时和异常样本上限。返回值只包含逻辑别名、计数和安全结论，不返回账号、host、grants、密码或连接串。
 
 ## Cleanup 运行状态
 
-cleanup worker 约每 10 秒写入 `checkpoint_cleanup_runtime` 心跳。monitor 还采集 `checkpoint_cleanup_outbox` 的 pending、due、processing、租约过期和 failed 汇总以及最多 100 条脱敏条目；不返回 `last_error` 原文，只返回 `has_error` 和安全错误状态。管理员后台的 database、cleanup-worker、outbox 三段视图都消费这些共享快照。
+cleanup worker 约每 10 秒写入 `agent_persistence_cleanup_runtime` 心跳，快照包含当前任务类型（`checkpoint` 或 `user_memory`）。monitor 还采集 `agent_persistence_cleanup_outbox`：checkpoint 与 user_memory 两张表各自汇总 pending、due、processing、租约过期和 failed 数量，并合并最多 100 条脱敏条目；不返回 `last_error` 原文，只返回 `has_error` 和安全错误状态。管理员后台的 database、cleanup-worker、outbox 三段视图都消费这些共享快照。
 
-每个 outbox attempt 只在最终边界记录一次 `checkpoint.cleanup.succeeded` 或 `checkpoint.cleanup.failed`；数据库中的 `last_error` 仍服务于状态机，但不进入运行日志。claim、heartbeat、运行快照发布等循环级故障使用 `checkpoint.cleanup.runtime.degraded/recovered` 转移事件。日志改造不改变 cleanup 的数据库写入、fencing、幂等、租约或 outbox 状态机。
+每个 outbox attempt 只在最终边界记录一次 `agent.persistence.cleanup.succeeded` 或 `agent.persistence.cleanup.failed`；数据库中的 `last_error` 仍服务于状态机，但不进入运行日志。claim、heartbeat、运行快照发布等循环级故障使用 `agent.persistence.cleanup.runtime.degraded/recovered` 转移事件。日志改造不改变 cleanup 的数据库写入、fencing、幂等、租约或 outbox 状态机。

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   adminAuthRedirectOptions,
   adminApi,
+  adminLoginUrl,
   ApiError,
   loadIdentity,
   shouldRedirectForApiError,
@@ -157,6 +158,12 @@ describe('管理员类型化 API 客户端', () => {
       adminAuthRedirectOptions(403, 'admin_required', '/admin/users'),
     ).toEqual({ notice: 'admin_required' })
     expect(adminAuthRedirectOptions(401, 'reauth_failed', '/admin/users')).toBeNull()
+  })
+
+  it('统一登录入口固定在 /auth/sign-in，并编码回跳与提示', () => {
+    expect(adminLoginUrl()).toBe('/auth/sign-in')
+    expect(adminLoginUrl({ next: '/admin/database' })).toBe('/auth/sign-in?next=%2Fadmin%2Fdatabase')
+    expect(adminLoginUrl({ notice: 'admin_required' })).toBe('/auth/sign-in?notice=admin_required')
   })
 
   it('受控改密只在 JSON 请求体传递密码，并同时携带 CSRF 与幂等键', async () => {

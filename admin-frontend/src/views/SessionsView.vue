@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ApiError, adminApi } from '../api'
+import { CaButton, CaCard, CaErrorState, CaPageHeader } from '@causalagent/design-system'
 import CursorPager from '../components/CursorPager.vue'
 import SensitiveContentDialog from '../components/SensitiveContentDialog.vue'
 import { formatDate } from '../lib/dashboard'
@@ -161,14 +162,8 @@ onMounted(() => loadSessions())
 </script>
 
 <template>
-  <section>
-    <header class="page-header">
-      <div>
-        <h1>会话与内容管理</h1>
-        <p class="page-description">
-        </p>
-      </div>
-    </header>
+  <section class="admin-page">
+    <CaPageHeader title="会话与内容管理" :level="1" size="md" />
 
     <section class="filter-bar">
       <el-input v-model="q" clearable placeholder="会话 ID" @keyup.enter="loadSessions(true)" />
@@ -177,12 +172,12 @@ onMounted(() => loadSessions())
         <el-option label="未归档" value="false" />
         <el-option label="已归档" value="true" />
       </el-select>
-      <el-button type="primary" :loading="loading" @click="loadSessions(true)">筛选</el-button>
+      <CaButton variant="primary" :loading="loading" @click="loadSessions(true)">筛选</CaButton>
     </section>
 
-    <el-alert v-if="error" class="page-notice" type="error" :closable="false" :title="error" />
+    <CaErrorState v-if="error" class="page-notice" title="会话读取失败" :description="error" />
 
-    <section class="panel table-panel">
+    <CaCard as="section" class="panel table-panel" variant="outline" padding="md">
       <el-table v-loading="loading" :data="page?.items || []" empty-text="没有符合条件的会话">
         <el-table-column prop="id" label="会话 ID" min-width="260" show-overflow-tooltip />
         <el-table-column prop="username" label="归属用户" min-width="140" />
@@ -207,7 +202,7 @@ onMounted(() => loadSessions())
         </el-table-column>
         <el-table-column label="操作" width="110" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="openDetail(row)">查看详情</el-button>
+            <CaButton variant="quiet" size="sm" @click="openDetail(row)">查看详情</CaButton>
           </template>
         </el-table-column>
       </el-table>
@@ -218,7 +213,7 @@ onMounted(() => loadSessions())
         @previous="previousPage"
         @next="nextPage"
       />
-    </section>
+    </CaCard>
 
     <el-drawer v-model="detailVisible" title="会话详情" size="min(980px, 100vw)">
       <div v-loading="detailLoading">
@@ -249,15 +244,15 @@ onMounted(() => loadSessions())
           </el-table-column>
           <el-table-column label="操作" width="190" fixed="right">
             <template #default="{ row }">
-              <el-button link type="primary" @click="revealMessage(row)">查看正文</el-button>
-              <el-button
+              <CaButton variant="quiet" size="sm" @click="revealMessage(row)">查看正文</CaButton>
+              <CaButton
                 v-if="row.attachment_count"
-                link
-                type="primary"
+                variant="quiet"
+                size="sm"
                 @click="openAttachments(row)"
               >
                 查看附件
-              </el-button>
+              </CaButton>
             </template>
           </el-table-column>
         </el-table>
@@ -281,7 +276,7 @@ onMounted(() => loadSessions())
         </el-table-column>
         <el-table-column label="操作" width="110">
           <template #default="{ row }">
-            <el-button link type="primary" @click="revealAttachment(row)">查看正文</el-button>
+            <CaButton variant="quiet" size="sm" @click="revealAttachment(row)">查看正文</CaButton>
           </template>
         </el-table-column>
       </el-table>

@@ -1,0 +1,180 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "loki", "uid": "causalagent-loki"},
+      "description": "当前筛选范围内达到 60 秒慢调用阈值的 MCP invocation 数量。",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "noValue": "0",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 7, "w": 6, "x": 0, "y": 0},
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time({service_name=~\"worker|mcp\", environment=~\"${environment:regex}\"} | json | job_id=~\"${job_id:regex}\" | tool=~\"${tool:regex}\" | event_code=\"mcp.tool.slow\" [$__range]))",
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "慢调用数量",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "causalagent-loki"},
+      "description": "当前筛选范围内 MCP 失败与取消事件总数。",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "noValue": "0",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 7, "w": 6, "x": 6, "y": 0},
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time({service_name=~\"worker|mcp\", environment=~\"${environment:regex}\"} | json | job_id=~\"${job_id:regex}\" | tool=~\"${tool:regex}\" | event_code=~\"mcp\\\\.(tool\\\\.(failed|canceled)|client\\\\.cancel\\\\.failed)\" [$__range]))",
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "失败与取消",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "causalagent-loki"},
+      "description": "按事件码展示 worker 发起、MCP 接收/接受、慢调用、完成、失败与取消的时间分布。",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "showPoints": "auto", "stacking": {"group": "A", "mode": "none"}},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 0},
+      "id": 3,
+      "options": {
+        "legend": {"calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (event_code) (count_over_time({service_name=~\"worker|mcp\", environment=~\"${environment:regex}\"} | json | job_id=~\"${job_id:regex}\" | tool=~\"${tool:regex}\" | event_code=~\"mcp\\\\..+\" [$__auto]))",
+          "legendFormat": "{{event_code}}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "MCP 生命周期趋势",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "causalagent-loki"},
+      "description": "按时间正序合并 worker 与 MCP 服务端日志。job_id、invocation_id、tool 都从 JSON 正文解析，不作为 Loki 标签。",
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 17, "w": 24, "x": 0, "y": 7},
+      "id": 4,
+      "options": {
+        "deduplication": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Ascending",
+        "wrapLines": true
+      },
+      "targets": [
+        {
+          "expr": "{service_name=~\"worker|mcp\", environment=~\"${environment:regex}\"} | json | job_id=~\"${job_id:regex}\" | tool=~\"${tool:regex}\" | event_code=~\"mcp\\\\..+\" | line_format \"{{.job_id}} | {{.invocation_id}} | {{.tool}} | {{.event_code}} — {{.message}}\"",
+          "maxLines": 500,
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "MCP Job 时间线",
+      "type": "logs"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["causalagent", "mcp", "jobs"],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".+",
+        "current": {"selected": true, "text": "All", "value": "$__all"},
+        "datasource": {"type": "loki", "uid": "causalagent-loki"},
+        "definition": "label_values({service_name=~\"worker|mcp\"}, environment)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "环境",
+        "multi": true,
+        "name": "environment",
+        "options": [],
+        "query": "label_values({service_name=~\"worker|mcp\"}, environment)",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {"selected": true, "text": ".+", "value": ".+"},
+        "hide": 0,
+        "label": "Job ID 正则",
+        "name": "job_id",
+        "options": [],
+        "query": ".+",
+        "skipUrlSync": false,
+        "type": "textbox"
+      },
+      {
+        "current": {"selected": true, "text": ".+", "value": ".+"},
+        "hide": 0,
+        "label": "工具正则",
+        "name": "tool",
+        "options": [],
+        "query": ".+",
+        "skipUrlSync": false,
+        "type": "textbox"
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "CausalAgent MCP Job 时间线",
+  "uid": "causalagent-mcp-jobs",
+  "version": 1,
+  "weekStart": ""
+}

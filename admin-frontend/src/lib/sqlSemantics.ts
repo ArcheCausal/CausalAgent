@@ -133,14 +133,25 @@ const TABLE_RULES: Record<string, TableRule> = {
     },
   },
   checkpoint_cleanup_outbox: {
-    module: 'Checkpoint 生命周期',
-    subject: 'PostgreSQL checkpoint 后台清理任务',
-    evidence: 'app/agent/checkpoint_cleanup.py、Database/checkpoint_cleanup_worker.py',
+    module: 'Agent 持久化生命周期',
+    subject: 'PostgreSQL 父子图 checkpoint 后台清理任务',
+    evidence: 'app/agent/persistence_cleanup.py、Database/agent_persistence_cleanup_worker.py',
     actions: {
       SELECT: '读取 checkpoint 清理任务',
       INSERT: '登记 checkpoint 清理任务',
       UPDATE: '更新 checkpoint 清理状态或租约',
       DELETE: '移除 checkpoint 清理任务',
+    },
+  },
+  user_memory_cleanup_outbox: {
+    module: 'Agent 持久化生命周期',
+    subject: '用户长期记忆 Store 后台清理任务',
+    evidence: 'app/agent/persistence_cleanup.py、Database/agent_persistence_cleanup_worker.py',
+    actions: {
+      SELECT: '读取长期记忆清理任务',
+      INSERT: '登记长期记忆清理任务',
+      UPDATE: '更新长期记忆清理状态或租约',
+      DELETE: '移除长期记忆清理任务',
     },
   },
   database_monitor_snapshots: {

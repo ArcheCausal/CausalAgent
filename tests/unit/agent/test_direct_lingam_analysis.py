@@ -359,5 +359,6 @@ def test_direct_lingam_mcp_tool_delegates_to_runner(monkeypatch) -> None:
     result = asyncio.run(mcp_server.causal_direct_lingam(1, "job-1", 2, 3))
 
     assert "causal_direct_lingam" in FakeFastMCP.registered_tools
+    assert "causal_olc" not in FakeFastMCP.registered_tools
     assert observed["csv_data"] == "A,B\n1,2\n3,4\n"
     assert result == {"success": True, "algorithm": "direct_lingam"}

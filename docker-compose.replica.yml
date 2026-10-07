@@ -157,6 +157,7 @@ services:
       - /app/杂项
       - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
       - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
+      - kb_multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
       - ./tmp/rag_eval:/app/tmp/rag_eval
     depends_on:
       mysql-primary:
@@ -164,6 +165,8 @@ services:
       mysql-replica:
         condition: service_healthy
       db-bootstrap:
+        condition: service_completed_successfully
+      kb-indexes-sync:
         condition: service_completed_successfully
     networks:
       - causalagent_replica_network
@@ -229,12 +232,15 @@ services:
       - /app/杂项
       - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
       - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
+      - kb_multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
     depends_on:
       mysql-primary:
         condition: service_healthy
       mysql-replica:
         condition: service_healthy
       db-bootstrap:
+        condition: service_completed_successfully
+      kb-indexes-sync:
         condition: service_completed_successfully
     networks:
       - causalagent_replica_network
@@ -275,12 +281,12 @@ services:
     networks:
       - causalagent_replica_network
 
-  checkpoint-cleanup:
+  agent-persistence-cleanup:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: causalagent_checkpoint_cleanup
-    command: python -m Database.checkpoint_cleanup_worker
+    container_name: causalagent_agent_persistence_cleanup
+    command: python -m Database.agent_persistence_cleanup_worker
     environment:
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
@@ -306,8 +312,8 @@ services:
       - CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS=${CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS:-5}
       - CHECKPOINT_POSTGRES_POOL_MIN_SIZE=1
       - CHECKPOINT_POSTGRES_POOL_MAX_SIZE=2
-      - CHECKPOINT_CLEANUP_POLL_INTERVAL_SECONDS=${CHECKPOINT_CLEANUP_POLL_INTERVAL_SECONDS:-1}
-      - CHECKPOINT_CLEANUP_LEASE_SECONDS=${CHECKPOINT_CLEANUP_LEASE_SECONDS:-300}
+      - AGENT_PERSISTENCE_CLEANUP_POLL_INTERVAL_SECONDS=${AGENT_PERSISTENCE_CLEANUP_POLL_INTERVAL_SECONDS:-1}
+      - AGENT_PERSISTENCE_CLEANUP_LEASE_SECONDS=${AGENT_PERSISTENCE_CLEANUP_LEASE_SECONDS:-300}
       - API_KEY=${API_KEY}
       - BASE_URL=${BASE_URL}
       - MODEL=${MODEL}
@@ -439,21 +445,39 @@ services:
       - /app/__pycache__
       - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
       - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
+      - kb_multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
       - ./tmp/rag_eval:/app/tmp/rag_eval
     depends_on:
       mysql-primary:
         condition: service_healthy
       mysql-replica:
         condition: service_healthy
+      kb-indexes-sync:
+        condition: service_completed_successfully
     networks:
       - causalagent_replica_network
     restart: unless-stopped
+
+  kb-indexes-sync:
+    image: python:3.11-slim
+    container_name: causalagent_kb_indexes_sync
+    volumes:
+      - .:/src:ro
+      - kb_multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
+    command:
+      - sh
+      - -c
+      - cp -a /src/Agent/knowledge_base/multimodal_indexes/. /app/Agent/knowledge_base/multimodal_indexes/
+    networks:
+      - causalagent_replica_network
 
 networks:
   causalagent_replica_network:
     driver: bridge
 
 volumes:
+  kb_multimodal_indexes:
+    driver: local
   mysql_primary_data:
     driver: local
   mysql_replica_data:

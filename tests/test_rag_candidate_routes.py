@@ -2,6 +2,7 @@ import json
 import hashlib
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,8 @@ from flask import Flask
 
 from app.rag_eval import isolated_runs
 from app.rag_eval import routes
+
+from tests.support.authorization import rag_eval_route_authorization
 
 
 class _FakeCandidateManager:
@@ -93,6 +96,14 @@ class _FakeCandidateManager:
 
 
 class RagCandidateRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.authorization_stack = ExitStack()
+        for authorization_context in rag_eval_route_authorization():
+            self.authorization_stack.enter_context(authorization_context)
+
+    def tearDown(self):
+        self.authorization_stack.close()
+
     def test_dataset_review_ui_owns_release_and_does_not_trigger_post_review_governance(self):
         """题集发布入口应位于候选审核页，对比页不得再发起治理任务。"""
         app_source = (Path(__file__).resolve().parents[1] / "app" / "rag_eval" / "frontend" / "src" / "App.vue").read_text(

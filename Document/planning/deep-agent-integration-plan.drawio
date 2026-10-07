@@ -1,0 +1,231 @@
+<mxfile host="65bd71144e">
+    <diagram id="overview" name="目标混合架构">
+        <mxGraphModel dx="2038" dy="1086" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1120" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title" value="CausalAgent × Deep Agent：确定性外壳、可选 Tool 循环与统一 Finalization" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;fontSize=24;fontStyle=1;fontColor=#172B4D;" parent="1" vertex="1">
+                    <mxGeometry x="240" y="20" width="1220" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane-control" value="入口与现有运行控制" style="swimlane;html=1;horizontal=1;startSize=34;rounded=1;container=1;collapsible=0;fillColor=#F4F5F7;strokeColor=#7A869A;fontColor=#172B4D;fontStyle=1;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="100" width="1620" height="170" as="geometry"/>
+                </mxCell>
+                <mxCell id="user" value="&lt;b&gt;用户请求 / 冻结文件&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6554C0;fontSize=13;" parent="lane-control" vertex="1">
+                    <mxGeometry x="60" y="70" width="220" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="job" value="&lt;b&gt;Job / Worker&lt;/b&gt;&lt;br&gt;Lease · Fencing · Cancel · Recovery" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DEEBFF;strokeColor=#0747A6;fontSize=13;" parent="lane-control" vertex="1">
+                    <mxGeometry x="350" y="60" width="260" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="agent-route" value="&lt;b&gt;现有 agent 路由节点&lt;/b&gt;&lt;br&gt;提示词 + 结构化 route_decision&lt;br&gt;不新增前置分类器" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAE6FF;strokeColor=#6554C0;fontSize=13;fontStyle=1;" parent="lane-control" vertex="1">
+                    <mxGeometry x="700" y="50" width="300" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="other-route" value="&lt;b&gt;现有其他路径&lt;/b&gt;&lt;br&gt;普通问答 / 报告追问" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7A869A;fontSize=13;" parent="lane-control" vertex="1">
+                    <mxGeometry x="1190" y="60" width="260" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane-analysis" value="数据型因果分析主链路" style="swimlane;html=1;horizontal=1;startSize=34;rounded=1;container=1;collapsible=0;fillColor=#DEEBFF;strokeColor=#0747A6;fontColor=#172B4D;fontStyle=1;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="300" width="1620" height="240" as="geometry"/>
+                </mxCell>
+                <mxCell id="fold" value="&lt;b&gt;fold&lt;/b&gt;&lt;br&gt;仅数据补充时 interrupt" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFEBE6;strokeColor=#DE350B;fontSize=13;" parent="lane-analysis" vertex="1">
+                    <mxGeometry x="40" y="85" width="200" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="admission" value="&lt;b&gt;确定性准入&lt;/b&gt;&lt;br&gt;身份 · 归属 · 可解析性 · 硬限制" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF0B3;strokeColor=#FF8B00;fontSize=13;" parent="lane-analysis" vertex="1">
+                    <mxGeometry x="300" y="75" width="230" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="profile" value="&lt;b&gt;基础 DataProfile&lt;/b&gt;&lt;br&gt;小而稳定；保留预处理图表" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3FCEF;strokeColor=#00875A;fontSize=13;" parent="lane-analysis" vertex="1">
+                    <mxGeometry x="590" y="85" width="230" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="deep-agent" value="&lt;b&gt;单个 Deep Agent 决策循环&lt;/b&gt;&lt;br&gt;零个 / 一个 / 多个 Tool&lt;br&gt;选择 · 观察 · 重跑 · 切换 · 比较&lt;br&gt;&lt;i&gt;内部结构见第 2 页&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6554C0;strokeColor=#403294;fontColor=#FFFFFF;fontSize=14;fontStyle=1;" parent="lane-analysis" vertex="1">
+                    <mxGeometry x="890" y="55" width="290" height="140" as="geometry"/>
+                </mxCell>
+                <mxCell id="finalize" value="&lt;b&gt;ToolStrategy(FinalAnalysisDecision)&lt;/b&gt;&lt;br&gt;始终结构化提交&lt;br&gt;主结果可为空" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAE6FF;strokeColor=#6554C0;fontSize=13;fontStyle=1;" parent="lane-analysis" vertex="1">
+                    <mxGeometry x="1260" y="75" width="250" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane-final" value="统一 Finalization 与用户产物" style="swimlane;html=1;horizontal=1;startSize=34;rounded=1;container=1;collapsible=0;fillColor=#E3FCEF;strokeColor=#00875A;fontColor=#172B4D;fontStyle=1;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="570" width="1620" height="210" as="geometry"/>
+                </mxCell>
+                <mxCell id="gate" value="&lt;b&gt;FinalizationGate&lt;/b&gt;&lt;br&gt;确定性核对&lt;br&gt;归属 · Ledger · assessments · 主图" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#00875A;strokeWidth=2;fontSize=13;fontStyle=1;" parent="lane-final" vertex="1">
+                    <mxGeometry x="190" y="60" width="280" height="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="report" value="&lt;b&gt;Report&lt;/b&gt;&lt;br&gt;无 Tool / 算法成功 / 全部失败&lt;br&gt;valid / degraded 都生成报告" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#00875A;fontSize=13;" parent="lane-final" vertex="1">
+                    <mxGeometry x="650" y="60" width="300" height="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="outputs" value="&lt;b&gt;MVP 用户可见产物&lt;/b&gt;&lt;br&gt;① 最终报告&lt;br&gt;② 至多一张主因果图（仅有效 primary_result_ref）&lt;br&gt;③ 预处理图表" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAE6FF;strokeColor=#6554C0;fontSize=13;" parent="lane-final" vertex="1">
+                    <mxGeometry x="1110" y="45" width="360" height="140" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane-state" value="可信状态与持久化边界" style="swimlane;html=1;horizontal=1;startSize=34;rounded=1;container=1;collapsible=0;fillColor=#F4F5F7;strokeColor=#7A869A;fontColor=#172B4D;fontStyle=1;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="810" width="1620" height="230" as="geometry"/>
+                </mxCell>
+                <mxCell id="checkpoint" value="&lt;b&gt;PostgreSQL Checkpoint&lt;/b&gt;&lt;br&gt;父图统一管理&lt;br&gt;thread_id = job_id" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;fillColor=#DEEBFF;strokeColor=#0747A6;fontSize=13;" parent="lane-state" vertex="1">
+                    <mxGeometry x="130" y="65" width="260" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="ledger" value="&lt;b&gt;Checkpoint Ledger + MySQL Job 事实&lt;/b&gt;&lt;br&gt;InvocationRecord + 全部 attempts&lt;br&gt;失败 · 超时 · 恢复重算 · 结果" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;fillColor=#E3FCEF;strokeColor=#00875A;fontSize=13;" parent="lane-state" vertex="1">
+                    <mxGeometry x="590" y="55" width="360" height="140" as="geometry"/>
+                </mxCell>
+                <mxCell id="preferences" value="&lt;b&gt;虚拟文件 Backend&lt;/b&gt;&lt;br&gt;State：raw / history / offload&lt;br&gt;Store：偏好 / 明确保存的研究背景" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;fillColor=#FFF0B3;strokeColor=#FF8B00;fontSize=13;" parent="lane-state" vertex="1">
+                    <mxGeometry x="1170" y="65" width="290" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-user-job" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#0747A6;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="user" target="job" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-job-agent" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#0747A6;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="job" target="agent-route" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-agent-other" value="普通问答 / 追问" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#7A869A;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="agent-route" target="other-route" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-agent-fold" value="数据型因果分析" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#6554C0;strokeWidth=2;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" parent="1" source="agent-route" target="fold" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="890" y="285"/>
+                            <mxPoint x="180" y="285"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e-fold-admission" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#0747A6;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="fold" target="admission" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-admission-profile" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#0747A6;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="admission" target="profile" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-profile-deep" value="受控 State 投影" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#6554C0;strokeWidth=2;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="profile" target="deep-agent" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-deep-finalize" value="始终提交" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#6554C0;strokeWidth=2;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="deep-agent" target="finalize" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-finalize-gate" value="结构化 FinalAnalysis" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#00875A;strokeWidth=2;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" parent="1" source="finalize" target="gate" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="1425" y="555"/>
+                            <mxPoint x="370" y="555"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e-gate-report" value="三种正常结果" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#00875A;strokeWidth=2;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="gate" target="report" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-report-output" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#00875A;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="report" target="outputs" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+    <diagram id="deep-agent-internals" name="Deep Agent 内部循环与结果">
+        <mxGraphModel dx="2409" dy="1284" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1900" pageHeight="1200" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title2" value="Deep Agent 内部：可选 Tool 循环、可信账本与单一主图" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;fontSize=24;fontStyle=1;fontColor=#172B4D;" parent="1" vertex="1">
+                    <mxGeometry x="430" y="20" width="1040" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane-loop" value="1. Deep Agent 决策循环（单 Agent，无内部 Human interrupt）" style="swimlane;html=1;horizontal=1;startSize=34;rounded=1;container=1;collapsible=0;fillColor=#EAE6FF;strokeColor=#6554C0;fontColor=#172B4D;fontStyle=1;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="100" width="1820" height="260" as="geometry"/>
+                </mxCell>
+                <mxCell id="context" value="&lt;b&gt;可信上下文&lt;/b&gt;&lt;br&gt;用户目标 · DataProfile&lt;br&gt;算法指定仅为 prompt 软偏好" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6554C0;fontSize=13;" parent="lane-loop" vertex="1">
+                    <mxGeometry x="40" y="75" width="230" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="agent-loop" value="&lt;b&gt;Deep Agent&lt;/b&gt;&lt;br&gt;观察已有结果与 Ledger&lt;br&gt;接受 · 重跑 · 切换 · 比较 · 补证据" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6554C0;strokeColor=#403294;fontColor=#FFFFFF;fontSize=14;fontStyle=1;" parent="lane-loop" vertex="1">
+                    <mxGeometry x="320" y="60" width="280" height="130" as="geometry"/>
+                </mxCell>
+                <mxCell id="need-tool" value="需要调用&lt;br&gt;领域 Tool？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF0B3;strokeColor=#FF8B00;fontSize=13;fontStyle=1;" parent="lane-loop" vertex="1">
+                    <mxGeometry x="670" y="65" width="140" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="finalize2" value="&lt;b&gt;FinalAnalysisDecision&lt;/b&gt;&lt;br&gt;primary_result_ref 可为空&lt;br&gt;取舍 · 冲突 · 建议&lt;br&gt;confidence + basis" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6554C0;strokeWidth=2;fontSize=13;fontStyle=1;" parent="lane-loop" vertex="1">
+                    <mxGeometry x="890" y="50" width="260" height="150" as="geometry"/>
+                </mxCell>
+                <mxCell id="gate2" value="&lt;b&gt;FinalizationGate&lt;/b&gt;&lt;br&gt;只校验，不调用 LLM，不改边&lt;br&gt;一次修正后仍失败 → degraded 报告" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3FCEF;strokeColor=#00875A;strokeWidth=2;fontSize=13;fontStyle=1;" parent="lane-loop" vertex="1">
+                    <mxGeometry x="1230" y="75" width="230" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="report2" value="&lt;b&gt;Report&lt;/b&gt;&lt;br&gt;三种正常结果共同出口" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6554C0;strokeColor=#403294;fontColor=#FFFFFF;fontSize=14;fontStyle=1;" parent="lane-loop" vertex="1">
+                    <mxGeometry x="1550" y="75" width="220" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="budget" value="&lt;b&gt;系统级有界预算&lt;/b&gt;　ModelCallLimitMiddleware + ToolCallLimitMiddleware；LangGraph recursion_limit 只可作为更高层兜底，不是第三个产品预算。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7A869A;dashed=1;fontSize=12;fontColor=#42526E;" parent="lane-loop" vertex="1">
+                    <mxGeometry x="830" y="205" width="940" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane-tools" value="2. 受控 Tool 执行面（仅在 Deep Agent 选择后运行）" style="swimlane;html=1;horizontal=1;startSize=34;rounded=1;container=1;collapsible=0;fillColor=#DEEBFF;strokeColor=#0747A6;fontColor=#172B4D;fontStyle=1;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="390" width="1820" height="360" as="geometry"/>
+                </mxCell>
+                <mxCell id="spec" value="&lt;b&gt;AlgorithmSpec + Registry&lt;/b&gt;&lt;br&gt;唯一事实源&lt;br&gt;schema · requires/produces · binding" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#0747A6;fontSize=13;" parent="lane-tools" vertex="1">
+                    <mxGeometry x="1420" y="75" width="340" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="scheduler" value="&lt;b&gt;ToolDependencyPlanner&lt;/b&gt;&lt;br&gt;只排序已选 calls&lt;br&gt;无依赖并行 · 有依赖按序" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF0B3;strokeColor=#FF8B00;fontSize=13;" parent="lane-tools" vertex="1">
+                    <mxGeometry x="1100" y="65" width="260" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="toolset" value="&lt;b&gt;共享领域 Tool 面&lt;/b&gt;&lt;br&gt;Algorithm：PC / OLC / DirectLiNGAM / …&lt;br&gt;Evidence：RAG&lt;br&gt;Academic：Web Search" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6554C0;fontSize=13;" parent="lane-tools" vertex="1">
+                    <mxGeometry x="810" y="50" width="240" height="150" as="geometry"/>
+                </mxCell>
+                <mxCell id="adapter" value="&lt;b&gt;可信 Adapter / Runtime&lt;/b&gt;&lt;br&gt;身份与前置校验 · 临时预处理&lt;br&gt;MCP / RAG / Web 执行&lt;br&gt;格式统一 · 硬契约校验" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DEEBFF;strokeColor=#0747A6;fontSize=13;fontStyle=1;" parent="lane-tools" vertex="1">
+                    <mxGeometry x="550" y="50" width="240" height="150" as="geometry"/>
+                </mxCell>
+                <mxCell id="results" value="&lt;b&gt;结构化结果&lt;/b&gt;&lt;br&gt;AlgorithmResult / EvidenceResult&lt;br&gt;valid · invalid_input · not_ready · timed_out&lt;br&gt;diagnostics + raw_result_ref + provenance" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3FCEF;strokeColor=#00875A;fontSize=13;" parent="lane-tools" vertex="1">
+                    <mxGeometry x="390" y="50" width="140" height="150" as="geometry"/>
+                </mxCell>
+                <mxCell id="tool-policy" value="模型不接触 raw MCP、宿主文件系统、Shell、自由代码或 SubAgent；只保留虚拟 read_file/edit_file，不开放 write_file。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7A869A;dashed=1;fontSize=12;fontColor=#42526E;" parent="lane-tools" vertex="1">
+                    <mxGeometry x="520" y="250" width="840" height="55" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane-truth" value="3. 事实合并、主图规则与三种正常结果" style="swimlane;html=1;horizontal=1;startSize=34;rounded=1;container=1;collapsible=0;fillColor=#E3FCEF;strokeColor=#00875A;fontColor=#172B4D;fontStyle=1;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="780" width="1820" height="350" as="geometry"/>
+                </mxCell>
+                <mxCell id="ledger2" value="&lt;b&gt;Action Ledger&lt;/b&gt;&lt;br&gt;始终存在，可为空&lt;br&gt;每 invocation 的全部 attempts" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;fillColor=#FFFFFF;strokeColor=#00875A;fontSize=13;" parent="lane-truth" vertex="1">
+                    <mxGeometry x="320" y="65" width="280" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="graph-rule" value="&lt;b&gt;唯一主图规则&lt;/b&gt;&lt;br&gt;primary_result_ref 必须引用有效算法结果&lt;br&gt;不拼图 · 不投票选边 · 不让 LLM 改图" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#0747A6;fontSize=13;" parent="lane-truth" vertex="1">
+                    <mxGeometry x="670" y="60" width="330" height="130" as="geometry"/>
+                </mxCell>
+                <mxCell id="proposal-rule" value="&lt;b&gt;revision_proposals&lt;/b&gt;&lt;br&gt;引用 result_ref / 证据&lt;br&gt;只进入报告，不生成 interpreted_graph" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF0B3;strokeColor=#FF8B00;fontSize=13;" parent="lane-truth" vertex="1">
+                    <mxGeometry x="1070" y="60" width="300" height="130" as="geometry"/>
+                </mxCell>
+                <mxCell id="outcome-none" value="&lt;b&gt;未调用 Tool&lt;/b&gt;&lt;br&gt;空 Ledger · 无主图&lt;br&gt;正常解释型报告" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4F5F7;strokeColor=#7A869A;fontSize=13;" parent="lane-truth" vertex="1">
+                    <mxGeometry x="70" y="230" width="500" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="outcome-valid" value="&lt;b&gt;至少一个算法有效&lt;/b&gt;&lt;br&gt;选择一个主结果 · 展示一张主图&lt;br&gt;报告算法、取舍、冲突和定性置信度" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3FCEF;strokeColor=#00875A;fontSize=13;" parent="lane-truth" vertex="1">
+                    <mxGeometry x="660" y="220" width="500" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="outcome-failed" value="&lt;b&gt;Tool 调用但算法全部失败&lt;/b&gt;&lt;br&gt;失败 Ledger · 无主图&lt;br&gt;仍生成自然语言报告，不使用固定占位句" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFEBE6;strokeColor=#DE350B;fontSize=13;" parent="lane-truth" vertex="1">
+                    <mxGeometry x="1250" y="220" width="500" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-context-agent" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#6554C0;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="context" target="agent-loop" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-agent-decision" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#6554C0;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="agent-loop" target="need-tool" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-no-finalize" value="否 / 已足够" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#6554C0;strokeWidth=2;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="need-tool" target="finalize2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-finalize-gate2" value="始终" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#00875A;strokeWidth=2;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="finalize2" target="gate2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-yes-scheduler" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#FF8B00;strokeWidth=2;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" parent="1" source="need-tool" target="scheduler" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="780" y="375"/>
+                            <mxPoint x="1270" y="375"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e-spec-scheduler" value="契约" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=open;endFill=0;dashed=1;strokeColor=#0747A6;labelBackgroundColor=#FFFFFF;exitX=0;exitY=0.5;entryX=1;entryY=0.5;" parent="1" source="spec" target="scheduler" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-scheduler-tools" value="已选 calls" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#0747A6;strokeWidth=2;labelBackgroundColor=#FFFFFF;exitX=0;exitY=0.5;entryX=1;entryY=0.5;" parent="1" source="scheduler" target="toolset" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-tools-adapter" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#0747A6;strokeWidth=2;exitX=0;exitY=0.5;entryX=1;entryY=0.5;" parent="1" source="toolset" target="adapter" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-adapter-results" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#00875A;strokeWidth=2;exitX=0;exitY=0.5;entryX=1;entryY=0.5;" parent="1" source="adapter" target="results" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-results-agent" value="观察后继续或结束" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;dashed=1;strokeColor=#6554C0;strokeWidth=2;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" parent="1" source="results" target="agent-loop" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-result-ledger" value="记录每次尝试与结果" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;dashed=1;strokeColor=#00875A;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" parent="1" source="results" target="ledger2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-gate-report2" value="校验通过" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#00875A;strokeWidth=2;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="gate2" target="report2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

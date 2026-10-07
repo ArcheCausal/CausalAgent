@@ -21,14 +21,18 @@ def create_app():
     from app.db import check_database_readiness
     from app.auth.routes import auth_bp
     from app.chat.routes import chat_bp
+    from app.chat.page_routes import dashboard_asset_bp, dashboard_page_bp
     from app.files.routes import files_bp
     from app.agent.routes import agent_bp
     from app.main.routes import main_bp
     from app.admin.routes import admin_bp, admin_page_bp
+    from app.analytics.routes import analytics_bp
     from app.request_context import register_request_context
     from app.rag_eval.routes import rag_eval_bp
+    from app.rag_eval.page_routes import rag_eval_page_bp
 
-    app = CausalFlask(__name__, static_folder="static")
+    # 四个前端都由显式蓝图按路径提供，应用不再暴露 Flask 默认的 /static 目录。
+    app = CausalFlask(__name__)
     app.secret_key = settings.SECRET_KEY
     register_request_context(app)
 
@@ -36,12 +40,16 @@ def create_app():
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(chat_bp)
+    app.register_blueprint(dashboard_page_bp)
+    app.register_blueprint(dashboard_asset_bp)
     app.register_blueprint(files_bp)
     app.register_blueprint(agent_bp)
     app.register_blueprint(main_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(admin_page_bp)
     app.register_blueprint(rag_eval_bp)
+    app.register_blueprint(rag_eval_page_bp)
+    app.register_blueprint(analytics_bp)
     return app
 
 

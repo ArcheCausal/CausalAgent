@@ -370,7 +370,7 @@ def _format_edges(causallearn_edges):
     return formatted_edges
 
 
-def run_pc_analysis(csv_data_string: str) -> dict:
+def run_pc_analysis(csv_data_string: str, alpha: float = 0.05) -> dict:
     """
     对CSV格式的字符串数据运行PC因果发现算法。
     
@@ -390,7 +390,7 @@ def run_pc_analysis(csv_data_string: str) -> dict:
         data = df.to_numpy()
         node_names = df.columns.tolist()
 
-        cg = pc(data=data, alpha=0.05, indep_test=fisherz, node_names=node_names)
+        cg = pc(data=data, alpha=alpha, indep_test=fisherz, node_names=node_names)
 
         # 提取结果
         edges = cg.G.get_graph_edges()

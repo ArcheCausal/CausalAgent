@@ -38,6 +38,30 @@ def csrf_token_is_valid() -> bool:
     )
 
 
+def csrf_rejection_response():
+    """构造统一的 CSRF 拒绝响应，并记录缺失或无效这两种原因。"""
+    expected = session.get(CSRF_SESSION_KEY)
+    supplied = request.headers.get(CSRF_HEADER)
+    log_event(
+        LOGGER,
+        "security.csrf.rejected",
+        details={
+            **current_request_log_details(),
+            "reason_code": (
+                "csrf_missing"
+                if not isinstance(expected, str) or not isinstance(supplied, str)
+                else "csrf_invalid"
+            ),
+        },
+    )
+    return jsonify({
+        "success": False,
+        "error": "CSRF 令牌无效或已过期",
+        "code": "csrf_invalid",
+        "request_id": get_request_id(),
+    }), 403
+
+
 def admin_write_required(view_func):
     """组合管理员强一致授权与 Session CSRF 校验。"""
 
@@ -45,26 +69,7 @@ def admin_write_required(view_func):
     def csrf_checked(*args, **kwargs):
         """拒绝缺失或无效 CSRF 请求头的管理员写请求。"""
         if not csrf_token_is_valid():
-            expected = session.get(CSRF_SESSION_KEY)
-            supplied = request.headers.get(CSRF_HEADER)
-            log_event(
-                LOGGER,
-                "security.csrf.rejected",
-                details={
-                    **current_request_log_details(),
-                    "reason_code": (
-                        "csrf_missing"
-                        if not isinstance(expected, str) or not isinstance(supplied, str)
-                        else "csrf_invalid"
-                    ),
-                },
-            )
-            return jsonify({
-                "success": False,
-                "error": "CSRF 令牌无效或已过期",
-                "code": "csrf_invalid",
-                "request_id": get_request_id(),
-            }), 403
+            return csrf_rejection_response()
         return view_func(*args, **kwargs)
 
     return admin_required(csrf_checked)

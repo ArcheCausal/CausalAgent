@@ -1,0 +1,2242 @@
+{
+  "models": {
+    "ActionAttempt": {
+      "$defs": {
+        "SafeErrorCode": {
+          "description": "首版允许跨边界传输的、无敏感细节的错误码。",
+          "enum": [
+            "USER_INPUT_FILE_MISSING",
+            "USER_INPUT_SCHEMA_AMBIGUOUS",
+            "USER_INPUT_REQUIRED_FIELD_MISSING",
+            "ALGORITHM_INPUT_INVALID",
+            "ALGORITHM_NOT_APPLICABLE",
+            "ALGORITHM_NOT_READY",
+            "ALGORITHM_EXECUTION_FAILED",
+            "ALGORITHM_TIMED_OUT",
+            "ALGORITHM_CANCELED",
+            "ALGORITHM_RESULT_CONTRACT_INVALID",
+            "UNKNOWN_CAPABILITY",
+            "DUPLICATE_INVOCATION",
+            "LEDGER_REVISION_CONFLICT",
+            "MCP_CAPABILITY_VERSION_UNSUPPORTED",
+            "MCP_CAPACITY_EXHAUSTED",
+            "MCP_AUTH_FAILED",
+            "MCP_CONTEXT_INVALID",
+            "MCP_LEASE_STALE",
+            "MCP_TRANSPORT_FAILED"
+          ],
+          "title": "SafeErrorCode",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "description": "一次实际执行 attempt 的单调 revision 快照。",
+      "properties": {
+        "retry_ordinal": {
+          "minimum": 0,
+          "title": "Retry Ordinal",
+          "type": "integer"
+        },
+        "revision": {
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "succeeded",
+            "failed",
+            "timed_out",
+            "not_ready",
+            "canceled",
+            "discarded"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Started At"
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finished At"
+        },
+        "safe_error_code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SafeErrorCode"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Safe Error Code"
+        }
+      },
+      "required": [
+        "retry_ordinal",
+        "revision",
+        "status"
+      ],
+      "title": "ActionAttempt",
+      "type": "object"
+    },
+    "AlgorithmExecutionCommand": {
+      "additionalProperties": false,
+      "description": "传输无关的算法执行请求；可信身份不由模型参数提供。",
+      "properties": {
+        "invocation_id": {
+          "title": "Invocation Id",
+          "type": "string"
+        },
+        "capability_id": {
+          "title": "Capability Id",
+          "type": "string"
+        },
+        "capability_version": {
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "spec_digest": {
+          "title": "Spec Digest",
+          "type": "string"
+        },
+        "provider_call_id": {
+          "title": "Provider Call Id",
+          "type": "string"
+        },
+        "input_identity": {
+          "title": "Input Identity",
+          "type": "string"
+        },
+        "parameters": {
+          "additionalProperties": true,
+          "title": "Parameters",
+          "type": "object"
+        },
+        "result_index": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Result Index",
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Seconds"
+        }
+      },
+      "required": [
+        "invocation_id",
+        "capability_id",
+        "capability_version",
+        "spec_digest",
+        "provider_call_id",
+        "input_identity"
+      ],
+      "title": "AlgorithmExecutionCommand",
+      "type": "object"
+    },
+    "AlgorithmResult": {
+      "$defs": {
+        "AlgorithmResultProvenance": {
+          "additionalProperties": false,
+          "description": "结果归属、输入身份和 spec 版本的可信证明字段。",
+          "properties": {
+            "job_id": {
+              "title": "Job Id",
+              "type": "string"
+            },
+            "attempt_count": {
+              "minimum": 0,
+              "title": "Attempt Count",
+              "type": "integer"
+            },
+            "lease_epoch": {
+              "minimum": 0,
+              "title": "Lease Epoch",
+              "type": "integer"
+            },
+            "input_identity": {
+              "title": "Input Identity",
+              "type": "string"
+            },
+            "spec_digest": {
+              "title": "Spec Digest",
+              "type": "string"
+            },
+            "invocation_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Invocation Id"
+            },
+            "capability_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Capability Id"
+            },
+            "capability_version": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Capability Version"
+            },
+            "preprocessing_recipe_digest": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Preprocessing Recipe Digest"
+            },
+            "algorithm_runner_version": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Algorithm Runner Version"
+            }
+          },
+          "required": [
+            "job_id",
+            "attempt_count",
+            "lease_epoch",
+            "input_identity",
+            "spec_digest"
+          ],
+          "title": "AlgorithmResultProvenance",
+          "type": "object"
+        },
+        "Diagnostics": {
+          "additionalProperties": false,
+          "description": "对模型安全的执行诊断；不允许把原始堆栈或文件正文放进来。",
+          "properties": {
+            "summary": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Summary"
+            },
+            "sample_count": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Sample Count"
+            },
+            "variable_count": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Variable Count"
+            },
+            "assumptions_checked": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Assumptions Checked",
+              "type": "array"
+            },
+            "metrics": {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "title": "Metrics",
+              "type": "object"
+            },
+            "safe_error_code": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SafeErrorCode"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Safe Error Code"
+            }
+          },
+          "title": "Diagnostics",
+          "type": "object"
+        },
+        "GraphEdge": {
+          "additionalProperties": false,
+          "description": "标准化图中的一条有向或部分定向边。",
+          "properties": {
+            "source": {
+              "title": "Source",
+              "type": "string"
+            },
+            "target": {
+              "title": "Target",
+              "type": "string"
+            },
+            "edge_type": {
+              "default": "directed",
+              "title": "Edge Type",
+              "type": "string"
+            },
+            "weight": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Weight"
+            }
+          },
+          "required": [
+            "source",
+            "target"
+          ],
+          "title": "GraphEdge",
+          "type": "object"
+        },
+        "SafeErrorCode": {
+          "description": "首版允许跨边界传输的、无敏感细节的错误码。",
+          "enum": [
+            "USER_INPUT_FILE_MISSING",
+            "USER_INPUT_SCHEMA_AMBIGUOUS",
+            "USER_INPUT_REQUIRED_FIELD_MISSING",
+            "ALGORITHM_INPUT_INVALID",
+            "ALGORITHM_NOT_APPLICABLE",
+            "ALGORITHM_NOT_READY",
+            "ALGORITHM_EXECUTION_FAILED",
+            "ALGORITHM_TIMED_OUT",
+            "ALGORITHM_CANCELED",
+            "ALGORITHM_RESULT_CONTRACT_INVALID",
+            "UNKNOWN_CAPABILITY",
+            "DUPLICATE_INVOCATION",
+            "LEDGER_REVISION_CONFLICT",
+            "MCP_CAPABILITY_VERSION_UNSUPPORTED",
+            "MCP_CAPACITY_EXHAUSTED",
+            "MCP_AUTH_FAILED",
+            "MCP_CONTEXT_INVALID",
+            "MCP_LEASE_STALE",
+            "MCP_TRANSPORT_FAILED"
+          ],
+          "title": "SafeErrorCode",
+          "type": "string"
+        },
+        "SafeWarning": {
+          "additionalProperties": false,
+          "description": "可进入 State/报告的受控 warning。",
+          "properties": {
+            "code": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SafeErrorCode"
+                },
+                {
+                  "type": "string"
+                }
+              ],
+              "title": "Code"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "SafeWarning",
+          "type": "object"
+        },
+        "StandardizedGraph": {
+          "additionalProperties": false,
+          "description": "Adapter 输出的最小统一图外壳。\n\n具体算法可以在 diagnostics 中保留额外说明，但主图的节点、边和语义\n必须经过 Adapter 的硬契约校验后才能进入 ``AlgorithmResult``。",
+          "properties": {
+            "graph_semantics": {
+              "title": "Graph Semantics",
+              "type": "string"
+            },
+            "nodes": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Nodes",
+              "type": "array"
+            },
+            "edges": {
+              "items": {
+                "$ref": "#/$defs/GraphEdge"
+              },
+              "title": "Edges",
+              "type": "array"
+            }
+          },
+          "required": [
+            "graph_semantics"
+          ],
+          "title": "StandardizedGraph",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Adapter 对外发布的统一算法结果。",
+      "properties": {
+        "result_ref": {
+          "title": "Result Ref",
+          "type": "string"
+        },
+        "invocation_id": {
+          "title": "Invocation Id",
+          "type": "string"
+        },
+        "provider_call_id": {
+          "title": "Provider Call Id",
+          "type": "string"
+        },
+        "capability_id": {
+          "title": "Capability Id",
+          "type": "string"
+        },
+        "capability_version": {
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "valid",
+            "invalid_input",
+            "not_applicable",
+            "not_ready",
+            "execution_failed",
+            "timed_out"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "standardized_graph": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StandardizedGraph"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "graph_semantics": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Graph Semantics"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
+        "diagnostics": {
+          "$ref": "#/$defs/Diagnostics"
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/SafeWarning"
+          },
+          "title": "Warnings",
+          "type": "array"
+        },
+        "raw_result_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Result Ref"
+        },
+        "raw_result_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Result Sha256"
+        },
+        "raw_result_size_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Result Size Bytes"
+        },
+        "raw_result_serialization_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Result Serialization Version"
+        },
+        "input_identity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Identity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/AlgorithmResultProvenance"
+        }
+      },
+      "required": [
+        "result_ref",
+        "invocation_id",
+        "provider_call_id",
+        "capability_id",
+        "capability_version",
+        "status",
+        "provenance"
+      ],
+      "title": "AlgorithmResult",
+      "type": "object"
+    },
+    "AlgorithmResultProvenance": {
+      "additionalProperties": false,
+      "description": "结果归属、输入身份和 spec 版本的可信证明字段。",
+      "properties": {
+        "job_id": {
+          "title": "Job Id",
+          "type": "string"
+        },
+        "attempt_count": {
+          "minimum": 0,
+          "title": "Attempt Count",
+          "type": "integer"
+        },
+        "lease_epoch": {
+          "minimum": 0,
+          "title": "Lease Epoch",
+          "type": "integer"
+        },
+        "input_identity": {
+          "title": "Input Identity",
+          "type": "string"
+        },
+        "spec_digest": {
+          "title": "Spec Digest",
+          "type": "string"
+        },
+        "invocation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Invocation Id"
+        },
+        "capability_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capability Id"
+        },
+        "capability_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capability Version"
+        },
+        "preprocessing_recipe_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Preprocessing Recipe Digest"
+        },
+        "algorithm_runner_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Algorithm Runner Version"
+        }
+      },
+      "required": [
+        "job_id",
+        "attempt_count",
+        "lease_epoch",
+        "input_identity",
+        "spec_digest"
+      ],
+      "title": "AlgorithmResultProvenance",
+      "type": "object"
+    },
+    "DataProfile": {
+      "additionalProperties": false,
+      "description": "外层准入阶段生成、供 Agent 选择算法使用的数据画像。",
+      "properties": {
+        "row_count": {
+          "minimum": 0,
+          "title": "Row Count",
+          "type": "integer"
+        },
+        "column_count": {
+          "minimum": 0,
+          "title": "Column Count",
+          "type": "integer"
+        },
+        "column_names": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Column Names",
+          "type": "array"
+        },
+        "numeric_columns": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Numeric Columns",
+          "type": "array"
+        },
+        "categorical_columns": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Categorical Columns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "row_count",
+        "column_count"
+      ],
+      "title": "DataProfile",
+      "type": "object"
+    },
+    "Diagnostics": {
+      "$defs": {
+        "SafeErrorCode": {
+          "description": "首版允许跨边界传输的、无敏感细节的错误码。",
+          "enum": [
+            "USER_INPUT_FILE_MISSING",
+            "USER_INPUT_SCHEMA_AMBIGUOUS",
+            "USER_INPUT_REQUIRED_FIELD_MISSING",
+            "ALGORITHM_INPUT_INVALID",
+            "ALGORITHM_NOT_APPLICABLE",
+            "ALGORITHM_NOT_READY",
+            "ALGORITHM_EXECUTION_FAILED",
+            "ALGORITHM_TIMED_OUT",
+            "ALGORITHM_CANCELED",
+            "ALGORITHM_RESULT_CONTRACT_INVALID",
+            "UNKNOWN_CAPABILITY",
+            "DUPLICATE_INVOCATION",
+            "LEDGER_REVISION_CONFLICT",
+            "MCP_CAPABILITY_VERSION_UNSUPPORTED",
+            "MCP_CAPACITY_EXHAUSTED",
+            "MCP_AUTH_FAILED",
+            "MCP_CONTEXT_INVALID",
+            "MCP_LEASE_STALE",
+            "MCP_TRANSPORT_FAILED"
+          ],
+          "title": "SafeErrorCode",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "description": "对模型安全的执行诊断；不允许把原始堆栈或文件正文放进来。",
+      "properties": {
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
+        "sample_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sample Count"
+        },
+        "variable_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Variable Count"
+        },
+        "assumptions_checked": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Assumptions Checked",
+          "type": "array"
+        },
+        "metrics": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Metrics",
+          "type": "object"
+        },
+        "safe_error_code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SafeErrorCode"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Safe Error Code"
+        }
+      },
+      "title": "Diagnostics",
+      "type": "object"
+    },
+    "EvidenceResult": {
+      "additionalProperties": false,
+      "description": "RAG evidence 的不可变 State 记录。",
+      "properties": {
+        "evidence_ref": {
+          "title": "Evidence Ref",
+          "type": "string"
+        },
+        "evidence_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Id"
+        },
+        "snippet": {
+          "title": "Snippet",
+          "type": "string"
+        },
+        "source_title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Title"
+        },
+        "source_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Url"
+        },
+        "locator": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Locator"
+        },
+        "modality": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Modality"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Score"
+        },
+        "dense_score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dense Score"
+        },
+        "sparse_score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sparse Score"
+        },
+        "rerank_score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rerank Score"
+        },
+        "sufficiency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sufficiency"
+        },
+        "release_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Release Id"
+        },
+        "degradation_flags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Degradation Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "evidence_ref",
+        "snippet"
+      ],
+      "title": "EvidenceResult",
+      "type": "object"
+    },
+    "FinalAnalysisDecision": {
+      "$defs": {
+        "ResultAssessment": {
+          "additionalProperties": false,
+          "description": "对单个算法结果的取舍记录；只能引用算法结果。",
+          "properties": {
+            "result_ref": {
+              "description": "被取舍的算法结果 result_ref；只能引用本次运行返回的算法结果，检索证据不要写进这个字段。",
+              "title": "Result Ref",
+              "type": "string"
+            },
+            "disposition": {
+              "enum": [
+                "primary",
+                "supporting",
+                "discarded"
+              ],
+              "title": "Disposition",
+              "type": "string"
+            },
+            "rationale": {
+              "title": "Rationale",
+              "type": "string"
+            }
+          },
+          "required": [
+            "result_ref",
+            "disposition",
+            "rationale"
+          ],
+          "title": "ResultAssessment",
+          "type": "object"
+        },
+        "RevisionProposal": {
+          "additionalProperties": false,
+          "description": "针对单个算法结果的修订建议；只作报告说明，不替换算法主图。",
+          "properties": {
+            "result_ref": {
+              "description": "被建议修订的算法结果 result_ref；只能引用本次运行返回的算法结果。",
+              "title": "Result Ref",
+              "type": "string"
+            },
+            "action": {
+              "enum": [
+                "retain",
+                "orient",
+                "reverse",
+                "remove",
+                "uncertain"
+              ],
+              "title": "Action",
+              "type": "string"
+            },
+            "rationale": {
+              "title": "Rationale",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "default": [],
+              "description": "支撑该建议的检索证据引用；只能填 rag_evidence_search 或 web_evidence_search 返回的 evidence_ref。算法结果之间互相印证请写进 rationale，不要填在这里。",
+              "items": {
+                "type": "string"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            }
+          },
+          "required": [
+            "result_ref",
+            "action",
+            "rationale"
+          ],
+          "title": "RevisionProposal",
+          "type": "object"
+        },
+        "ScientificConflict": {
+          "additionalProperties": false,
+          "properties": {
+            "conflict_id": {
+              "title": "Conflict Id",
+              "type": "string"
+            },
+            "result_refs": {
+              "default": [],
+              "description": "冲突涉及的算法结果 result_ref；只能引用本次运行返回的算法结果，不要写入检索证据引用。",
+              "items": {
+                "type": "string"
+              },
+              "title": "Result Refs",
+              "type": "array"
+            },
+            "summary": {
+              "title": "Summary",
+              "type": "string"
+            },
+            "resolution": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Resolution"
+            }
+          },
+          "required": [
+            "conflict_id",
+            "summary"
+          ],
+          "title": "ScientificConflict",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "ToolStrategy 的静态终态契约；动态归属由后续 FinalizationGate 校验。",
+      "properties": {
+        "outcome": {
+          "enum": [
+            "evidence_only",
+            "algorithm_supported",
+            "no_valid_algorithm"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "primary_result_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "主结果 result_ref；必须是本次运行返回且状态有效的算法结果。",
+          "title": "Primary Result Ref"
+        },
+        "result_assessments": {
+          "description": "逐算法结果的唯一取舍；每个有效算法结果恰好一条。检索证据引用不属于这里，只能出现在 revision_proposals.evidence_refs。",
+          "items": {
+            "$ref": "#/$defs/ResultAssessment"
+          },
+          "title": "Result Assessments",
+          "type": "array"
+        },
+        "conflict_status": {
+          "enum": [
+            "none",
+            "resolved",
+            "unresolved"
+          ],
+          "title": "Conflict Status",
+          "type": "string"
+        },
+        "conflicts": {
+          "items": {
+            "$ref": "#/$defs/ScientificConflict"
+          },
+          "title": "Conflicts",
+          "type": "array"
+        },
+        "revision_proposals": {
+          "items": {
+            "$ref": "#/$defs/RevisionProposal"
+          },
+          "title": "Revision Proposals",
+          "type": "array"
+        },
+        "selection_rationale": {
+          "title": "Selection Rationale",
+          "type": "string"
+        },
+        "confidence": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "confidence_basis": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Confidence Basis",
+          "type": "array"
+        }
+      },
+      "required": [
+        "outcome",
+        "conflict_status",
+        "selection_rationale",
+        "confidence"
+      ],
+      "title": "FinalAnalysisDecision",
+      "type": "object"
+    },
+    "GraphEdge": {
+      "additionalProperties": false,
+      "description": "标准化图中的一条有向或部分定向边。",
+      "properties": {
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "target": {
+          "title": "Target",
+          "type": "string"
+        },
+        "edge_type": {
+          "default": "directed",
+          "title": "Edge Type",
+          "type": "string"
+        },
+        "weight": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Weight"
+        }
+      },
+      "required": [
+        "source",
+        "target"
+      ],
+      "title": "GraphEdge",
+      "type": "object"
+    },
+    "InvocationRecord": {
+      "$defs": {
+        "ActionAttempt": {
+          "additionalProperties": false,
+          "description": "一次实际执行 attempt 的单调 revision 快照。",
+          "properties": {
+            "retry_ordinal": {
+              "minimum": 0,
+              "title": "Retry Ordinal",
+              "type": "integer"
+            },
+            "revision": {
+              "minimum": 0,
+              "title": "Revision",
+              "type": "integer"
+            },
+            "status": {
+              "enum": [
+                "queued",
+                "running",
+                "succeeded",
+                "failed",
+                "timed_out",
+                "not_ready",
+                "canceled",
+                "discarded"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "started_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Started At"
+            },
+            "finished_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Finished At"
+            },
+            "safe_error_code": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SafeErrorCode"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Safe Error Code"
+            }
+          },
+          "required": [
+            "retry_ordinal",
+            "revision",
+            "status"
+          ],
+          "title": "ActionAttempt",
+          "type": "object"
+        },
+        "SafeErrorCode": {
+          "description": "首版允许跨边界传输的、无敏感细节的错误码。",
+          "enum": [
+            "USER_INPUT_FILE_MISSING",
+            "USER_INPUT_SCHEMA_AMBIGUOUS",
+            "USER_INPUT_REQUIRED_FIELD_MISSING",
+            "ALGORITHM_INPUT_INVALID",
+            "ALGORITHM_NOT_APPLICABLE",
+            "ALGORITHM_NOT_READY",
+            "ALGORITHM_EXECUTION_FAILED",
+            "ALGORITHM_TIMED_OUT",
+            "ALGORITHM_CANCELED",
+            "ALGORITHM_RESULT_CONTRACT_INVALID",
+            "UNKNOWN_CAPABILITY",
+            "DUPLICATE_INVOCATION",
+            "LEDGER_REVISION_CONFLICT",
+            "MCP_CAPABILITY_VERSION_UNSUPPORTED",
+            "MCP_CAPACITY_EXHAUSTED",
+            "MCP_AUTH_FAILED",
+            "MCP_CONTEXT_INVALID",
+            "MCP_LEASE_STALE",
+            "MCP_TRANSPORT_FAILED"
+          ],
+          "title": "SafeErrorCode",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "description": "一个逻辑 function call 及其全部 retry/revision 历史。",
+      "properties": {
+        "invocation_id": {
+          "title": "Invocation Id",
+          "type": "string"
+        },
+        "response_identity": {
+          "title": "Response Identity",
+          "type": "string"
+        },
+        "response_identity_source": {
+          "enum": [
+            "provider_response_id",
+            "message_execution_id"
+          ],
+          "title": "Response Identity Source",
+          "type": "string"
+        },
+        "provider_response_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Response Id"
+        },
+        "provider_item_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Item Id"
+        },
+        "provider_call_id": {
+          "title": "Provider Call Id",
+          "type": "string"
+        },
+        "tool_name": {
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "final_status": {
+          "enum": [
+            "pending",
+            "succeeded",
+            "failed",
+            "timed_out",
+            "not_ready",
+            "canceled",
+            "discarded"
+          ],
+          "title": "Final Status",
+          "type": "string"
+        },
+        "result_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Ref"
+        },
+        "job_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Job Id"
+        },
+        "attempt_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt Count"
+        },
+        "lease_epoch": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lease Epoch"
+        },
+        "worker_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Worker Id"
+        },
+        "input_identity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Identity"
+        },
+        "attempts": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ActionAttempt"
+          },
+          "title": "Attempts",
+          "type": "object"
+        }
+      },
+      "required": [
+        "invocation_id",
+        "response_identity",
+        "response_identity_source",
+        "provider_call_id",
+        "tool_name",
+        "final_status"
+      ],
+      "title": "InvocationRecord",
+      "type": "object"
+    },
+    "McpInvocationContext": {
+      "additionalProperties": false,
+      "description": "worker 注入、MCP 验签并再次查库的可信调用上下文。",
+      "properties": {
+        "invocation_id": {
+          "title": "Invocation Id",
+          "type": "string"
+        },
+        "job_id": {
+          "title": "Job Id",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "user_id": {
+          "exclusiveMinimum": 0,
+          "title": "User Id",
+          "type": "integer"
+        },
+        "attempt_count": {
+          "minimum": 0,
+          "title": "Attempt Count",
+          "type": "integer"
+        },
+        "lease_epoch": {
+          "minimum": 0,
+          "title": "Lease Epoch",
+          "type": "integer"
+        },
+        "worker_id": {
+          "title": "Worker Id",
+          "type": "string"
+        },
+        "input_snapshot_digest": {
+          "title": "Input Snapshot Digest",
+          "type": "string"
+        },
+        "issued_at": {
+          "format": "date-time",
+          "title": "Issued At",
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "key_id": {
+          "title": "Key Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "invocation_id",
+        "job_id",
+        "session_id",
+        "user_id",
+        "attempt_count",
+        "lease_epoch",
+        "worker_id",
+        "input_snapshot_digest",
+        "issued_at",
+        "expires_at",
+        "key_id"
+      ],
+      "title": "McpInvocationContext",
+      "type": "object"
+    },
+    "PublicDecision": {
+      "additionalProperties": false,
+      "description": "模型在 Tool Call 中显式生成、可直接展示的简短决策说明。",
+      "properties": {
+        "summary": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary"
+      ],
+      "title": "PublicDecision",
+      "type": "object"
+    },
+    "RawResultMetadata": {
+      "additionalProperties": false,
+      "description": "canonical raw JSON 的可审计元数据。",
+      "properties": {
+        "raw_result_ref": {
+          "title": "Raw Result Ref",
+          "type": "string"
+        },
+        "raw_result_sha256": {
+          "title": "Raw Result Sha256",
+          "type": "string"
+        },
+        "raw_result_size_bytes": {
+          "minimum": 0,
+          "title": "Raw Result Size Bytes",
+          "type": "integer"
+        },
+        "raw_result_serialization_version": {
+          "title": "Raw Result Serialization Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "raw_result_ref",
+        "raw_result_sha256",
+        "raw_result_size_bytes",
+        "raw_result_serialization_version"
+      ],
+      "title": "RawResultMetadata",
+      "type": "object"
+    },
+    "ResultAssessment": {
+      "additionalProperties": false,
+      "description": "对单个算法结果的取舍记录；只能引用算法结果。",
+      "properties": {
+        "result_ref": {
+          "description": "被取舍的算法结果 result_ref；只能引用本次运行返回的算法结果，检索证据不要写进这个字段。",
+          "title": "Result Ref",
+          "type": "string"
+        },
+        "disposition": {
+          "enum": [
+            "primary",
+            "supporting",
+            "discarded"
+          ],
+          "title": "Disposition",
+          "type": "string"
+        },
+        "rationale": {
+          "title": "Rationale",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result_ref",
+        "disposition",
+        "rationale"
+      ],
+      "title": "ResultAssessment",
+      "type": "object"
+    },
+    "RevisionProposal": {
+      "additionalProperties": false,
+      "description": "针对单个算法结果的修订建议；只作报告说明，不替换算法主图。",
+      "properties": {
+        "result_ref": {
+          "description": "被建议修订的算法结果 result_ref；只能引用本次运行返回的算法结果。",
+          "title": "Result Ref",
+          "type": "string"
+        },
+        "action": {
+          "enum": [
+            "retain",
+            "orient",
+            "reverse",
+            "remove",
+            "uncertain"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "rationale": {
+          "title": "Rationale",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "default": [],
+          "description": "支撑该建议的检索证据引用；只能填 rag_evidence_search 或 web_evidence_search 返回的 evidence_ref。算法结果之间互相印证请写进 rationale，不要填在这里。",
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "result_ref",
+        "action",
+        "rationale"
+      ],
+      "title": "RevisionProposal",
+      "type": "object"
+    },
+    "SafeWarning": {
+      "$defs": {
+        "SafeErrorCode": {
+          "description": "首版允许跨边界传输的、无敏感细节的错误码。",
+          "enum": [
+            "USER_INPUT_FILE_MISSING",
+            "USER_INPUT_SCHEMA_AMBIGUOUS",
+            "USER_INPUT_REQUIRED_FIELD_MISSING",
+            "ALGORITHM_INPUT_INVALID",
+            "ALGORITHM_NOT_APPLICABLE",
+            "ALGORITHM_NOT_READY",
+            "ALGORITHM_EXECUTION_FAILED",
+            "ALGORITHM_TIMED_OUT",
+            "ALGORITHM_CANCELED",
+            "ALGORITHM_RESULT_CONTRACT_INVALID",
+            "UNKNOWN_CAPABILITY",
+            "DUPLICATE_INVOCATION",
+            "LEDGER_REVISION_CONFLICT",
+            "MCP_CAPABILITY_VERSION_UNSUPPORTED",
+            "MCP_CAPACITY_EXHAUSTED",
+            "MCP_AUTH_FAILED",
+            "MCP_CONTEXT_INVALID",
+            "MCP_LEASE_STALE",
+            "MCP_TRANSPORT_FAILED"
+          ],
+          "title": "SafeErrorCode",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "description": "可进入 State/报告的受控 warning。",
+      "properties": {
+        "code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SafeErrorCode"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Code"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "SafeWarning",
+      "type": "object"
+    },
+    "ScientificConflict": {
+      "additionalProperties": false,
+      "properties": {
+        "conflict_id": {
+          "title": "Conflict Id",
+          "type": "string"
+        },
+        "result_refs": {
+          "default": [],
+          "description": "冲突涉及的算法结果 result_ref；只能引用本次运行返回的算法结果，不要写入检索证据引用。",
+          "items": {
+            "type": "string"
+          },
+          "title": "Result Refs",
+          "type": "array"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolution"
+        }
+      },
+      "required": [
+        "conflict_id",
+        "summary"
+      ],
+      "title": "ScientificConflict",
+      "type": "object"
+    },
+    "StandardizedGraph": {
+      "$defs": {
+        "GraphEdge": {
+          "additionalProperties": false,
+          "description": "标准化图中的一条有向或部分定向边。",
+          "properties": {
+            "source": {
+              "title": "Source",
+              "type": "string"
+            },
+            "target": {
+              "title": "Target",
+              "type": "string"
+            },
+            "edge_type": {
+              "default": "directed",
+              "title": "Edge Type",
+              "type": "string"
+            },
+            "weight": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Weight"
+            }
+          },
+          "required": [
+            "source",
+            "target"
+          ],
+          "title": "GraphEdge",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Adapter 输出的最小统一图外壳。\n\n具体算法可以在 diagnostics 中保留额外说明，但主图的节点、边和语义\n必须经过 Adapter 的硬契约校验后才能进入 ``AlgorithmResult``。",
+      "properties": {
+        "graph_semantics": {
+          "title": "Graph Semantics",
+          "type": "string"
+        },
+        "nodes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Nodes",
+          "type": "array"
+        },
+        "edges": {
+          "items": {
+            "$ref": "#/$defs/GraphEdge"
+          },
+          "title": "Edges",
+          "type": "array"
+        }
+      },
+      "required": [
+        "graph_semantics"
+      ],
+      "title": "StandardizedGraph",
+      "type": "object"
+    },
+    "WebEvidenceResult": {
+      "additionalProperties": false,
+      "description": "Web evidence 在通用证据外增加 provider 状态和抓取时间。",
+      "properties": {
+        "evidence_ref": {
+          "title": "Evidence Ref",
+          "type": "string"
+        },
+        "evidence_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Id"
+        },
+        "snippet": {
+          "title": "Snippet",
+          "type": "string"
+        },
+        "source_title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Title"
+        },
+        "source_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Url"
+        },
+        "locator": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Locator"
+        },
+        "modality": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Modality"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Score"
+        },
+        "dense_score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dense Score"
+        },
+        "sparse_score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sparse Score"
+        },
+        "rerank_score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rerank Score"
+        },
+        "sufficiency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sufficiency"
+        },
+        "release_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Release Id"
+        },
+        "degradation_flags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Degradation Flags",
+          "type": "array"
+        },
+        "provider_status": {
+          "title": "Provider Status",
+          "type": "string"
+        },
+        "fetched_at": {
+          "format": "date-time",
+          "title": "Fetched At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_ref",
+        "snippet",
+        "provider_status",
+        "fetched_at"
+      ],
+      "title": "WebEvidenceResult",
+      "type": "object"
+    }
+  },
+  "schema_version": "p1-v1",
+  "tools": [
+    {
+      "capability_id": "causal.cdfm",
+      "spec_digest": "8fdd047d486462685aa0f7c94ffbc851e74a5d41dd06575f1b6ab1281f90fbec",
+      "tool": {
+        "name": "causal_cdfm",
+        "description": "用预训练因果发现基础模型 CDFM 在连续数值表格数据上做零样本图推断，一次调用返回整张候选有向图。同一个 checkpoint 已覆盖线性、非线性、异方差、有序或离散观测、测量误差与潜在混杂等多类机制，因此机制未知或明显非线性时，比依赖单一假设的工具更合适，也可以与 PC、DirectLiNGAM 的结果并行对照。不传 threshold 时由服务端按模型自带校准器自动决定判决边界，传入 0 到 1 的数值可覆盖它。缺失值按 NaN/±Inf 掩码传递给模型；当前只接受连续数值列，不接受分类变量。输出只有边及其方向，不包含权重和置信度：方向可能随阈值变化，不可识别场景下方向证据不足，两条相反方向的边也可能对应潜在混杂，结果不构成准确率或生产能力证明。",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "threshold": {
+              "anyOf": [
+                {
+                  "maximum": 1.0,
+                  "minimum": 0.0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "边概率的判决阈值；不传时由服务端使用模型自带校准器自动决定判决边界。",
+              "title": "Threshold"
+            },
+            "public_decision": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "description": "模型在 Tool Call 中显式生成、可直接展示的简短决策说明。",
+                  "properties": {
+                    "summary": {
+                      "maxLength": 400,
+                      "minLength": 1,
+                      "title": "Summary",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "summary"
+                  ],
+                  "title": "PublicDecision",
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "面向当前用户公开的工具选择依据；应在同一次 Tool Call 中提供。该字段不属于算法科学参数或检索参数。",
+              "title": "Public Decision"
+            }
+          },
+          "title": "CausalCdfmInputToolInput",
+          "type": "object"
+        }
+      }
+    },
+    {
+      "capability_id": "causal.direct_lingam",
+      "spec_digest": "718ac64c3efe7790b5bda8a2b700e850cfa554500ad11a095d8fba9450898915",
+      "tool": {
+        "name": "causal_direct_lingam",
+        "description": "在连续数值数据上使用 DirectLiNGAM 估计有向无环因果结构。适用于线性、非高斯、误差独立且没有潜在混杂的场景。",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "public_decision": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "description": "模型在 Tool Call 中显式生成、可直接展示的简短决策说明。",
+                  "properties": {
+                    "summary": {
+                      "maxLength": 400,
+                      "minLength": 1,
+                      "title": "Summary",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "summary"
+                  ],
+                  "title": "PublicDecision",
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "面向当前用户公开的工具选择依据；应在同一次 Tool Call 中提供。该字段不属于算法科学参数或检索参数。",
+              "title": "Public Decision"
+            }
+          },
+          "title": "CausalDirectLiNGAMInputToolInput",
+          "type": "object"
+        }
+      }
+    },
+    {
+      "capability_id": "causal.pc",
+      "spec_digest": "2be84a02ec63d244fbc0533f130fdf5c3f7ea1f43364414d9a3bb8d4c56036db",
+      "tool": {
+        "name": "causal_pc",
+        "description": "在表格数据上使用 PC 方法发现条件独立结构并生成部分有向图。适用于一般观测因果发现；需要数值或可确定性编码的表格数据，不应在明显存在潜在混杂且需要专门处理时作为唯一方法。",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "alpha": {
+              "default": 0.05,
+              "exclusiveMaximum": 1.0,
+              "exclusiveMinimum": 0.0,
+              "title": "Alpha",
+              "type": "number"
+            },
+            "public_decision": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "description": "模型在 Tool Call 中显式生成、可直接展示的简短决策说明。",
+                  "properties": {
+                    "summary": {
+                      "maxLength": 400,
+                      "minLength": 1,
+                      "title": "Summary",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "summary"
+                  ],
+                  "title": "PublicDecision",
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "面向当前用户公开的工具选择依据；应在同一次 Tool Call 中提供。该字段不属于算法科学参数或检索参数。",
+              "title": "Public Decision"
+            }
+          },
+          "title": "CausalPcInputToolInput",
+          "type": "object"
+        }
+      }
+    }
+  ]
+}

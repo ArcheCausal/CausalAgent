@@ -4,14 +4,10 @@ from __future__ import annotations
 
 import contextvars
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from Agent.execution_control import JobExecutionRevoked
 from app.agent import job_service
-
-
-class JobExecutionRevoked(RuntimeError):
-    """表示当前 worker 已失去继续推进 Job 的资格。"""
-
 
 class ExecutionAuthorityUnknown(JobExecutionRevoked):
     """表示无法从 MySQL 主库确认执行资格，必须停止本次推进。"""
@@ -49,6 +45,12 @@ class JobExecutionGuard:
     authority_unknown: bool = False
     last_status: str | None = None
     last_execution_state: str | None = None
+    _revoked_event: asyncio.Event = field(
+        default_factory=asyncio.Event,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def install(self):
         """把守卫放入当前异步上下文，供子图和错误处理路径读取。"""
@@ -67,6 +69,7 @@ class JobExecutionGuard:
     ) -> None:
         """标记后续所有节点和持久化均不得继续。"""
         self.revoked = True
+        self._revoked_event.set()
         if status is not None:
             self.last_status = str(status)
         if execution_state is not None:
@@ -86,14 +89,24 @@ class JobExecutionGuard:
             )
         except Exception as exc:  # 数据库资格未知时不能默认继续
             self.authority_unknown = True
-            self.revoked = True
+            self.mark_revoked()
             raise ExecutionAuthorityUnknown("execution authority unknown") from exc
         self.last_status = str(authority.get("status") or "unknown")
         self.last_execution_state = str(authority.get("execution_state") or "unknown")
         if not authority.get("active"):
-            self.revoked = True
+            self.mark_revoked(
+                status=self.last_status,
+                execution_state=self.last_execution_state,
+            )
             raise JobExecutionRevoked("Job execution revoked")
 
     async def check_after_call(self) -> None:
         """在 LLM/RAG/MCP/解析等调用返回后再次确认资格。"""
         await self.ensure_active()
+
+    async def wait_revoked(self) -> None:
+        """等待 heartbeat 或资格检查标记本 invocation 已撤销。"""
+
+        if self.revoked:
+            return
+        await self._revoked_event.wait()

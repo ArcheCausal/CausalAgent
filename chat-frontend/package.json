@@ -1,0 +1,46 @@
+{
+  "name": "causalagent-chat-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "vue-tsc -b",
+    "test:unit": "vitest run tests/unit tests/contract",
+    "test:components": "vitest run tests/components",
+    "test:e2e:mock": "playwright test -c playwright.mock.config.ts",
+    "build": "vue-tsc -b && vite build",
+    "check": "npm run lint && npm run typecheck && npm run test:unit && npm run test:components && npm run test:e2e:mock && npm run build"
+  },
+  "dependencies": {
+    "@egjs/hammerjs": "2.0.17",
+    "component-emitter": "1.3.1",
+    "keycharm": "0.4.0",
+    "pinia": "3.0.4",
+    "uuid": "9.0.1",
+    "vis-data": "7.1.10",
+    "vis-network": "9.1.9",
+    "vis-util": "5.0.7",
+    "vue": "3.5.40",
+    "zod": "4.1.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.1",
+    "@playwright/test": "1.62.0",
+    "@types/hammerjs": "2.0.46",
+    "@types/node": "26.1.1",
+    "@vitejs/plugin-vue": "6.0.8",
+    "@vue/test-utils": "2.4.11",
+    "eslint": "9.39.1",
+    "eslint-plugin-vue": "10.5.1",
+    "globals": "14.0.0",
+    "jsdom": "29.1.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.46.3",
+    "vite": "8.1.5",
+    "vitest": "4.1.10",
+    "vue-eslint-parser": "10.2.0",
+    "vue-tsc": "3.3.8"
+  }
+}

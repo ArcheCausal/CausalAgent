@@ -1,9 +1,11 @@
 <script setup lang="ts">
+import { CaButton, CaLoadingState } from '@causalagent/design-system'
 import {
   ArrowLeftRight,
   ClipboardCheck,
   Database,
   FolderOpen,
+  Gauge,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -26,10 +28,12 @@ const identityReady = ref(false)
 const collapsed = ref(false)
 const mobileOpen = ref(false)
 const SIDEBAR_STORAGE_KEY = 'causalagent.admin.sidebar.collapsed'
-const BRAND_LOGO_URL = '/api/admin/brand/logo'
 const FLASK_ORIGIN = import.meta.env.VITE_FLASK_ORIGIN?.replace(/\/$/, '') || ''
-const CHAT_URL = `${FLASK_ORIGIN}/`
-const GRAFANA_URL = 'http://127.0.0.1:3000/'
+const CHAT_URL = `${FLASK_ORIGIN}/dashboard`
+const RAG_EVAL_URL = `${FLASK_ORIGIN}/rag-eval`
+const grafanaUrl = ref('')
+const grafanaConfigError = ref(false)
+const BRAND_LOGO_URL = '/api/admin/brand/logo'
 
 const navigation = [
   {
@@ -55,12 +59,23 @@ const navigation = [
 /** 从浏览器恢复桌面侧栏偏好并确认实时管理员身份。 */
 onMounted(async () => {
   collapsed.value = window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === 'true'
-  try {
-    const identity = await loadIdentity()
-    username.value = identity.username || '管理员'
+  const [identityResult, runtimeConfigResult] = await Promise.allSettled([
+    loadIdentity(),
+    adminApi.runtimeConfig(),
+  ])
+
+  if (identityResult.status === 'fulfilled') {
+    username.value = identityResult.value.username || '管理员'
     identityReady.value = true
-  } catch {
+  } else {
     identityReady.value = false
+    return
+  }
+
+  if (runtimeConfigResult.status === 'fulfilled') {
+    grafanaUrl.value = runtimeConfigResult.value.grafana_url
+  } else {
+    grafanaConfigError.value = true
   }
 })
 
@@ -96,10 +111,10 @@ watch(
         :aria-expanded="mobileOpen"
         @click="mobileOpen = true"
       >
-        <Menu :size="20" :stroke-width="2" aria-hidden="true" />
+        <Menu :size="20" :stroke-width="1.5" aria-hidden="true" />
       </button>
       <div class="mobile-brand-icon" aria-hidden="true">
-        <img :src="BRAND_LOGO_URL" alt="">
+        <img :src="BRAND_LOGO_URL" alt="CausalAgent">
       </div>
       <strong>CausalAgent 管理后台</strong>
     </header>
@@ -118,8 +133,12 @@ watch(
       aria-label="后台导航"
     >
       <div class="brand-block">
-        <div class="brand-image-wrap" :class="{ cropped: collapsed }">
+        <div class="brand-image-wrap">
           <img :src="BRAND_LOGO_URL" alt="CausalAgent">
+        </div>
+        <div class="brand-copy" aria-label="CausalAgent 管理后台">
+          <strong>CausalAgent</strong>
+          <span>管理后台</span>
         </div>
         <button
           class="sidebar-toggle"
@@ -128,8 +147,8 @@ watch(
           :aria-expanded="!collapsed"
           @click="toggleSidebar"
         >
-          <PanelLeftOpen v-if="collapsed" :size="16" :stroke-width="2" aria-hidden="true" />
-          <PanelLeftClose v-else :size="16" :stroke-width="2" aria-hidden="true" />
+          <PanelLeftOpen v-if="collapsed" :size="16" :stroke-width="1.5" aria-hidden="true" />
+          <PanelLeftClose v-else :size="16" :stroke-width="1.5" aria-hidden="true" />
         </button>
         <button
           class="mobile-close-button"
@@ -137,7 +156,7 @@ watch(
           aria-label="关闭后台导航"
           @click="mobileOpen = false"
         >
-          <X :size="20" :stroke-width="2" aria-hidden="true" />
+          <X :size="20" :stroke-width="1.5" aria-hidden="true" />
         </button>
       </div>
 
@@ -157,7 +176,7 @@ watch(
               :to="item.to"
             >
               <span class="nav-icon" aria-hidden="true">
-                <component :is="item.icon" :size="18" :stroke-width="1.8" />
+                <component :is="item.icon" :size="18" :stroke-width="1.5" />
               </span>
               <span class="nav-text">{{ item.label }}</span>
             </router-link>
@@ -171,45 +190,57 @@ watch(
           <strong>{{ username }}</strong>
         </div>
         <el-tooltip content="进入 Grafana" placement="right" :disabled="!collapsed">
-          <el-button
+          <CaButton
             class="grafana-entry-button"
-            tag="a"
-            type="warning"
-            :href="GRAFANA_URL"
-            :disabled="!identityReady"
+            variant="secondary"
+            :href="grafanaUrl"
+            :disabled="!identityReady || !grafanaUrl"
+            :title="grafanaConfigError ? 'Grafana 地址暂时不可用' : undefined"
           >
             <span class="grafana-entry-icon" aria-hidden="true">
-              <ArrowLeftRight :size="18" :stroke-width="1.8" />
+              <ArrowLeftRight :size="18" :stroke-width="1.5" />
             </span>
             <span class="grafana-entry-text">进入 Grafana</span>
-          </el-button>
+          </CaButton>
         </el-tooltip>
         <el-tooltip content="进入聊天" placement="right" :disabled="!collapsed">
-          <el-button
+          <CaButton
             class="chat-entry-button"
-            tag="a"
-            type="primary"
+            variant="primary"
             :href="CHAT_URL"
             :disabled="!identityReady"
           >
             <span class="chat-entry-icon" aria-hidden="true">
-              <MessageCircle :size="18" :stroke-width="1.8" />
+              <MessageCircle :size="18" :stroke-width="1.5" />
             </span>
             <span class="chat-entry-text">进入聊天</span>
-          </el-button>
+          </CaButton>
+        </el-tooltip>
+        <el-tooltip content="进入 RAG 评测台" placement="right" :disabled="!collapsed">
+          <CaButton
+            class="chat-entry-button"
+            variant="primary"
+            :href="RAG_EVAL_URL"
+            :disabled="!identityReady"
+          >
+            <span class="chat-entry-icon" aria-hidden="true">
+              <Gauge :size="18" :stroke-width="1.5" />
+            </span>
+            <span class="chat-entry-text">RAG 评测台</span>
+          </CaButton>
         </el-tooltip>
         <el-tooltip content="退出登录" placement="right" :disabled="!collapsed">
-          <el-button
+          <CaButton
             class="logout-button"
-            type="success"
+            variant="secondary"
             :disabled="!identityReady"
             @click="adminApi.logout"
           >
             <span class="logout-icon" aria-hidden="true">
-              <LogOut :size="18" :stroke-width="1.8" />
+              <LogOut :size="18" :stroke-width="1.5" />
             </span>
             <span class="logout-text">退出登录</span>
-          </el-button>
+          </CaButton>
         </el-tooltip>
       </div>
     </aside>
@@ -217,7 +248,7 @@ watch(
     <main class="admin-main">
       <router-view v-if="identityReady" />
       <div v-else class="page-loading">
-        <el-skeleton :rows="8" animated />
+        <CaLoadingState variant="skeleton" :lines="8" />
       </div>
     </main>
   </div>

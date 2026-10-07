@@ -8,27 +8,25 @@ import {
   ElDescriptionsItem,
   ElDialog,
   ElDrawer,
-  ElEmpty,
   ElForm,
   ElFormItem,
   ElInput,
   ElInputNumber,
   ElLoading,
   ElOption,
-  ElSegmented,
   ElSelect,
-  ElSkeleton,
   ElSwitch,
   ElTable,
   ElTableColumn,
-  ElTag,
   ElTimeline,
   ElTimelineItem,
   ElTooltip,
 } from 'element-plus'
+import '@causalagent/design-system/styles.css'
 import 'element-plus/dist/index.css'
 import App from './App.vue'
 import { router } from './router'
+import './element-plus.css'
 import './styles.css'
 
 const app = createApp(App)
@@ -41,20 +39,16 @@ for (const plugin of [
   ElDescriptionsItem,
   ElDialog,
   ElDrawer,
-  ElEmpty,
   ElForm,
   ElFormItem,
   ElInput,
   ElInputNumber,
   ElLoading,
   ElOption,
-  ElSegmented,
   ElSelect,
-  ElSkeleton,
   ElSwitch,
   ElTable,
   ElTableColumn,
-  ElTag,
   ElTimeline,
   ElTimelineItem,
   ElTooltip,

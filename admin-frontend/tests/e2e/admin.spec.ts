@@ -13,7 +13,7 @@ test.describe('管理员 Vue 与真实共享快照', () => {
 
   test('管理员直接访问、登录、看板刷新、审计与配置版本流程', async ({ page, context }) => {
     await page.goto('/admin/database')
-    await expect(page).toHaveURL(/\/\?next=%2Fadmin%2Fdatabase$/)
+    await expect(page).toHaveURL(/\/auth\/sign-in\?next=%2Fadmin%2Fdatabase$/)
 
     await page.locator('#loginUsername').fill(username!)
     await page.locator('#loginPassword').fill(password!)

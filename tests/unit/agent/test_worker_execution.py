@@ -23,6 +23,10 @@ for _key, _value in {
 
 from app.agent.job_service import FailJobResult  # noqa: E402
 from app.agent.worker import execution  # noqa: E402
+from app.agent.worker.event_adapter import (  # noqa: E402
+    classify_graph_failure,
+    sanitize_public_error,
+)
 from app.agent.worker.execution_guard import JobExecutionRevoked  # noqa: E402
 from observability.logging_runtime import current_log_context  # noqa: E402
 
@@ -48,6 +52,7 @@ class FakeWriter:
     def __init__(self, job, worker_id, execution_guard=None):
         self.terminal_seen = False
         self.terminal_type = None
+        self.terminal_diagnostic = None
         self.abort_calls = []
         self.close_calls = 0
 
@@ -70,12 +75,13 @@ class FailingCleanupWriter(FakeWriter):
 
 
 class TerminalWriter(FakeWriter):
-    """根据 graph 终态设置只读终态类型。"""
+    """根据 graph 终态设置只读终态类型，并同步内部诊断。"""
 
     async def submit(self, payload):
         if payload.get("type") in {"final_result", "interrupt", "error"}:
             self.terminal_seen = True
             self.terminal_type = payload["type"]
+            self.terminal_diagnostic = payload.get("_diagnostic")
 
 
 async def _failing_graph():
@@ -92,6 +98,19 @@ async def _blocking_graph():
 
 async def _terminal_graph(event_type: str):
     yield {"type": event_type, "data": {"type": "text", "summary": "safe"}}
+
+
+async def _failing_terminal_graph(error: BaseException):
+    """产生带内部诊断的 graph error 终态，复现真实的 graph_runner 输出。"""
+    try:
+        raise error
+    except Exception as exc:  # noqa: BLE001 - 复现 graph_runner 的 except Exception
+        yield {
+            "type": "error",
+            "message": sanitize_public_error(exc),
+            "attempt": 2,
+            "_diagnostic": classify_graph_failure(exc),
+        }
 
 
 class WorkerExecutionTests(IsolatedAsyncioTestCase):
@@ -257,6 +276,82 @@ class WorkerExecutionTests(IsolatedAsyncioTestCase):
                 self.assertEqual(context["job_id"], "job-1")
                 self.assertEqual(context["worker_slot"], "4")
             self.assertEqual(current_log_context(), {})
+
+    async def _run_with_graph(self, graph_source, writer_cls=TerminalWriter):
+        """在完整 patch 环境下跑一次 run_job，返回捕获到的日志调用。"""
+        writer = writer_cls(_job(), "worker-a")
+        observed = []
+
+        def capture(_logger, event_code, **kwargs):
+            observed.append((event_code, kwargs))
+
+        with patch(
+            "app.agent.worker.execution.OrderedEventWriter",
+            return_value=writer,
+        ), patch(
+            "app.agent.worker.execution.ai_call_stream",
+            return_value=graph_source,
+        ), patch(
+            "app.agent.worker.execution.heartbeat_until_stopped",
+            new=AsyncMock(),
+        ), patch(
+            "app.agent.worker.execution.JobExecutionGuard.ensure_active",
+            new=AsyncMock(),
+        ), patch(
+            "app.agent.worker.execution.JobExecutionGuard.check_after_call",
+            new=AsyncMock(),
+        ), patch(
+            "app.agent.worker.execution.job_service.get_latest_input_value",
+            return_value={
+                "input_type": "initial",
+                "runtime_value": "hello",
+                "stored_text": "hello",
+                "chat_message_id": 1,
+            },
+        ), patch(
+            "app.agent.worker.execution.log_event",
+            side_effect=capture,
+        ):
+            await execution.run_job(
+                _job(),
+                SimpleNamespace(graph=object(), mcp_tools=[]),
+                "host:4",
+                worker_slot=4,
+            )
+        return observed
+
+    async def test_graph_terminal_error_logs_classification_and_exception_metadata(self):
+        """graph 终态失败必须带上稳定故障域、真实原因码和异常元数据。"""
+        error = ConnectionRefusedError("mysql://secret-host refused")
+        observed = await self._run_with_graph(_failing_terminal_graph(error))
+
+        failures = [item for item in observed if item[0] == "worker.job.failed"]
+        self.assertEqual(len(failures), 1)
+        _code, kwargs = failures[0]
+
+        details = kwargs["details"]
+        self.assertEqual(details["failure_phase"], "graph_terminal")
+        self.assertEqual(details["reason_code"], "connection_unavailable")
+        self.assertEqual(details["error_category"], "provider_error")
+        self.assertEqual(details["attempt"], 2)
+        self.assertNotIn("secret-host", repr(details))
+
+        exc_info = kwargs["exc_info"]
+        self.assertIs(exc_info[0], ConnectionRefusedError)
+        self.assertIs(exc_info[1], error)
+        self.assertIsNotNone(exc_info[2])
+
+    async def test_graph_terminal_error_without_diagnostic_keeps_legacy_shape(self):
+        """没有内部诊断时保持既有 reason_code，且不写入 error_category 键。"""
+        observed = await self._run_with_graph(_terminal_graph("error"))
+
+        failures = [item for item in observed if item[0] == "worker.job.failed"]
+        self.assertEqual(len(failures), 1)
+        _code, kwargs = failures[0]
+
+        self.assertEqual(kwargs["details"]["reason_code"], "node_error")
+        self.assertIsNone(kwargs["details"]["error_category"])
+        self.assertIsNone(kwargs["exc_info"])
 
     async def test_two_jobs_in_different_slots_never_cross_log_context(self):
         jobs = []

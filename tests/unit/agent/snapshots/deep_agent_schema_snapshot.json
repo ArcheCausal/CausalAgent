@@ -1,0 +1,387 @@
+{
+  "pydantic_models": {
+    "ActionAttempt": {
+      "properties": [
+        "finished_at",
+        "retry_ordinal",
+        "revision",
+        "safe_error_code",
+        "started_at",
+        "status"
+      ],
+      "required": [
+        "retry_ordinal",
+        "revision",
+        "status"
+      ],
+      "sha256": "ca1b54d755d4272899e3f971ab5aec93cc9a183ce0f8209ac0cd1af834593e75",
+      "title": "ActionAttempt"
+    },
+    "AlgorithmExecutionCommand": {
+      "properties": [
+        "capability_id",
+        "capability_version",
+        "input_identity",
+        "invocation_id",
+        "parameters",
+        "provider_call_id",
+        "result_index",
+        "spec_digest",
+        "timeout_seconds"
+      ],
+      "required": [
+        "invocation_id",
+        "capability_id",
+        "capability_version",
+        "spec_digest",
+        "provider_call_id",
+        "input_identity"
+      ],
+      "sha256": "e3ac2d8d6ccce1010fb406e0a87fd3b545114f2ae9b2db4fe55e7ad29b07f366",
+      "title": "AlgorithmExecutionCommand"
+    },
+    "AlgorithmResult": {
+      "properties": [
+        "capability_id",
+        "capability_version",
+        "diagnostics",
+        "graph_semantics",
+        "input_identity",
+        "invocation_id",
+        "provenance",
+        "provider_call_id",
+        "raw_result_ref",
+        "raw_result_serialization_version",
+        "raw_result_sha256",
+        "raw_result_size_bytes",
+        "result_ref",
+        "standardized_graph",
+        "status",
+        "summary",
+        "warnings"
+      ],
+      "required": [
+        "result_ref",
+        "invocation_id",
+        "provider_call_id",
+        "capability_id",
+        "capability_version",
+        "status",
+        "provenance"
+      ],
+      "sha256": "ad83178522ddc5e54aaa50bf9433e75144898d99be5eba3c824fcaf26d7f63d1",
+      "title": "AlgorithmResult"
+    },
+    "AlgorithmResultProvenance": {
+      "properties": [
+        "algorithm_runner_version",
+        "attempt_count",
+        "capability_id",
+        "capability_version",
+        "input_identity",
+        "invocation_id",
+        "job_id",
+        "lease_epoch",
+        "preprocessing_recipe_digest",
+        "spec_digest"
+      ],
+      "required": [
+        "job_id",
+        "attempt_count",
+        "lease_epoch",
+        "input_identity",
+        "spec_digest"
+      ],
+      "sha256": "922fd25e8c50ca3ce1b7333f02a1bcb1b33b926510f692f0bd3de16d6d5f3dd3",
+      "title": "AlgorithmResultProvenance"
+    },
+    "DataProfile": {
+      "properties": [
+        "categorical_columns",
+        "column_count",
+        "column_names",
+        "numeric_columns",
+        "row_count"
+      ],
+      "required": [
+        "row_count",
+        "column_count"
+      ],
+      "sha256": "a0be9d853c86ce2045031d29b8a7a70d2d5fc338f359f0a41d07024910aa9a57",
+      "title": "DataProfile"
+    },
+    "Diagnostics": {
+      "properties": [
+        "assumptions_checked",
+        "metrics",
+        "safe_error_code",
+        "sample_count",
+        "summary",
+        "variable_count"
+      ],
+      "required": [],
+      "sha256": "255efc66b0d713f12b59bd37f08be7f1c59553ab576b4b959a08d7839faf11bc",
+      "title": "Diagnostics"
+    },
+    "EvidenceResult": {
+      "properties": [
+        "degradation_flags",
+        "dense_score",
+        "evidence_id",
+        "evidence_ref",
+        "locator",
+        "modality",
+        "release_id",
+        "rerank_score",
+        "score",
+        "snippet",
+        "source_title",
+        "source_url",
+        "sparse_score",
+        "sufficiency"
+      ],
+      "required": [
+        "evidence_ref",
+        "snippet"
+      ],
+      "sha256": "12f2c95a8c0ef1ea41921daa8deda8a72cac2227481efa064830ab4ada30115c",
+      "title": "EvidenceResult"
+    },
+    "FinalAnalysisDecision": {
+      "properties": [
+        "confidence",
+        "confidence_basis",
+        "conflict_status",
+        "conflicts",
+        "outcome",
+        "primary_result_ref",
+        "result_assessments",
+        "revision_proposals",
+        "selection_rationale"
+      ],
+      "required": [
+        "outcome",
+        "conflict_status",
+        "selection_rationale",
+        "confidence"
+      ],
+      "sha256": "398a337fce47181bbc1994bbdef44ec75a9d485e1c6f9e6edb2decbda035909c",
+      "title": "FinalAnalysisDecision"
+    },
+    "GraphEdge": {
+      "properties": [
+        "edge_type",
+        "source",
+        "target",
+        "weight"
+      ],
+      "required": [
+        "source",
+        "target"
+      ],
+      "sha256": "31cb634ae48fad84dc221be40fcff438ddcba9b6b893ee55e2d5dc9abf6f3ae6",
+      "title": "GraphEdge"
+    },
+    "InvocationRecord": {
+      "properties": [
+        "attempt_count",
+        "attempts",
+        "final_status",
+        "input_identity",
+        "invocation_id",
+        "job_id",
+        "lease_epoch",
+        "provider_call_id",
+        "provider_item_id",
+        "provider_response_id",
+        "response_identity",
+        "response_identity_source",
+        "result_ref",
+        "tool_name",
+        "worker_id"
+      ],
+      "required": [
+        "invocation_id",
+        "response_identity",
+        "response_identity_source",
+        "provider_call_id",
+        "tool_name",
+        "final_status"
+      ],
+      "sha256": "6e875d0ac71965656d7c6c3ad62567c7683038e66c9324fb9e35002c148226fc",
+      "title": "InvocationRecord"
+    },
+    "McpInvocationContext": {
+      "properties": [
+        "attempt_count",
+        "expires_at",
+        "input_snapshot_digest",
+        "invocation_id",
+        "issued_at",
+        "job_id",
+        "key_id",
+        "lease_epoch",
+        "session_id",
+        "user_id",
+        "worker_id"
+      ],
+      "required": [
+        "invocation_id",
+        "job_id",
+        "session_id",
+        "user_id",
+        "attempt_count",
+        "lease_epoch",
+        "worker_id",
+        "input_snapshot_digest",
+        "issued_at",
+        "expires_at",
+        "key_id"
+      ],
+      "sha256": "d07f8d4b713ce44abb36454327ba09e8c91896551350922a55a541d96721246f",
+      "title": "McpInvocationContext"
+    },
+    "PublicDecision": {
+      "properties": [
+        "summary"
+      ],
+      "required": [
+        "summary"
+      ],
+      "sha256": "479bffd16be16def248e67d0812322dbd37ce5ee4dc21200e588a342d64e09e8",
+      "title": "PublicDecision"
+    },
+    "RawResultMetadata": {
+      "properties": [
+        "raw_result_ref",
+        "raw_result_serialization_version",
+        "raw_result_sha256",
+        "raw_result_size_bytes"
+      ],
+      "required": [
+        "raw_result_ref",
+        "raw_result_sha256",
+        "raw_result_size_bytes",
+        "raw_result_serialization_version"
+      ],
+      "sha256": "8500827ab007fd1ae0cd4fe048af80fbeeeaa6a2c00fdbde1cb9bf0d44cc9c88",
+      "title": "RawResultMetadata"
+    },
+    "ResultAssessment": {
+      "properties": [
+        "disposition",
+        "rationale",
+        "result_ref"
+      ],
+      "required": [
+        "result_ref",
+        "disposition",
+        "rationale"
+      ],
+      "sha256": "470e990b2b72874ad955153a6b6f07952fedd7371059ce9cdf6d7eef674902f1",
+      "title": "ResultAssessment"
+    },
+    "RevisionProposal": {
+      "properties": [
+        "action",
+        "evidence_refs",
+        "rationale",
+        "result_ref"
+      ],
+      "required": [
+        "result_ref",
+        "action",
+        "rationale"
+      ],
+      "sha256": "6eaae3b1819119d82ee6c3ac173d0071a8d5e74322ba273dfc56395c0282bd46",
+      "title": "RevisionProposal"
+    },
+    "SafeWarning": {
+      "properties": [
+        "code",
+        "message"
+      ],
+      "required": [
+        "code",
+        "message"
+      ],
+      "sha256": "f7eb121fdd4fa2bd6a26bf5c70ae39c0792e9259864a7c70cebc1e186279cf35",
+      "title": "SafeWarning"
+    },
+    "ScientificConflict": {
+      "properties": [
+        "conflict_id",
+        "resolution",
+        "result_refs",
+        "summary"
+      ],
+      "required": [
+        "conflict_id",
+        "summary"
+      ],
+      "sha256": "d7c2e37166847ec7a7c082df645384125af1a58caa77d273851325de75f41095",
+      "title": "ScientificConflict"
+    },
+    "StandardizedGraph": {
+      "properties": [
+        "edges",
+        "graph_semantics",
+        "nodes"
+      ],
+      "required": [
+        "graph_semantics"
+      ],
+      "sha256": "dca4ab789e84a85fc28004cde8380e150f0122412979e717d46d92bfcfa10437",
+      "title": "StandardizedGraph"
+    },
+    "WebEvidenceResult": {
+      "properties": [
+        "degradation_flags",
+        "dense_score",
+        "evidence_id",
+        "evidence_ref",
+        "fetched_at",
+        "locator",
+        "modality",
+        "provider_status",
+        "release_id",
+        "rerank_score",
+        "score",
+        "snippet",
+        "source_title",
+        "source_url",
+        "sparse_score",
+        "sufficiency"
+      ],
+      "required": [
+        "evidence_ref",
+        "snippet",
+        "provider_status",
+        "fetched_at"
+      ],
+      "sha256": "0b3c27d6f52635a8550bf0472686e296cb913e566c814ca04f9b2151a6d562e3",
+      "title": "WebEvidenceResult"
+    }
+  },
+  "schema_version": "p1-v1",
+  "tools": [
+    {
+      "capability_id": "causal.cdfm",
+      "schema_sha256": "751074663c761fd14ce1d755a2e8ec3a0f3fcb8820649f936ecd0c4a9ec3d583",
+      "spec_digest": "8fdd047d486462685aa0f7c94ffbc851e74a5d41dd06575f1b6ab1281f90fbec",
+      "tool_name": "causal_cdfm"
+    },
+    {
+      "capability_id": "causal.direct_lingam",
+      "schema_sha256": "723945a1c464701111fa0c2b5399ef06264230e540a19f3ecde58e50c07ea59c",
+      "spec_digest": "718ac64c3efe7790b5bda8a2b700e850cfa554500ad11a095d8fba9450898915",
+      "tool_name": "causal_direct_lingam"
+    },
+    {
+      "capability_id": "causal.pc",
+      "schema_sha256": "1ae6f556853dc118755e124cee3f282572a3a6dc267a63e9d1ea5cc3e0dde118",
+      "spec_digest": "2be84a02ec63d244fbc0533f130fdf5c3f7ea1f43364414d9a3bb8d4c56036db",
+      "tool_name": "causal_pc"
+    }
+  ]
+}

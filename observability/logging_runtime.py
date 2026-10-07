@@ -37,6 +37,7 @@ ALLOWED_CONTEXT_FIELDS = frozenset(
         "user_id",
         "session_id",
         "job_id",
+        "invocation_id",
         "worker_slot",
         "node",
         "tool",

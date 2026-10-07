@@ -153,8 +153,8 @@ FLUSH PRIVILEGES;
         -p causalagent31e2e `
         -f docker-compose.yml `
         -f docker-compose.admin-e2e.yml `
-        up -d --build checkpoint-cleanup
-    Assert-Admin31Exit "start isolated PostgreSQL checkpoint cleanup"
+        up -d --build agent-persistence-cleanup
+    Assert-Admin31Exit "start isolated Agent persistence cleanup"
     python -m tests.e2e.admin.seed_admin_31_e2e
     Assert-Admin31Exit "seed isolated 3.1/3.2 fixtures"
 

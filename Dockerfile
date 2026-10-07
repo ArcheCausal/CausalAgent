@@ -18,19 +18,9 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
     libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
-# 先安装基础依赖（很少变化）
-COPY requirements-base.txt .
-RUN pip install --no-cache-dir -r requirements-base.txt
-
-# 先安装 CPU 版 PyTorch，避免从 PyPI 拉取包含 CUDA 组件的超大 wheel
-RUN pip install --no-cache-dir \
-    --index-url https://download.pytorch.org/whl/cpu \
-    torch==2.7.1+cpu \
-    torchvision==0.22.1+cpu
-
-# 再安装所有依赖
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# 依赖锁与镜像平台/解释器固定一致；CPU Torch 的 index 和 hash 也由锁文件控制。
+COPY tests/smoke/requirements-deep-agent-py311-linux.lock /tmp/requirements.lock
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock
 
 
 FROM python-deps AS test
@@ -45,10 +35,51 @@ FROM node:24-alpine AS admin-builder
 
 WORKDIR /frontend
 
+COPY packages/design-system/src/ /packages/design-system/src/
 COPY admin-frontend/package.json admin-frontend/package-lock.json ./
-RUN npm ci
+RUN npm ci \
+    && ln -s /frontend/node_modules /packages/design-system/node_modules
 
 COPY admin-frontend/ ./
+COPY packages/design-system/ /packages/design-system/
+RUN npm run build
+
+
+FROM node:24-alpine AS chat-builder
+
+WORKDIR /frontend
+
+COPY chat-frontend/package.json chat-frontend/package-lock.json ./
+RUN npm ci
+
+COPY chat-frontend/ ./
+COPY packages/design-system/ /packages/design-system/
+RUN npm run build
+
+
+FROM node:24-alpine AS website-builder
+
+WORKDIR /frontend
+
+COPY packages/design-system/src/ /packages/design-system/src/
+COPY website-frontend/package.json website-frontend/package-lock.json website-frontend/.npmrc ./
+RUN npm ci \
+    && ln -s /frontend/node_modules /packages/design-system/node_modules
+
+COPY website-frontend/ ./
+COPY packages/design-system/ /packages/design-system/
+RUN npm run build
+
+
+FROM node:24-alpine AS rag-eval-builder
+
+WORKDIR /workspace/app/rag_eval/frontend
+
+COPY app/rag_eval/frontend/package.json app/rag_eval/frontend/package-lock.json ./
+RUN npm ci
+
+COPY app/rag_eval/frontend/ ./
+COPY packages/design-system/ /workspace/packages/design-system/
 RUN npm run build
 
 
@@ -56,8 +87,14 @@ FROM python-deps AS runtime
 
 COPY . .
 COPY --from=admin-builder /frontend/dist /opt/causalagent-admin
+COPY --from=chat-builder /frontend/dist /opt/causalagent-chat
+COPY --from=website-builder /frontend/dist /opt/causalagent-website
+COPY --from=rag-eval-builder /workspace/app/rag_eval/frontend_dist /opt/causalagent-rag-eval
 
-ENV ADMIN_FRONTEND_DIST_DIR=/opt/causalagent-admin
+ENV ADMIN_FRONTEND_DIST_DIR=/opt/causalagent-admin \
+    CHAT_FRONTEND_DIST_DIR=/opt/causalagent-chat \
+    WEBSITE_FRONTEND_DIST_DIR=/opt/causalagent-website \
+    RAG_EVAL_FRONTEND_DIST_DIR=/opt/causalagent-rag-eval
 
 EXPOSE 5001
 

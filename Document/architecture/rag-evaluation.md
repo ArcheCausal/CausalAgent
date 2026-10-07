@@ -2,7 +2,7 @@
 
 文档职责：定义隔离 RAG 评测从知识源、摄取、staged index、数据集、评测运行到正式 release 和 worker 的业务架构。
 
-适用范围：说明当前 `/rag_eval` 工作台及其后端任务边界、身份绑定、发布门禁和运行生命周期；逐路由的请求与响应格式见 [`api/rag-eval.md`](../api/rag-eval.md)。
+适用范围：说明当前 `/rag-eval` 评测台及其后端任务边界、身份绑定与权限、发布门禁和运行生命周期；逐路由的请求与响应格式见 [`api/rag-eval.md`](../api/rag-eval.md)。
 
 > 本文只记录当前实现已经提供的架构事实。路径、默认值和接口行为以 `app/rag_eval/`、`Agent/knowledge_base/multimodal/`、配置文件和迁移为准；历史演练、实验计划和旧接口清单不再作为独立权威文档维护。
 

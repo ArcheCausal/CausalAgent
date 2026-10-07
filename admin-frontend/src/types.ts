@@ -18,14 +18,15 @@ export interface DashboardData {
   sql_performance: SnapshotMeta
   capacity: SnapshotMeta
   integrity: SnapshotMeta
-  checkpoint_cleanup_runtime?: CleanupWorkerSnapshot
-  checkpoint_cleanup_outbox?: CleanupOutboxSnapshot
+  agent_persistence_cleanup_runtime?: CleanupWorkerSnapshot
+  agent_persistence_cleanup_outbox?: CleanupOutboxSnapshot
   refresh_policy: Record<string, unknown>
 }
 
 export interface CleanupWorkerSnapshot extends SnapshotMeta {
   worker_alias?: string
   worker_status?: 'idle' | 'processing' | 'stale' | 'stopped' | 'unknown' | string
+  current_task_type?: 'checkpoint' | 'user_memory' | null
   started_at?: string | null
   heartbeat_at?: string | null
   current_outbox_id?: number | null
@@ -44,7 +45,9 @@ export interface CleanupWorkerSnapshot extends SnapshotMeta {
 
 export interface CleanupOutboxItem {
   outbox_id: number
-  thread_id: string
+  task_type: 'checkpoint' | 'user_memory' | string
+  thread_id: string | null
+  user_id: number | null
   operation_id: string | null
   status: 'pending' | 'processing' | 'succeeded' | 'failed' | string
   attempts: number
@@ -61,16 +64,20 @@ export interface CleanupOutboxItem {
 }
 
 export interface CleanupOutboxSnapshot extends SnapshotMeta {
-  summary?: {
-    pending: number | null
-    due_pending: number | null
-    processing: number | null
-    expired_processing: number | null
-    failed: number | null
-    latest_completed_at: string | null
-    earliest_pending_at: string | null
-  }
+  summary?: Partial<Record<CleanupTaskType, CleanupOutboxSummary>>
   items?: CleanupOutboxItem[]
+}
+
+export type CleanupTaskType = 'checkpoint' | 'user_memory'
+
+export interface CleanupOutboxSummary {
+  pending: number | null
+  due_pending: number | null
+  processing: number | null
+  expired_processing: number | null
+  failed: number | null
+  latest_completed_at: string | null
+  earliest_pending_at: string | null
 }
 
 export type MonitorField =
@@ -122,6 +129,11 @@ export interface Identity {
   username?: string
   role?: 'user' | 'admin'
   csrf_token?: string
+}
+
+/** 由部署环境决定的前端地址；开发指向本机端口，预发指向网关同源路径。 */
+export interface RuntimeConfig {
+  grafana_url: string
 }
 
 export interface CursorPage<T> {
@@ -200,6 +212,13 @@ export interface AdminOperationResult {
   replayed: boolean
   completed_at?: string | null
   checkpoint_cleanup?: {
+    status: 'pending' | 'succeeded' | 'failed'
+    total: number
+    succeeded: number
+    failed: number
+    pending: number
+  }
+  user_memory_cleanup?: {
     status: 'pending' | 'succeeded' | 'failed'
     total: number
     succeeded: number

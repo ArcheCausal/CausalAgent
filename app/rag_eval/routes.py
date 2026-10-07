@@ -7,8 +7,9 @@ import math
 import queue
 import time
 import uuid
+from functools import wraps
 from pathlib import Path
-from flask import Blueprint, jsonify, make_response, request, Response, session
+from flask import Blueprint, g, jsonify, make_response, request, Response, session
 
 from app.rag_eval.service import (
     get_rag_eval_status,
@@ -40,10 +41,101 @@ from app.rag_eval.profile_store import (
     update_custom_profile,
 )
 from config.settings import settings
-from app.request_context import log_request_failure
+from app.admin.audit_service import record_admin_audit_event
+from app.request_context import get_request_id, log_request_failure
+from app.auth.authorization import enforce_permission, require_permission
+from app.auth.csrf import csrf_rejection_response, csrf_token_is_valid
+from app.auth.rbac import (
+    PERMISSION_RAG_EVAL_ACCESS,
+    PERMISSION_RAG_EVAL_GOVERNANCE,
+    PERMISSION_RAG_EVAL_PUBLISH,
+    PERMISSION_RAG_EVAL_READ,
+    PERMISSION_RAG_EVAL_ROLLBACK,
+    PERMISSION_RAG_EVAL_RUN,
+)
 
 rag_eval_bp = Blueprint("rag_eval", __name__, url_prefix="/api/rag_eval")
 dataset_registry = DatasetRegistry(Path(settings.RAG_EVAL_DATASET_ROOT))
+
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# 发布、回滚和治理使用独立权限，因此不由方法级读/运行检查兜底。
+SPECIFIC_PERMISSION_ENDPOINTS = frozenset({
+    "rag_eval.api_publish_strategy_profile",
+    "rag_eval.api_publish_production_config",
+    "rag_eval.api_multimodal_release_gate_check",
+    "rag_eval.api_multimodal_release_publish",
+    "rag_eval.api_multimodal_release_rollback",
+    "rag_eval.api_freeze_gold_v2",
+    "rag_eval.api_bind_baseline_v2",
+    "rag_eval.api_start_gold_v2_governance",
+})
+
+
+@rag_eval_bp.before_request
+def enforce_rag_eval_access():
+    """RAG 评测台全部接口要求访问权限，写请求额外要求 CSRF 令牌。"""
+    denied = enforce_permission(PERMISSION_RAG_EVAL_ACCESS)
+    if denied is not None:
+        return denied
+    if request.method not in SAFE_METHODS and not csrf_token_is_valid():
+        return csrf_rejection_response()
+    if request.endpoint in SPECIFIC_PERMISSION_ENDPOINTS:
+        return None
+    permission_key = (
+        PERMISSION_RAG_EVAL_READ
+        if request.method in SAFE_METHODS
+        else PERMISSION_RAG_EVAL_RUN
+    )
+    return enforce_permission(permission_key)
+
+
+def _audit_target_id() -> str:
+    """返回审计用的受限目标标识，优先使用路由变量。"""
+    for value in request.view_args.values():
+        if isinstance(value, str) and value:
+            return value[:200]
+    return request.path[:200]
+
+
+def _record_rag_eval_audit(action: str, *, result: str, status_code: int) -> None:
+    """记录发布、回滚和治理操作；审计写入失败只记日志，不改变原响应。"""
+    actor = getattr(g, "current_user", None) or {}
+    record_admin_audit_event(
+        actor=actor,
+        action=action,
+        target_type="rag_eval_operation",
+        target_id=_audit_target_id(),
+        old_values=None,
+        new_values={"method": request.method, "status_code": status_code},
+        result=result,
+        request_id=get_request_id(),
+        error_code=None if status_code < 400 else f"http_{status_code}",
+    )
+
+
+def audit_rag_eval_operation(action: str):
+    """按下发状态记录发布、回滚与治理操作审计结果。"""
+
+    def decorator(view_func):
+        """包装目标视图并在返回前写入审计事件。"""
+
+        @wraps(view_func)
+        def wrapped_view(*args, **kwargs):
+            """调用原视图并按响应状态记录审计。"""
+            response = make_response(view_func(*args, **kwargs))
+            status_code = response.status_code
+            if status_code < 400:
+                result = "success"
+            elif status_code < 500:
+                result = "rejected"
+            else:
+                result = "failed"
+            _record_rag_eval_audit(action, result=result, status_code=status_code)
+            return response
+
+        return wrapped_view
+
+    return decorator
 
 
 def _json_response(data, status=200):
@@ -178,6 +270,8 @@ def api_delete_strategy_profile(profile_id):
 
 
 @rag_eval_bp.route("/profiles/<profile_id>/publish", methods=["POST"])
+@require_permission(PERMISSION_RAG_EVAL_PUBLISH)
+@audit_rag_eval_operation("rag_eval.profile.publish")
 def api_publish_strategy_profile(profile_id):
     """发布自定义 profile 的 retrieval 快照，并切换正式 profile 指针。"""
     try:
@@ -208,6 +302,8 @@ def api_get_production_config():
 
 
 @rag_eval_bp.route("/production-config/publish", methods=["POST"])
+@require_permission(PERMISSION_RAG_EVAL_PUBLISH)
+@audit_rag_eval_operation("rag_eval.production_config.publish")
 def api_publish_production_config():
     """把当前评测检索配置发布为正式 RAG 调用配置。"""
     try:
@@ -620,6 +716,8 @@ def api_multimodal_release_status():
 
 
 @rag_eval_bp.route("/multimodal/releases/gate-check", methods=["POST"])
+@require_permission(PERMISSION_RAG_EVAL_GOVERNANCE)
+@audit_rag_eval_operation("rag_eval.release.gate_check")
 def api_multimodal_release_gate_check():
     """重新执行指定 staged 候选的正式发布门禁，不切换 active pointer。"""
     try:
@@ -642,6 +740,8 @@ def api_multimodal_release_gate_check():
 
 
 @rag_eval_bp.route("/multimodal/releases/publish", methods=["POST"])
+@require_permission(PERMISSION_RAG_EVAL_PUBLISH)
+@audit_rag_eval_operation("rag_eval.release.publish")
 def api_multimodal_release_publish():
     """用户显式确认后晋级候选并切换正式 active pointer。"""
     try:
@@ -668,6 +768,8 @@ def api_multimodal_release_publish():
 
 
 @rag_eval_bp.route("/multimodal/releases/rollback", methods=["POST"])
+@require_permission(PERMISSION_RAG_EVAL_ROLLBACK)
+@audit_rag_eval_operation("rag_eval.release.rollback")
 def api_multimodal_release_rollback():
     """执行与 CLI 一致的正式多模态版本回滚。"""
     try:
@@ -936,6 +1038,8 @@ def api_rebind_isolated_candidate(run_id):
 
 
 @rag_eval_bp.route("/gold-v2/freeze", methods=["POST"])
+@require_permission(PERMISSION_RAG_EVAL_GOVERNANCE)
+@audit_rag_eval_operation("rag_eval.gold.freeze")
 def api_freeze_gold_v2():
     """只从服务端保存的候选审核 run 尝试冻结 Gold v2。"""
     try:
@@ -1043,6 +1147,8 @@ def api_gold_v2_status():
     return _json_response({"success": True, "data": payload})
 
 @rag_eval_bp.route("/baseline-v2/bind", methods=["POST"])
+@require_permission(PERMISSION_RAG_EVAL_GOVERNANCE)
+@audit_rag_eval_operation("rag_eval.baseline.bind")
 def api_bind_baseline_v2():
     """绑定只读 active pointer、active_current 和已冻结 Gold v2。"""
     try:
@@ -1055,6 +1161,8 @@ def api_bind_baseline_v2():
 
 
 @rag_eval_bp.route("/gold-v2/governance", methods=["POST"])
+@require_permission(PERMISSION_RAG_EVAL_GOVERNANCE)
+@audit_rag_eval_operation("rag_eval.gold.governance")
 def api_start_gold_v2_governance():
     """确认后把已完成 evaluation run 放入无人值守 Gold 健康治理队列。"""
     try:

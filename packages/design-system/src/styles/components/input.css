@@ -1,0 +1,84 @@
+/* 输入控件
+
+   原型页面没有输入控件，这里是按同一语言补充的形态：
+   纸面、一像素细描边、小卡片圆角，焦点环沿用品牌基础的两像素墨色描边。
+   错误提示沿用原型失败态的表达方式：正文色加下划线，不引入彩色。 */
+.ca-field {
+  display: grid;
+  gap: var(--ca-space-8);
+}
+
+.ca-field__label {
+  color: var(--ca-text-default);
+  font-size: var(--ca-text-body-sm);
+  line-height: var(--ca-leading-body-sm);
+}
+
+.ca-field__control {
+  width: 100%;
+  min-height: 36px;
+  padding: var(--ca-space-8) var(--ca-space-12);
+  border: var(--ca-border-width) solid var(--ca-border-default);
+  border-radius: var(--ca-radius-small);
+  background: var(--ca-surface-panel);
+  color: var(--ca-text-default);
+  font-family: inherit;
+  font-size: var(--ca-text-body-sm);
+  font-weight: var(--ca-weight-regular);
+  line-height: var(--ca-leading-body-sm);
+  transition:
+    border-color var(--ca-motion-fast) var(--ca-ease-out),
+    background var(--ca-motion-fast) var(--ca-ease-out);
+}
+
+textarea.ca-field__control {
+  min-height: 88px;
+  resize: vertical;
+}
+
+.ca-field__control::placeholder {
+  color: var(--ca-text-subtle);
+}
+
+@media (hover: hover) {
+  .ca-field__control:hover {
+    border-color: var(--ca-border-strong);
+  }
+}
+
+.ca-field__control:focus-visible {
+  border-color: var(--ca-ink);
+}
+
+.ca-field__control[disabled] {
+  background: var(--ca-surface-muted);
+  color: var(--ca-text-muted-strong);
+  cursor: not-allowed;
+}
+
+.ca-field__control[readonly] {
+  background: var(--ca-surface-muted);
+}
+
+.ca-field__hint,
+.ca-field__error {
+  margin: 0;
+  font-size: var(--ca-text-caption);
+  line-height: var(--ca-leading-caption);
+}
+
+.ca-field__hint {
+  color: var(--ca-text-muted);
+}
+
+.ca-field__error {
+  color: var(--ca-text-default);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+@media (pointer: coarse) {
+  .ca-field__control {
+    min-height: 44px;
+  }
+}

@@ -26,6 +26,10 @@ from app.db import (
 )
 from app.request_context import REQUEST_ID_PATTERN
 from config.settings import settings
+from Database.analysis_contexts import (
+    create_or_reuse_context_for_frozen_file,
+    record_analysis_results,
+)
 
 
 ACTIVE_STATUSES = ("queued", "running", "waiting_input")
@@ -458,16 +462,23 @@ def create_job(
             "input_file_hash": None,
             "input_filename": None,
         }
+        # 冻结文件存在时在同一个事务里创建或复用分析上下文；普通聊天 Job 可以为空。
+        analysis_context_id = create_or_reuse_context_for_frozen_file(
+            cursor,
+            user_id=user_id,
+            session_id=session_id,
+            snapshot=snapshot_values,
+        )
         cursor.execute(
             """
             INSERT INTO analysis_jobs (
                 job_id, user_id, session_id, request_id, message,
                 input_user_file_id, input_object_id, input_file_hash, input_filename,
                 web_search_enabled, status, max_attempts, active_session_key,
-                idempotency_key, request_fingerprint
+                idempotency_key, request_fingerprint, analysis_context_id
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, 'queued', %s, %s, %s, %s
+                %s, 'queued', %s, %s, %s, %s, %s
             )
             """,
             (
@@ -485,16 +496,23 @@ def create_job(
                 f"{user_id}:{session_id}",
                 idempotency_key,
                 fingerprint,
+                analysis_context_id,
             ),
         )
         cursor.execute(
             """
             INSERT INTO analysis_job_inputs (
                 job_id, sequence, input_type, input_text,
-                idempotency_key, request_fingerprint
-            ) VALUES (%s, 0, 'initial', %s, %s, %s)
+                idempotency_key, request_fingerprint, analysis_context_id
+            ) VALUES (%s, 0, 'initial', %s, %s, %s, %s)
             """,
-            (job_id, normalized_message, idempotency_key, fingerprint),
+            (
+                job_id,
+                normalized_message,
+                idempotency_key,
+                fingerprint,
+                analysis_context_id,
+            ),
         )
         input_id = int(cursor.lastrowid)
         chat_message_id = save_user_input_for_job_in_transaction(
@@ -751,6 +769,7 @@ def _complete_job_lifecycle(
     chat_response: dict[str, Any] | str | None = None,
     result: dict[str, Any] | None = None,
     status: str,
+    context_update: dict[str, Any] | None = None,
 ) -> bool:
     """在一个事务中完成事件、assistant 消息和 Job 状态更新。"""
     job_id = job["job_id"]
@@ -792,8 +811,9 @@ def _complete_job_lifecycle(
                 payload=payload,
                 event_key=event_key,
             )
+            assistant_message_id: int | None = None
             if chat_response is not None:
-                save_assistant_for_job_in_transaction(
+                assistant_message_id = save_assistant_for_job_in_transaction(
                     cursor,
                     job_id=job_id,
                     user_id=int(job["user_id"]),
@@ -871,11 +891,50 @@ def _complete_job_lifecycle(
             if cursor.rowcount != 1:
                 connection.rollback()
                 return False
+            if status == "succeeded" and context_update:
+                _commit_context_results(
+                    cursor,
+                    job_id=job_id,
+                    context_update=context_update,
+                    assistant_message_id=assistant_message_id,
+                )
             connection.commit()
             return True
         except Exception:
             connection.rollback()
             raise
+
+
+def _commit_context_results(
+    cursor,
+    *,
+    job_id: str,
+    context_update: dict[str, Any],
+    assistant_message_id: int | None,
+) -> None:
+    """在终态事务内把本次执行已经确认的事实写回分析上下文。
+
+    只有真正交付了报告的那一轮才更新报告引用；追问或普通问答的文本回答不会覆盖
+    上下文里已有的报告。
+    """
+    cursor.execute(
+        "SELECT analysis_context_id FROM analysis_jobs WHERE job_id = %s",
+        (job_id,),
+    )
+    row = cursor.fetchone() or {}
+    context_id = row.get("analysis_context_id")
+    if not context_id:
+        return
+    report_id = context_update.get("report_id")
+    record_analysis_results(
+        cursor,
+        context_id=str(context_id),
+        algorithm_summary=context_update.get("algorithm_summary"),
+        rag_evidence=context_update.get("rag_evidence"),
+        web_evidence=context_update.get("web_evidence"),
+        report_message_id=assistant_message_id if report_id else None,
+        report_id=report_id,
+    )
 
 
 def _finalize_exhausted_job(cursor, stale_after: int) -> bool:
@@ -1332,6 +1391,7 @@ def complete_job_with_chat(
     *,
     lease_epoch: int | None = None,
     question_id: str | None = None,
+    context_update: dict[str, Any] | None = None,
 ) -> bool:
     """在一个事务内完成 final、error 或 interrupt 生命周期。"""
     if event_type == "interrupt":
@@ -1363,6 +1423,7 @@ def complete_job_with_chat(
         lease_epoch=lease_epoch,
         chat_response=chat_response,
         result=result,
+        context_update=context_update,
         status="succeeded",
     )
 
@@ -1528,10 +1589,18 @@ def resume_job(
                 """
                 INSERT INTO analysis_job_inputs (
                     job_id, sequence, input_type, input_text, question_id,
-                    idempotency_key, request_fingerprint
-                ) VALUES (%s, %s, 'resume', %s, %s, %s, %s)
+                    idempotency_key, request_fingerprint, analysis_context_id
+                ) VALUES (%s, %s, 'resume', %s, %s, %s, %s, %s)
                 """,
-                (job_id, sequence, normalized_answer, question_id, idempotency_key, fingerprint),
+                (
+                    job_id,
+                    sequence,
+                    normalized_answer,
+                    question_id,
+                    idempotency_key,
+                    fingerprint,
+                    job.get("analysis_context_id"),
+                ),
             )
             input_id = int(cursor.lastrowid)
             chat_message_id = save_user_input_for_job_in_transaction(

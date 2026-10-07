@@ -1,0 +1,104 @@
+/* CausalAgent 设计系统：品牌基础样式
+
+   这一层只包含整站一致的文字、焦点和动效规则，不重置外边距、不改变布局结构，
+   因此可以按前端逐个页面引入，未迁移的页面不会因为引入本文件而改变排版。
+
+   规则放在 @layer ca-base 里：业务页面里没有放进层级的样式优先级更高，
+   迁移过程中旧页面样式仍然可以覆盖品牌基础，迁移完成后再删除旧规则。 */
+@layer ca-base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-padding-top: calc(var(--ca-nav-height) + 16px);
+  }
+
+  body {
+    margin: 0;
+    background: var(--ca-surface-page);
+    color: var(--ca-text-default);
+    font-family: var(--ca-font-sans);
+    font-weight: var(--ca-weight-regular);
+    font-size: var(--ca-text-body);
+    line-height: var(--ca-leading-body);
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* 全站只有一个字重，标题、表格头和加粗标签都不改变字重 */
+  strong,
+  b,
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  th {
+    font-weight: var(--ca-weight-regular);
+  }
+
+  /* 标题用 balance 避免末行只剩一两个字，正文用 pretty 避免孤字 */
+  h1,
+  h2 {
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+
+  /* 焦点环跟着控件自己的圆角走，所以不在这里写 border-radius */
+  :focus-visible {
+    outline: 2px solid var(--ca-focus-ring);
+    outline-offset: 3px;
+  }
+
+  /* 反色面上的焦点环换成纸白才看得见，反色区块加 ca-inverse */
+  .ca-inverse :focus-visible {
+    outline-color: var(--ca-focus-ring-inverse);
+  }
+
+  svg:focus-visible,
+  svg :focus-visible {
+    outline: none;
+  }
+
+  /* 文字链接：只在正文里使用，颜色和字形与正文一致，靠下划线表示可点 */
+  .ca-link {
+    color: var(--ca-text-default);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-thickness: var(--ca-border-width);
+  }
+
+  @media (hover: hover) {
+    .ca-link:hover {
+      color: var(--ca-ink-hover);
+    }
+  }
+
+  .ca-visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition: none !important;
+      animation: none !important;
+    }
+  }
+}

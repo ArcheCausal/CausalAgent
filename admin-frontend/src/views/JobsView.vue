@@ -1,9 +1,19 @@
 <script setup lang="ts">
+import {
+  CaBadge,
+  CaButton,
+  CaCard,
+  CaEmptyState,
+  CaErrorState,
+  CaPageHeader,
+  CaTabs,
+} from '@causalagent/design-system'
 import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError, adminApi } from '../api'
 import CursorPager from '../components/CursorPager.vue'
 import SensitiveContentDialog from '../components/SensitiveContentDialog.vue'
 import { formatDate } from '../lib/dashboard'
+import { statusTone } from '../lib/statusTone'
 import type {
   AgentWorkerSummary,
   AdminCheckpointPage,
@@ -39,9 +49,9 @@ const checkpointError = ref('')
 const checkpointCursors = ref<(string | undefined)[]>([undefined])
 type DetailPanel = 'events' | 'checkpoints'
 const activeDetailPanel = ref<DetailPanel>('events')
-const detailPanelOptions: Array<{ label: string; value: DetailPanel }> = [
-  { label: '节点与任务事件', value: 'events' },
-  { label: 'Checkpoint 状态', value: 'checkpoints' },
+const detailPanelOptions: Array<{ id: DetailPanel; label: string }> = [
+  { label: '节点与任务事件', id: 'events' },
+  { label: 'Checkpoint 状态', id: 'checkpoints' },
 ]
 const contentVisible = ref(false)
 const contentTitle = ref('')
@@ -234,12 +244,9 @@ function revealInput(input: AdminJobInput): void {
   contentVisible.value = true
 }
 
-/** 把任务状态映射为 Element Plus 标签类型。 */
-function statusType(value: AdminJob['status']): 'success' | 'warning' | 'danger' | 'info' {
-  if (value === 'succeeded') return 'success'
-  if (value === 'failed' || value === 'canceled') return 'danger'
-  if (value === 'running') return 'warning'
-  return 'info'
+/** 只接受两个受控的任务详情视图，避免标签页改变业务状态。 */
+function selectDetailPanel(value: string): void {
+  if (value === 'events' || value === 'checkpoints') activeDetailPanel.value = value
 }
 
 onMounted(() => {
@@ -249,14 +256,10 @@ onMounted(() => {
 </script>
 
 <template>
-  <section>
-    <header class="page-header">
-      <div>
-        <h1>分析任务管理</h1>
-      </div>
-    </header>
+  <section class="admin-page">
+    <CaPageHeader title="分析任务管理" :level="1" size="md" />
 
-    <section class="panel worker-summary-panel" v-loading="workerSummaryLoading">
+    <CaCard as="section" class="panel worker-summary-panel" variant="outline" padding="md" v-loading="workerSummaryLoading">
       <div class="panel-header">
         <div>
           <h2>Agent Worker</h2>
@@ -283,8 +286,8 @@ onMounted(() => {
         <el-table-column label="尝试次数" min-width="110"><template #default="{ row }">{{ row.attempt_count }} / {{ row.max_attempts }}</template></el-table-column>
         <el-table-column label="心跳时间" min-width="180"><template #default="{ row }">{{ formatDate(row.heartbeat_at) }}</template></el-table-column>
       </el-table>
-      <el-empty v-else description="当前没有活动任务" />
-    </section>
+      <CaEmptyState v-else description="当前没有活动任务" />
+    </CaCard>
 
     <section class="filter-bar">
       <el-input v-model="q" clearable placeholder="Job ID" @keyup.enter="loadJobs(true)" />
@@ -293,19 +296,19 @@ onMounted(() => {
       </el-select>
       <el-input v-model="userId" clearable placeholder="用户 ID" @keyup.enter="loadJobs(true)" />
       <el-input v-model="sessionId" clearable placeholder="会话 ID" @keyup.enter="loadJobs(true)" />
-      <el-button type="primary" :loading="loading" @click="loadJobs(true)">筛选</el-button>
+      <CaButton variant="primary" :loading="loading" @click="loadJobs(true)">筛选</CaButton>
     </section>
 
-    <el-alert v-if="error" class="page-notice" type="error" :closable="false" :title="error" />
+    <CaErrorState v-if="error" class="page-notice" title="任务读取失败" :description="error" />
 
-    <section class="panel table-panel">
+    <CaCard as="section" class="panel table-panel" variant="outline" padding="md">
       <el-table v-loading="loading" :data="page?.items || []" empty-text="没有符合条件的任务">
         <el-table-column prop="job_id" label="Job ID" min-width="260" show-overflow-tooltip />
         <el-table-column prop="username" label="用户" min-width="130" />
         <el-table-column prop="session_id" label="会话" min-width="220" show-overflow-tooltip />
         <el-table-column label="状态" width="110">
           <template #default="{ row }">
-            <el-tag :type="statusType(row.status)">{{ row.status }}</el-tag>
+            <CaBadge :tone="statusTone(row.status)">{{ row.status }}</CaBadge>
           </template>
         </el-table-column>
         <el-table-column prop="worker_id" label="Worker" min-width="170" show-overflow-tooltip />
@@ -315,7 +318,7 @@ onMounted(() => {
         </el-table-column>
         <el-table-column label="操作" width="110" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="openDetail(row)">查看详情</el-button>
+            <CaButton variant="quiet" size="sm" @click="openDetail(row)">查看详情</CaButton>
           </template>
         </el-table-column>
       </el-table>
@@ -326,7 +329,7 @@ onMounted(() => {
         @previous="previousPage"
         @next="nextPage"
       />
-    </section>
+    </CaCard>
 
     <el-drawer v-model="detailVisible" title="任务详情" size="min(920px, 100vw)">
       <div v-loading="detailLoading">
@@ -368,7 +371,7 @@ onMounted(() => {
             </el-table-column>
             <el-table-column label="操作" width="110">
               <template #default="{ row }">
-                <el-button link type="primary" @click="revealInput(row)">查看正文</el-button>
+                <CaButton variant="quiet" size="sm" @click="revealInput(row)">查看正文</CaButton>
               </template>
             </el-table-column>
           </el-table>
@@ -376,8 +379,8 @@ onMounted(() => {
 
         <div v-if="detail" class="sensitive-actions">
           <span>查看会被读取并审计！</span>
-          <el-button v-if="detail.has_result" @click="reveal('result')">查看结果</el-button>
-          <el-button v-if="detail.has_error" type="danger" plain @click="reveal('error')">查看错误</el-button>
+          <CaButton v-if="detail.has_result" variant="secondary" @click="reveal('result')">查看结果</CaButton>
+          <CaButton v-if="detail.has_error" variant="secondary" @click="reveal('error')">查看错误</CaButton>
         </div>
 
         <div v-if="detail" class="job-state-selector">
@@ -385,11 +388,11 @@ onMounted(() => {
             <strong>任务状态视图</strong>
             <span>选择查看 MySQL 任务事件或 PostgreSQL checkpoint 摘要</span>
           </div>
-          <el-segmented
-            v-model="activeDetailPanel"
-            :options="detailPanelOptions"
-            size="large"
+          <CaTabs
+            :model-value="activeDetailPanel"
+            :items="detailPanelOptions"
             aria-label="选择任务状态视图"
+            @update:model-value="selectDetailPanel"
           />
         </div>
 
@@ -399,12 +402,11 @@ onMounted(() => {
           class="job-state-panel"
         >
           <h3 class="drawer-section-title">节点与任务事件（MySQL）</h3>
-          <el-alert
+          <CaErrorState
             v-if="eventError"
             class="page-notice"
-            type="error"
-            :closable="false"
-            :title="eventError"
+            title="任务事件读取失败"
+            :description="eventError"
           />
           <el-timeline v-if="events?.items.length">
             <el-timeline-item
@@ -420,7 +422,7 @@ onMounted(() => {
               </span>
             </el-timeline-item>
           </el-timeline>
-          <el-empty v-else description="没有任务事件" />
+          <CaEmptyState v-else description="没有任务事件" />
           <CursorPager
             :can-previous="eventCursors.length > 1"
             :has-more="Boolean(events?.has_more)"
@@ -432,12 +434,11 @@ onMounted(() => {
 
         <section v-else-if="detail" v-loading="checkpointLoading" class="job-state-panel">
           <h3 class="drawer-section-title">Checkpoint 状态（PostgreSQL）</h3>
-          <el-alert
+          <CaErrorState
             v-if="checkpointError"
             class="page-notice"
-            type="error"
-            :closable="false"
-            :title="checkpointError"
+            title="Checkpoint 读取失败"
+            :description="checkpointError"
           />
           <el-alert
             v-if="checkpoints?.legacy_unattributed"
@@ -458,7 +459,7 @@ onMounted(() => {
               <span class="event-meta">更新通道 {{ checkpoint.updated_channels.join('、') || '无' }}</span>
             </el-timeline-item>
           </el-timeline>
-          <el-empty v-else-if="!checkpointError" description="没有可归属当前任务的 checkpoint" />
+          <CaEmptyState v-else-if="!checkpointError" description="没有可归属当前任务的 checkpoint" />
           <CursorPager
             :can-previous="checkpointCursors.length > 1"
             :has-more="Boolean(checkpoints?.has_more)"

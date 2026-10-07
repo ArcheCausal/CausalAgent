@@ -2,8 +2,18 @@
 用户认证路由
 """
 from flask import Blueprint, request, jsonify, session
-from app.auth.authorization import DEFAULT_ADMIN_PAGE, safe_admin_return_target
+from app.auth.authorization import (
+    DEFAULT_ADMIN_PAGE,
+    DEFAULT_USER_PAGE,
+    safe_return_target,
+)
 from app.auth.csrf import ensure_csrf_token
+from app.auth.rbac import (
+    PERMISSION_ADMIN_ACCESS,
+    get_user_permissions,
+    get_user_role_keys,
+    primary_role_key,
+)
 from app.auth.session_guard import get_current_session_user
 from app.request_context import bind_request_log_context
 from observability.logging_runtime import log_event
@@ -85,30 +95,41 @@ def handle_login():
     stored_hashed_password = user_data["password_hash"].encode('utf-8')
     if bcrypt.checkpw(plain_password.encode('utf-8'), stored_hashed_password):
         last_login_recorded = record_successful_login(user_data['id'])
-        
+
+        # 角色和权限以 user_roles/role_permissions 为准，Session 只保存身份与撤销版本。
+        role_keys = get_user_role_keys(user_data['id'])
+        permissions = get_user_permissions(user_data['id'])
+        role = primary_role_key(role_keys)
+
         #  核心修改：在 Session 中存储用户信息 
         session.clear() # 先清除旧的会话数据
         session['user_id'] = user_data['id']
         session['username'] = user_data['username']
         session['auth_version'] = int(user_data.get('auth_version') or 1)
         bind_request_log_context(user_id=user_data["id"])
+        # 登录成功由后端自己记录，不依赖前端上报的结果。
+        log_event(LOGGER, "analytics.auth.login_success")
         csrf_token = ensure_csrf_token()
         # Session 会自动通过浏览器 cookie 维护状态，不再需要文件
-        
-        redirect_to = safe_admin_return_target(requested_next)
-        if redirect_to is None and user_data['role'] == 'admin':
-            redirect_to = DEFAULT_ADMIN_PAGE
+
+        redirect_to = safe_return_target(requested_next)
+        if redirect_to is None:
+            redirect_to = (
+                DEFAULT_ADMIN_PAGE
+                if PERMISSION_ADMIN_ACCESS in permissions
+                else DEFAULT_USER_PAGE
+            )
 
         response_payload = {
             'success': True,
             'username': username,
-            'role': user_data['role'],
+            'role': role,
+            'permissions': sorted(permissions),
             'csrf_token': csrf_token,
+            'redirect_to': redirect_to,
         }
         if not last_login_recorded:
             response_payload['warning_code'] = LAST_LOGIN_RECORD_FAILED_WARNING
-        if redirect_to is not None:
-            response_payload['redirect_to'] = redirect_to
         return jsonify(response_payload)
     else:
         return jsonify({'success': False, 'error': '密码错误'}), 401 # 401 Unauthorized
@@ -130,10 +151,12 @@ def check_auth():
     current_user = get_current_session_user()
     if current_user:
         username = current_user['username']
+        permissions = get_user_permissions(current_user['id'])
         return jsonify({
             'isLoggedIn': True,
             'username': username,
-            'role': current_user['role'],
+            'role': primary_role_key(get_user_role_keys(current_user['id'])),
+            'permissions': sorted(permissions),
             'csrf_token': ensure_csrf_token(),
         })
     else:

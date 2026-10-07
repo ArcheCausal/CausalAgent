@@ -44,6 +44,7 @@ CausalAgent
 - [User Features](#user-features)
   - [User Showcase](#user-showcase)
   - [Agent Runtime](#agent-runtime)
+  - [Deep Agent](#deep-agent)
   - [Core Capabilities](#core-capabilities)
 - [Quick Start](#quick-start)
   - [Service URLs](#service-urls)
@@ -52,6 +53,7 @@ CausalAgent
 - [Administration and Development](#administration-and-development)
   - [Administrator Console](#administrator-console)
   - [Observability](#observability)
+  - [User Frontend (Vue)](#user-frontend-vue)
   - [Backend Tests](#backend-tests)
   - [Windows Deployment](#windows-deployment)
 - [Technical Documentation](#technical-documentation)
@@ -75,6 +77,7 @@ You only need to upload your data. CausalAgent will:
 | Feature | Description |
 | :--- | :--- |
 | **Agent-driven** | A LangGraph parent graph automatically routes analysis nodes, tool stages, and subgraphs. |
+| **Deep Agent analysis** | After pre-processing, a Deep Agent subgraph plans algorithm calls, retrieval tools, and result selection under a fixed budget. |
 | **Dynamic causal graphs** | Instead of static images, CausalAgent renders interactive network graphs. You can drag nodes, zoom, and click to inspect details. |
 | **MCP-based architecture** | Uses **Model Context Protocol (MCP)** to decouple core logic from tools, making it easy to extend new algorithms. |
 | **RAG enhanced** | A domain-specific knowledge base for causal inference is integrated to ensure the generated reports are rigorous and well grounded. |
@@ -83,10 +86,10 @@ You only need to upload your data. CausalAgent will:
 
 | Category | Components |
 | :--- | :--- |
-| **Agent and models** | LangGraph, LangChain, MCP, OpenAI-compatible Chat / Embedding APIs |
+| **Agent and models** | LangGraph, Deep Agents, LangChain, MCP, OpenAI-compatible Chat / Embedding APIs |
 | **RAG and search** | ChromaDB, BM25S, Ragas, SearXNG |
 | **Backend and data** | Flask, MySQL, PostgreSQL, Alembic |
-| **Frontend** | HTML5, JavaScript, Vue 3, Vite, WebView2 |
+| **Frontend** | Vue 3, TypeScript, Pinia, Vite, vis-network, WebView2 |
 | **Observability** | Grafana Alloy, Loki, Grafana |
 | **Runtime and release** | Docker Compose, GitHub Actions |
 
@@ -106,22 +109,38 @@ You only need to upload your data. CausalAgent will:
 
 ### Agent Runtime
 
+The parent graph orchestrates pre-processing, the Deep Agent subgraph, finalization checks, and the report node; an independent worker executes every job.
+
 ```mermaid
 graph TD;
-    User((User)) --> UI[Web / Windows Client]
+    User((User)) --> UI[Vue Chat App / Windows Client]
     UI --> API[Flask API / Analysis Job]
     API --> Worker[Job Worker / Slot]
     Worker --> Graph[LangGraph Parent Graph]
-    Graph --> MCP[MCP: PC / OLC / DirectLiNGAM]
-    Graph --> RAG[RAG Knowledge Base]
-    Graph --> Search[Web Search / SearXNG]
+    Graph --> DeepAgent[Deep Agent Subgraph]
+    DeepAgent --> MCP[MCP: PC / DirectLiNGAM / CDFM]
+    DeepAgent --> RAG[RAG Knowledge Base]
+    DeepAgent --> Search[Web Search / SearXNG]
     Graph --> Report[Post-processing / Report]
     Worker --> Events[(MySQL Job / SSE Events)]
     Graph <--> Checkpoint[(PostgreSQL Checkpoint)]
+    DeepAgent <--> Memory[(PostgreSQL Long-term Memory)]
     Events --> UI
 ```
 
 Users can enable Web Search per analysis job. If RAG or Web Search is temporarily unavailable, the corresponding subgraph returns a controlled degradation result so that the main analysis can continue.
+
+### Deep Agent
+
+After pre-processing, a Deep Agent subgraph decides which algorithms and retrieval tools to call and how to select among the results.
+
+- **Explicit state boundary**: The parent graph projects only the question, data profile, analysis parameters, and required input messages into the subgraph. The subgraph returns only algorithm results, the tool-call ledger, RAG and Web Search evidence, structured decisions, and report summaries. Full messages, internal fields, and intermediate plans never flow back into the parent state.
+- **Separate execution identity**: Parent and child graph share the PostgreSQL checkpointer but use different threads and namespaces, plus an execution scope built from the job, attempt, lease, and frozen input identity. A scope mismatch restarts from the minimal parent input instead of reusing earlier artifacts.
+- **Tool orchestration**: Models see LangChain function tools generated from the local `AlgorithmSpec` registry. PC, DirectLiNGAM, and CDFM are enabled by default. Algorithm calls inside one model response are layered by `requires`/`produces`: independent calls run in parallel under per-job concurrency and tool-budget limits. The runtime never calls a remote `list_tools()` to extend the model tool set.
+- **Long-term memory**: User preferences and research background live in a PostgreSQL Store that is separate from job checkpoints. The model may only write `/memories/preferences.md` and `/memories/research_background.md`; every other write is denied, and the cleanup worker removes the namespace when the user is deleted.
+- **Bounded budget**: Model calls, tool calls, recursion depth, tool-node timeout, and per-job parallel tools all have fixed upper bounds; exceeding them follows a controlled failure path.
+- **Finalization check**: The finalization gate calls no model. It verifies that references in the final decision exist, that algorithm results match the tool-call ledger, and that provenance belongs to the current job, attempt, lease, and frozen input. The first failed check returns the exact violated reference rule to the subgraph for one revision; a second failure degrades to a report based only on verified inputs, without publishing unverified selections.
+- **Cancellation**: When a job heartbeat is lost or a cancel arrives, the worker stops waiting locally and sends a signed cancel over a dedicated control lane, which terminates only the targeted algorithm call.
 
 ### Core Capabilities
 
@@ -141,8 +160,9 @@ The overall pipeline of CausalAgent can be summarized as:
 - **Pluggable algorithm framework**: Through MCP, causal discovery and estimation algorithms are wrapped as "tools" and can be swapped or extended without changing the Agent logic.
 - **Currently supported**:
   - PC algorithm for causal structure learning based on conditional independence tests.
-  - OLC for continuous-variable scenarios with expected latent confounders.
   - DirectLiNGAM for linear, non-Gaussian, acyclic continuous data under its explicit model assumptions.
+  - CDFM, a pretrained causal discovery foundation model, for zero-shot causal graph inference on continuous numeric tabular data in a single call that returns one candidate directed graph. The same checkpoint covers linear, nonlinear, heteroscedastic, ordinal or discrete, measurement-error, and latent-confounding mechanisms, so it is a better fit than assumption-specific tools when the mechanism is unknown or clearly nonlinear. Only an optional `threshold` is exposed to the model; when it is omitted the service uses the model's own calibrator to fix the decision boundary, while the checkpoint path, device, and standardization policy are fixed by the algorithm service. Missing values follow the NaN/±Inf mask rules and categorical variables are not accepted. The output contains edges and directions only, without weights or confidence values: directions can change with the threshold, evidence for direction is weak in non-identifiable regimes, and two opposing edges may indicate a latent confounder; the result is this model inference only, without any accuracy or production-capability claim.
+- **Kept but disabled by default**: The OLC implementation (specification, adapter, runner, and algorithm code) remains in the repository but is not part of the default tool surface.
 - **Planned**:
   - FCI and other algorithms with latent confounders.
   - Causal effect estimation (ATE/CATE) and counterfactual analysis.
@@ -171,6 +191,7 @@ The optional Web Search subgraph uses SearXNG to aggregate academic results from
 #### Report Generation
 
 - **Automatic structured reports**: Generate reports with sections like background, data overview, methods, findings, conclusions, and limitations.
+- **Structured report rendering**: The model produces sections, Markdown text, and resource references only, while chart data, causal graph models, sources, and evidence are injected and validated by the backend. The chat app renders sections, charts, and causal graphs by block type and shows a controlled notice for unknown references instead of breaking the page.
 - **Interactive causal graph**: Use frontend components such as vis-network to render a graph that supports drag, zoom and click.
 
 ## Quick Start
@@ -181,12 +202,14 @@ After the default development Compose stack starts, use these entry points:
 
 | Function | URL | Purpose |
 | --- | --- | --- |
-| User chat | [http://127.0.0.1:5001/](http://127.0.0.1:5001/) | Upload data, start analyses, and view reports |
-| RAG workbench | [http://127.0.0.1:5001/rag_eval](http://127.0.0.1:5001/rag_eval) | Source ingestion, staged indexes, evaluation, and release management |
+| Website | [http://127.0.0.1:5001/](http://127.0.0.1:5001/) | Product pages, public docs, changelog, and sign-in/sign-up entries |
+| Sign-in | [http://127.0.0.1:5001/auth/sign-in](http://127.0.0.1:5001/auth/sign-in) | Shared sign-in entry that returns each account to its permitted area |
+| User workspace | [http://127.0.0.1:5001/dashboard](http://127.0.0.1:5001/dashboard) | Upload data, start analyses, and view reports after signing in |
+| RAG workbench | [http://127.0.0.1:5001/rag-eval](http://127.0.0.1:5001/rag-eval) | Source ingestion, staged indexes, evaluation, and release management; administrators only |
 | Admin console | [http://127.0.0.1:5001/admin/database](http://127.0.0.1:5001/admin/database) | Default entry for authenticated administrators |
-| Grafana | [http://127.0.0.1:3000](http://127.0.0.1:3000) | Log search and dashboards |
+| Grafana | [http://127.0.0.1:3000/grafana/](http://127.0.0.1:3000/grafana/) | Log search and dashboards |
 
-The RAG workbench is an isolated build, evaluation, and release workspace. It is not the same as RAG queries inside the normal chat flow.
+The website, the user workspace, the RAG workbench, and the admin console are four separately built frontends. The RAG workbench is an isolated build, evaluation, and release workspace and requires the `rag_eval.access` permission; it is not the same as RAG queries inside the normal chat flow.
 
 ### Minimum Configuration
 
@@ -194,6 +217,8 @@ Copy [`.env.example`](.env.example), then configure the capabilities you plan to
 
 - Base services: `SECRET_KEY`, the MySQL accounts, and `CHECKPOINT_POSTGRES_PASSWORD`.
 - Chat model: `API_KEY`, `BASE_URL`, and `MODEL`.
+- Deep Agent: `DEEP_AGENT_MODEL`, `DEEP_AGENT_BASE_URL`, `DEEP_AGENT_API_KEY`, and `DEEP_AGENT_CONTEXT_WINDOW_TOKENS`; the context window must be set explicitly, because there is no silent fallback.
+- Algorithm service: `CAUSAL_MCP_SERVICE_TOKEN` and `CAUSAL_MCP_SIGNING_KEY_CURRENT`, plus `CAUSAL_MCP_SIGNING_KEY_PREVIOUS` during key rotation; `CDFM_MODEL_PATH` selects the CDFM checkpoint.
 - RAG queries: `EMBEDDING_API_KEY`, `EMBEDDING_BASE_URL`, and `EMBEDDING_MODEL`; these must match the active release manifest.
 - Log UI: `GRAFANA_ADMIN_PASSWORD`.
 - Web Search: Compose defaults to `WEB_SEARCH_PROVIDER=searxng` and its internal `SEARXNG_URL`.
@@ -202,10 +227,12 @@ See [`Document/development/setup.md`](Document/development/setup.md) and [`Docum
 
 ### Docker Deployment
 
+The multi-stage `Dockerfile` builds the ordinary-user Vue app and the administrator Vue app with Node 24 first, then produces a Python runtime image that ships only the runtime and static artifacts.
+
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/Heyflyingpig/CausalAgent
+   git clone https://github.com/ArcheCausal/CausalAgent
    cd CausalAgent
    ```
 
@@ -251,6 +278,24 @@ app / worker / monitor / MCP / RAG worker
 ```
 
 Runtime events are controlled by the event catalog and correlated with request, job, session, and worker-slot fields. Raw prompts, file contents, API keys, tokens, and cookies must not enter logs. See [`Document/development/observability.md`](Document/development/observability.md) for event, noise-control, and privacy rules.
+
+### Frontends (Vue)
+
+Four standalone Vue 3 + TypeScript projects run on the same origin and none of them belongs to a root npm workspace. Flask serves each build output from its own path prefix: the website in `website-frontend/` (`/site-assets/`), the user workspace in `chat-frontend/` (`/dashboard-assets/`), the RAG workbench in `app/rag_eval/frontend/` (`/rag-eval/`), and the admin console in `admin-frontend/` (`/admin/`). When a build output is missing, that frontend's page entry returns 503 with a request ID instead of falling back to another frontend or serving partial assets.
+
+Start the local development servers from the repository root with a single command; the script opens one window per selected frontend and runs Vite there:
+
+```powershell
+.\scripts\dev_frontends.ps1                          # all four frontends
+.\scripts\dev_frontends.ps1 -Frontends website,chat  # website and chat only
+.\scripts\dev_frontends.ps1 -Frontends rag -Install  # run npm ci first
+```
+
+The script uses PowerShell and npm only. `-WhatIf` prints the planned operations, `-Install` runs `npm ci` first, and single-frontend work can still use `npm ci` and `npm run dev` inside that directory. Ports, development URLs, and skip conditions are documented in [`Document/development/setup.md`](Document/development/setup.md).
+
+`npm run dev` only starts Vite on port 5174 and proxies API calls to `http://127.0.0.1:5001`. Setting `CHAT_VITE_DEV_SERVER_URL=http://127.0.0.1:5174` makes Flask redirect `/` to Vite while keeping the `next` query parameter. Quality gates and the production build run `npm run lint`, `npm run typecheck`, `npm run test:unit`, `npm run test:components`, `npm run test:e2e:mock`, and `npm run build`, or all of them through `npm run check`. Mock E2E uses simulated APIs only and is not evidence of real Flask, worker, or model acceptance.
+
+See [`Document/development/chat-frontend.md`](Document/development/chat-frontend.md) for the detailed state constraints.
 
 ### Backend Tests
 
@@ -322,16 +367,20 @@ Supported keywords include `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `
 │   └── rag_eval/               # Isolated ingestion, evaluation, and release
 ├── Agent/                      # LangGraph, causal tools, and knowledge base
 │   ├── causal_agent/           # Parent graph, nodes, routing, and subgraphs
+│   ├── deep_agent/             # Deep Agent subgraph, memory, and finalization
+│   ├── deep_agent_tools/       # Algorithm specs, adapters, tools, and events
 │   ├── CausalAgentMCP/         # MCP causal algorithm server
 │   └── knowledge_base/         # RAG runtime, multimodal indexes, and evaluation
 ├── Database/                   # MySQL, PostgreSQL, migrations, and monitoring
 ├── observability/              # Structured logging, event catalog, and Alloy
 ├── searxng/                    # Web Search configuration and initialization
-├── admin-frontend/             # Vue administrator frontend
+├── website-frontend/           # Vue website frontend (public pages and auth)
+├── chat-frontend/              # Vue ordinary-user app frontend (/dashboard)
+├── admin-frontend/             # Vue administrator frontend (/admin)
 ├── windows-client/             # Windows client, build, and smoke tests
 ├── config/                     # Application and RAG path configuration
 ├── deploy/                     # Staging and production resources
-├── scripts/                    # Release, acceptance, and diagnostics
+├── scripts/                    # Development, release, acceptance, and diagnostics
 ├── Document/                   # Current technical documentation
 ├── tests/                      # Unit, integration, E2E, and smoke tests
 ├── docker-compose*.yml         # Development, test, staging, and production stacks
@@ -340,5 +389,5 @@ Supported keywords include `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Heyflyingpig/CausalAgent&type=Date)](https://star-history.com/#Heyflyingpig/CausalAgent&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=ArcheCausal/CausalAgent&type=Date)](https://star-history.com/#ArcheCausal/CausalAgent&Date)
 

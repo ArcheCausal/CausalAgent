@@ -29,6 +29,12 @@ ADMIN = {"id": 7, "username": "admin", "role": "admin", "is_active": True}
 NORMAL_USER = {"id": 8, "username": "user", "role": "user", "is_active": True}
 
 
+from tests.support.authorization import (
+    ADMIN_PERMISSIONS,
+    USER_PERMISSIONS,
+    authorized_as,
+)
+
 def build_app():
     """构造只注册管理员蓝图和请求上下文的最小 Flask 应用。"""
     app = Flask(__name__)
@@ -83,7 +89,7 @@ class AdminBusinessApiTests(unittest.TestCase):
             "next_cursor": None,
         }
         with (
-            patch("app.auth.authorization.get_current_session_user", return_value=ADMIN),
+            authorized_as(ADMIN),
             patch("app.admin.routes.list_users", return_value=payload) as service,
             app.test_client() as client,
         ):
@@ -109,7 +115,7 @@ class AdminBusinessApiTests(unittest.TestCase):
         """超出最大页大小时不得触发数据库查询。"""
         app = build_app()
         with (
-            patch("app.auth.authorization.get_current_session_user", return_value=ADMIN),
+            authorized_as(ADMIN),
             patch("app.admin.routes.list_users") as service,
             app.test_client() as client,
         ):
@@ -123,10 +129,7 @@ class AdminBusinessApiTests(unittest.TestCase):
         """普通用户访问敏感详情必须得到 403 且留存拒绝审计。"""
         app = build_app()
         with (
-            patch(
-                "app.auth.authorization.get_current_session_user",
-                return_value=NORMAL_USER,
-            ),
+            authorized_as(NORMAL_USER, USER_PERMISSIONS),
             patch(
                 "app.admin.contracts.record_admin_audit_event",
                 return_value=True,
@@ -147,10 +150,7 @@ class AdminBusinessApiTests(unittest.TestCase):
         """侧栏 Logo 复用原图，但图片接口本身仍属于管理员权限边界。"""
         app = build_app()
         with (
-            patch(
-                "app.auth.authorization.get_current_session_user",
-                return_value=NORMAL_USER,
-            ),
+            authorized_as(NORMAL_USER, USER_PERMISSIONS),
             app.test_client() as client,
         ):
             response = client.get("/api/admin/brand/logo")
@@ -158,11 +158,34 @@ class AdminBusinessApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.get_json()["code"], "admin_required")
 
+    def test_runtime_config_returns_grafana_url_for_admins_only(self):
+        """运行期地址按部署环境下发，且同样受管理员权限边界约束。"""
+        app = build_app()
+        with (
+            authorized_as(ADMIN, ADMIN_PERMISSIONS),
+            app.test_client() as client,
+        ):
+            response = client.get("/api/admin/runtime-config")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertIn("request_id", payload)
+        self.assertIn("grafana_url", payload["data"])
+
+        with (
+            authorized_as(NORMAL_USER, USER_PERMISSIONS),
+            app.test_client() as client,
+        ):
+            forbidden = client.get("/api/admin/runtime-config")
+
+        self.assertEqual(forbidden.status_code, 403)
+
     def test_sensitive_success_fails_closed_when_audit_is_unavailable(self):
         """敏感详情已生成但成功审计失败时不得把正文返回给管理员。"""
         app = build_app()
         with (
-            patch("app.auth.authorization.get_current_session_user", return_value=ADMIN),
+            authorized_as(ADMIN),
             patch(
                 "app.admin.routes.get_user_detail",
                 return_value={"id": 3, "username": "alice"},
@@ -190,7 +213,7 @@ class AdminBusinessApiTests(unittest.TestCase):
         """404 目标也要记录拒绝结果，但审计载荷不能包含正文。"""
         app = build_app()
         with (
-            patch("app.auth.authorization.get_current_session_user", return_value=ADMIN),
+            authorized_as(ADMIN),
             patch(
                 "app.admin.routes.get_user_detail",
                 side_effect=AdminApiError("not_found", "记录不存在", 404),
@@ -213,7 +236,7 @@ class AdminBusinessApiTests(unittest.TestCase):
         """文件成功下载必须使用附件头，并由同一事务服务完成计数与审计。"""
         app = build_app()
         with (
-            patch("app.auth.authorization.get_current_session_user", return_value=ADMIN),
+            authorized_as(ADMIN),
             patch(
                 "app.admin.routes.download_file",
                 return_value=(
@@ -238,7 +261,7 @@ class AdminBusinessApiTests(unittest.TestCase):
         """deep 审计只能通过带 CSRF 的写请求登记给 monitor。"""
         app = build_app()
         with (
-            patch("app.auth.authorization.get_current_session_user", return_value=ADMIN),
+            authorized_as(ADMIN),
             patch(
                 "app.admin.routes.request_snapshot_refresh",
                 return_value={

@@ -32,6 +32,7 @@ from Agent.causal_agent.graph_utils import (  # noqa: E402
     guarded_error_handler,
     guarded_router,
 )
+from Agent.deep_agent.context import AgentRunContext  # noqa: E402
 from Agent.causal_agent.fault_tolerance import retry_transient_errors  # noqa: E402
 from app.agent.worker.execution_guard import (  # noqa: E402
     JobExecutionGuard,
@@ -59,6 +60,29 @@ class FakeGuard:
         self.calls.append("after")
         if self.revoked:
             raise JobExecutionRevoked("revoked")
+
+
+def test_bound_node_delegates_checks_through_agent_run_context():
+    """生产 AgentRunContext 必须把节点前后检查委托给 execution guard。"""
+    async def scenario():
+        guard = FakeGuard()
+
+        async def increment(state: GuardState) -> dict[str, int]:
+            return {"value": state["value"] + 1}
+
+        graph = StateGraph(GuardState)
+        graph.add_node("increment", bind_node(increment))
+        graph.set_entry_point("increment")
+
+        result = await graph.compile().ainvoke(
+            {"value": 0},
+            context=AgentRunContext(execution_guard=guard),
+        )
+
+        assert result["value"] == 1
+        assert guard.calls == ["ensure", "after"]
+
+    asyncio.run(scenario())
 
 
 def test_conditional_router_receives_runtime_context_and_checks_before_target():
@@ -263,3 +287,79 @@ async def _revoke_after(guard: JobExecutionGuard, delay: float) -> None:
     """在 retry sleep 中撤销 Guard。"""
     await asyncio.sleep(delay)
     guard.mark_revoked()
+
+
+def test_guard_revocation_wakes_long_running_dependency_waiter() -> None:
+    async def scenario():
+        guard = JobExecutionGuard("job-1", "worker-a", 1, 1)
+        waiter = asyncio.create_task(guard.wait_revoked())
+        await asyncio.sleep(0)
+        assert waiter.done() is False
+        guard.mark_revoked(status="canceled", execution_state="draining")
+        await asyncio.wait_for(waiter, timeout=0.1)
+        assert guard.revoked is True
+        assert guard.last_status == "canceled"
+
+    asyncio.run(scenario())
+
+
+def test_degraded_log_carries_structured_output_diagnostics_without_model_text() -> None:
+    """结构化输出降级日志只带 schema、尝试次数和字段路径，不带模型取值。"""
+    from pydantic import BaseModel, ConfigDict, ValidationError
+
+    from Agent.llm_structured_output import StructuredOutputError
+    from observability.event_catalog import validate_event_details
+
+    class Draft(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        title: str
+
+    try:
+        Draft.model_validate({"title": "ok", "leaked_key_name": "secret-model-value"})
+    except ValidationError as exc:
+        cause = exc
+
+    async def scenario():
+        guard = FakeGuard()
+
+        async def report_node(state: GuardState) -> dict[str, int]:
+            raise StructuredOutputError(
+                node_name="report",
+                schema_name="Draft",
+                cause=cause,
+                attempts=2,
+            )
+
+        def fallback(state: GuardState, error: NodeError) -> dict[str, int]:
+            return {"value": 5}
+
+        graph = StateGraph(GuardState)
+        graph.add_node(
+            "report",
+            bind_node(report_node, event_node_name="report"),
+            error_handler=guarded_error_handler(fallback, event_node_name="report"),
+        )
+        graph.set_entry_point("report")
+        with patch("Agent.causal_agent.graph_utils.log_event") as log_event:
+            result = await graph.compile().ainvoke({"value": 0}, context=guard)
+
+        assert result["value"] == 5
+        assert log_event.call_args.args[1] == "job.node.degraded"
+        details = log_event.call_args.kwargs["details"]
+        assert details["cause_code"] == "schema_invalid"
+        assert details["failure_kind"] == "node_error"
+        assert details["schema_name"] == "Draft"
+        assert details["structured_attempts"] == 2
+        assert details["validation_error_count"] == 1
+        assert details["validation_first_type"] == "extra_forbidden"
+        assert details["validation_first_loc"] == "extra"
+        assert "leaked_key_name" not in repr(details)
+        assert "secret-model-value" not in repr(details)
+
+        resolved, safe, violation = validate_event_details("job.node.degraded", details)
+        assert resolved is not None
+        assert violation is None
+        assert safe == details
+
+    asyncio.run(scenario())

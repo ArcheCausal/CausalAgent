@@ -11,6 +11,11 @@
     "esModuleInterop": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["vite/client", "vitest/globals"],
+    "baseUrl": ".",
+    "paths": {
+      "@causalagent/design-system": ["../packages/design-system/src/index.ts"],
+      "@causalagent/design-system/*": ["../packages/design-system/src/*"]
+    },
     "skipLibCheck": true,
     "noEmit": true
   },

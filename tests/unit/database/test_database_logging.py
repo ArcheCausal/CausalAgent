@@ -21,7 +21,7 @@ for key, value in {
 
 from Database import monitoring  # noqa: E402
 from app import db  # noqa: E402
-from config.settings import settings  # noqa: E402
+from config.database_settings import database_settings  # noqa: E402
 from observability.noise_control import FailureTransitionTracker, RepeatEventLimiter  # noqa: E402
 
 
@@ -46,7 +46,7 @@ def test_slow_query_logs_only_operation_digest_duration_and_suppression_count():
     cursor = _Cursor()
     secret_sql = "SELECT * FROM private_table WHERE token = 'sql-secret' AND id = 42"
     with (
-        patch.object(settings, "MYSQL_QUERY_WARN_MS", 100),
+        patch.object(database_settings, "MYSQL_QUERY_WARN_MS", 100),
         patch("app.db.time.perf_counter", side_effect=(10.0, 10.2)),
         patch("app.db._SLOW_QUERY_LIMITER", RepeatEventLimiter()),
         patch("app.db.log_event") as log_event,
@@ -70,7 +70,7 @@ def test_slow_query_logs_only_operation_digest_duration_and_suppression_count():
 def test_slow_query_observability_failure_does_not_change_query_result():
     cursor = _Cursor()
     with (
-        patch.object(settings, "MYSQL_QUERY_WARN_MS", 100),
+        patch.object(database_settings, "MYSQL_QUERY_WARN_MS", 100),
         patch("app.db.time.perf_counter", side_effect=(10.0, 10.2)),
         patch("app.db._sql_identity", side_effect=RuntimeError("digest failed")),
     ):
@@ -88,7 +88,7 @@ def test_replica_fallback_is_transition_limited_and_recovers_without_hostname():
         return health["usable"]
 
     with (
-        patch.object(settings, "MYSQL_READ_HOSTS", ["secret-replica.internal"]),
+        patch.object(database_settings, "MYSQL_READ_HOSTS", ["secret-replica.internal"]),
         patch("app.db.should_use_replica", side_effect=should_use),
         patch("app.db._replica_failure_reason", return_value=("replica_lag", 9)),
         patch("app.db._get_read_pool", return_value=pool),

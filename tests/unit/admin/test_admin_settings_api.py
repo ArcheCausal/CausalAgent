@@ -58,6 +58,12 @@ CURRENT = {
 }
 
 
+from tests.support.authorization import (
+    ADMIN_PERMISSIONS,
+    USER_PERMISSIONS,
+    authorized_as,
+)
+
 def build_app():
     """构建包含 request ID 钩子的管理员 API 测试应用。"""
     app = Flask(__name__)
@@ -81,7 +87,7 @@ class AdminSettingsApiTests(unittest.TestCase):
         """保存接口把实时管理员与关联 ID 原样传给事务服务。"""
         app = build_app()
         with (
-            patch("app.auth.authorization.get_current_session_user", return_value=ADMIN),
+            authorized_as(ADMIN),
             patch("app.admin.routes.save_monitor_settings", return_value=CURRENT) as save,
         ):
             client = self.authenticated_client(app)
@@ -104,7 +110,7 @@ class AdminSettingsApiTests(unittest.TestCase):
         """服务字段错误应保持字段映射和请求 ID。"""
         app = build_app()
         with (
-            patch("app.auth.authorization.get_current_session_user", return_value=ADMIN),
+            authorized_as(ADMIN),
             patch(
                 "app.admin.routes.save_monitor_settings",
                 side_effect=MonitorSettingsValidationError({"realtime_interval_seconds": "必须在 5 到 10 之间"}),
@@ -130,7 +136,7 @@ class AdminSettingsApiTests(unittest.TestCase):
         """乐观锁冲突应返回 409 和当前配置供前端重载。"""
         app = build_app()
         with (
-            patch("app.auth.authorization.get_current_session_user", return_value=ADMIN),
+            authorized_as(ADMIN),
             patch(
                 "app.admin.routes.save_monitor_settings",
                 side_effect=MonitorSettingsVersionConflict(CURRENT),
@@ -151,7 +157,7 @@ class AdminSettingsApiTests(unittest.TestCase):
         """数据库写失败应尽力记录 failed 审计并返回可关联错误。"""
         app = build_app()
         with (
-            patch("app.auth.authorization.get_current_session_user", return_value=ADMIN),
+            authorized_as(ADMIN),
             patch("app.admin.routes.save_monitor_settings", side_effect=RuntimeError("offline")),
             patch("app.admin.routes.record_admin_audit_event") as audit,
         ):
@@ -174,7 +180,7 @@ class AdminSettingsApiTests(unittest.TestCase):
         """重置要求版本，历史 limit/before_id 保持有界正整数。"""
         app = build_app()
         with (
-            patch("app.auth.authorization.get_current_session_user", return_value=ADMIN),
+            authorized_as(ADMIN),
             patch("app.admin.routes.reset_monitor_settings", return_value=CURRENT) as reset,
             patch(
                 "app.admin.routes.list_monitor_setting_events",

@@ -334,5 +334,367 @@ class DevelopAndRagMergeMigrationTests(unittest.TestCase):
             )
 
 
+class UserMemoryCleanupOutboxMigrationTests(unittest.TestCase):
+    """静态验证用户长期记忆清理 outbox migration 与启动就绪检查。"""
+
+    MIGRATION_PATH = Path(
+        "Database/migrations/versions/"
+        "t5e6f7a8b9c0_add_user_memory_cleanup_outbox.py"
+    )
+
+    def test_migration_extends_current_head(self):
+        """新 revision 直接承接当前唯一 head。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        self.assertIn('revision: str = "t5e6f7a8b9c0"', text)
+        self.assertIn(
+            'down_revision: Union[str, Sequence[str], None] = "s4d5e6f7a8b9"',
+            text,
+        )
+
+    def test_migration_creates_lease_and_aggregate_columns(self):
+        """表结构包含状态、重试、租约、脱敏错误结论和完成时间。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        self.assertIn("CREATE TABLE user_memory_cleanup_outbox", text)
+        for column in (
+            "user_id INT NOT NULL",
+            "operation_id CHAR(36) DEFAULT NULL",
+            "status VARCHAR(16) NOT NULL DEFAULT 'pending'",
+            "attempts TINYINT UNSIGNED NOT NULL DEFAULT 0",
+            "available_at DATETIME(6)",
+            "lease_expires_at DATETIME(6) DEFAULT NULL",
+            "completed_at DATETIME(6) DEFAULT NULL",
+        ):
+            self.assertIn(column, text)
+        self.assertIn("UNIQUE KEY uq_user_memory_cleanup_outbox_user (user_id)", text)
+        self.assertIn(
+            "INDEX idx_user_memory_cleanup_outbox_claim",
+            text,
+        )
+
+    def test_migration_keeps_no_user_foreign_key(self):
+        """用户删除后任务必须保留，因此 user_id 不关联 users 外键。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("REFERENCES users", text)
+        self.assertIn(
+            "FOREIGN KEY (operation_id) REFERENCES admin_operations(operation_id)",
+            text,
+        )
+
+    def test_downgrade_only_drops_the_new_outbox(self):
+        """回滚只删除本次新增账本，不触碰其他结构。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        downgrade = text.split("def downgrade()")[1]
+        self.assertIn("DROP TABLE IF EXISTS user_memory_cleanup_outbox", downgrade)
+        self.assertNotIn("DROP TABLE", downgrade.replace(
+            "DROP TABLE IF EXISTS user_memory_cleanup_outbox", ""
+        ))
+
+    def test_readiness_requires_outbox_table_and_claim_index(self):
+        """应用启动检查必须同时覆盖新表和新领取索引。"""
+        text = Path("app/db.py").read_text(encoding="utf-8")
+        self.assertIn('"user_memory_cleanup_outbox"', text)
+        self.assertIn("idx_user_memory_cleanup_outbox_claim", text)
+
+
+class MonitorSnapshotKeyWidthMigrationTests(unittest.TestCase):
+    """静态验证快照键长度扩展 migration 与清理快照命名。"""
+
+    MIGRATION_PATH = Path(
+        "Database/migrations/versions/u7a8b9c0d1e2_widen_monitor_snapshot_key.py"
+    )
+
+    def test_migration_extends_memory_cleanup_head(self):
+        """新 revision 直接承接记忆清理 outbox revision。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        self.assertIn('revision: str = "u7a8b9c0d1e2"', text)
+        self.assertIn(
+            'down_revision: Union[str, Sequence[str], None] = "t5e6f7a8b9c0"',
+            text,
+        )
+
+    def test_migration_widens_snapshot_key_without_truncating(self):
+        """upgrade 放宽到 64 字符，downgrade 只恢复上限而不改写快照内容。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        self.assertIn("MODIFY snapshot_key VARCHAR(64) NOT NULL", text)
+        self.assertIn("MODIFY snapshot_key VARCHAR(32) NOT NULL", text)
+        self.assertNotIn("UPDATE database_monitor_snapshots", text)
+        self.assertNotIn("DELETE FROM", text)
+
+    def test_cleanup_snapshot_keys_fit_the_widened_column(self):
+        """清理快照键必须落在放宽后的上限内，且至少一个键依赖这次放宽。"""
+        from Database.monitoring import (
+            CLEANUP_OUTBOX_SNAPSHOT_KEY,
+            CLEANUP_RUNTIME_SNAPSHOT_KEY,
+        )
+
+        lengths = {
+            snapshot_key: len(snapshot_key)
+            for snapshot_key in (
+                CLEANUP_RUNTIME_SNAPSHOT_KEY,
+                CLEANUP_OUTBOX_SNAPSHOT_KEY,
+            )
+        }
+        for snapshot_key, length in lengths.items():
+            self.assertLessEqual(length, 64, snapshot_key)
+        self.assertTrue(
+            any(length > 32 for length in lengths.values()),
+            lengths,
+        )
+
+
+class ReportDocumentMigrationTests(unittest.TestCase):
+    """静态验证结构化报告附件枚举 migration 与就绪检查。"""
+
+    MIGRATION_PATH = Path(
+        "Database/migrations/versions/"
+        "v8b9c0d1e2f3_add_report_document_to_attachment_type.py"
+    )
+
+    def test_migration_extends_current_head(self):
+        """新 revision 直接承接当前唯一 head。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        self.assertIn('revision: str = "v8b9c0d1e2f3"', text)
+        self.assertIn(
+            'down_revision: Union[str, Sequence[str], None] = "u7a8b9c0d1e2"',
+            text,
+        )
+
+    def test_upgrade_only_adds_report_document_enum_value(self):
+        """升级只放宽 attachment_type 枚举，不删除历史附件数据。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        upgrade = text.split("def downgrade()", 1)[0]
+        self.assertIn("'web_search_references', 'report_document'", upgrade)
+        self.assertIn(
+            "'causal_graph', 'analysis_result', 'file_content', 'other', 'visualization'",
+            upgrade,
+        )
+        self.assertNotIn("DELETE", upgrade)
+        self.assertNotIn("DROP", upgrade)
+
+    def test_downgrade_deletes_only_report_document_rows(self):
+        """回滚只能移除本次新增枚举值对应的附件。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        downgrade = text.split("def downgrade()", 1)[1]
+        self.assertIn("DELETE FROM chat_attachments", downgrade)
+        self.assertIn("WHERE attachment_type = 'report_document'", downgrade)
+        self.assertNotIn("DROP TABLE", downgrade)
+        self.assertNotIn("DROP COLUMN", downgrade)
+
+    def test_readiness_requires_report_document_enum(self):
+        """应用启动检查必须能发现未执行报告附件 migration 的数据库。"""
+        text = Path("Database/inspection.py").read_text(encoding="utf-8")
+        self.assertIn("report_document", text)
+
+
+class RbacTablesMigrationTests(unittest.TestCase):
+    """静态验证 RBAC 关系表、初始授权关系与启动就绪检查。"""
+
+    MIGRATION_PATH = Path(
+        "Database/migrations/versions/w9c0d1e2f3a4_add_rbac_tables.py"
+    )
+
+    FIRST_PHASE_PERMISSIONS = (
+        "dashboard.access",
+        "rag_eval.access",
+        "rag_eval.read",
+        "rag_eval.run",
+        "rag_eval.publish",
+        "rag_eval.rollback",
+        "rag_eval.governance",
+        "admin.access",
+        "admin.users.read",
+        "admin.users.write",
+        "admin.database.read",
+        "admin.database.write",
+        "admin.sensitive.read",
+    )
+
+    def test_migration_extends_the_current_head(self):
+        """新 revision 直接承接报告附件枚举 revision。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        self.assertIn('revision: str = "w9c0d1e2f3a4"', text)
+        self.assertIn(
+            'down_revision: Union[str, Sequence[str], None] = "v8b9c0d1e2f3"',
+            text,
+        )
+
+    def test_migration_creates_the_four_relation_tables(self):
+        """角色、权限与两张关系表必须一次建立，并用联合主键去重。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        for table in ("roles", "permissions", "user_roles", "role_permissions"):
+            self.assertIn(f"CREATE TABLE {table} (", text)
+        self.assertIn("PRIMARY KEY (user_id, role_id)", text)
+        self.assertIn("PRIMARY KEY (role_id, permission_id)", text)
+        self.assertIn("UNIQUE KEY uq_roles_role_key (role_key)", text)
+        self.assertIn("UNIQUE KEY uq_permissions_permission_key (permission_key)", text)
+        self.assertIn("FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE", text)
+
+    def test_migration_seeds_two_roles_and_first_phase_permissions(self):
+        """第一阶段只初始化 user 与 admin，并登记全部权限键。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        self.assertIn('("user", "普通用户"', text)
+        self.assertIn('("admin", "管理员"', text)
+        for permission_key in self.FIRST_PHASE_PERMISSIONS:
+            with self.subTest(permission_key=permission_key):
+                self.assertIn(f'("{permission_key}"', text)
+
+    def test_normal_user_keeps_only_dashboard_and_admin_keeps_everything(self):
+        """普通角色只拥有普通应用权限，管理员拥有第一阶段全部权限。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        self.assertIn('"user": ("dashboard.access",)', text)
+        self.assertIn(
+            '"admin": tuple(permission_key for permission_key, _, _ in PERMISSION_SEEDS)',
+            text,
+        )
+
+    def test_migration_backfills_relations_from_the_compatibility_column(self):
+        """回填只按现有 users.role 建立关系，不修改兼容字段本身。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        self.assertIn("JOIN roles ON roles.role_key = users.role", text)
+        self.assertIn("INSERT INTO user_roles (user_id, role_id)", text)
+        self.assertNotIn("UPDATE users", text)
+
+    def test_downgrade_only_drops_the_new_tables(self):
+        """回滚只删除本次新增的四张表，保留 users.role 与业务数据。"""
+        downgrade = self.MIGRATION_PATH.read_text(encoding="utf-8").split("def downgrade()")[1]
+        for table in ("role_permissions", "user_roles", "permissions", "roles"):
+            self.assertIn(f"DROP TABLE IF EXISTS {table}", downgrade)
+        self.assertNotIn("ALTER TABLE users", downgrade)
+        self.assertNotIn("DROP COLUMN", downgrade)
+
+    def test_readiness_requires_relations_and_seeded_roles(self):
+        """应用启动检查必须同时覆盖新表与已初始化的两个角色。"""
+        text = Path("app/db.py").read_text(encoding="utf-8")
+        for fragment in (
+            '"roles"',
+            '"permissions"',
+            '"user_roles"',
+            '"role_permissions"',
+            'FROM roles',
+            "数据库角色缺失",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, text)
+
+
+class AnalysisContextsMigrationTests(unittest.TestCase):
+    """静态验证分析上下文 migration、绑定字段和启动就绪检查。"""
+
+    MIGRATION_PATH = Path(
+        "Database/migrations/versions/c9d0e1f2a3b4_add_analysis_contexts.py"
+    )
+
+    def test_migration_extends_the_current_head(self):
+        """新 revision 直接承接 RBAC 关系表 revision。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        self.assertIn('revision: str = "c9d0e1f2a3b4"', text)
+        self.assertIn(
+            'down_revision: Union[str, Sequence[str], None] = "w9c0d1e2f3a4"',
+            text,
+        )
+
+    def test_migration_creates_context_table_with_snapshot_and_summary_columns(self):
+        """上下文表必须同时保存文件快照、分析参数、结构化摘要和报告引用。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        self.assertIn("CREATE TABLE analysis_contexts (", text)
+        for column in (
+            "analysis_context_id CHAR(36) NOT NULL PRIMARY KEY",
+            "session_id VARCHAR(36) NOT NULL",
+            "user_id INT NOT NULL",
+            "status ENUM('active', 'archived') NOT NULL DEFAULT 'active'",
+            "input_user_file_id BIGINT DEFAULT NULL",
+            "file_object_id BIGINT DEFAULT NULL",
+            "file_hash CHAR(64) DEFAULT NULL",
+            "filename VARCHAR(255) DEFAULT NULL",
+            "target VARCHAR(255) DEFAULT NULL",
+            "treatment VARCHAR(255) DEFAULT NULL",
+            "analysis_question MEDIUMTEXT DEFAULT NULL",
+            "latest_algorithm_summary JSON DEFAULT NULL",
+            "latest_rag_evidence JSON DEFAULT NULL",
+            "latest_web_evidence JSON DEFAULT NULL",
+            "latest_report_message_id BIGINT DEFAULT NULL",
+            "latest_report_id VARCHAR(64) DEFAULT NULL",
+        ):
+            with self.subTest(column=column):
+                self.assertIn(column, text)
+        self.assertIn("INDEX idx_analysis_contexts_session_updated", text)
+        self.assertIn("INDEX idx_analysis_contexts_user_session_status", text)
+        self.assertIn("FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE", text)
+
+    def test_migration_binds_session_job_and_input_without_rewriting_data(self):
+        """Session 指针、Job 绑定和输入账本字段都可空，且不更新历史数据。"""
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        upgrade = text.split("def downgrade()", 1)[0]
+
+        self.assertIn("ALTER TABLE sessions", upgrade)
+        self.assertIn("ADD COLUMN active_analysis_context_id CHAR(36) DEFAULT NULL", upgrade)
+        self.assertIn("ALTER TABLE analysis_jobs", upgrade)
+        self.assertIn("ALTER TABLE analysis_job_inputs", upgrade)
+        self.assertIn("fk_analysis_jobs_analysis_context", upgrade)
+        self.assertIn("fk_analysis_job_inputs_analysis_context", upgrade)
+        self.assertNotIn("UPDATE sessions", upgrade)
+        self.assertNotIn("UPDATE analysis_jobs", upgrade)
+
+    def test_downgrade_only_drops_new_context_structure(self):
+        """回滚只删除本次新增的结构，不删除会话、Job、输入或报告数据。"""
+        downgrade = self.MIGRATION_PATH.read_text(encoding="utf-8").split(
+            "def downgrade()"
+        )[1]
+
+        self.assertIn("DROP COLUMN analysis_context_id", downgrade)
+        self.assertIn("DROP COLUMN active_analysis_context_id", downgrade)
+        self.assertIn("DROP TABLE IF EXISTS analysis_contexts", downgrade)
+        self.assertNotIn("DELETE FROM", downgrade)
+
+    def test_readiness_requires_context_table_columns_and_indexes(self):
+        """应用启动检查必须能发现未执行上下文 migration 的数据库。"""
+        text = Path("app/db.py").read_text(encoding="utf-8")
+        for fragment in (
+            '"analysis_contexts"',
+            '"active_analysis_context_id"',
+            "idx_analysis_contexts_session_updated",
+            "idx_analysis_contexts_user_session_status",
+            "idx_analysis_jobs_analysis_context",
+            "idx_analysis_job_inputs_analysis_context",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, text)
+
+
+class RegistrationRoleBackfillMigrationTests(unittest.TestCase):
+    """静态验证注册缺陷遗留角色关系的无损回填。"""
+
+    MIGRATION_PATH = Path(
+        "Database/migrations/versions/d0e1f2a3b4c5_backfill_missing_user_roles.py"
+    )
+
+    def test_migration_extends_analysis_context_head(self):
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        self.assertIn('revision: str = "d0e1f2a3b4c5"', text)
+        self.assertIn(
+            'down_revision: Union[str, Sequence[str], None] = "c9d0e1f2a3b4"',
+            text,
+        )
+
+    def test_upgrade_backfills_user_and_legacy_admin_relations_without_overwrite(self):
+        text = self.MIGRATION_PATH.read_text(encoding="utf-8")
+        upgrade = text.split("def downgrade()", 1)[0]
+        self.assertEqual(upgrade.count("INSERT INTO user_roles (user_id, role_id)"), 2)
+        self.assertIn("roles.role_key = 'user'", upgrade)
+        self.assertIn("roles.role_key = 'admin'", upgrade)
+        self.assertIn("users.role = 'admin'", upgrade)
+        self.assertEqual(upgrade.count("user_roles.user_id IS NULL"), 2)
+        self.assertNotIn("UPDATE users", upgrade)
+        self.assertNotIn("DELETE FROM", upgrade)
+
+    def test_downgrade_does_not_delete_indistinguishable_role_relations(self):
+        downgrade = self.MIGRATION_PATH.read_text(encoding="utf-8").split(
+            "def downgrade()",
+            1,
+        )[1]
+        self.assertNotIn("DELETE FROM", downgrade)
+        self.assertNotIn("DROP TABLE", downgrade)
+
+
 if __name__ == "__main__":
     unittest.main()

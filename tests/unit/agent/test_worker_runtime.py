@@ -1,7 +1,7 @@
 """验证 worker runtime 的依赖显式性和 slot 隔离边界。"""
 
 import asyncio
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 import runpy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -10,9 +10,12 @@ from app.agent.worker.runtime import (
     McpClientResources,
     ProcessRuntime,
     RagReadiness,
+    SlotRuntime,
+    create_deep_agent_model,
     create_process_runtime,
     create_slot_runtime,
     inspect_rag_readiness,
+    initialize_production_runtime,
 )
 
 
@@ -49,6 +52,28 @@ def test_process_runtime_returns_explicit_llm_and_rag_state():
     assert runtime.rag_available is False
     assert runtime.rag_status == "rag_unavailable"
     assert runtime.rag_error_code == "active_release_missing"
+
+
+def test_deep_agent_model_uses_validated_responses_profile(monkeypatch):
+    """生产模型必须沿用 P0 验证过的无 reasoning Responses 配置。"""
+    monkeypatch.setenv("DEEP_AGENT_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("DEEP_AGENT_BASE_URL", "https://provider.example")
+    monkeypatch.setenv("DEEP_AGENT_API_KEY", "test-only")
+    configured = Mock(name="deep-agent-model")
+
+    with patch("app.agent.worker.runtime.ChatOpenAI", return_value=configured) as model_cls:
+        model = create_deep_agent_model()
+
+    assert model is configured
+    model_cls.assert_called_once_with(
+        model="deepseek-v4-flash",
+        base_url="https://provider.example",
+        api_key="test-only",
+        streaming=True,
+        use_responses_api=True,
+        output_version="responses/v1",
+        reasoning={"effort": "none"},
+    )
 
 
 def test_rag_readiness_returns_release_identity_without_heavy_runtime_creation():
@@ -156,6 +181,71 @@ def test_slot_runtime_builds_graph_from_explicit_dependencies():
     assert slot_runtime.graph is graph
 
 
+def test_production_slot_reuses_process_graph_without_opening_stdio_mcp():
+    """生产新路径复用进程级 HTTP pool/graph，不再创建 slot stdio session。"""
+    llm = Mock(name="llm")
+    graph = Mock(name="compiled-parent-graph")
+    domain_tools = (SimpleNamespace(name="causal_pc"),)
+    process_runtime = ProcessRuntime(
+        llm=llm,
+        rag_available=True,
+        domain_tools=domain_tools,
+        graph=graph,
+    )
+
+    with patch(
+        "app.agent.worker.runtime.open_mcp_client_resources",
+        new=AsyncMock(side_effect=AssertionError("stdio path must be unreachable")),
+    ):
+        slot_runtime = asyncio.run(
+            create_slot_runtime(
+                process_runtime,
+                AsyncExitStack(),
+                Mock(name="checkpoint_pool"),
+            )
+        )
+
+    assert slot_runtime.graph is graph
+    assert slot_runtime.mcp_resources is None
+    assert slot_runtime.mcp_tools == list(domain_tools)
+    assert slot_runtime.process_runtime is process_runtime
+
+
+def test_slot_context_binds_job_lease_and_web_switch():
+    """每次 slot invocation 都从 claim 结果构造可信 identity。"""
+    from Agent.deep_agent import TrustedJobIdentity
+
+    process_runtime = ProcessRuntime(
+        llm=Mock(name="llm"),
+        rag_available=True,
+        algorithm_executor=Mock(name="executor"),
+        filesystem_backend=Mock(name="backend"),
+    )
+    slot_runtime = SlotRuntime(
+        llm=process_runtime.llm,
+        process_runtime=process_runtime,
+    )
+    context = slot_runtime.build_run_context(
+        job={
+            "job_id": "00000000-0000-0000-0000-000000000301",
+            "session_id": "00000000-0000-0000-0000-000000000302",
+            "user_id": 7,
+            "attempt_count": 2,
+            "lease_epoch": 4,
+            "input_file_hash": "input-sha",
+            "web_search_enabled": True,
+        },
+        execution_guard=Mock(name="guard"),
+        worker_id="worker-1",
+    )
+
+    assert isinstance(context.trusted_identity, TrustedJobIdentity)
+    assert context.trusted_identity.attempt_count == 2
+    assert context.trusted_identity.lease_epoch == 4
+    assert context.web_search_enabled is True
+    assert context.algorithm_executor is process_runtime.algorithm_executor
+
+
 def test_drain_timeout_cancels_local_slot_without_terminal_job_mutation():
     """超时只取消本地 slot，未完成 Job 留给 stale recovery。"""
     from app.agent.worker.bootstrap import _run_slots_until_shutdown
@@ -223,3 +313,55 @@ def test_stop_event_prevents_idle_slot_from_claiming_more_jobs():
         claim_next_job.assert_not_called()
 
     asyncio.run(scenario())
+
+
+def test_production_runtime_waits_for_both_mcp_lanes_before_executor(monkeypatch):
+    """单一 pool 的 start 完成两类成员握手后才允许创建执行器。"""
+
+    order = []
+    pool = SimpleNamespace(close=AsyncMock())
+
+    async def start_pool():
+        order.extend(["execute_ready", "control_ready"])
+
+    pool.start = start_pool
+
+    def build_executor(received_pool, **_kwargs):
+        assert received_pool is pool
+        assert order == ["execute_ready", "control_ready"]
+        order.append("executor_created")
+        return Mock(name="executor")
+
+    @asynccontextmanager
+    async def store_context():
+        yield Mock(name="store")
+
+    adapter = SimpleNamespace(raw_backend=Mock(name="backend"))
+    monkeypatch.setenv("CAUSAL_MCP_SIGNING_KEY_CURRENT", "test-signing-key")
+    with (
+        patch("app.agent.worker.runtime.create_llm", return_value=Mock(name="llm")),
+        patch("app.agent.worker.runtime.open_async_postgres_store", return_value=store_context()),
+        patch("app.agent.worker.runtime.McpClientPoolConfig.from_env", return_value=Mock()),
+        patch("app.agent.worker.runtime.McpClientPool", return_value=pool) as pool_cls,
+        patch("app.agent.worker.runtime.McpAlgorithmExecutor", side_effect=build_executor),
+        patch("app.agent.worker.runtime.build_default_adapters", return_value={"pc": adapter}),
+        patch("app.agent.worker.runtime.build_default_registry", return_value=Mock(name="registry")),
+        patch("app.agent.worker.runtime.build_algorithm_tools", return_value=()),
+        patch("app.agent.worker.runtime.build_default_rag_evidence_tool", return_value=Mock()),
+        patch("app.agent.worker.runtime.build_default_web_evidence_tool", return_value=Mock()),
+        patch("app.agent.worker.runtime.inspect_rag_readiness", return_value=RagReadiness("rag_unavailable")),
+        patch("app.agent.worker.runtime.create_deep_agent_model", return_value=Mock()),
+        patch("app.agent.worker.runtime._required_positive_environment_integer", return_value=1000),
+        patch("app.agent.worker.runtime.build_checkpointer", return_value=Mock()),
+        patch("app.agent.worker.runtime.build_deep_agent", return_value=Mock()),
+        patch("Agent.causal_agent.graph.build_deep_agent_parent_graph", return_value=Mock()),
+    ):
+        async def scenario():
+            async with AsyncExitStack() as stack:
+                return await initialize_production_runtime(Mock(), stack)
+
+        runtime = asyncio.run(scenario())
+
+    pool_cls.assert_called_once()
+    assert runtime.mcp_pool is pool
+    assert order == ["execute_ready", "control_ready", "executor_created"]

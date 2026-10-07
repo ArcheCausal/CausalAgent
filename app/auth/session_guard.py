@@ -2,7 +2,7 @@
 会话用户校验工具。
 """
 
-from flask import session
+from flask import g, has_request_context, session
 import logging
 
 from app.request_context import bind_request_log_context
@@ -10,6 +10,7 @@ from observability.logging_runtime import log_event
 
 
 LOGGER = logging.getLogger(__name__)
+_UNRESOLVED = object()
 
 
 def find_user_by_id(user_id):
@@ -20,8 +21,26 @@ def find_user_by_id(user_id):
 
 
 def get_current_session_user():
+    """返回当前请求的会话用户，同一请求内只解析一次。
+
+    身份有效性在每个请求首次需要时重新查询主库，请求内后续调用复用缓存，
+    既不重复查库，也不把身份有效期延长到请求之外。
     """
-    返回当前会话对应的真实用户。
+    if has_request_context():
+        cached = getattr(g, "_session_user_resolved", _UNRESOLVED)
+        if cached is not _UNRESOLVED:
+            return cached
+    user = _resolve_session_user()
+    if has_request_context():
+        g._session_user_resolved = user
+        if user is not None:
+            g.current_user = user
+    return user
+
+
+def _resolve_session_user():
+    """
+    查询当前会话对应的真实用户。
 
     如果浏览器里还保留着旧 session，但当前数据库中该用户已不存在或
     已被禁用，则主动清空 session，避免继续以失效身份访问受保护接口。

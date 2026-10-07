@@ -22,6 +22,8 @@ for key, value in TEST_ENV.items():
 
 from app.auth.routes import auth_bp
 
+from tests.support.authorization import ADMIN_PERMISSIONS, patch_login_identity
+
 
 def build_app():
     """构建只注册认证蓝图的最小测试应用。"""
@@ -85,6 +87,7 @@ class SessionGuardTests(unittest.TestCase):
         with (
             patch("app.auth.session_guard.find_user_by_id", return_value=active_admin),
             patch("app.auth.service.record_successful_login") as record_login,
+            patch_login_identity(("user", "admin"), ADMIN_PERMISSIONS),
         ):
             with app.test_client() as client:
                 with client.session_transaction() as flask_session:
@@ -97,6 +100,7 @@ class SessionGuardTests(unittest.TestCase):
                 self.assertEqual(payload["isLoggedIn"], True)
                 self.assertEqual(payload["username"], "active-admin")
                 self.assertEqual(payload["role"], "admin")
+                self.assertIn("admin.access", payload["permissions"])
                 self.assertIsInstance(payload["csrf_token"], str)
                 self.assertGreaterEqual(len(payload["csrf_token"]), 32)
                 with client.session_transaction() as flask_session:
@@ -167,6 +171,7 @@ class SessionGuardTests(unittest.TestCase):
         with (
             patch.dict(sys.modules, {"app.auth.service": service_module}),
             patch("app.auth.routes.bcrypt.checkpw", return_value=True),
+            patch_login_identity(("user", "admin"), ADMIN_PERMISSIONS),
         ):
             with app.test_client() as client:
                 response = client.post(
@@ -179,6 +184,7 @@ class SessionGuardTests(unittest.TestCase):
         self.assertEqual(payload["success"], True)
         self.assertEqual(payload["username"], "admin-login")
         self.assertEqual(payload["role"], "admin")
+        self.assertIn("rag_eval.access", payload["permissions"])
         self.assertEqual(payload["redirect_to"], "/admin/database")
         self.assertIsInstance(payload["csrf_token"], str)
         self.assertGreaterEqual(len(payload["csrf_token"]), 32)
@@ -199,6 +205,7 @@ class SessionGuardTests(unittest.TestCase):
         with (
             patch.dict(sys.modules, {"app.auth.service": service_module}),
             patch("app.auth.routes.bcrypt.checkpw", return_value=True),
+            patch_login_identity(),
         ):
             with app.test_client() as client:
                 response = client.post(
@@ -254,6 +261,7 @@ class SessionGuardTests(unittest.TestCase):
         with (
             patch.dict(sys.modules, {"app.auth.service": service_module}),
             patch("app.auth.routes.bcrypt.checkpw", return_value=True),
+            patch_login_identity(("user", "admin"), ADMIN_PERMISSIONS),
             app.test_client() as client,
         ):
             safe_response = client.post(
@@ -297,6 +305,7 @@ class SessionGuardTests(unittest.TestCase):
         with (
             patch.dict(sys.modules, {"app.auth.service": service_module}),
             patch("app.auth.routes.bcrypt.checkpw", return_value=True),
+            patch_login_identity(),
             app.test_client() as client,
         ):
             response = client.post(

@@ -6,18 +6,67 @@ import asyncio
 from typing import Any, AsyncIterator
 
 from langchain_core.messages import HumanMessage
+from langgraph.errors import NodeCancelledError
 from langgraph.types import Command
 
 from app.agent.checkpoint_recovery import checkpoint_identity
 from app.chat.services import get_job_chat_history
 from app.agent.worker.event_adapter import (
     LangGraphEventAdapter,
+    classify_graph_failure,
     sanitize_public_error,
 )
 from app.agent.worker.execution_guard import JobExecutionGuard, JobExecutionRevoked
 from app.agent.worker.result_presenter import process_final_result
 from config.settings import settings
+from Agent.causal_agent.analysis_context import build_context_commit, build_context_index
 from Agent.causal_agent.context import AgentRunContext
+from Database.analysis_contexts import load_active_context, load_context_index
+
+
+# LangGraph 的节点错误处理器在 updates 流里使用这个前缀提交降级结果。
+ERROR_HANDLER_STREAM_PREFIX = "__error_handler__"
+
+
+def _build_final_result(state_values: dict[str, Any], *, job_attempt: int) -> dict[str, Any]:
+    """构造稳定终态事件；上下文写回事实只作为内部字段交给 event writer。"""
+    return {
+        "type": "final_result",
+        "data": process_final_result(state_values),
+        "attempt": job_attempt,
+        "_context_commit": build_context_commit(state_values),
+    }
+
+
+async def _recovered_after_node_error(
+    graph: Any,
+    config: dict[str, Any],
+    *,
+    handler_recovered: bool,
+    job_attempt: int,
+) -> dict[str, Any] | None:
+    """节点错误处理器已提交降级结果时，把这一轮按正常终态收尾。
+
+    LangGraph 的 astream 在节点错误处理器成功提交降级结果之后，仍会把原任务异常抛给
+    调用方。此时图状态已经收敛（没有待执行节点、没有 pending interrupt），继续把降级
+    结果当作本轮终态，比让整个 Job 失败更符合节点级降级的约定。读不到或无法确认收敛
+    时返回 None，调用方保持原有的失败路径。
+    """
+
+    if not handler_recovered:
+        return None
+    try:
+        state = await graph.aget_state(config)
+    except Exception:
+        return None
+    if getattr(state, "next", None):
+        return None
+    if _snapshot_interrupts(state):
+        return None
+    values = getattr(state, "values", None)
+    if not isinstance(values, dict):
+        return None
+    return _build_final_result(values, job_attempt=job_attempt)
 
 
 def _snapshot_interrupts(snapshot: Any) -> list[Any]:
@@ -30,6 +79,16 @@ def _snapshot_interrupts(snapshot: Any) -> list[Any]:
         for task in (getattr(snapshot, "tasks", None) or ())
         for item in (getattr(task, "interrupts", None) or ())
     ]
+
+
+def _raise_wrapped_cancellation(error: BaseException) -> None:
+    """Restore worker control-flow semantics after LangGraph wraps node errors."""
+
+    cause = getattr(error, "error", None) or error.__cause__
+    if isinstance(error, NodeCancelledError) and isinstance(
+        cause, (asyncio.CancelledError, JobExecutionRevoked)
+    ):
+        raise cause
 
 
 def _interrupt_id(interrupt_obj: Any) -> str:
@@ -128,6 +187,15 @@ async def _initial_graph_input(
         )
         if not history:
             raise RuntimeError("Job 初始聊天历史为空")
+    # 分析上下文是跨 Job 的业务事实来源，只在 Job 首次构造 State 时读取；
+    # 同一 Job 的 resume 与 stale recovery 继续使用 checkpoint 中的投影。
+    active_context = await asyncio.to_thread(load_active_context, user_id, session_id)
+    index_rows = await asyncio.to_thread(
+        load_context_index,
+        user_id,
+        session_id,
+        exclude_context_id=(active_context or {}).get("analysis_context_id"),
+    )
     return {
         "messages": history,
         "user_id": user_id,
@@ -140,6 +208,8 @@ async def _initial_graph_input(
             "file_hash": input_file_hash,
             "filename": input_filename,
         },
+        "analysis_context": active_context or {},
+        "analysis_context_index": build_context_index(index_rows),
     }
 
 
@@ -161,6 +231,7 @@ async def ai_call_stream(
     initial_input_record: dict[str, Any] | None = None,
     execution_guard: JobExecutionGuard | None = None,
     web_search_enabled: bool = False,
+    agent_runtime_context: AgentRunContext | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """在显式传入的 graph 上执行一次调用并产出公开事件。"""
     if graph is None:
@@ -230,12 +301,13 @@ async def ai_call_stream(
 
     adapter = LangGraphEventAdapter(job_id, job_attempt)
     streamed_interrupts: list[Any] = []
+    handler_recovered = False
     stream_kwargs = {
         "stream_mode": ["updates", "messages", "custom", "tasks"],
         "subgraphs": True,
         "version": "v2",
     }
-    stream_kwargs["context"] = AgentRunContext(
+    stream_kwargs["context"] = agent_runtime_context or AgentRunContext(
         execution_guard=execution_guard,
         web_search_enabled=web_search_enabled,
     )
@@ -248,6 +320,11 @@ async def ai_call_stream(
             if execution_guard is not None:
                 await execution_guard.ensure_active()
             if chunk.get("type") == "updates" and isinstance(chunk.get("data"), dict):
+                if any(
+                    str(key).startswith(ERROR_HANDLER_STREAM_PREFIX)
+                    for key in chunk["data"]
+                ):
+                    handler_recovered = True
                 interrupt_data = chunk["data"].get("__interrupt__")
                 if interrupt_data:
                     streamed_interrupts.extend(
@@ -285,21 +362,32 @@ async def ai_call_stream(
 
         if execution_guard is not None:
             await execution_guard.ensure_active()
-        final_result = process_final_result(state.values)
+        final_result = _build_final_result(state.values, job_attempt=job_attempt)
         if execution_guard is not None:
             await execution_guard.check_after_call()
-        yield {
-            "type": "final_result",
-            "data": final_result,
-            "attempt": job_attempt,
-        }
+        yield final_result
     except JobExecutionRevoked:
         raise
     except Exception as exc:
+        _raise_wrapped_cancellation(exc)
         if execution_guard is not None:
             await execution_guard.check_after_call()
+        recovered = await _recovered_after_node_error(
+            graph,
+            config,
+            handler_recovered=handler_recovered,
+            job_attempt=job_attempt,
+        )
+        if recovered is not None:
+            if execution_guard is not None:
+                await execution_guard.check_after_call()
+            yield recovered
+            return
+        # 公开事件只保留脱敏文案；真实异常通过下划线前缀的内部字段传给
+        # OrderedEventWriter，后者只把 message 落库，诊断只用于 worker 日志。
         yield {
             "type": "error",
             "message": sanitize_public_error(exc),
             "attempt": job_attempt,
+            "_diagnostic": classify_graph_failure(exc),
         }

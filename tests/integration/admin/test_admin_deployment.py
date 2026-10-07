@@ -1,4 +1,3 @@
-import subprocess
 import unittest
 from pathlib import Path
 
@@ -13,6 +12,10 @@ class AdminFrontendDeploymentTests(unittest.TestCase):
         text = Path("Dockerfile").read_text(encoding="utf-8")
 
         self.assertIn("FROM node:24-alpine AS admin-builder", text)
+        self.assertIn(
+            "COPY packages/design-system/src/ /packages/design-system/src/",
+            text,
+        )
         self.assertIn("RUN npm ci", text)
         self.assertIn("RUN npm run build", text)
         self.assertIn("FROM python-deps AS runtime", text)
@@ -29,20 +32,18 @@ class AdminFrontendDeploymentTests(unittest.TestCase):
         self.assertNotIn("vite", final_stage.lower())
         self.assertIn("gunicorn", final_stage)
 
-    def test_admin_production_build_is_present_and_not_gitignored(self):
-        """管理员生产入口必须存在，且不能再被根 Git 忽略规则排除。"""
-        index_path = Path("admin-frontend/dist/index.html")
+    def test_admin_production_build_is_gitignored_like_the_other_frontends(self):
+        """管理员构建产物与其它前端一致：只提交源码，产物由构建阶段重新生成。"""
+        gitignore = Path(".gitignore").read_text(encoding="utf-8")
+        dockerignore = Path(".dockerignore").read_text(encoding="utf-8")
 
-        self.assertTrue(index_path.is_file())
-        result = subprocess.run(
-            ["git", "check-ignore", "--quiet", str(index_path)],
-            check=False,
-        )
-        self.assertEqual(
-            result.returncode,
-            1,
-            "admin-frontend/dist/index.html must be tracked as a release artifact",
-        )
+        for text in (gitignore, dockerignore):
+            with self.subTest(text=text[:20]):
+                self.assertIn("admin-frontend/dist/", text)
+                self.assertIn("chat-frontend/dist/", text)
+                self.assertIn("website-frontend/dist/", text)
+        self.assertIn("admin-frontend/dist/*", gitignore)
+        self.assertNotIn("!admin-frontend/dist", gitignore)
 
     def test_compose_files_add_no_node_service_or_port(self):
         """各套 Compose 不得启动 Vite/Node 服务或开放 5173。"""

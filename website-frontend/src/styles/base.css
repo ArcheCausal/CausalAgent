@@ -1,0 +1,48 @@
+/* 官网整站入口样式。
+
+   品牌字体、颜色和基础状态来自共享设计系统（@causalagent/design-system）；
+   本文件只保留整页加载需要的文档级规则，具体页面样式在各页自己的样式表里。 */
+:root {
+  color-scheme: light;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  margin: 0;
+  overflow-x: clip;
+  background: var(--ca-surface-page);
+  color: var(--ca-text-default);
+  font-family: var(--ca-font-sans);
+  font-weight: var(--ca-weight-regular);
+  font-size: var(--ca-text-body);
+  line-height: var(--ca-leading-body);
+  font-variant-numeric: tabular-nums;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+img {
+  max-width: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}

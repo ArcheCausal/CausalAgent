@@ -57,9 +57,9 @@ python -m venv .venv-desktop
 
 URL 优先级为：命令行 `--url`，然后是 `CAUSALAGENT_DESKTOP_URL`，最后是模式默认值。
 
-开发模式默认加载 `http://127.0.0.1:5001/`，并允许 `http://localhost:5001/`；为运行隔离 stub，也允许显式配置的本地回环端口。开发模式可使用 `--debug` 或 `CAUSALAGENT_DESKTOP_DEBUG=true`。
+开发模式默认加载 `http://127.0.0.1:5001/dashboard`，并允许 `http://localhost:5001/dashboard`；为运行隔离 stub，也允许显式配置的本地回环端口。开发模式可使用 `--debug` 或 `CAUSALAGENT_DESKTOP_DEBUG=true`。
 
-Developer Preview 是面向开发者的冻结发行通道。它默认加载 `http://127.0.0.1:5001/`，只接受 HTTP loopback origin（`localhost`、IPv4/IPv6 loopback），并始终关闭 debug；命令行或环境变量即使尝试指定公网、局域网或其他 HTTPS origin 也会被拒绝。Developer Preview 不包含后端，使用前仍需在本机启动 CausalAgent 服务。
+Developer Preview 是面向开发者的冻结发行通道。它默认加载 `http://127.0.0.1:5001/dashboard`，只接受 HTTP loopback origin（`localhost`、IPv4/IPv6 loopback），并始终关闭 debug；命令行或环境变量即使尝试指定公网、局域网或其他 HTTPS origin 也会被拒绝。Developer Preview 不包含后端，使用前仍需在本机启动 CausalAgent 服务。
 
 Release 模式必须使用预先配置的 HTTPS origin：
 
@@ -124,7 +124,7 @@ powershell -ExecutionPolicy Bypass -File .\windows-client\build.ps1 `
   -PackageMode onefile
 ```
 
-输出为 `dist\CausalAgent.exe`。构建脚本会将 `developer-preview` 通道标记嵌入 PyInstaller 包；冻结后的程序默认连接 `http://127.0.0.1:5001/`，不会接受环境变量或命令行传入的非 loopback 地址，也不会开启 debug。若本地服务使用其他 loopback 端口，可以显式传入 `--url http://127.0.0.1:<port>/`。
+输出为 `dist\CausalAgent.exe`。构建脚本会将 `developer-preview` 通道标记嵌入 PyInstaller 包；冻结后的程序默认连接 `http://127.0.0.1:5001/dashboard`，不会接受环境变量或命令行传入的非 loopback 地址，也不会开启 debug。若本地服务使用其他 loopback 地址或端口，可以显式传入 `--url http://127.0.0.1:<port>/dashboard`。
 
 `CAUSALAGENT_DESKTOP_TEST_AUTOCLOSE_SECONDS` 只对 source development 运行生效，用于真实 smoke 的自动退出；冻结的 Developer Preview 和 Release 包会忽略该测试变量，避免继承开发环境变量后意外自动关闭。
 
@@ -144,7 +144,7 @@ powershell -ExecutionPolicy Bypass -File .\windows-client\build.ps1 `
 
 ### `v0.1.0` GitHub Release
 
-`.github/workflows/release-windows.yml` 监听 `v*` tag，在 GitHub 托管的 `windows-latest` Windows runner 上创建 `.venv-desktop`、安装桌面依赖、运行桌面逻辑测试并构建 Developer Preview onefile；冻结通道标记和 EXE 桌面环境检查都通过后，才生成 `SHA256SUMS.txt`。workflow 自动创建 Draft Pre-release 并上传 EXE；GitHub 会按该 tag 自动提供 Source code 压缩包，workflow 不上传 Docker 镜像。维护者检查 Draft 的 tag、附件、校验值和说明后，再手动点击 Publish release。
+`.github/workflows/release-windows.yml` 不会因推送 `v*` tag 自动运行。先将 workflow 和目标版本代码合入 `main`，再推送严格 SemVer tag；随后在 Actions 页面手动运行 `Windows Developer Preview Release`，填写 `target_tag`，并保持 `upload_to_published_release` 关闭。workflow 在 GitHub 托管的 `windows-latest` runner 上创建 `.venv-desktop`、安装桌面依赖、运行桌面逻辑测试并构建 Developer Preview onefile；冻结通道标记和 EXE 桌面环境检查通过后，生成 `SHA256SUMS.txt`，并创建 Draft Pre-release、上传 EXE。GitHub 会按该 tag 自动提供 Source code 压缩包，workflow 不上传 Docker 镜像。维护者检查 Draft 的 tag、附件、校验值和说明后，再手动点击 Publish release。
 
 已发布 Release 因构建故障缺少附件时，不重新创建或移动 tag。先将 workflow 修复合并到默认分支，再从 Actions 页面手动运行 `Windows Developer Preview Release`，填写原 tag 并显式确认补齐模式。workflow 会从原 tag 重新构建，只向已发布且未锁定的 Release 上传缺失的 EXE 与校验文件；同名附件存在时拒绝覆盖，也不改变正式版或 Pre-release 属性。完整操作和发布边界见 [`Document/development/deployment.md`](../Document/development/deployment.md#源码-release-与-cd-流程)。
 

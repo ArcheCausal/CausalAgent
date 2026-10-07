@@ -22,6 +22,7 @@
 - MySQL/PostgreSQL、主从、迁移、checkpoint、cleanup 和 monitor 内部机制归 `database/`。
 - 启动、测试、日志系统和构建部署归 `development/`；文档维护规则由本文件统一维护。
 - 管理员页面、后端授权和管理员 API 如何消费共享能力归 `admin/`，不复制数据库 worker 内部实现。
+- 前端视觉方向、设计 token、共享组件契约和四个前端的样式现状归 `design-system/`；各前端的路由、API 契约和部署事实仍归 `development/`、`admin/` 和各自的局部 `AGENTS.md`。
 
 `Document/operations/` 不创建。原计划中的部署、监控和运行维护内容分别归 `development/deployment.md`、`database/monitoring.md` 和 `admin/`。
 

@@ -22,11 +22,14 @@ from app.auth.admin_cli import main, promote_user_to_admin
 class FakeCursor:
     """模拟管理员提升所需的最小字典游标。"""
 
+    ROLE_ROWS = ({"id": 1, "role_key": "user"}, {"id": 2, "role_key": "admin"})
+
     def __init__(self, user, update_rowcount=1):
         self.user = user
         self.update_rowcount = update_rowcount
         self.rowcount = -1
         self.statements = []
+        self.role_relation_writes = []
 
     def execute(self, sql, params):
         """记录 SQL，并为 UPDATE 设置预期影响行数。"""
@@ -34,9 +37,17 @@ class FakeCursor:
         if sql.lstrip().upper().startswith("UPDATE"):
             self.rowcount = self.update_rowcount
 
+    def executemany(self, sql, params):
+        """记录角色关系批量写入，供提升事务断言使用。"""
+        self.role_relation_writes.append((" ".join(sql.split()), tuple(params)))
+
     def fetchone(self):
         """返回预设的目标用户。"""
         return self.user
+
+    def fetchall(self):
+        """返回角色表的两个已初始化角色，供关系写入使用。"""
+        return list(self.ROLE_ROWS)
 
 
 class FakeConnection:
@@ -117,7 +128,17 @@ class AdminCliTests(unittest.TestCase):
         self.assertIn("已提升为管理员", message)
         self.assertTrue(connection.committed)
         self.assertFalse(connection.rolled_back)
-        self.assertEqual(len(connection.fake_cursor.statements), 2)
+        statements = connection.fake_cursor.statements
+        self.assertEqual(len(statements), 4)
+        self.assertIn("UPDATE users", statements[1][0])
+        self.assertIn("DELETE FROM user_roles", statements[3][0])
+        self.assertEqual(
+            connection.fake_cursor.role_relation_writes,
+            [(
+                "INSERT INTO user_roles (user_id, role_id) VALUES (%s, %s)",
+                ((3, 2), (3, 1)),
+            )],
+        )
 
     def test_main_uses_success_exit_code(self):
         """CLI 成功时返回零退出码。"""

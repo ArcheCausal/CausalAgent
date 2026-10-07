@@ -130,9 +130,16 @@ services:
       - DB_MONITOR_INTEGRITY_ENABLED=${DB_MONITOR_INTEGRITY_ENABLED:-false}
       - DB_MONITOR_INTEGRITY_INTERVAL_SECONDS=${DB_MONITOR_INTEGRITY_INTERVAL_SECONDS:-86400}
       - ADMIN_VITE_DEV_SERVER_URL=${ADMIN_VITE_DEV_SERVER_URL:-}
+      - WEBSITE_FRONTEND_DIST_DIR=${WEBSITE_FRONTEND_DIST_DIR:-/opt/causalagent-website}
+      - WEBSITE_VITE_DEV_SERVER_URL=${WEBSITE_VITE_DEV_SERVER_URL:-}
+      - CHAT_FRONTEND_DIST_DIR=${CHAT_FRONTEND_DIST_DIR:-/opt/causalagent-chat}
+      - CHAT_VITE_DEV_SERVER_URL=${CHAT_VITE_DEV_SERVER_URL:-}
+      - RAG_EVAL_FRONTEND_DIST_DIR=${RAG_EVAL_FRONTEND_DIST_DIR:-/opt/causalagent-rag-eval}
+      - GRAFANA_PUBLIC_URL=${GRAFANA_PUBLIC_URL:-http://127.0.0.1:3000/grafana/}
       - WEB_WORKERS=${WEB_WORKERS:-1}
       - WEB_THREADS=${WEB_THREADS:-12}
       - WEB_TIMEOUT=${WEB_TIMEOUT:-120}
+      - SSE_POLL_INTERVAL_SECONDS=${SSE_POLL_INTERVAL_SECONDS:-0.05}
       - JOB_WORKERS=${JOB_WORKERS:-2}
       - JOB_HEARTBEAT_INTERVAL_SECONDS=${JOB_HEARTBEAT_INTERVAL_SECONDS:-10}
       - JOB_STALE_AFTER_SECONDS=${JOB_STALE_AFTER_SECONDS:-120}
@@ -161,6 +168,7 @@ services:
       - /app/杂项
       - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
       - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
+      - kb_multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
       - ./tmp/rag_eval:/app/tmp/rag_eval
     depends_on:
       mysql-primary:
@@ -168,6 +176,8 @@ services:
       mysql-replica:
         condition: service_healthy
       db-bootstrap:
+        condition: service_completed_successfully
+      kb-indexes-sync:
         condition: service_completed_successfully
     networks:
       - causalagent_replica_network
@@ -224,6 +234,10 @@ services:
       - API_KEY=${API_KEY}
       - BASE_URL=${BASE_URL}
       - MODEL=${MODEL}
+      - DEEP_AGENT_MODEL=${DEEP_AGENT_MODEL:-deepseek-v4-flash}
+      - DEEP_AGENT_BASE_URL=${DEEP_AGENT_BASE_URL:-${BASE_URL}}
+      - DEEP_AGENT_API_KEY=${DEEP_AGENT_API_KEY:-${API_KEY}}
+      - DEEP_AGENT_CONTEXT_WINDOW_TOKENS=${DEEP_AGENT_CONTEXT_WINDOW_TOKENS:-1000000}
       - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-}
       - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-qwen3.7-text-embedding}
@@ -231,12 +245,27 @@ services:
       - FLASK_ENV=development
       - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-}
       - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT:-}
+      - CAUSAL_MCP_URL=http://causal-mcp:8080/mcp
+      - CAUSAL_MCP_SERVICE_TOKEN=${CAUSAL_MCP_SERVICE_TOKEN:-local-causal-mcp-token}
+      - CAUSAL_MCP_SIGNING_KEY_CURRENT=${CAUSAL_MCP_SIGNING_KEY_CURRENT:-local-causal-mcp-signing-key}
+      - CAUSAL_MCP_SIGNING_KEY_ID=${CAUSAL_MCP_SIGNING_KEY_ID:-current}
+      - CAUSAL_MCP_CLIENT_POOL_SIZE=${CAUSAL_MCP_CLIENT_POOL_SIZE:-2}
+      - CAUSAL_MCP_MAX_IN_FLIGHT_PER_CLIENT=${CAUSAL_MCP_MAX_IN_FLIGHT_PER_CLIENT:-1}
+      - CAUSAL_MCP_POOL_ACQUIRE_TIMEOUT_SECONDS=${CAUSAL_MCP_POOL_ACQUIRE_TIMEOUT_SECONDS:-5}
+      - CAUSAL_MCP_CONTROL_POOL_SIZE=${CAUSAL_MCP_CONTROL_POOL_SIZE:-1}
+      - CAUSAL_MCP_CONTROL_MAX_IN_FLIGHT_PER_CLIENT=${CAUSAL_MCP_CONTROL_MAX_IN_FLIGHT_PER_CLIENT:-2}
+      - CAUSAL_MCP_CONTROL_ACQUIRE_TIMEOUT_SECONDS=${CAUSAL_MCP_CONTROL_ACQUIRE_TIMEOUT_SECONDS:-1}
+      - CAUSAL_MCP_CANCEL_TIMEOUT_SECONDS=${CAUSAL_MCP_CANCEL_TIMEOUT_SECONDS:-6}
+      - CAUSAL_MCP_HTTP_MAX_CONNECTIONS=${CAUSAL_MCP_HTTP_MAX_CONNECTIONS:-8}
+      - CAUSAL_MCP_HTTP_MAX_KEEPALIVE_CONNECTIONS=${CAUSAL_MCP_HTTP_MAX_KEEPALIVE_CONNECTIONS:-4}
+      - CAUSAL_MCP_HTTP_READ_TIMEOUT_SECONDS=${CAUSAL_MCP_HTTP_READ_TIMEOUT_SECONDS:-660}
     volumes:
       - .:/app
       - /app/__pycache__
       - /app/杂项
       - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
       - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
+      - kb_multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
     depends_on:
       mysql-primary:
         condition: service_healthy
@@ -244,8 +273,63 @@ services:
         condition: service_healthy
       db-bootstrap:
         condition: service_completed_successfully
+      causal-mcp:
+        condition: service_healthy
+      kb-indexes-sync:
+        condition: service_completed_successfully
     networks:
       - causalagent_replica_network
+    restart: unless-stopped
+    stop_grace_period: 75s
+
+  causal-mcp:
+    build:
+      context: .
+      dockerfile: Agent/CausalAgentMCP/Dockerfile
+    container_name: causalagent_causal_mcp
+    labels:
+      causalagent_observability: "true"
+      causalagent_service: "mcp"
+      causalagent_environment: "development"
+    command: python -m Agent.CausalAgentMCP.app
+    environment:
+      - MYSQL_HOST=mysql-primary
+      - MYSQL_WRITE_HOST=mysql-primary
+      - MYSQL_READ_HOSTS=
+      - MYSQL_PORT=3306
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_WRITE_USER=${MYSQL_WRITE_USER:-${MYSQL_USER}}
+      - MYSQL_WRITE_PASSWORD=${MYSQL_WRITE_PASSWORD:-${MYSQL_PASSWORD}}
+      - MYSQL_READ_USER=${MYSQL_READ_USER:-${MYSQL_USER}}
+      - MYSQL_READ_PASSWORD=${MYSQL_READ_PASSWORD:-${MYSQL_PASSWORD}}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_POOL_SIZE_WRITE=${MYSQL_POOL_SIZE_WRITE:-2}
+      - MYSQL_POOL_SIZE_READ=${MYSQL_POOL_SIZE_READ:-1}
+      - MYSQL_CONNECT_TIMEOUT_SECONDS=${MYSQL_CONNECT_TIMEOUT_SECONDS:-5}
+      - MYSQL_POOL_ACQUIRE_TIMEOUT_SECONDS=${MYSQL_POOL_ACQUIRE_TIMEOUT_SECONDS:-3}
+      - CAUSAL_MCP_SERVICE_TOKEN=${CAUSAL_MCP_SERVICE_TOKEN:-local-causal-mcp-token}
+      - CAUSAL_MCP_SIGNING_KEY_CURRENT=${CAUSAL_MCP_SIGNING_KEY_CURRENT:-local-causal-mcp-signing-key}
+      - CAUSAL_MCP_SIGNING_KEY_ID=${CAUSAL_MCP_SIGNING_KEY_ID:-current}
+      - CAUSAL_MCP_PROCESS_WORKERS=${CAUSAL_MCP_PROCESS_WORKERS:-2}
+      - CAUSAL_MCP_QUEUE_CAPACITY=${CAUSAL_MCP_QUEUE_CAPACITY:-4}
+      - CAUSAL_MCP_ENQUEUE_TIMEOUT_SECONDS=${CAUSAL_MCP_ENQUEUE_TIMEOUT_SECONDS:-5}
+      - CAUSAL_MCP_ALGORITHM_DEADLINE_SECONDS=${CAUSAL_MCP_ALGORITHM_DEADLINE_SECONDS:-600}
+      - CAUSAL_MCP_SLOW_LOG_SECONDS=${CAUSAL_MCP_SLOW_LOG_SECONDS:-60}
+      - CDFM_MODEL_PATH=${CDFM_MODEL_PATH:-DMIRLAB/CDFM}
+    depends_on:
+      mysql-primary:
+        condition: service_healthy
+      db-bootstrap:
+        condition: service_completed_successfully
+    networks:
+      - causalagent_replica_network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     restart: unless-stopped
     stop_grace_period: 75s
 
@@ -287,16 +371,16 @@ services:
     networks:
       - causalagent_replica_network
 
-  checkpoint-cleanup:
+  agent-persistence-cleanup:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: causalagent_checkpoint_cleanup
+    container_name: causalagent_agent_persistence_cleanup
     labels:
       causalagent_observability: "true"
       causalagent_service: "maintenance"
       causalagent_environment: "development"
-    command: python -m Database.checkpoint_cleanup_worker
+    command: python -m Database.agent_persistence_cleanup_worker
     environment:
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
@@ -322,9 +406,9 @@ services:
       - CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS=${CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS:-5}
       - CHECKPOINT_POSTGRES_POOL_MIN_SIZE=1
       - CHECKPOINT_POSTGRES_POOL_MAX_SIZE=2
-      - CHECKPOINT_CLEANUP_POLL_INTERVAL_SECONDS=${CHECKPOINT_CLEANUP_POLL_INTERVAL_SECONDS:-1}
-      - CHECKPOINT_CLEANUP_HEARTBEAT_INTERVAL_SECONDS=${CHECKPOINT_CLEANUP_HEARTBEAT_INTERVAL_SECONDS:-10}
-      - CHECKPOINT_CLEANUP_LEASE_SECONDS=${CHECKPOINT_CLEANUP_LEASE_SECONDS:-300}
+      - AGENT_PERSISTENCE_CLEANUP_POLL_INTERVAL_SECONDS=${AGENT_PERSISTENCE_CLEANUP_POLL_INTERVAL_SECONDS:-1}
+      - AGENT_PERSISTENCE_CLEANUP_HEARTBEAT_INTERVAL_SECONDS=${AGENT_PERSISTENCE_CLEANUP_HEARTBEAT_INTERVAL_SECONDS:-10}
+      - AGENT_PERSISTENCE_CLEANUP_LEASE_SECONDS=${AGENT_PERSISTENCE_CLEANUP_LEASE_SECONDS:-300}
       - API_KEY=${API_KEY}
       - BASE_URL=${BASE_URL}
       - MODEL=${MODEL}
@@ -399,6 +483,7 @@ services:
       - /app/杂项
       - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
       - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
+      - kb_multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
       - ./tmp/rag_eval:/app/tmp/rag_eval
     depends_on:
       mysql-primary:
@@ -406,6 +491,8 @@ services:
       mysql-replica:
         condition: service_healthy
       db-bootstrap:
+        condition: service_completed_successfully
+      kb-indexes-sync:
         condition: service_completed_successfully
     networks:
       - causalagent_replica_network
@@ -482,29 +569,19 @@ services:
       - causalagent_replica_network
     restart: unless-stopped
 
-  searxng-init:
-    image: python:3.11-slim
-    container_name: causalagent_searxng_init
-    restart: "no"
-    volumes:
-      - ./searxng/core-config:/etc/searxng
-      - ./searxng/init:/init:ro
-    entrypoint: ["sh", "/init/init_settings.sh"]
-
   searxng:
     image: searxng/searxng:2026.8.21-bbb3c7d82
     container_name: causalagent_searxng
     restart: unless-stopped
     environment:
       - SEARXNG_BASE_URL=http://searxng:8080/
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-local-searxng-secret}
     volumes:
-      - ./searxng/core-config:/etc/searxng
+      - ./searxng/core-config:/etc/searxng:ro
       - searxng_core_data:/var/cache/searxng
     depends_on:
       valkey:
         condition: service_healthy
-      searxng-init:
-        condition: service_completed_successfully
     healthcheck:
       test:
         - CMD
@@ -578,6 +655,8 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_USERS_DEFAULT_LANGUAGE: zh-Hans
+      GF_SERVER_ROOT_URL: /grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
@@ -592,6 +671,19 @@ services:
     cpus: "0.5"
     mem_limit: 512m
     restart: unless-stopped
+
+  kb-indexes-sync:
+    image: python:3.11-slim
+    container_name: causalagent_kb_indexes_sync
+    volumes:
+      - .:/src:ro
+      - kb_multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
+    command:
+      - sh
+      - -c
+      - cp -a /src/Agent/knowledge_base/multimodal_indexes/. /app/Agent/knowledge_base/multimodal_indexes/
+    networks:
+      - causalagent_replica_network
 
 networks:
   causalagent_replica_network:
@@ -615,4 +707,6 @@ volumes:
   grafana_data:
     driver: local
   alloy_positions:
+    driver: local
+  kb_multimodal_indexes:
     driver: local

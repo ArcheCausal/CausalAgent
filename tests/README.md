@@ -1,5 +1,9 @@
 # 后端测试说明
 
+文档职责：记录测试目录、测试层级和跨模块验证入口。
+
+适用范围：新增或修改测试、CI 测试门禁和部署合同检查时使用；具体模块的专项验证说明以对应的 Document 页面为准。
+
 测试目录先按测试层级划分，再在层级内按业务模块划分：
 
 ```text
@@ -23,11 +27,26 @@ tests/
 
 `unit` 和 `integration` 表示依赖范围，`admin`、`auth`、`database` 等目录表示业务归属。新增测试时先判断是否需要真实跨模块依赖，再选择业务目录。仓库测试同时包含 pytest 风格函数与 `unittest.TestCase`，统一由 pytest 负责发现和执行。
 
-`integration/deployment/` 只做不启动容器的 Compose 部署契约检查；SearXNG 的 init、healthcheck 和幂等性真实容器验证通过 `tests/run_searxng_docker_validation.ps1` 手工执行，不属于默认 pytest 范围。
+`integration/deployment/` 只做不启动容器的 Compose 部署契约检查，包括预发服务、网络、卷、镜像 digest 和公网端口边界；SearXNG 的 `SEARXNG_SECRET` 注入和 `/healthz` 真实容器验证通过 `tests/run_searxng_docker_validation.ps1` 手工执行，不属于默认 pytest 范围。
+
+## 前端与页面入口
+
+仓库现在有四个互相独立的 Vue 3 + TypeScript 工程，都不加入根级 npm workspace：官网 `website-frontend/`、普通用户应用 `chat-frontend/`、管理员系统 `admin-frontend/`、RAG 评测台 `app/rag_eval/frontend/`。进入目录后执行 `npm ci` 安装锁定依赖。各端的 `npm run check` 覆盖范围按实际 package scripts 区分：官网运行类型检查、单元测试和生产构建；普通用户应用还运行 lint、组件测试和 Mock Playwright E2E；管理员系统运行类型检查、单元测试和生产构建，Mock E2E 需另行运行 `npm run test:e2e:mock`（命令见 `Document/admin/testing.md`）；RAG 评测台使用 `npm run typecheck`、`npm test` 和 `npm run build`。Mock E2E 只使用模拟 API，不等价于真实 Flask、数据库、worker、模型或浏览器验收。
+
+页面入口与构建产物的 Flask 契约由本地或发布前手工检查：
+
+```powershell
+python -m pytest -p no:cacheprovider tests/integration/deployment/test_frontend_entrypoints.py
+docker compose -f docker-compose.yml config --quiet
+docker compose --env-file .env.staging.example -f docker-compose.staging.yml config --quiet
+docker compose -f docker-compose.prod.yml config --quiet
+```
+
+`/`、`/product`、`/about`、`/docs`、`/changelog` 以及 `/auth/sign-in`、`/auth/sign-up` 由官网产物提供；`/dashboard` 由普通用户应用提供，未登录访问跳转 `/auth/sign-in`；`/rag-eval` 由 RAG 评测台提供并要求 `rag_eval.access`；`/admin` 继续由管理员前端提供。项目已移除 `/chat-next` 和 `/rag_eval` 兼容别名，也不再读取或向 Compose 传递 `CHAT_FRONTEND_ENTRY`。未执行的真实验收、Docker 镜像构建或运行时检查必须在报告中明确保留。
 
 ## Docker 单元测试环境（推荐）
 
-`docker-compose.test.yml` 提供独立的 `unit-test` 服务。Dockerfile 的 `test` 目标在共享 Python 项目依赖上安装 `requirements-test.txt`，不会把 `pytest` 临时安装到正在运行的应用容器。
+`docker-compose.test.yml` 提供独立的 `unit-test` 服务。Dockerfile 的 `test` 目标先从 `tests/smoke/requirements-deep-agent-py311-linux.lock` 安装 Python 3.11 Linux hash-pinned 项目依赖，再安装 `requirements-test.txt`，不会把 `pytest` 临时安装到正在运行的应用容器。
 
 该服务有以下边界：
 

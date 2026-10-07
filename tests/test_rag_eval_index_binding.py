@@ -2,6 +2,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ import app.rag_eval.isolated_runs as isolated_runs
 from Agent.knowledge_base.rag.operation_datasets import benchmark_v2
 from app.rag_eval.index_binding import IndexBindingError, IndexBindingGate
 from app.rag_eval.isolated_runs import IsolatedRunManager
+from tests.support.authorization import rag_eval_route_authorization
 
 
 class IndexBindingGateTests(unittest.TestCase):
@@ -40,8 +42,12 @@ class IndexBindingGateTests(unittest.TestCase):
             lambda run_id: self.root / run_id,
             lambda: self.embedding,
         )
+        self.authorization_stack = ExitStack()
+        for authorization_context in rag_eval_route_authorization():
+            self.authorization_stack.enter_context(authorization_context)
 
     def tearDown(self):
+        self.authorization_stack.close()
         self.temporary.cleanup()
 
     def _write_index(self, *, unit_id="unit-1"):

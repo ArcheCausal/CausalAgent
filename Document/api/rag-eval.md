@@ -10,7 +10,8 @@
 
 ### 1.1 Base URL、请求和响应
 
-- Base URL：`/api/rag_eval`。路径使用下划线，例如 `/api/rag_eval/isolated/evaluation-runs`；页面地址 `/rag_eval` 或 `/rag-eval` 不是本 API 前缀。
+- Base URL：`/api/rag_eval`。路径使用下划线，例如 `/api/rag_eval/isolated/evaluation-runs`；页面地址 `/rag-eval` 不是本 API 前缀。
+- 鉴权：整个蓝图要求 `rag_eval.access`（未登录 `401`，缺少权限 `403`）；读请求要求 `rag_eval.read`，写请求要求 `rag_eval.run` 且必须带 `X-CSRF-Token`，发布、回滚和治理路由分别要求 `rag_eval.publish`、`rag_eval.rollback` 和 `rag_eval.governance`。发布、回滚和治理结果会写入 `admin_audit_events`，包含操作者、动作、目标、请求 ID 和结果。
 - JSON 成功响应通常为 `{"success": true, "data": ...}`；创建长任务使用 HTTP `202`，创建数据集/来源/profile 使用 `201`。
 - JSON 失败响应通常为 `{"success": false, "error": "..."}`，数据集校验还可能包含 `error_code`，发布门禁失败还包含 `data` 报告。
 - `NaN` 和无穷浮点数序列化为 JSON `null`。

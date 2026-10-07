@@ -122,20 +122,9 @@ def test_ainvoke_structured_returns_schema_without_sync_blocking():
     assert llm.calls == [(ExampleSchema, {"method": "function_calling"})]
 
 
-@pytest.mark.parametrize(
-    ("result", "model_error", "cause_type"),
-    [
-        ({"value": "not-an-int"}, None, ValidationError),
-        (None, RuntimeError("model unavailable"), RuntimeError),
-    ],
-)
-def test_structured_failures_have_metadata_cause_and_no_internal_retry(
-    result,
-    model_error,
-    cause_type,
-):
-    """校验失败和模型异常都统一封装，且调用器内部不重试。"""
-    runnable = FakeRunnable(result=result, error=model_error)
+def test_schema_failure_retries_once_and_keeps_a_safe_validation_summary():
+    """校验失败在统一入口内重试一次，并保留不含取值的校验摘要。"""
+    runnable = FakeRunnable(result={"value": "not-an-int"})
 
     with pytest.raises(StructuredOutputError) as captured:
         invoke_structured(
@@ -149,9 +138,131 @@ def test_structured_failures_have_metadata_cause_and_no_internal_retry(
     error = captured.value
     assert error.node_name == "failing_node"
     assert error.schema_name == "ExampleSchema"
-    assert error.original_exception_type == cause_type.__name__
-    assert isinstance(error.__cause__, cause_type)
+    assert error.original_exception_type == "ValidationError"
+    assert error.safe_cause_code == "schema_invalid"
+    assert error.structured_attempts == 2
+    assert error.safe_validation == {
+        "count": 1,
+        "first_type": "int_parsing",
+        "first_loc": "value",
+    }
+    assert isinstance(error.__cause__, ValidationError)
+    assert "not-an-int" not in str(error)
+    assert runnable.invoke_count == 2
+
+
+def test_missing_tool_call_payload_uses_dedicated_cause_code_and_retries():
+    """模型没有返回可解析工具调用时使用独立原因代码，而不是 schema_invalid。"""
+    runnable = FakeRunnable(result=None)
+
+    with pytest.raises(StructuredOutputError) as captured:
+        invoke_structured(
+            llm=FakeLLM(),
+            schema=ExampleSchema,
+            prompt=FakePrompt(runnable),
+            inputs={},
+            node_name="report",
+        )
+
+    error = captured.value
+    assert error.node_name == "report"
+    assert error.safe_cause_code == "tool_call_invalid"
+    assert error.original_exception_type == "NoToolCallError"
+    assert error.structured_attempts == 2
+    assert error.safe_validation is None
+    assert runnable.invoke_count == 2
+
+
+def test_model_runtime_error_is_not_retried_inside_the_invoker():
+    """模型自身异常不属于可重试的结构化输出失败，保持单次调用。"""
+    runnable = FakeRunnable(error=RuntimeError("model unavailable"))
+
+    with pytest.raises(StructuredOutputError) as captured:
+        invoke_structured(
+            llm=FakeLLM(),
+            schema=ExampleSchema,
+            prompt=FakePrompt(runnable),
+            inputs={},
+            node_name="failing_node",
+        )
+
+    error = captured.value
+    assert error.original_exception_type == "RuntimeError"
+    assert error.safe_cause_code == "unknown"
+    assert error.structured_attempts == 1
+    assert isinstance(error.__cause__, RuntimeError)
     assert runnable.invoke_count == 1
+
+
+def test_retry_returns_schema_when_second_attempt_is_valid():
+    """首次返回不可用结果、第二次返回合法结果时直接返回 Schema 实例。"""
+
+    class FlakyRunnable(FakeRunnable):
+        def invoke(self, inputs):
+            self.invoke_count += 1
+            if self.invoke_count == 1:
+                return None
+            return {"value": 3}
+
+    runnable = FlakyRunnable()
+
+    result = invoke_structured(
+        llm=FakeLLM(),
+        schema=ExampleSchema,
+        prompt=FakePrompt(runnable),
+        inputs={},
+        node_name="report",
+    )
+
+    assert result == ExampleSchema(value=3)
+    assert runnable.invoke_count == 2
+
+
+def test_async_entry_retries_once_before_raising():
+    """异步入口与同步入口保持同一套有界重试约定。"""
+    runnable = FakeRunnable(result=None)
+
+    with pytest.raises(StructuredOutputError) as captured:
+        asyncio.run(
+            ainvoke_structured(
+                llm=FakeLLM(),
+                schema=ExampleSchema,
+                prompt=FakePrompt(runnable),
+                inputs={},
+                node_name="report",
+            )
+        )
+
+    assert captured.value.structured_attempts == 2
+    assert runnable.ainvoke_count == 2
+    assert runnable.invoke_count == 0
+
+
+def test_retry_stops_when_execution_is_revoked():
+    """重试前重新确认执行资格，已撤销的 Job 不再发起第二次调用。"""
+    from app.agent.worker.execution_guard import (
+        JobExecutionGuard,
+        JobExecutionRevoked,
+    )
+
+    guard = JobExecutionGuard("job-1", "worker-a", 1, 1, revoked=True)
+    token = guard.install()
+    runnable = FakeRunnable(result=None)
+    try:
+        with pytest.raises(JobExecutionRevoked):
+            asyncio.run(
+                ainvoke_structured(
+                    llm=FakeLLM(),
+                    schema=ExampleSchema,
+                    prompt=FakePrompt(runnable),
+                    inputs={},
+                    node_name="report",
+                )
+            )
+    finally:
+        JobExecutionGuard.reset(token)
+
+    assert runnable.ainvoke_count == 1
 
 
 def test_rag_evidence_answer_failure_returns_insufficient_evidence(monkeypatch):

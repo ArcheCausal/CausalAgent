@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage
 from langgraph.errors import NodeError
 from langgraph.types import Command, RetryPolicy, TimeoutPolicy, default_retry_on
 
+from Agent.Report.document import build_degraded_report_document
 from .state import CausalAgentState, RagSubgraphState
 from app.agent.worker.execution_guard import (
     JobExecutionRevoked,
@@ -38,6 +39,8 @@ def retry_transient_errors(exc: BaseException) -> bool:
         return False
     guard = current_execution_guard()
     if guard is not None and guard.revoked:
+        if default_retry_on(exc):
+            raise JobExecutionRevoked("执行已撤销，停止瞬态错误重试")
         return False
     exc_name = exc.__class__.__name__.lower()
     if "interrupt" in exc_name:
@@ -360,12 +363,11 @@ def recover_terminal_message(state: CausalAgentState, error: NodeError) -> dict:
 
 
 def recover_report(state: CausalAgentState, error: NodeError) -> dict:
-    """报告节点失败后的恢复：生成简短兜底报告，让 worker 能走 final_result。"""
+    """报告节点失败后的恢复：生成降级报告文档，让 worker 能走 final_result。"""
     message = f"报告生成失败：{_error_message(error)}"
     return {
         "messages": [AIMessage(content="决策：因果分析报告生成失败。", name=error.node)],
-        "final_report": message,
-        "visualization_mapping": {},
+        "report_document": build_degraded_report_document(message),
     }
 
 

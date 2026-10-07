@@ -1,0 +1,73 @@
+/* 加载状态
+
+   两种形态都来自原型：skeleton 是原型 .doc-skeleton 的三行骨架，
+   line 是原型 .runbar 的两像素推进线。原型没有转圈指示器。 */
+.ca-loading {
+  display: grid;
+  gap: var(--ca-space-8);
+}
+
+.ca-loading--line {
+  gap: 0;
+}
+
+.ca-loading__rule {
+  height: 8px;
+  border-radius: var(--ca-radius-small);
+  background: var(--ca-surface-muted);
+}
+
+.ca-loading__rule--title {
+  width: 42%;
+  height: 14px;
+  background: var(--ca-border-default);
+}
+
+.ca-loading__rule--short {
+  width: 68%;
+}
+
+.ca-loading__track {
+  height: 2px;
+  overflow: hidden;
+  border-radius: var(--ca-radius-full);
+  background: var(--ca-border-default);
+}
+
+.ca-loading__fill {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--ca-radius-full);
+  background: var(--ca-ink);
+  transform: scaleX(0);
+  transform-origin: 0 50%;
+  transition: transform var(--ca-motion-progress) linear;
+}
+
+.ca-loading__fill--indeterminate {
+  width: 40%;
+  animation: ca-loading-sweep 1100ms var(--ca-ease-out) infinite;
+}
+
+@keyframes ca-loading-sweep {
+  from {
+    transform: translateX(-110%);
+  }
+
+  to {
+    transform: translateX(260%);
+  }
+}
+
+/* 减少动态时保留静止的推进线，不用动画表达进度 */
+@media (prefers-reduced-motion: reduce) {
+  .ca-loading__fill {
+    transition: none;
+  }
+
+  .ca-loading__fill--indeterminate {
+    width: 40%;
+    transform: none;
+    animation: none;
+  }
+}

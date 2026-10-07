@@ -1,0 +1,42 @@
+# lightweight-ci 路径过滤器，按模块划分 PR 需要执行的检查范围。
+#
+# 维护规则：重命名或移动顶层目录时，必须同步更新这里的 glob。旧 glob 匹配不到
+# 任何文件时对应 job 会静默跳过，该模块不再被 CI 覆盖，而 CI 仍然显示全绿。
+# 每个过滤器对应的 job 与覆盖范围见 Document/development/testing.md 的
+# 「GitHub Actions CI」一节。
+
+# 后端、Agent、数据库、配置、脚本与后端测试。
+backend:
+  - 'app/**'
+  - 'Agent/**'
+  - 'Database/**'
+  - 'config/**'
+  - 'scripts/**'
+  - 'tests/**'
+  - 'CausalAgent.py'
+  - 'Run_causal.py'
+  - 'requirements.txt'
+  - 'requirements-base.txt'
+  - 'requirements-test.txt'
+  - 'Dockerfile'
+  - 'docker-compose.test.yml'
+
+# 四个前端工程，以及被它们以源码形式引用的共享设计系统。
+frontends:
+  - 'chat-frontend/**'
+  - 'admin-frontend/**'
+  - 'website-frontend/**'
+  - 'app/rag_eval/frontend/**'
+  - 'packages/design-system/**'
+
+# Compose、可观测、搜索、部署与对应的静态契约检查。
+contracts:
+  - 'docker-compose*.yml'
+  - 'observability/**'
+  - 'searxng/**'
+  - 'deploy/**'
+  - 'tests/integration/deployment/**'
+  - 'tests/integration/test_observability_compose.py'
+  - 'tests/test_staging_*.py'
+  - '.env.example'
+  - '.env.staging.example'

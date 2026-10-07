@@ -144,6 +144,13 @@ def admin_asset(filename: str):
     return send_from_directory(_admin_dist_dir() / "assets", filename)
 
 
+@admin_page_bp.route("/brand/<path:filename>")
+@admin_required(page=True)
+def admin_brand_asset(filename: str):
+    """仅向实时校验通过的管理员返回 Vue 品牌图标与应用清单。"""
+    return send_from_directory(_admin_dist_dir() / "brand", filename)
+
+
 @admin_bp.route("/brand/logo")
 @admin_required
 def admin_brand_logo():
@@ -157,6 +164,13 @@ def admin_brand_logo():
     response.headers["Cache-Control"] = "private, max-age=86400"
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
+
+
+@admin_bp.route("/runtime-config")
+@admin_required
+def admin_runtime_config():
+    """返回由部署环境决定的前端地址；开发为本机端口，预发为网关同源路径。"""
+    return api_success({"grafana_url": settings.GRAFANA_PUBLIC_URL})
 
 
 @admin_bp.route("/db/health")

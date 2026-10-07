@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
+import os
 from pathlib import Path
 import re
 import sys
@@ -13,6 +14,20 @@ from typing import Any
 from langchain_openai import ChatOpenAI
 
 from Agent.causal_agent.postgres_checkpointer import build_checkpointer
+from Agent.deep_agent.context import AgentRunContext, FrozenInputRef, TrustedJobIdentity
+from Agent.deep_agent.graph import (
+    DeepAgentGraphConfig,
+    build_deep_agent,
+)
+from Agent.deep_agent.memory import build_official_backend, trusted_memory_namespace
+from Agent.deep_agent.postgres_store import open_async_postgres_store
+from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
+from Agent.deep_agent_tools.adapters import build_default_adapters
+from Agent.deep_agent_tools.mcp_algorithm_executor import McpAlgorithmExecutor
+from Agent.deep_agent_tools.rag_evidence_tool import build_default_rag_evidence_tool
+from Agent.deep_agent_tools.registry import build_default_registry
+from Agent.deep_agent_tools.web_evidence_tool import build_default_web_evidence_tool
+from app.agent.worker.mcp_client_pool import McpClientPool, McpClientPoolConfig
 from config.settings import settings
 from observability.logging_runtime import log_event
 
@@ -45,6 +60,14 @@ class ProcessRuntime:
     rag_status: str | None = None
     rag_release_id: str | None = None
     rag_error_code: str | None = None
+    mcp_pool: Any | None = None
+    algorithm_executor: Any | None = None
+    algorithm_registry: Any | None = None
+    domain_tools: tuple[Any, ...] = ()
+    filesystem_backend: Any | None = None
+    store: Any | None = None
+    checkpointer: Any | None = None
+    graph: Any | None = None
 
     def __post_init__(self) -> None:
         """为旧的显式构造调用补齐稳定的 RAG 状态名称。"""
@@ -70,9 +93,59 @@ class SlotRuntime:
     """显式保存一个 slot 的 LLM、MCP 生命周期资源、tools 与 graph。"""
 
     llm: ChatOpenAI
-    mcp_resources: McpClientResources
-    mcp_tools: list[Any]
-    graph: Any
+    mcp_resources: McpClientResources | None = None
+    mcp_tools: list[Any] = field(default_factory=list)
+    graph: Any = None
+    process_runtime: ProcessRuntime | None = None
+
+    def build_run_context(
+        self,
+        *,
+        job: dict[str, Any],
+        execution_guard: Any,
+        worker_id: str,
+        event_sink: Any | None = None,
+    ) -> AgentRunContext:
+        """从已 claim 的 Job 构造一次 invocation 的可信 runtime context。"""
+
+        process_runtime = self.process_runtime
+        if process_runtime is None:
+            raise RuntimeError("slot process runtime is unavailable")
+        job_id = str(job["job_id"])
+        input_identity = str(job.get("input_file_hash") or f"job-input:{job_id}")
+        # 冻结输入引用在本 invocation 内可刷新：用户用自然语言切换分析上下文时，
+        # 服务端在同一事务里重写 Job 冻结快照，MCP 摘要与 provenance 校验随后
+        # 读取这里的新 hash，不需要重建整个 run context。
+        frozen_input = FrozenInputRef(
+            user_file_id=(
+                int(job["input_user_file_id"]) if job.get("input_user_file_id") else None
+            ),
+            object_id=int(job["input_object_id"]) if job.get("input_object_id") else None,
+            content_hash=input_identity,
+            filename=job.get("input_filename"),
+        )
+        identity = TrustedJobIdentity(
+            job_id=job_id,
+            session_id=str(job["session_id"]),
+            user_id=int(job["user_id"]),
+            attempt_count=int(job["attempt_count"]),
+            lease_epoch=int(job.get("lease_epoch") or 0),
+            worker_id=worker_id,
+            input_identity=input_identity,
+            input_snapshot_digest=str(job.get("input_file_hash") or input_identity),
+            frozen_input=frozen_input,
+        )
+        return AgentRunContext(
+            execution_guard=execution_guard,
+            trusted_identity=identity,
+            algorithm_executor=process_runtime.algorithm_executor,
+            filesystem_backend=process_runtime.filesystem_backend,
+            web_search_enabled=bool(job.get("web_search_enabled")),
+            rag_available=process_runtime.rag_available,
+            rag_release_id=process_runtime.rag_release_id,
+            rag_error_code=process_runtime.rag_error_code,
+            event_sink=event_sink,
+        )
 
 
 def create_llm() -> ChatOpenAI:
@@ -174,6 +247,121 @@ def create_process_runtime() -> ProcessRuntime:
     )
 
 
+def _required_positive_environment_integer(name: str) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        raise RuntimeError(f"{name} must be configured")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer") from exc
+    if value <= 0:
+        raise RuntimeError(f"{name} must be positive")
+    return value
+
+
+def create_deep_agent_model() -> ChatOpenAI:
+    """创建带 Responses API 和显式 profile 的 Deep Agent 模型。"""
+
+    model_name = os.getenv("DEEP_AGENT_MODEL", "deepseek-v4-flash").strip()
+    base_url = (os.getenv("DEEP_AGENT_BASE_URL") or settings.BASE_URL or "").strip()
+    api_key = (os.getenv("DEEP_AGENT_API_KEY") or settings.API_KEY or "").strip()
+    if not model_name or not base_url or not api_key:
+        raise RuntimeError("Deep Agent 模型配置不完整，无法初始化")
+    return ChatOpenAI(
+        model=model_name,
+        base_url=base_url,
+        api_key=api_key,
+        streaming=True,
+        use_responses_api=True,
+        output_version="responses/v1",
+        reasoning={"effort": "none"},
+    )
+
+
+async def initialize_production_runtime(
+    checkpoint_pool: Any,
+    process_stack: AsyncExitStack,
+) -> ProcessRuntime:
+    """按计划的 fail-fast 顺序创建进程级 Store、MCP pool 和 compiled graphs。"""
+
+    # 外层旧图仍负责 fold/report；新内层使用独立、显式的 Deep Agent model。
+    outer_llm = create_llm()
+    store = await process_stack.enter_async_context(open_async_postgres_store())
+
+    mcp_config = McpClientPoolConfig.from_env()
+    mcp_pool = McpClientPool(mcp_config)
+    process_stack.push_async_callback(mcp_pool.close)
+    await mcp_pool.start()
+
+    signing_key = (os.getenv("CAUSAL_MCP_SIGNING_KEY_CURRENT") or "").strip()
+    if not signing_key:
+        raise RuntimeError("CAUSAL_MCP_SIGNING_KEY_CURRENT is required")
+    algorithm_executor = McpAlgorithmExecutor(
+        mcp_pool,
+        signing_key=signing_key,
+    )
+    adapters = build_default_adapters(
+        executor=algorithm_executor,
+        raw_backend=build_official_backend(
+            store=store,
+            namespace=trusted_memory_namespace,
+        ),
+    )
+    registry = build_default_registry(adapters)
+    readiness = inspect_rag_readiness()
+    domain_tools = (
+        *build_algorithm_tools(registry),
+        build_default_rag_evidence_tool(readiness=readiness),
+        build_default_web_evidence_tool(web_search_enabled=True),
+    )
+
+    deep_model = create_deep_agent_model()
+    context_window_tokens = _required_positive_environment_integer(
+        "DEEP_AGENT_CONTEXT_WINDOW_TOKENS"
+    )
+    filesystem_backend = adapters[next(iter(adapters))].raw_backend
+    checkpointer = build_checkpointer(checkpoint_pool)
+    deep_graph = build_deep_agent(
+        model=deep_model,
+        domain_tools=domain_tools,
+        backend=filesystem_backend,
+        store=store,
+        config=DeepAgentGraphConfig(
+            model_name=os.getenv("DEEP_AGENT_MODEL", "deepseek-v4-flash"),
+            context_window_tokens=context_window_tokens,
+        ),
+        # Deep Agent 使用与父图相同的 PostgreSQL saver，但以稳定 child
+        # thread_id 隔离 checkpoint namespace；父图只保存 child 引用和最终投影。
+        checkpointer=checkpointer,
+        registry=registry,
+    )
+    from Agent.causal_agent.graph import build_deep_agent_parent_graph
+
+    parent_graph = build_deep_agent_parent_graph(
+        llm=outer_llm,
+        deep_agent=deep_graph,
+        registry=registry,
+        checkpointer=checkpointer,
+        store=store,
+    )
+    return ProcessRuntime(
+        llm=outer_llm,
+        rag_available=readiness.available,
+        rag_status=readiness.status,
+        rag_release_id=readiness.release_id,
+        rag_error_code=readiness.error_code,
+        mcp_pool=mcp_pool,
+        algorithm_executor=algorithm_executor,
+        algorithm_registry=registry,
+        domain_tools=tuple(domain_tools),
+        filesystem_backend=filesystem_backend,
+        store=store,
+        checkpointer=checkpointer,
+        graph=parent_graph,
+    )
+
+
 async def open_mcp_client_resources(
     process_stack: AsyncExitStack,
 ) -> McpClientResources:
@@ -205,7 +393,16 @@ async def create_slot_runtime(
     process_stack: AsyncExitStack,
     checkpoint_pool: Any,
 ) -> SlotRuntime:
-    """创建一个 slot 独占的 MCP 资源和 graph，并显式返回其依赖。"""
+    """创建 slot invocation 视图；新运行时复用进程级 pool/compiled graph。"""
+    if process_runtime.graph is not None:
+        return SlotRuntime(
+            llm=process_runtime.llm,
+            mcp_resources=None,
+            mcp_tools=list(process_runtime.domain_tools),
+            graph=process_runtime.graph,
+            process_runtime=process_runtime,
+        )
+
     from Agent.causal_agent.graph import create_graph_from_tools
 
     mcp_resources = await open_mcp_client_resources(process_stack)
@@ -221,4 +418,5 @@ async def create_slot_runtime(
         mcp_resources=mcp_resources,
         mcp_tools=mcp_resources.tools,
         graph=graph,
+        process_runtime=process_runtime,
     )

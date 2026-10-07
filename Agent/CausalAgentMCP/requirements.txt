@@ -1,0 +1,5 @@
+# Keep the private MCP image free of Deep Agent/RAG/frontend dependencies.
+mcp==2.2.0
+httpx2==2.6.0
+psutil==7.2.2
+cdfm-base==0.1.0

@@ -22,21 +22,10 @@ for key, value in {
 
 
 def _install_import_stubs():
-    """隔离路由测试不需要的数据库、绘图和向量库依赖。"""
+    """隔离路由测试不需要的数据库和向量库依赖。"""
     agent_connect = types.ModuleType("Database.agent_connect")
     agent_connect.require_frozen_file_for_job = lambda *args, **kwargs: None
     sys.modules.setdefault("Database.agent_connect", agent_connect)
-
-    data_visualize = types.ModuleType("Agent.Processing.data_visualize")
-    data_visualize.generate_visualizations = lambda *args, **kwargs: {}
-    sys.modules.setdefault("Agent.Processing.data_visualize", data_visualize)
-
-    query_rag = types.ModuleType("Agent.knowledge_base.query_rag")
-    query_rag.get_rag_excerpt = lambda *args, **kwargs: ""
-    query_rag.format_rag_summary_for_prompt = lambda *args, **kwargs: ""
-    query_rag.get_rag_response = lambda *args, **kwargs: {}
-    sys.modules.setdefault("Agent.knowledge_base.query_rag", query_rag)
-
 
 _install_import_stubs()
 
@@ -90,23 +79,39 @@ def _mcp_tool(name="causal_pc"):
 
 
 @pytest.mark.parametrize(
-    "route",
-    ["fold", "postprocess", "normal_chat", "inquiry_answer"],
+    "intent,expected_route",
+    [
+        ("normal_chat", "normal_chat"),
+        ("start_analysis", "fold"),
+        ("answer_report", "inquiry_answer"),
+        ("switch_analysis_context", "context_switch"),
+    ],
 )
-def test_agent_writes_every_legal_structured_route(monkeypatch, route):
-    """LLM 四种合法路由都必须覆盖 checkpoint 中的旧决策值。"""
+def test_agent_writes_every_legal_structured_intent(monkeypatch, intent, expected_route):
+    """模型给出的每一种意图都由后端映射覆盖 checkpoint 中的旧决策值。"""
     async def fake_invoke(**kwargs):
-        return nodes.RouteQuery(route=route)
+        return nodes.AgentIntentDecision(
+            intent=intent,
+            context_hint=(
+                "sales.csv" if intent == "switch_analysis_context" else None
+            ),
+        )
 
     monkeypatch.setattr(nodes, "ainvoke_structured", fake_invoke)
     result = asyncio.run(
         nodes.agent_node(
-            _state(route_decision="postprocess"),
+            _state(
+                route_decision="postprocess",
+                analysis_context={
+                    "analysis_context_id": "ctx-1",
+                    "latest_report_message_id": 3,
+                },
+            ),
             object(),
         )
     )
 
-    assert result["route_decision"] == route
+    assert result["route_decision"] == expected_route
 
 
 def test_agent_deterministic_and_failure_routes_overwrite_old_state(monkeypatch):

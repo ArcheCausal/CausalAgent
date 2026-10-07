@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from config.checkpoint_settings import CheckpointPostgresConfig
+from config.database_settings import DatabaseConfig, database_settings
 
 # 计算项目根目录
 # __file__ -> D:/.../CausalAgent/config/settings.py
@@ -35,7 +36,7 @@ class AppConfig:
     - 本地开发：通过项目根目录的 .env 文件（由 python-dotenv 自动加载）
     
     """
-    def __init__(self):
+    def __init__(self, *, database_config: DatabaseConfig | None = None):
         """
         初始化配置类。
         所有配置都从环境变量加载（本地开发通过.env文件自动加载到环境变量）
@@ -49,65 +50,34 @@ class AppConfig:
         self.BASE_URL = self._get_config("BASE_URL")
         self.MODEL = self._get_config("MODEL")
 
-        # 数据库配置。MYSQL_HOST 作为历史兼容项，默认等价于写库地址。
-        self.MYSQL_HOST = self._get_config("MYSQL_HOST", required=False)
-        self.MYSQL_WRITE_HOST = self._get_config(
+        # 独立的数据库配置仍以相同字段暴露，兼容现有 App/Admin/Worker 调用方。
+        if database_config is None:
+            database_config = DatabaseConfig.from_env()
+        for name in (
+            "MYSQL_HOST",
             "MYSQL_WRITE_HOST",
-            required=False,
-            default=self.MYSQL_HOST
-        )
-        if not self.MYSQL_WRITE_HOST:
-            raise ValueError("配置错误: 缺少必需的环境变量 'MYSQL_HOST' 或 'MYSQL_WRITE_HOST'。")
-        self.MYSQL_HOST = self.MYSQL_WRITE_HOST
-        self.MYSQL_READ_HOSTS = self._parse_csv_config(
-            self._get_config("MYSQL_READ_HOSTS", required=False, default="")
-        )
-        self.MYSQL_PORT = self._get_int_config("MYSQL_PORT", default=3306)
-        self.MYSQL_USER = self._get_config("MYSQL_USER", required=False, default=None)
-        self.MYSQL_PASSWORD = self._get_config("MYSQL_PASSWORD", required=False, default=None)
-        self.MYSQL_WRITE_USER = self._get_config(
+            "MYSQL_READ_HOSTS",
+            "MYSQL_PORT",
+            "MYSQL_USER",
+            "MYSQL_PASSWORD",
             "MYSQL_WRITE_USER",
-            required=False,
-            default=self.MYSQL_USER
-        )
-        self.MYSQL_WRITE_PASSWORD = self._get_config(
             "MYSQL_WRITE_PASSWORD",
-            required=False,
-            default=self.MYSQL_PASSWORD
-        )
-        self.MYSQL_READ_USER = self._get_config(
             "MYSQL_READ_USER",
-            required=False,
-            default=self.MYSQL_USER
-        )
-        self.MYSQL_READ_PASSWORD = self._get_config(
             "MYSQL_READ_PASSWORD",
-            required=False,
-            default=self.MYSQL_PASSWORD
-        )
-        self.MYSQL_REPLICA_STATUS_USER = self._get_config(
             "MYSQL_REPLICA_STATUS_USER",
-            required=False,
-            default=None
-        )
-        self.MYSQL_REPLICA_STATUS_PASSWORD = self._get_config(
             "MYSQL_REPLICA_STATUS_PASSWORD",
-            required=False,
-            default=None
-        )
-        missing_database_credentials = [
-            name
-            for name, value in {
-                "MYSQL_WRITE_USER 或 MYSQL_USER": self.MYSQL_WRITE_USER,
-                "MYSQL_WRITE_PASSWORD 或 MYSQL_PASSWORD": self.MYSQL_WRITE_PASSWORD,
-                "MYSQL_READ_USER 或 MYSQL_USER": self.MYSQL_READ_USER,
-                "MYSQL_READ_PASSWORD 或 MYSQL_PASSWORD": self.MYSQL_READ_PASSWORD,
-            }.items()
-            if not value
-        ]
-        if missing_database_credentials:
-            raise ValueError(f"配置错误: 缺少数据库账号配置 {missing_database_credentials}")
-        self.MYSQL_DATABASE = self._get_config("MYSQL_DATABASE")
+            "MYSQL_DATABASE",
+            "MYSQL_POOL_SIZE_WRITE",
+            "MYSQL_POOL_SIZE_READ",
+            "MYSQL_CONNECT_TIMEOUT_SECONDS",
+            "MYSQL_POOL_ACQUIRE_TIMEOUT_SECONDS",
+            "MYSQL_POOL_ACQUIRE_RETRY_MS",
+            "MYSQL_REPLICA_STATUS_CACHE_SECONDS",
+            "MYSQL_REPLICA_MAX_LAG_SECONDS",
+            "MYSQL_QUERY_WARN_MS",
+        ):
+            setattr(self, name, getattr(database_config, name))
+
         checkpoint_postgres = CheckpointPostgresConfig.from_env()
         self.CHECKPOINT_POSTGRES_HOST = checkpoint_postgres.host
         self.CHECKPOINT_POSTGRES_PORT = checkpoint_postgres.port
@@ -117,29 +87,6 @@ class AppConfig:
         self.CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS = checkpoint_postgres.connect_timeout_seconds
         self.CHECKPOINT_POSTGRES_POOL_MIN_SIZE = checkpoint_postgres.pool_min_size
         self.CHECKPOINT_POSTGRES_POOL_MAX_SIZE = checkpoint_postgres.pool_max_size
-        self.MYSQL_POOL_SIZE_WRITE = self._get_int_config("MYSQL_POOL_SIZE_WRITE", default=5)
-        self.MYSQL_POOL_SIZE_READ = self._get_int_config("MYSQL_POOL_SIZE_READ", default=5)
-        self.MYSQL_CONNECT_TIMEOUT_SECONDS = self._get_int_config(
-            "MYSQL_CONNECT_TIMEOUT_SECONDS",
-            default=5,
-        )
-        self.MYSQL_POOL_ACQUIRE_TIMEOUT_SECONDS = self._get_float_config(
-            "MYSQL_POOL_ACQUIRE_TIMEOUT_SECONDS",
-            default=3.0,
-        )
-        self.MYSQL_POOL_ACQUIRE_RETRY_MS = self._get_int_config(
-            "MYSQL_POOL_ACQUIRE_RETRY_MS",
-            default=50,
-        )
-        self.MYSQL_REPLICA_STATUS_CACHE_SECONDS = self._get_float_config(
-            "MYSQL_REPLICA_STATUS_CACHE_SECONDS",
-            default=2.0,
-        )
-        self.MYSQL_REPLICA_MAX_LAG_SECONDS = self._get_int_config(
-            "MYSQL_REPLICA_MAX_LAG_SECONDS",
-            default=2
-        )
-        self.MYSQL_QUERY_WARN_MS = self._get_int_config("MYSQL_QUERY_WARN_MS", default=500)
         self.DB_INSPECTION_QUERY_TIMEOUT_MS = self._get_int_config(
             "DB_INSPECTION_QUERY_TIMEOUT_MS",
             default=3000,
@@ -180,6 +127,31 @@ class AppConfig:
             "DB_MONITOR_INTEGRITY_INTERVAL_SECONDS",
             default=86400,
         )
+        self.CHAT_FRONTEND_DIST_DIR = self._get_config(
+            "CHAT_FRONTEND_DIST_DIR",
+            required=False,
+            default="",
+        )
+        self.CHAT_VITE_DEV_SERVER_URL = self._get_config(
+            "CHAT_VITE_DEV_SERVER_URL",
+            required=False,
+            default="",
+        ).rstrip("/")
+        self.WEBSITE_FRONTEND_DIST_DIR = self._get_config(
+            "WEBSITE_FRONTEND_DIST_DIR",
+            required=False,
+            default="",
+        )
+        self.WEBSITE_VITE_DEV_SERVER_URL = self._get_config(
+            "WEBSITE_VITE_DEV_SERVER_URL",
+            required=False,
+            default="",
+        ).rstrip("/")
+        self.RAG_EVAL_FRONTEND_DIST_DIR = self._get_config(
+            "RAG_EVAL_FRONTEND_DIST_DIR",
+            required=False,
+            default="",
+        )
         self.ADMIN_VITE_DEV_SERVER_URL = self._get_config(
             "ADMIN_VITE_DEV_SERVER_URL",
             required=False,
@@ -203,12 +175,6 @@ class AppConfig:
             default=5,
         )
         positive_database_values = {
-            "MYSQL_POOL_SIZE_WRITE": self.MYSQL_POOL_SIZE_WRITE,
-            "MYSQL_POOL_SIZE_READ": self.MYSQL_POOL_SIZE_READ,
-            "MYSQL_CONNECT_TIMEOUT_SECONDS": self.MYSQL_CONNECT_TIMEOUT_SECONDS,
-            "MYSQL_POOL_ACQUIRE_TIMEOUT_SECONDS": self.MYSQL_POOL_ACQUIRE_TIMEOUT_SECONDS,
-            "MYSQL_POOL_ACQUIRE_RETRY_MS": self.MYSQL_POOL_ACQUIRE_RETRY_MS,
-            "MYSQL_REPLICA_STATUS_CACHE_SECONDS": self.MYSQL_REPLICA_STATUS_CACHE_SECONDS,
             "CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS": self.CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS,
             "CHECKPOINT_POSTGRES_POOL_MIN_SIZE": self.CHECKPOINT_POSTGRES_POOL_MIN_SIZE,
             "CHECKPOINT_POSTGRES_POOL_MAX_SIZE": self.CHECKPOINT_POSTGRES_POOL_MAX_SIZE,
@@ -221,10 +187,6 @@ class AppConfig:
                 raise ValueError(f"配置错误: {name} 必须大于 0。")
         if self.ADMIN_BATCH_MAX_TARGETS > 50:
             raise ValueError("配置错误: ADMIN_BATCH_MAX_TARGETS 不能超过 50。")
-        if self.MYSQL_POOL_SIZE_WRITE > 32 or self.MYSQL_POOL_SIZE_READ > 32:
-            raise ValueError(
-                "配置错误: MySQL Connector/Python 单连接池大小不能超过 32。"
-            )
         checkpoint_postgres.validate()
         if self.DB_INSPECTION_QUERY_TIMEOUT_MS <= 0:
             raise ValueError("配置错误: DB_INSPECTION_QUERY_TIMEOUT_MS 必须大于 0。")
@@ -362,6 +324,13 @@ class AppConfig:
             default="http://export.arxiv.org/api/query",
         ).rstrip("/")
 
+        # 浏览器访问 Grafana 的地址：开发默认本机映射端口，预发由网关反代到 /grafana/。
+        self.GRAFANA_PUBLIC_URL = self._get_config(
+            "GRAFANA_PUBLIC_URL",
+            required=False,
+            default="http://127.0.0.1:3000/grafana/",
+        )
+
         # 初始化完成后，自动设置 LangSmith
         self._setup_langsmith()
 
@@ -464,7 +433,7 @@ class AppConfig:
 # 如果失败，settings 将为 None，依赖此配置的服务将无法启动。
 settings = None
 try:
-    settings = AppConfig()
+    settings = AppConfig(database_config=database_settings)
     logging.info("应用配置已从环境变量成功加载。")
 except (FileNotFoundError, ValueError) as e:
     logging.critical(f"配置加载失败，应用无法启动: {e}")

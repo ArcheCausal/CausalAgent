@@ -21,6 +21,7 @@ _CONTEXT_FIELDS = frozenset(
         "user_id",
         "session_id",
         "job_id",
+        "invocation_id",
         "worker_slot",
         "node",
         "tool",
@@ -58,6 +59,7 @@ REASON_CODES = frozenset(
         "config_read_failed",
         "connection_unavailable",
         "connection",
+        "control_capacity_timeout",
         "csrf_invalid",
         "csrf_missing",
         "cache_write_failed",
@@ -75,6 +77,7 @@ REASON_CODES = frozenset(
         "invalid_schema",
         "invalid_result",
         "invalid_runtime_context",
+        "invalid_response",
         "knowledge_base_missing",
         "lock_operation_failed",
         "lock_release_failed",
@@ -97,6 +100,7 @@ REASON_CODES = frozenset(
         "replica_lag",
         "replica_status_unavailable",
         "replica_unhealthy",
+        "response_timeout",
         "retry_exhausted",
         "runtime_failed",
         "snapshot_publish_failed",
@@ -160,6 +164,11 @@ METHOD = DetailRule(
 STATUS_CODE = DetailRule((int,), minimum=100, maximum=599)
 PHASES = DetailRule((list, tuple), max_items=16, max_bytes=1024)
 SHA256 = DetailRule((str,), pattern=re.compile(r"^[a-f0-9]{64}$"), max_bytes=64)
+STRUCTURED_LOCATION = DetailRule(
+    (str,),
+    pattern=re.compile(r"^[A-Za-z0-9_.-]{1,64}$"),
+    max_bytes=64,
+)
 JOB_STATUS = DetailRule(
     (str,),
     choices=frozenset({
@@ -199,6 +208,26 @@ RESULT_KIND = DetailRule(
     choices=frozenset({"structured_result", "other_result"}),
     max_bytes=32,
 )
+ERROR_CATEGORY = DetailRule(
+    (str,),
+    choices=frozenset(
+        {
+            "provider_error",
+            "protocol_error",
+            "checkpoint_error",
+            "runtime_contract_error",
+            "internal_error",
+        }
+    ),
+    max_bytes=32,
+)
+
+# 公开预览统计的固定取值：页面标识和示例标识由前端静态数据与后端接口共同使用，
+# 目录是唯一来源，客户端只能上报这里登记过的值。
+ANALYTICS_PAGE_IDS = frozenset({"home"})
+ANALYTICS_DEMO_KEYS = frozenset({"overview", "report", "graph"})
+PAGE_ID = DetailRule((str,), choices=ANALYTICS_PAGE_IDS, max_bytes=32)
+DEMO_KEY = DetailRule((str,), choices=ANALYTICS_DEMO_KEYS, max_bytes=32)
 
 
 def _details(**rules: DetailRule) -> Mapping[str, DetailRule]:
@@ -395,6 +424,7 @@ _events: dict[str, EventSpec] = {
         "分析任务执行失败",
         failure_phase=TOKEN,
         reason_code=REASON,
+        error_category=ERROR_CATEGORY,
         attempt=POSITIVE_COUNT,
         duration_ms=DURATION,
     ),
@@ -434,6 +464,12 @@ _events: dict[str, EventSpec] = {
         failure_kind=TOKEN,
         final_attempt=POSITIVE_COUNT,
         fallback=TOKEN,
+        cause_code=TOKEN,
+        schema_name=TEXT,
+        structured_attempts=POSITIVE_COUNT,
+        validation_error_count=COUNT,
+        validation_first_type=TOKEN,
+        validation_first_loc=STRUCTURED_LOCATION,
     ),
     "job.postprocess.degraded": _spec(
         logging.WARNING,
@@ -502,6 +538,8 @@ _events: dict[str, EventSpec] = {
         logging.INFO,
         "dependency",
         "MCP 工具调用完成",
+        capability=TOKEN,
+        retry_ordinal=COUNT,
         duration_ms=DURATION,
         input_bytes=COUNT,
         result_kind=RESULT_KIND,
@@ -510,9 +548,106 @@ _events: dict[str, EventSpec] = {
         logging.ERROR,
         "dependency",
         "MCP 工具调用失败",
+        capability=TOKEN,
+        retry_ordinal=COUNT,
         duration_ms=DURATION,
         input_bytes=COUNT,
         reason_code=REASON,
+    ),
+    "mcp.tool.canceled": _spec(
+        logging.INFO,
+        "dependency",
+        "MCP 工具调用已取消",
+        capability=TOKEN,
+        retry_ordinal=COUNT,
+        duration_ms=DURATION,
+        reason_code=REASON,
+    ),
+    "mcp.tool.slow": _spec(
+        logging.WARNING,
+        "dependency",
+        "MCP 工具调用持续时间过长",
+        capability=TOKEN,
+        duration_ms=DURATION,
+        timeout_seconds=COUNT,
+    ),
+    "mcp.request.received": _spec(
+        logging.INFO,
+        "dependency",
+        "MCP 请求已收到",
+        capability=TOKEN,
+        retry_ordinal=COUNT,
+    ),
+    "mcp.request.rejected": _spec(
+        logging.WARNING,
+        "dependency",
+        "MCP 请求已拒绝",
+        capability=TOKEN,
+        reason_code=REASON,
+    ),
+    "mcp.request.accepted": _spec(
+        logging.INFO,
+        "dependency",
+        "MCP 请求已接受",
+        capability=TOKEN,
+        retry_ordinal=COUNT,
+        queue_wait_ms=DURATION,
+        timeout_seconds=COUNT,
+    ),
+    "mcp.cancel.finished": _spec(
+        logging.INFO,
+        "dependency",
+        "MCP 取消请求已处理",
+        capability=TOKEN,
+        cancellation_status=TOKEN,
+    ),
+    "mcp.client.call.started": _spec(
+        logging.INFO,
+        "dependency",
+        "Worker 已发起 MCP 调用",
+        capability=TOKEN,
+        retry_ordinal=COUNT,
+    ),
+    "mcp.client.cancel.requested": _spec(
+        logging.INFO,
+        "dependency",
+        "Worker 已请求取消 MCP 调用",
+        capability=TOKEN,
+        retry_ordinal=COUNT,
+    ),
+    "mcp.client.cancel.finished": _spec(
+        logging.INFO,
+        "dependency",
+        "Worker MCP 取消请求已完成",
+        capability=TOKEN,
+        cancellation_status=TOKEN,
+    ),
+    "mcp.client.cancel.failed": _spec(
+        logging.WARNING,
+        "dependency",
+        "Worker MCP 取消请求失败",
+        capability=TOKEN,
+        reason_code=REASON,
+    ),
+    "mcp.capacity.rejected": _spec(
+        logging.WARNING,
+        "dependency",
+        "MCP 请求因容量限制被拒绝",
+        reason_code=REASON,
+        retry_after_seconds=COUNT,
+    ),
+    "mcp.process.recycled": _spec(
+        logging.WARNING,
+        "dependency",
+        "MCP 算法进程池已回收",
+        reason_code=REASON,
+    ),
+    "mcp.client.reconnected": _spec(
+        logging.INFO,
+        "dependency",
+        "MCP 客户端成员已重连",
+        generation=COUNT,
+        pool_lane=TOKEN,
     ),
     "mcp.transport.failed": _spec(
         logging.WARNING,
@@ -569,36 +704,75 @@ _events: dict[str, EventSpec] = {
         downtime_ms=DURATION,
         failure_count=POSITIVE_COUNT,
     ),
-    "checkpoint.cleanup.succeeded": _spec(
+    "agent.persistence.cleanup.succeeded": _spec(
         logging.INFO,
         "lifecycle",
-        "Checkpoint cleanup 已完成",
+        "Agent 持久化清理已完成",
+        task_type=TOKEN,
         outbox_id=POSITIVE_COUNT,
         attempt=POSITIVE_COUNT,
         duration_ms=DURATION,
+        deleted_count=COUNT,
     ),
-    "checkpoint.cleanup.failed": _spec(
+    "agent.persistence.cleanup.failed": _spec(
         logging.ERROR,
         "dependency",
-        "Checkpoint cleanup 执行失败",
+        "Agent 持久化清理执行失败",
+        task_type=TOKEN,
         outbox_id=POSITIVE_COUNT,
         attempt=POSITIVE_COUNT,
         duration_ms=DURATION,
         reason_code=REASON,
     ),
-    "checkpoint.cleanup.runtime.degraded": _spec(
+    "agent.persistence.cleanup.runtime.degraded": _spec(
         logging.WARNING,
         "dependency",
-        "Checkpoint cleanup 运行循环已降级",
+        "Agent 持久化清理运行循环已降级",
         reason_code=REASON,
         suppressed_count=COUNT,
     ),
-    "checkpoint.cleanup.runtime.recovered": _spec(
+    "agent.persistence.cleanup.runtime.recovered": _spec(
         logging.INFO,
         "dependency",
-        "Checkpoint cleanup 运行循环已恢复",
+        "Agent 持久化清理运行循环已恢复",
         downtime_ms=DURATION,
         failure_count=POSITIVE_COUNT,
+    ),
+    "analytics.public_preview.view": _spec(
+        logging.INFO,
+        "request",
+        "公开预览已展示",
+        visitor_hash=SHA256,
+        page=PAGE_ID,
+        demo_key=DEMO_KEY,
+    ),
+    "analytics.public_preview.demo_open": _spec(
+        logging.INFO,
+        "request",
+        "公开预览示例已打开",
+        visitor_hash=SHA256,
+        page=PAGE_ID,
+        demo_key=DEMO_KEY,
+    ),
+    "analytics.public_preview.send_click": _spec(
+        logging.INFO,
+        "request",
+        "未登录访客点击发送",
+        visitor_hash=SHA256,
+        page=PAGE_ID,
+        demo_key=DEMO_KEY,
+    ),
+    "analytics.auth.panel_open": _spec(
+        logging.INFO,
+        "request",
+        "登录面板已打开",
+        visitor_hash=SHA256,
+        page=PAGE_ID,
+    ),
+    "analytics.auth.login_success": _spec(
+        logging.INFO,
+        "request",
+        "用户登录成功",
     ),
 }
 
@@ -695,6 +869,8 @@ def validate_event_details(
 
 
 __all__ = [
+    "ANALYTICS_DEMO_KEYS",
+    "ANALYTICS_PAGE_IDS",
     "CONTRACT_VIOLATIONS",
     "DetailRule",
     "EVENT_SPECS",

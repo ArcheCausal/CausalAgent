@@ -8,7 +8,7 @@ from typing import Any
 from langchain_core.messages import AIMessage
 
 from Agent.causal_agent.web_search_node import WEB_SEARCH_MAX_RESULTS
-from app.chat.response_storage import render_summary_for_display
+from Agent.Report.document import ReportDocument
 from observability.logging_runtime import log_context, log_event
 
 
@@ -25,8 +25,26 @@ def _extract_references(web_search_result: Any) -> list[dict]:
     ]
 
 
+def _report_document_payload(document: Any) -> dict[str, Any] | None:
+    """把报告文档模型或等价 JSON 转成公开的 structured 报告载荷。"""
+    if isinstance(document, ReportDocument):
+        payload = document.model_dump(mode="json")
+    elif isinstance(document, dict):
+        payload = document
+    else:
+        return None
+    if not isinstance(payload, dict) or "report_id" not in payload:
+        return None
+    return {
+        "type": "report",
+        "layout": "report",
+        "render_mode": "structured",
+        "document": payload,
+    }
+
+
 def process_final_result(final_state_data: dict[str, Any]) -> dict[str, Any]:
-    """按消息、报告和因果图优先级生成稳定的最终响应。"""
+    """按消息和结构化报告文档优先级生成稳定的最终响应。"""
     messages = final_state_data.get("messages", [])
     if messages:
         last_message = messages[-1]
@@ -35,50 +53,11 @@ def process_final_result(final_state_data: dict[str, Any]) -> dict[str, Any]:
             if message_name in {"normal_chat", "inquiry_answer"}:
                 return {"type": "text", "summary": last_message.content}
 
-            if message_name == "report" and final_state_data.get("final_report"):
-                result: dict[str, Any] = {
-                    "summary": final_state_data["final_report"],
-                    "layout": "report",
-                }
-                analysis_data = final_state_data.get("causal_analysis_result")
-                if isinstance(analysis_data, dict) and analysis_data.get("success"):
-                    original_graph = analysis_data.get("data")
-                    postprocess_result = final_state_data.get("postprocess_result") or {}
-                    revised_graph = postprocess_result.get("revised_graph")
-                    has_valid_revised_graph = (
-                        isinstance(revised_graph, dict)
-                        and isinstance(revised_graph.get("nodes"), list)
-                        and isinstance(revised_graph.get("edges"), list)
-                        and not postprocess_result.get("error")
-                    )
-                    result["type"] = "causal_graph"
-                    result["data"] = (
-                        revised_graph if has_valid_revised_graph else original_graph
-                    )
-                    result["graph_source"] = (
-                        "postprocessed" if has_valid_revised_graph else "original"
-                    )
-                    result["revision_summary"] = postprocess_result.get(
-                        "revision_summary",
-                        "",
-                    )
-                result.setdefault("type", "text")
-                visualization_mapping = final_state_data.get("visualization_mapping")
-                if visualization_mapping:
-                    result["raw_summary"] = result["summary"]
-                    result["visualization_mapping"] = visualization_mapping
-                    result["summary"] = render_summary_for_display(
-                        result["summary"],
-                        visualization_mapping,
-                    )
-                references = _extract_references(final_state_data.get("web_search_result"))
-                if references:
-                    result["references"] = references
-                return result
-
-    final_report = final_state_data.get("final_report")
-    if final_report:
-        result = {"type": "text", "summary": final_report, "layout": "report"}
+    result = _report_document_payload(final_state_data.get("report_document"))
+    if result is not None:
+        finalization_status = final_state_data.get("finalization_status")
+        if finalization_status in {"valid", "degraded"}:
+            result["finalization_status"] = finalization_status
         references = _extract_references(final_state_data.get("web_search_result"))
         if references:
             result["references"] = references

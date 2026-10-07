@@ -1,0 +1,35 @@
+/* CausalAgent 设计系统：间距与版式层
+
+   间距基准是 4px 和 8px 的倍数。元素间距由容器的 gap 提供，不用外边距堆叠。
+   阅读宽度取自原型页面各段文字的实际最大宽度。 */
+@layer ca-tokens {
+  :root {
+    --ca-space-4: 4px;
+    --ca-space-8: 8px;
+    --ca-space-12: 12px;
+    --ca-space-16: 16px;
+    --ca-space-24: 24px;
+    --ca-space-32: 32px;
+    --ca-space-40: 40px;
+    --ca-space-48: 48px;
+    --ca-space-56: 56px;
+    --ca-space-64: 64px;
+    --ca-space-80: 80px;
+    --ca-space-112: 112px;
+    --ca-space-128: 128px;
+    --ca-space-160: 160px;
+
+    --ca-page-max-width: 1200px;
+    --ca-section-gap: 80px;
+    --ca-card-padding: 24px;
+    --ca-element-gap: 8px;
+    --ca-nav-height: 72px;
+    /* 应用端侧栏宽度，取自原型分析台左侧会话栏 */
+    --ca-rail-width: 264px;
+
+    --ca-measure-narrow: 46ch;
+    --ca-measure-body: 52ch;
+    --ca-measure-wide: 62ch;
+    --ca-measure-lede: 720px;
+  }
+}

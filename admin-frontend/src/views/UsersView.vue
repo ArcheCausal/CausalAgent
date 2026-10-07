@@ -2,8 +2,16 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ApiError, adminApi } from '../api'
+import {
+  CaBadge,
+  CaButton,
+  CaCard,
+  CaErrorState,
+  CaPageHeader,
+} from '@causalagent/design-system'
 import CursorPager from '../components/CursorPager.vue'
 import { formatDate } from '../lib/dashboard'
+import { statusTone } from '../lib/statusTone'
 import type {
   AdminOperationResult,
   AdminUser,
@@ -46,13 +54,13 @@ const deleteConfirmation = ref('')
 const deleteReauthPassword = ref('')
 const deleteIdempotencyKey = ref('')
 const deleteError = ref('')
-const checkpointCleanupResult = ref<AdminOperationResult | null>(null)
-const CHECKPOINT_CLEANUP_STORAGE_KEY = 'causalagent.admin.last-checkpoint-cleanup'
+const persistenceCleanupResult = ref<AdminOperationResult | null>(null)
+const PERSISTENCE_CLEANUP_STORAGE_KEY = 'causalagent.admin.last-persistence-cleanup'
 
 /** 尝试保留最近一次删除进度；浏览器禁用存储时不影响已提交的删除。 */
-function persistCheckpointCleanupResult(result: AdminOperationResult): void {
+function persistPersistenceCleanupResult(result: AdminOperationResult): void {
   try {
-    window.sessionStorage.setItem(CHECKPOINT_CLEANUP_STORAGE_KEY, JSON.stringify(result))
+    window.sessionStorage.setItem(PERSISTENCE_CLEANUP_STORAGE_KEY, JSON.stringify(result))
   } catch {
     // 页面内状态仍然可见，存储不可用不应覆盖成功结果。
   }
@@ -127,31 +135,34 @@ function newIdempotencyKey(): string {
 }
 
 /** 轮询跨库 cleanup 操作，避免把 MySQL 已完成误报成 PostgreSQL 已完成。 */
-async function waitForCheckpointCleanup(operationId: string): Promise<void> {
+async function waitForPersistenceCleanup(operationId: string): Promise<void> {
   for (let attempt = 0; attempt < 30; attempt += 1) {
     await new Promise(resolve => window.setTimeout(resolve, 1000))
     try {
       const operation = await adminApi.operation(operationId)
-      checkpointCleanupResult.value = operation
-      persistCheckpointCleanupResult(operation)
+      persistenceCleanupResult.value = operation
+      persistPersistenceCleanupResult(operation)
       if (operation.status === 'succeeded') {
-        ElMessage.success('用户删除及 checkpoint 清理已完成')
+        ElMessage.success('用户删除及 PostgreSQL 持久化数据清理已完成')
         return
       }
       if (operation.status === 'failed') {
-        ElMessage.error('用户业务数据已删除，但 checkpoint 清理失败，请查看操作状态')
+        ElMessage.error('用户业务数据已删除，但 PostgreSQL 清理失败，请查看操作状态')
         return
       }
     } catch {
       // 短暂读取失败不改变已提交的删除结果，下一轮继续查询。
     }
   }
-  ElMessage.warning('用户业务数据已删除，checkpoint 仍在后台清理')
+  ElMessage.warning('用户业务数据已删除，PostgreSQL 持久化数据仍在后台清理')
 }
 
 /** 把 cleanup 聚合状态转换成不含内部异常的管理员文案。 */
-function checkpointCleanupStatusLabel(result: AdminOperationResult | null): string {
-  const status = result?.checkpoint_cleanup?.status || result?.status
+function persistenceCleanupStatusLabel(
+  result: AdminOperationResult | null,
+  task: 'checkpoint_cleanup' | 'user_memory_cleanup',
+): string {
+  const status = result?.[task]?.status || result?.status
   if (status === 'succeeded') return '成功'
   if (status === 'failed') return '失败'
   if (status === 'running' || status === 'pending') return '清理中'
@@ -276,11 +287,11 @@ async function submitDelete(): Promise<void> {
       },
       deleteIdempotencyKey.value,
     )
-    checkpointCleanupResult.value = result
-    persistCheckpointCleanupResult(result)
+    persistenceCleanupResult.value = result
+    persistPersistenceCleanupResult(result)
     if (result.status === 'running') {
-      ElMessage.info('用户业务数据已删除，checkpoint 正在后台清理')
-      void waitForCheckpointCleanup(result.operation_id)
+      ElMessage.info('用户业务数据已删除，PostgreSQL 持久化数据正在后台清理')
+      void waitForPersistenceCleanup(result.operation_id)
     } else {
       ElMessage.success(`用户已删除${result.replayed ? '（幂等重放）' : ''}`)
     }
@@ -302,16 +313,16 @@ async function submitDelete(): Promise<void> {
 onMounted(() => {
   let stored: string | null = null
   try {
-    stored = window.sessionStorage.getItem(CHECKPOINT_CLEANUP_STORAGE_KEY)
+    stored = window.sessionStorage.getItem(PERSISTENCE_CLEANUP_STORAGE_KEY)
   } catch {
     stored = null
   }
   if (stored) {
     try {
-      checkpointCleanupResult.value = JSON.parse(stored) as AdminOperationResult
+      persistenceCleanupResult.value = JSON.parse(stored) as AdminOperationResult
     } catch {
       try {
-        window.sessionStorage.removeItem(CHECKPOINT_CLEANUP_STORAGE_KEY)
+        window.sessionStorage.removeItem(PERSISTENCE_CLEANUP_STORAGE_KEY)
       } catch {
         // 忽略不可用的浏览器存储。
       }
@@ -322,12 +333,8 @@ onMounted(() => {
 </script>
 
 <template>
-  <section>
-    <header class="page-header">
-      <div>
-        <h1>用户与权限管理</h1>
-      </div>
-    </header>
+  <section class="admin-page">
+    <CaPageHeader title="用户与权限管理" :level="1" size="md" />
 
     <section class="filter-bar">
       <el-input v-model="q" clearable placeholder="用户名" @keyup.enter="loadUsers(true)" />
@@ -339,70 +346,81 @@ onMounted(() => {
         <el-option label="已启用" value="true" />
         <el-option label="已禁用" value="false" />
       </el-select>
-      <el-button type="primary" :loading="loading" @click="loadUsers(true)">筛选</el-button>
+      <CaButton variant="primary" :loading="loading" @click="loadUsers(true)">筛选</CaButton>
     </section>
 
-    <el-alert v-if="error" class="page-notice" type="error" :closable="false" :title="error" />
+    <CaErrorState v-if="error" class="page-notice" title="用户读取失败" :description="error" />
 
-    <section v-if="checkpointCleanupResult" class="panel checkpoint-cleanup-result">
+    <CaCard
+      v-if="persistenceCleanupResult"
+      as="section"
+      class="panel persistence-cleanup-result"
+      variant="outline"
+      padding="md"
+    >
       <div class="panel-header">
         <div>
-          <h2>Checkpoint 清理进度</h2>
-          <p>用户业务数据已删除；PostgreSQL checkpoint 由后台 worker 异步清理。</p>
+          <h2>PostgreSQL 持久化数据清理进度</h2>
+          <p>用户业务数据已删除；父子图 checkpoint 和长期记忆 Store 由后台 worker 异步清理。</p>
         </div>
-        <el-tag
-          :type="checkpointCleanupStatusLabel(checkpointCleanupResult) === '成功' ? 'success' : checkpointCleanupStatusLabel(checkpointCleanupResult) === '失败' ? 'danger' : 'warning'"
-          round
+        <CaBadge
+          :tone="persistenceCleanupStatusLabel(persistenceCleanupResult, 'checkpoint_cleanup') === '失败'
+            || persistenceCleanupStatusLabel(persistenceCleanupResult, 'user_memory_cleanup') === '失败' ? 'strong' : 'neutral'"
         >
-          {{ checkpointCleanupStatusLabel(checkpointCleanupResult) }}
-        </el-tag>
+          {{ persistenceCleanupResult.status === 'succeeded' ? '成功' : persistenceCleanupResult.status === 'failed' ? '失败' : '清理中' }}
+        </CaBadge>
       </div>
       <div class="inline-metrics four-columns">
         <div><span>MySQL 用户数据</span><strong>已删除</strong></div>
-        <div><span>PostgreSQL checkpoint</span><strong>{{ checkpointCleanupStatusLabel(checkpointCleanupResult) }}</strong></div>
-        <div><span>总任务数</span><strong>{{ checkpointCleanupResult.checkpoint_cleanup?.total ?? 0 }}</strong></div>
-        <div><span>成功数</span><strong>{{ checkpointCleanupResult.checkpoint_cleanup?.succeeded ?? 0 }}</strong></div>
-        <div><span>失败数</span><strong>{{ checkpointCleanupResult.checkpoint_cleanup?.failed ?? 0 }}</strong></div>
-        <div><span>待处理数</span><strong>{{ checkpointCleanupResult.checkpoint_cleanup?.pending ?? 0 }}</strong></div>
-        <div><span>Operation ID</span><strong class="break-anywhere">{{ checkpointCleanupResult.operation_id }}</strong></div>
+        <div><span>父子图 checkpoint</span><strong>{{ persistenceCleanupStatusLabel(persistenceCleanupResult, 'checkpoint_cleanup') }}</strong></div>
+        <div><span>长期记忆 Store</span><strong>{{ persistenceCleanupStatusLabel(persistenceCleanupResult, 'user_memory_cleanup') }}</strong></div>
+        <div><span>Checkpoint 任务（成功/总数）</span><strong>{{ persistenceCleanupResult.checkpoint_cleanup?.succeeded ?? 0 }} / {{ persistenceCleanupResult.checkpoint_cleanup?.total ?? 0 }}</strong></div>
+        <div><span>记忆清理任务（成功/总数）</span><strong>{{ persistenceCleanupResult.user_memory_cleanup?.succeeded ?? 0 }} / {{ persistenceCleanupResult.user_memory_cleanup?.total ?? 0 }}</strong></div>
+        <div><span>失败任务数</span><strong>{{ (persistenceCleanupResult.checkpoint_cleanup?.failed ?? 0) + (persistenceCleanupResult.user_memory_cleanup?.failed ?? 0) }}</strong></div>
+        <div><span>待处理任务数</span><strong>{{ (persistenceCleanupResult.checkpoint_cleanup?.pending ?? 0) + (persistenceCleanupResult.user_memory_cleanup?.pending ?? 0) }}</strong></div>
+        <div><span>Operation ID</span><strong class="break-anywhere">{{ persistenceCleanupResult.operation_id }}</strong></div>
       </div>
       <router-link
-        class="checkpoint-cleanup-link"
-        :to="{ path: '/database', query: { view: 'outbox', operation_id: checkpointCleanupResult.operation_id } }"
+        class="persistence-cleanup-link"
+        :to="{ path: '/database', query: { view: 'outbox', operation_id: persistenceCleanupResult.operation_id } }"
       >
         查看全局清理状态
       </router-link>
-    </section>
+    </CaCard>
 
-    <section class="panel table-panel">
+    <CaCard as="section" class="panel table-panel" variant="outline" padding="md">
       <div class="controlled-action-bar">
         <span>已选择 {{ selectedUsers.length }} / 20 个用户</span>
-        <el-button
+        <CaButton
+          variant="secondary"
           :disabled="!selectedUsers.length"
           @click="openOperation('set_active', selectedUsers, true)"
         >
           批量启用
-        </el-button>
+        </CaButton>
         <el-button
+          type="danger"
           :disabled="!selectedUsers.length"
           @click="openOperation('set_active', selectedUsers, false)"
         >
           批量禁用
         </el-button>
-        <el-button
+        <CaButton
+          variant="secondary"
           :disabled="!selectedUsers.length"
           @click="openOperation('set_role', selectedUsers, 'admin')"
         >
           批量设为管理员
-        </el-button>
-        <el-button
+        </CaButton>
+        <CaButton
+          variant="secondary"
           :disabled="!selectedUsers.length"
           @click="openOperation('set_role', selectedUsers, 'user')"
         >
           批量设为普通用户
-        </el-button>
+        </CaButton>
         <el-button
-          type="warning"
+          type="danger"
           :disabled="!selectedUsers.length"
           @click="openOperation('set_password', selectedUsers)"
         >
@@ -422,16 +440,16 @@ onMounted(() => {
         <el-table-column prop="username" label="用户名" min-width="180" />
         <el-table-column label="角色" width="120">
           <template #default="{ row }">
-            <el-tag :type="row.role === 'admin' ? 'primary' : 'info'">
+            <CaBadge :tone="statusTone(row.role === 'admin' ? 'active' : 'unknown')">
               {{ row.role === 'admin' ? '管理员' : '普通用户' }}
-            </el-tag>
+            </CaBadge>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="110">
           <template #default="{ row }">
-            <el-tag :type="row.is_active ? 'success' : 'danger'">
+            <CaBadge :tone="statusTone(row.is_active ? 'enabled' : 'disabled')">
               {{ row.is_active ? '已启用' : '已禁用' }}
-            </el-tag>
+            </CaBadge>
           </template>
         </el-table-column>
         <el-table-column label="创建时间" min-width="180">
@@ -442,22 +460,31 @@ onMounted(() => {
         </el-table-column>
         <el-table-column label="操作" width="350" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="openDetail(row)">详情</el-button>
+            <CaButton variant="quiet" size="sm" @click="openDetail(row)">详情</CaButton>
             <el-button
+              v-if="row.is_active"
               link
-              :type="row.is_active ? 'warning' : 'success'"
-              @click="openOperation('set_active', [row], !row.is_active)"
+              type="danger"
+              @click="openOperation('set_active', [row], false)"
             >
-              {{ row.is_active ? '禁用' : '启用' }}
+              禁用
             </el-button>
-            <el-button
-              link
-              type="primary"
+            <CaButton
+              v-else
+              variant="quiet"
+              size="sm"
+              @click="openOperation('set_active', [row], true)"
+            >
+              启用
+            </CaButton>
+            <CaButton
+              variant="quiet"
+              size="sm"
               @click="openOperation('set_role', [row], row.role === 'admin' ? 'user' : 'admin')"
             >
               {{ row.role === 'admin' ? '降为用户' : '升为管理员' }}
-            </el-button>
-            <el-button link type="warning" @click="openOperation('set_password', [row])">改密</el-button>
+            </CaButton>
+            <el-button link type="danger" @click="openOperation('set_password', [row])">改密</el-button>
             <el-button link type="danger" @click="openDelete(row)">删除</el-button>
           </template>
         </el-table-column>
@@ -469,7 +496,7 @@ onMounted(() => {
         @previous="previousPage"
         @next="nextPage"
       />
-    </section>
+      </CaCard>
 
     <el-drawer v-model="detailVisible" title="用户详情" size="min(520px, 100vw)">
       <div v-loading="detailLoading">
@@ -569,9 +596,23 @@ onMounted(() => {
         </el-form>
       </div>
       <template #footer>
-        <el-button @click="operationVisible = false">取消</el-button>
+        <CaButton variant="secondary" @click="operationVisible = false">取消</CaButton>
+        <CaButton
+          v-if="operationAction !== 'set_password' && !(operationAction === 'set_active' && operationValue === false)"
+          variant="primary"
+          :loading="operationSubmitting"
+          :disabled="
+            !operationPreview?.can_execute ||
+              !operationConfirmed ||
+              !reauthPassword
+          "
+          @click="submitOperation"
+        >
+          确认执行
+        </CaButton>
         <el-button
-          type="primary"
+          v-else
+          type="danger"
           :loading="operationSubmitting"
           :disabled="
             !operationPreview?.can_execute ||
@@ -589,6 +630,7 @@ onMounted(() => {
     <el-dialog v-model="deleteVisible" title="删除用户" width="min(720px, 96vw)">
       <div v-loading="deleteLoading">
         <el-alert
+          class="danger-alert"
           type="error"
           :closable="false"
           show-icon
@@ -596,7 +638,7 @@ onMounted(() => {
         />
         <el-alert
           v-if="deleteError"
-          class="dialog-error"
+          class="dialog-error danger-alert"
           type="error"
           :closable="false"
           show-icon
@@ -614,7 +656,7 @@ onMounted(() => {
           </el-descriptions>
           <el-alert
             v-if="deleteImpact.blockers.length"
-            class="page-notice"
+            class="page-notice danger-alert"
             type="error"
             :closable="false"
             :title="deleteImpact.blockers.join('；')"
@@ -651,7 +693,7 @@ onMounted(() => {
         </template>
       </div>
       <template #footer>
-        <el-button @click="deleteVisible = false">取消</el-button>
+        <CaButton variant="secondary" @click="deleteVisible = false">取消</CaButton>
         <el-button
           type="danger"
           :loading="deleteSubmitting"
@@ -674,56 +716,56 @@ onMounted(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 14px;
+  gap: var(--ca-space-8);
+  margin-bottom: var(--ca-space-12);
 }
 
 .controlled-action-bar > span {
   margin-right: auto;
-  color: #64748b;
+  color: var(--ca-text-muted);
 }
 
 .operation-preview-table,
 .impact-grid,
 .reauth-form {
-  margin-top: 16px;
+  margin-top: var(--ca-space-16);
 }
 
 .dialog-error {
-  margin-top: 12px;
+  margin-top: var(--ca-space-12);
 }
 
 .danger-confirmation-form {
   display: grid;
-  gap: 16px;
-  margin-top: 16px;
+  gap: var(--ca-space-16);
+  margin-top: var(--ca-space-16);
 }
 
 .danger-confirmation-field label {
   display: block;
-  margin-bottom: 8px;
-  color: #1f2937;
-  font-weight: 600;
+  margin-bottom: var(--ca-space-8);
+  color: var(--ca-text-default);
+  font-weight: var(--ca-weight-regular);
 }
 
 .danger-confirmation-field p {
-  margin: 6px 0 0;
-  color: #64748b;
-  font-size: 13px;
+  margin: var(--ca-space-4) 0 0;
+  color: var(--ca-text-muted);
+  font-size: var(--ca-text-caption);
   line-height: 1.5;
 }
 
 .operation-confirmation {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  color: #334155;
+  gap: var(--ca-space-8);
+  color: var(--ca-text-default);
   cursor: pointer;
 }
 
 .operation-confirmation input {
-  width: 16px;
-  height: 16px;
-  accent-color: #2563eb;
+  width: var(--ca-space-16);
+  height: var(--ca-space-16);
+  accent-color: var(--ca-text-default);
 }
 </style>

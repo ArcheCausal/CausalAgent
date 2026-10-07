@@ -6,11 +6,17 @@
 
 ## 身份与授权
 
-普通用户接口通过当前 Cookie Session 找到用户，并每次从 MySQL 确认用户仍存在、`is_active` 为真且 `auth_version` 匹配。管理员接口额外要求主库强一致读取到 `role = 'admin'`；Session 中缓存的角色不能作为后端授权依据。
+普通用户接口通过当前 Cookie Session 找到用户，并每次从 MySQL 确认用户仍存在、`is_active` 为真且 `auth_version` 匹配。权限来自主库强一致读取的 `user_roles` 与 `role_permissions`：`/dashboard` 需要 `dashboard.access`，`/rag-eval` 与 `/api/rag_eval` 需要 `rag_eval.access`，管理员接口需要 `admin.access`。Session 只保存 `user_id`、`auth_version` 和展示用用户名，角色或权限列表都不能作为后端授权依据；同一请求内身份与权限各只解析一次。
 
-未登录或会话失效的 API 返回 `401`；已登录但不具备管理员权限的管理员 API 返回 `403`。管理员页面未登录时回到统一登录入口，普通用户访问管理页面先返回真实 `403` 再回普通首页。登录成功和 `check_auth` 会返回当前 Session 绑定的 CSRF token。
+未登录或会话失效的 API 返回 `401`（错误码 `auth_required`）；已登录但缺少所需权限的 API 返回 `403`：管理员接口保留 `admin_required`，其它权限使用 `permission_denied`。页面未登录时跳转 `/auth/sign-in?next=<已登记的站内页面>`，已登录但缺少页面权限时返回受控 `403` 页面。登录成功和 `check_auth` 会返回当前 Session 绑定的 CSRF token，并附带当前角色与权限列表；登录回跳只接受 `/dashboard*`、`/rag-eval` 和已知管理员页面，查询参数与片段一律丢弃。
 
 管理员写请求必须回传 `X-CSRF-Token`。管理员数据库刷新、完整性审计、在线配置写入以及 3.2 受控业务操作还分别受密码重新认证、预览、明确确认和 `Idempotency-Key` 等接口契约约束，不能把这些约束下沉为前端自律。
+
+## 公开统计接口
+
+`POST /api/analytics/events` 是当前唯一不要求登录的写接口：它只接收公开页面的固定交互事件，不创建用户、Session、消息、文件或分析 Job，也不读取或返回任何业务数据。请求体只允许 `visitor_id`（UUID）和最多 10 个事件，总量不超过 8 KiB；事件名、事件字段、`page` 和 `demo_key` 必须来自事件目录登记的取值，不接受客户端时间，任何一项不合法都整体拒绝并返回稳定 `code`，不产生部分日志。成功返回 `202` 和已接受数量。普通用户应用在入口拆分后不再上报这些事件（公开预览由官网取代），接口、事件目录与脱敏规则保持不变。
+
+该接口不使用 Cookie 身份，也不承担任何鉴权语义；统计写入失败不影响公开页面、登录和真实业务接口。日志侧只记录 HMAC-SHA256 摘要 `visitor_hash`，不记录原始访客标识、消息正文或文件信息，具体事件、字段和去重规则见 [`../development/observability.md`](../development/observability.md)。
 
 ## Request ID 与错误
 
@@ -38,4 +44,4 @@ Flask 在确定 request ID 后立即绑定运行日志上下文，只有主库�
 
 普通用户 Job SSE 使用 `text/event-stream`，事件由 MySQL `analysis_job_events` 按递增事件 ID 读取。客户端可通过 `Last-Event-ID` 或 `last_event_id` 查询参数续传；服务端发送 `id`、`event` 和 JSON `data`，定期发送 `heartbeat` 保活。
 
-公共事件必须经过脱敏适配器：只暴露公开文字、阶段和稳定状态，移除内部 `attempt` 等字段，不暴露原始 prompt、ToolMessage、完整工具结果、图状态、文件内容或隐藏推理。终态事件或 `interrupt` 到达后连接结束，页面刷新后应通过活动 Job 接口和最后事件 ID恢复状态。
+公共事件必须经过字段白名单投影：只暴露公开文字、阶段和稳定状态，移除内部 `attempt` 等字段；`tool_call_result` 只允许公开工具名、摘要、`succeeded/not_ready/timed_out/canceled/failed` 状态和格式受限的 `safe_error_code`。`decision` 可公开专用的 `summary`、`decision_kind`、工具名和置信度，`decision_delta` 只允许同一公开决策摘要的 `stream_id`、批次序号和增量，其中算法说明只做类型、单行和长度校验，不改写模型原文。不暴露普通模型 `content`、原始 prompt、ToolMessage、完整工具结果、图状态、文件内容、provider ID、result reference 或隐藏推理。`final_result.data.finalization_status` 仅允许 `valid`/`degraded`，由程序 Gate 生成；终态事件或 `interrupt` 到达后连接结束，页面刷新后通过持久化历史和 Event ID 恢复状态。

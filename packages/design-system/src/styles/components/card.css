@@ -1,0 +1,53 @@
+/* 卡片
+
+   outline 是原型 .plate，raised 是原型 .preview，muted 是原型 .bcard，
+   list 是原型 .facts-list。卡片只提供表面和间距，不负责内部排版。 */
+.ca-card {
+  border-radius: var(--ca-radius-card);
+}
+
+.ca-card--muted {
+  background: var(--ca-surface-muted);
+}
+
+.ca-card--outline {
+  border: var(--ca-border-width) solid var(--ca-border-default);
+  background: var(--ca-surface-panel);
+}
+
+.ca-card--raised {
+  border: var(--ca-border-width) solid var(--ca-border-default);
+  background: var(--ca-surface-panel);
+  box-shadow: var(--ca-shadow-panel);
+}
+
+.ca-card--list {
+  border-radius: var(--ca-radius-list);
+  background: var(--ca-surface-panel);
+  box-shadow: var(--ca-shadow-list);
+}
+
+.ca-card--pad-none {
+  padding: 0;
+}
+
+.ca-card--pad-xs {
+  padding: var(--ca-space-8);
+}
+
+.ca-card--pad-sm {
+  padding: var(--ca-space-16);
+}
+
+.ca-card--pad-md {
+  padding: var(--ca-card-padding);
+}
+
+.ca-card--pad-lg {
+  padding: var(--ca-space-40);
+}
+
+/* 卡片头部与主体共用外边线时使用；开启后卡片会裁掉内部的焦点环 */
+.ca-card--clip {
+  overflow: hidden;
+}

@@ -1308,3 +1308,419 @@
   - 【构建环境】：修复 GitHub Windows runner 未创建 `.venv-desktop`、而打包脚本只接受该虚拟环境所导致的 onefile 构建失败；依赖安装、逻辑测试、PyInstaller 构建和冻结标记检查统一使用桌面虚拟环境。
   - 【恢复入口】：为 workflow 增加显式手动补齐模式，从原 tag 重新检出和构建，只允许向已发布且未锁定的 Release 上传缺失附件；不改变正式版或 Pre-release 属性，并拒绝移动 tag、修改说明或覆盖同名附件。
   - 【文档与测试】：增加 workflow 静态安全契约测试，并同步桌面发布、CD 恢复流程和 v0.1.0 Release Notes 的验收边界。
+
+---
+2026.9.15
+- 【MCP/Deep Agent：完成 P2-M 代码切片与 P2-U fake executor 前置】
+  - 【P2-M 服务】：新增独立 `causal-mcp` 服务，提供 MCP 2.2 Streamable HTTP、Bearer/HMAC 鉴权、MySQL primary strong read 与旧 lease/worker fencing、固定 PC/OLC/DirectLiNGAM runner、bounded ProcessPool 和 N×K client pool。
+  - 【P2-U 前置】：新增基于官方 `DeepAgentState` 的隔离扩展、runtime-only run context、显式 parent/deep state projection，以及带 checkpointer 的 fake executor graph；当前 worker 仍保留旧 stdio 路径，真实接入留待 P3。
+  - 【部署与依赖】：补齐 `causal-mcp` 私网 Compose 服务、健康检查和资源边界；独立镜像固定 CDMIR 版本并使用 CPU-only Torch，镜像 `pip check` 通过。
+  - 【验收证据】：Docker unit `454 passed`，相关 integration `20 passed`；隔离 MySQL strong-read/旧 lease、HMAC/Compose 配置、真实算法 fixture runner、并发排队/超时回收、A/B pool、故障 generation/cancel 和容器日志敏感字段扫描均按脚本记录。
+  - 【边界与风险】：MySQL 使用最小隔离 schema；算法调用、`2 running + 4 queued`、RSS/CPU 为受控 fixture/容器基线，不构成生产容量或性能承诺；真实容器调用已验证健康、鉴权和结构化响应，但极小输入仍返回 `execution_failed`，完整 P3 worker HTTP 接入、迁移链路和生产规模验收尚未完成。
+  - 【主线合并收口】：保留 DeepAgent 主线 State/Context/Graph 权威实现，补齐三阶段 lease fencing、异步 strong read、`/ready` 健康门禁、PC 参数透传、容量信号量释放、旧进程代际终止后回收和成功/失败目录事件；修复全量测试中的 RAG module stub 污染。
+  - 【合并验证】：重建 Python 3.11 测试镜像后全量 unit `515 passed`；Agent/部署/migration/日志定向 integration `44 passed, 3 skipped`，开发 Compose 静态展开通过；既有 admin deployment 两项失败仍独立保留，不计入 MCP/DeepAgent 完成证据。
+- 【P3 worker 与父图接入】：在普通 merge 合入 MCP 协作代码后，接入进程级 MCP client pool、真实 executor、官方 PostgreSQL Store 装配、静态 Algorithm Registry、Deep Agent 子图及外层 `agent → fold/preprocess → deep_agent → finalization_gate → report` 路径；生产路径不按 slot 启动 stdio session。
+- 【P4 结果与事件收口】：加入 AlgorithmSpec 驱动的同响应 ToolNode dispatch、RAG evidence 惰性初始化、FinalizationGate 一次修正与二次 degraded 报告、公共 Tool result 安全字段和 `finalization_status`；未删除旧兼容文件或重要产物。
+
+
+- 【数据库配置隔离】：新增独立 `DatabaseConfig`/`database_settings`，让 `app.db` 不再导入完整 `config.settings`；App/Worker 仍保留 `API_KEY`、`BASE_URL`、`MODEL` 的 fail-fast 校验和兼容的 `MYSQL_*` 字段。
+- 【MCP 启动边界】：开发、预发和生产的 `causal-mcp` 配置不注入应用/模型密钥；开发 Compose 同时移除不必要的 `SECRET_KEY`，并补充无模型环境导入与 Compose 契约回归测试。
+
+- 【Deep Agent 恢复边界】：生产装配让父图与 Deep Agent child 共用 worker 创建的 PostgreSQL saver，但使用独立稳定的 child thread/`deep_agent_v1` namespace；child scope 绑定 Job、attempt、lease 和冻结输入 hash，父图只投影 child 引用/status、结果、Ledger、证据和 Gate 所需事实，完整 messages/内部计划留在 child checkpoint。真实 PostgreSQL 重启恢复仍未作为 P5 通过项。
+- 【Ledger 与结果加固】：InvocationRecord 新记录强制携带当前 Job、attempt、lease、worker 和输入 hash 归属，FinalizationGate 对缺失或错配归属 fail-closed；`AlgorithmResult.result_ref` 必须严格由自身 invocation 和规范非负 result index 构成，executor、Adapter 和 Gate 均复核 input/result_ref 契约。
+- 【撤销与 MCP 语义】：`JobExecutionRevoked`/`CancelledError` 继续作为控制流传播，不生成普通失败 AlgorithmResult、不进入 FinalizationGate/degraded；MCP stale lease 映射为撤销，在途调用按 at-least-once 语义重建，不承诺从 HTTP 中途恢复。
+- 【工具生命周期与 RAG】：算法、RAG、Web Tool 在真实外部调用前后通过 worker `OrderedEventWriter` 写入有序 lifecycle start/result，并用稳定 `event_key` 支持重放幂等；RAG readiness、release id 和输入快照绑定已传入实际 RAG Tool，未就绪或 release 不匹配时调用前短路。新增取消事件同键 payload 一致性回归，避免 sink 与 stream 产生幂等冲突。
+- 【Ledger 归属补强与最终验证】：FinalizationGate 现在先对 Ledger 中指向当前 Job 的所有 invocation 统一校验 identity 与所有权字段，再仅纳入当前 attempt、lease、worker 和输入 hash 的算法记录；缺失、跨 Job 污染和当前 Job 的非法 invocation identity 均 fail-closed。新增相关回归后 Docker Agent unit/integration 共 `368 passed`；LangSmith 外部上报因测试环境 DNS 不可达产生告警，但不影响测试结果。
+
+- 【普通端 Vue 并行迁移】
+  - 【工程与传输层】：新增独立 `chat-frontend/` Vue 3 + TypeScript 工程，按 API schema、Pinia、Job runtime、组件和渲染器分域；普通端 SSE 改用 `fetch()` + `ReadableStream`，手工解析 `id/event/data`，保留 Flask SSE 路径和公共内容，增加未知事件游标、协议坏包和有界重连处理。
+  - 【入口与构建】：增加 `/chat-next`、`/chat-legacy`、`/chat-assets/` 和 `CHAT_FRONTEND_ENTRY`/`CHAT_FRONTEND_DIST_DIR`/`CHAT_VITE_DEV_SERVER_URL`；Docker 通过 Node 24 `chat-builder` 构建 Vue 产物，最终 runtime 不包含 Node/npm。迁移期根入口默认仍为旧版。
+  - 【文档与验证】：同步 `Document/`、`tests/README.md` 和普通端基线，明确启动配置错误以 `web.startup.failed` 日志加非零进程退出为失败证据。前端 Lint、类型检查、23 项 unit/contract、3 项组件、1 项 Mock E2E 和生产构建已通过；真实 Flask/数据库/worker/模型、Chrome/Edge、桌面壳等人工等价验收尚未完成，未切换根入口或删除旧版。
+- 【普通端 Vue 视觉等价修复】
+  - 【布局骨架】：以旧版 HTML/CSS/JS 为事实基线，恢复默认收起的 300px 抽屉侧栏、无顶部标题栏的主内容区，以及欢迎区与输入卡居中、会话输入卡置底的双状态 880px 内容列。
+  - 【视觉语义】：恢复浅绿用户气泡、无卡片 AI 与思考文本流、旧版输入卡/按钮/文件草稿、认证遮罩、设置弹窗、用户信息弹窗、报告和因果图样式，并把语言切换入口放回设置菜单。
+
+---
+2026.9.16
+- 【问题修复】
+  - 【MCP 隔离修复】：新增无 `app`/LangChain/数据库依赖的共享 `Agent.execution_control.JobExecutionRevoked`，避免私有 MCP 镜像导入 `Agent.deep_agent_tools` 时加载 worker/job runtime；MCP-only import smoke 和相关 36 项测试通过。
+  - 【PostgreSQL Store 启动修复】：移除传给 `psycopg.conninfo.make_conninfo()` 的非法 `autocommit` DSN 参数，补充连接串契约测试；相关 checkpoint/MCP/planner 回归 31 项通过。
+- 【Deep Agent 调用后 Guard 修复】：为生产 `AgentRunContext` 补齐 `check_after_call()` 委托，确保节点与父图在模型或工具返回后继续校验当前 Job lease/cancel 状态，避免成功的 DeepSeek 响应因上下文接口缺失触发 `AttributeError` 和无效重试；新增生产上下文包装回归，Docker Agent unit/integration 共 `370 passed`。
+- 【Deep Agent 记忆 namespace 修复】：修正官方 `StoreBackend` 传入 LangGraph `Runtime` 时的可信身份解包，按 `Runtime.context.trusted_identity.user_id` 生成既有用户隔离 namespace，避免 Deep Agent 在 child checkpoint 建立前因误判身份缺失而失败；新增 Runtime 包装形态回归，Docker Agent unit/integration 共 `371 passed`。确认无活动 Job/lease 后重启开发 worker，`worker.startup.ready` 与两个 `worker.slot.ready` 均正常。
+- 【DeepSeek Responses 配置修复】：生产 Deep Agent 模型恢复 P0 已验证的 `output_version="responses/v1"` 与 `reasoning.effort="none"`，避免 DeepSeek 默认思考模式在携带 tools 和既有 assistant 历史时因缺少回传 `reasoning_text` 返回 HTTP 400；新增生产模型配置回归，Docker Agent unit/integration 共 `372 passed`。重启 worker 后真实 DeepSeek Responses 单/双工具、Tool 结果回填、结构化输出 smoke 以及真实 Deep Agent checkpoint、权限、取消、schema retry、无 reasoning stream、summarization P0 均通过。
+- 【RAG 降级日志收敛】：移除 `RagService` 对 embedding API 故障的重复 `rag.enrichment.degraded` 记录，只保留 `embedding_runtime` 的单次分类日志；将 DashScope `AllocationQuota.FreeTierOnly`/免费额度耗尽归类为 `quota_billing`。
+- 【工具状态文案修复】：公共 Tool 生命周期将 Web Search 关闭显示为“未启用”并保留 `not_ready` 状态，将 RAG/Web 依赖不可用显示为“暂不可用”，取消和超时继续使用独立文案；RAG/工具事件与日志合同定向 Docker 回归共 `100 passed`。
+- 【MCP 调用可观测性】：worker 与 MCP 服务端统一按 `job_id + invocation_id + tool` 关联调用生命周期，补齐请求发起、接收、接受、完成、失败、取消与 60 秒慢调用事件；新增 Grafana「CausalAgent MCP Job 时间线」面板，关联字段只从 JSON 正文解析，不提升为 Loki 高基数标签。
+- 【MCP 精确取消】：worker 在 Job lease/cancel 撤销时中断本地等待并发送签名控制请求，MCP 端按完整执行身份幂等取消排队 invocation 或终止对应独立算法进程，同时保留并行 sibling；取消继续作为控制流传播，不生成普通失败结果或进入算法重试。
+- 【MCP 架构文档】：新增 MCP 客户端池与服务端算法执行池说明，完整记录 Worker 通信、Streamable HTTP/HTTP/1.1/TCP 分层、容量计算、generation 重连、精确取消、进程终止、一致性边界和运维注意事项，并加入技术文档导航。
+- 【OLC 默认停用】：以 `DEFAULT_ALGORITHM_SPECS` 作为 worker Adapter 与 MCP runner 的共同 allowlist，当前只注册 PC、DirectLiNGAM；OLC 的 Spec、Adapter、runner 和算法实现继续保留，旧兼容 MCP 入口也取消工具装饰器，后续可通过恢复 allowlist 注册重新启用。
+- 【FinalizationGate 修复】：补齐父图子图包装器传入的 `config` 参数，修复最终节点因签名不匹配导致的 `TypeError`；新增真实 LangGraph 包装执行回归，并同步两算法 schema 快照与架构/测试文档。Docker Agent unit/integration 共 `380 passed`，注册面调整后的定向回归 `38 passed`；测试容器的 LangSmith DNS 上报告警不影响断言结果。
+- 【开发产物忽略】：忽略 Playwright CLI 在仓库根目录生成的 `.playwright-cli/` 页面快照与控制台产物，避免浏览器验证文件进入版本控制候选。
+- 【MCP 控制 lane】：将 Worker MCP 客户端池拆为 execute/control 两个独立请求 lane；默认普通容量 `2 × 1`、控制容量 `1 × 2`，取消不再受普通请求占满影响，重连保留 lane 并记录 `pool_lane`。
+- 【取消预算与原因】：新增控制槽获取 1 秒、取消确认总预算 6 秒配置；取消失败细分为 `control_capacity_timeout`、`response_timeout`、`transport_error` 和 `invalid_response`，外层 `CancelledError` 继续传播。
+- 【部署与验收】：同步开发、预发、生产 Compose 与 `.env.example`，补充 lane/容量/事件目录契约测试及真实 HTTP 饱和并发验收场景；Docker 定向回归 `62 passed`、完整单元测试 `575 passed`，MCP spike 与真实 HTTP 饱和/双取消验收通过。
+- 【Deep Agent 公开决策与刷新恢复】：算法 Tool Call 新增可选 `public_decision.summary` 公开说明 envelope，dependency middleware 在调度和执行前剥离该字段并将有效说明持久化为幂等 `decision` 事件；FinalizationGate 通过后再把内部结果引用映射为公开算法名和最终选择说明，degraded 路径不公开未验证决策。
+- 【前端历史回放】：确认现有 Deep Agent lifecycle 已完整落入 `analysis_job_events` 并能由 `/api/load_session` 重建；前端增加明细先于父阶段到达时的 `step_id` 暂存补绘，并为相关静态脚本增加版本参数，避免缓存旧恢复代码。
+- 【Agent worker：graph 终态失败日志保真】
+  - 【异常传递】：`graph_runner` 不再把 LangGraph 抛出的异常压缩成一句脱敏文案后丢弃；公开 `message` 保持 `sanitize_public_error()` 原有文案不变，真实异常改由 `_diagnostic` 内部字段携带 `error_category`、真实 `reason_code` 和 `exc_info` 继续传递。
+  - 【内部通道】：`OrderedEventWriter` 只把 `message` 交给 `fail_job`，诊断与 `terminal_type == "error"` 同步挂在只读的 `terminal_diagnostic` 上；`_diagnostic` 不进入 `analysis_job_events`、SSE、聊天投影或管理员接口。
+  - 【稳定分类】：`worker.job.failed` 新增 `error_category` 字段，取值为 `provider_error/protocol_error/checkpoint_error/runtime_contract_error/internal_error`，只按异常类名（含基类）判定、不读取异常文本；`reason_code` 由固定 `node_error` 改为按异常映射到既有 `REASON_CODES`，未识别异常仍保留 `node_error`。
+  - 【日志产出】：`worker.job.failed` 现在带上非 null 的 `exception_type` 与清理后的 `stack`，可定位到具体堆栈帧。
+  - 【同步更新】：`Document/development/observability.md` 的事件表与关联链路补充 `error_category` 取值和内部诊断边界。
+
+- 【普通端 Vue 单架构收敛】
+  - 【布局与任务交互】：侧栏内容区改为占满剩余高度，使设置与用户入口固定在底部；Thinking 标题和执行步骤统一左对齐；移除独立取消按钮，运行时发送键显示旋转进度环与中心停止方块，再次点击沿用 Job 取消接口。
+  - 【入口与部署】：根路由固定提供 Vue 构建产物，`/chat-next` 仅保留兼容别名，移除 `/chat-legacy` 和 `CHAT_FRONTEND_ENTRY` 的路由、配置及三个 Compose 引用；缺少 Vue dist 时继续返回带 request ID 的稳定 503。
+  - 【旧文件边界】：旧普通端静态文件已经退出运行时引用；受仓库禁止 agent 删除重要文件的规则限制，物理文件仍保留并在普通端文档中列出人工删除清单，独立 RAG 工作台不在清理范围内。
+
+---
+2026.9.17
+- 【工具公开决策扩展与渐进展示】
+  - 【检索决策】：`rag_evidence_search` 与 `web_evidence_search` 复用 `public_decision.summary` envelope，在外部检索前剥离该字段并写入 `decision_kind=evidence` 幂等事件；检索器、Adapter 和 MCP 入参不含该字段，缺失或格式无效不阻断工具。
+  - 【渐进展示】：`decision` 事件仍以完整校验文本单条落库；实时页面按字符渐进显示，历史回放与 `prefers-reduced-motion` 环境直接展示完整文本，展示速度不阻塞算法执行。聊天页脚本与样式缓存版本更新为 `20260917-tool-decisions-2`。
+  - 【并行 evidence 修复】：RAG/Web evidence reference 在进入 Deep Agent State 和 ToolMessage 前增加稳定 invocation 作用域，修复不同并行查询复用 `E1` 或重叠来源时触发不可变 reducer 冲突；同一调用恢复仍复用相同 reference。
+  - 【并行展示修复】：同一阶段同时到达的公开决策继续各自保留，但渐进动画改为按事件到达顺序串行执行，避免多行文字同时流式出现；历史回放和减少动态效果偏好保持即时展示。
+- 【文档：Deep Agent 文档核对】
+  - 【Agent：运行事实与历史材料收束】：以生产 worker、父/子图、AlgorithmSpec allowlist、MCP execute/control lane、公共事件和部署配置为准重写 Agent 运行时及系统总览；将冗长实施计划收束为长期维护记录，并把产品规划与技术设计标为历史决策材料。修正公共工具状态、实际配置入口、父子 checkpoint 身份和 raw 文件归属；明确当前 cleanup outbox 尚未删除 Deep Agent child thread，以及 recursion/finalization retry 两项配置尚未接入生产调用路径。
+- 【FinalizationGate：终态引用契约与修正链路】
+  - 【引用契约】：`FinalAnalysisDecision` 明确两套引用命名空间：`result_assessments`、`primary_result_ref`、`conflicts.result_refs` 与 `revision_proposals.result_ref` 只接受本次运行返回的算法结果引用，RAG/Web 证据引用只能出现在 `revision_proposals.evidence_refs`；该分工写入结构化字段描述与系统提示，使模型在提交时就能区分“算法结果取舍”和“检索证据引用”。
+  - 【规则化修正指令】：Gate 校验失败改为携带稳定规则码，并把规则翻译成脱敏的中文修正要求写进重试指令，使模型知道具体违反了哪条引用规则，而不是只收到泛泛的重新提交要求；身份、账本与状态一致性失败不带规则码，继续使用通用指令，不把内部完整性问题包装成模型可修正的指令。
+  - 【阶段公开说明】：Gate 拒绝时发布 `progress` 阶段说明，可修正时挂在 `finalization_gate` 阶段并给出修正要求，降级时说明本次仅基于已验证输入生成报告；第二次 Deep Agent 启动修正时，新阶段同样收到一条 `progress` 说明，指出该阶段沿用已有工具结果、不重复调用工具。事件适配器按登记节点名绑定活跃阶段，并拒绝未登记节点名与空文本。
+  - 【事故回归】：新增复现真实事故的用例，把证据引用写进 `result_assessments` 时先以 `assessment_ref_unknown_result` 拒绝，只修该处后继续以 `proposal_evidence_ref_unknown` 拒绝，两处都修正后才通过，锁定两处违规与修正路径。
+
+- 【Agent 持久化清理：父子图 checkpoint 与用户长期记忆统一清理】
+  - 【数据库迁移】：新增 `user_memory_cleanup_outbox`（revision `t5e6f7a8b9c0`），按 `user_id` 唯一保存状态、重试次数、可领取时间、租约、脱敏错误结论和完成时间；只与 `admin_operations` 建立外键，不关联 `users`，从而在用户行删除后仍保留任务；迁移不回填也不激活历史数据，downgrade 只删除新表；同时新增 `u7a8b9c0d1e2` 把 `database_monitor_snapshots.snapshot_key` 扩展到 64 字符，容纳按进程命名的清理心跳与队列快照键。
+  - 【删除事务】：用户物理删除在同一个 MySQL 事务中为每个 Job 登记 checkpoint 清理、为同一 `user_id` 登记一条长期记忆清理，并写入管理员操作聚合；任一登记失败回滚整个删除；单独删除 Session 或 Job 仍只清理 checkpoint，保留用户长期记忆。
+  - 【清理 worker】：`Database/checkpoint_cleanup_worker.py` 与 `app/agent/checkpoint_cleanup.py` 改名为 `Database/agent_persistence_cleanup_worker.py` 与 `app/agent/persistence_cleanup.py`；一个进程轮转消费两张 outbox，复用同一个 PostgreSQL 连接池构造 `AsyncPostgresSaver` 和 `AsyncPostgresStore`，不新增第二个容器；Compose 服务名、容器名、启动命令和 `AGENT_PERSISTENCE_CLEANUP_*` 环境变量同步切换。
+  - 【父子图清理】：checkpoint 任务在一次 attempt 内删除父图 `thread_id=job_id` 和子图 `thread_id=deep-agent:<uuid5(job_id)>`，两者都成功才标记成功，部分成功整项重试并依赖官方删除接口的幂等性。
+  - 【长期记忆清理】：记忆任务按可信 `("causalagent", "memory", str(user_id))` namespace 使用官方 Store API 枚举并逐条删除，删除后重新查询确认 namespace 为空，不对 Store 表执行宽泛 SQL；清理 worker 启动时校验 checkpoint 与 Store schema 版本，Store 未 setup 时有界等待，不自行建表。
+  - 【操作聚合与维护入口】：管理员用户删除只有在 checkpoint 清理和记忆清理全部成功后进入 `succeeded`，任一任务最终失败进入 `failed`；`Database/lifecycle_repair.py` 的失败/过期重置扩展到两张 outbox。
+  - 【监控与看板】：worker 心跳快照改为 `agent_persistence_cleanup_runtime` 并新增当前任务类型；队列快照改为 `agent_persistence_cleanup_outbox`，分别汇总两类 outbox 的 pending、due、processing、过期租约和 failed 数量；管理员数据库看板、用户删除结果视图和 SQL 语义映射同步更新字段与名称。
+  - 【日志事件】：cleanup 事件前缀统一为 `agent.persistence.cleanup.*`，成功事件新增 `task_type` 和 `deleted_count`，运行快照不再保留旧的 `checkpoint_cleanup_runtime` 名称。
+  - 【文档同步】：更新系统架构总览、Job/文件生命周期、数据库总览与迁移 checkpoint、监控、部署、可观测性、测试和管理员模块文档，删除已经修复的父子图与长期记忆清理缺口描述。
+
+- 【因果图渲染修复】
+  - 【载荷投影】：`process_final_result` 在展示层把 Agent 内部标准化图（节点名列表与 `source`/`target` 边）投影为前端 vis-network 的 `{id,label}` 节点与 `{from,to}` 边，边类型映射为箭头与虚线，权重按 `.6g` 作为边标签，`graph_semantics` 等内部字段不再进入公开载荷。
+  - 【历史会话】：`/api/load_session` 读取 `causal_graph` 附件时执行同一投影，早期版本按内部格式写入的附件不需要重跑分析即可恢复显示。
+  - 【失败可见】：前端 `renderCausalGraph` 把节点/边建表与网络创建一起纳入异常处理，数据格式不符合 vis-network 要求时在图上直接给出说明文本，同时更新聊天页脚本缓存版本号。
+
+---
+2026.9.18
+- 【普通端 Vue 合并 develop 的 Deep Agent 变更】
+  - 【合并】：在 `refactor(Frontend)/refactor-fronten` 上合并 `origin/develop`（PR #74 合入的 Deep Agent 后端与公共事件契约）；文本冲突只出现在 `CHANGELOG.md` 与 `Document/README.md`，自动合并的 `Dockerfile`、`config/settings.py`、三个 Compose、`tests/README.md` 和 `Document/` 页面逐项核对后同时保留双方内容。
+  - 【阶段明细】：Vue 端补齐 `decision_delta` 增量、`decision_kind` 公开前缀、同一工具生命周期事件的挂起与放行、明细早于父 `node_start` 时的暂存补绘，以及 `node_retry`/`node_end` 的错误与重试文案。
+  - 【展示】：新增草稿与公开决策的逐字展示（40 字/秒、25ms 步进）；终态校正同一草稿，报告布局同样复用；`prefers-reduced-motion` 和终态直接展示完整文本。聊天区新增 80px 阈值滚动跟随，用户主动上滑后停止跟随。
+  - 【验证】：`npm ci` 与 `npm run check`（Lint、`vue-tsc -b` 类型检查、35 项 unit/contract、9 项组件、1 项 Mock E2E、生产构建）通过；`python -m pytest tests/integration/deployment/test_chat_frontend.py` 8 项通过；`docker compose -f docker-compose.yml config --quiet` 通过；遗留静态脚本的 19 项 Node 测试继续通过。
+  - 【计划外修正】：`chat-frontend` 的 `typecheck` 原本是 `vue-tsc --noEmit`，在 solution 配置下不检查任何文件，改为 `vue-tsc -b` 后才暴露并修正事件适配器的一处类型错误；`Document/development/deployment.md` 的镜像阶段数量和依赖锁定说明按当前 `Dockerfile` 更新。
+  - 【边界】：真实 Flask、数据库、worker、模型和浏览器人工验收未执行；`app/static/` 旧静态文件及其配套 Node 测试仍按 `Document/development/chat-frontend.md` 的清单由用户自行删除。
+  - 【工具事件顺序】：同一工具的 `tool_call_start`/`tool_call_result` 改为在该决策的逐字展示追平之后才出现；收到完整 `decision` 只结束该决策流，工具结果与任务终态负责强制放行，修正原先收到完整 `decision` 就立即放行、决策文本与工具调用同时出现的问题。
+  - 【界面尺寸】：普通端侧栏宽度由 300px 调整为 360px，会话与文件条目在右侧为编辑、删除按钮留出固定位置，标题不再被按钮压住；用户消息气泡的上下内边距由 7px 调整为 12px。
+  - 【计划外修正】：`chat-frontend` 的 `typecheck` 原本是 `vue-tsc --noEmit`，在 solution 配置下不检查任何文件，改为 `vue-tsc -b` 后修正了事件适配器的一处类型错误；`Document/development/deployment.md` 的镜像阶段数量和依赖锁定说明按当前 `Dockerfile` 更新。
+- 【CDFM v0.1 causal-mcp 能力接入】
+  - 【契约与接线】：默认 Algorithm Registry 新增 `causal.cdfm`/`causal_cdfm`，工具只公开 `threshold`；新增连续数值输入边界、CPU CDFM runner、`directed_graph` 语义和独立矩阵方向转换。
+  - 【结果与部署】：通过私有 `AlgorithmExecutionResponse` 保存 logits、probabilities、threshold 到 raw artifact，标准结果和公共事件不携带 raw 字段；causal-mcp 镜像固定 `cdfm-base==0.1.0`、CPU Torch 与 `CDFM_MODEL_PATH` 配置。
+  - 【验收边界】：新增单元契约和独立 `CDFM_MCP_ENGINEERING_SMOKE` 入口；本轮不扩展算法路由、共识、准确率、模型常驻化或生产图环路修复承诺。
+- 【多模态索引目录改为可写命名卷】
+  - 【Compose】：开发、兼容副本、预发和生产把 `Agent/knowledge_base/multimodal_indexes` 从仓库直挂或只读挂载改为可写命名卷（`kb_multimodal_indexes`、`kb_multimodal_indexes_staging`、`kb_multimodal_indexes_prod`），覆盖会打开该索引的 app、worker 和开发/兼容副本的 rag-eval-worker；新增一次性 `kb-indexes-sync` 服务作为这些服务的 `service_completed_successfully` 依赖，在启动前把宿主 release 复制进卷；staging 的 `STAGING_VOLUME_NAMES` 同步登记新卷。
+  - 【文档】：部署文档新增“多模态索引目录与挂载”小节，说明 Chroma 构造 `PersistentClient` 时写入 `acquire_write` 写锁记录、只读挂载会让 RAG 降级为 `rag_unavailable`、卷与宿主 release 的一致性要求、发布后导出与卷重建步骤以及禁止 `down -v`；开发环境文档补充同步与导出命令并登记 `kb-indexes-sync`；根 AGENTS.md 增加对应核对项。
+  - 【测试】：`tests/test_staging_compose_contract.py` 改为断言四份 Compose 的可写命名卷挂载，并移除 staging 的索引只读挂载契约。
+- 【报告模块：结构化报告文档】
+  - 【数据结构】：新增 `Agent/Report/document.py` 与 `Agent/Report/assets.py`，定义 `ReportDraft`、`ReportDocument`、四种报告块（`section`、`markdown`、`chart`、`causal_graph`）、图表资源、因果图业务模型、来源与证据模型，并提供块 ID 唯一性、块类型、资源引用和证据引用校验；因果图节点 ID 由变量名生成（如 `node_age`），边 ID 由端点变量名生成（如 `edge_age_income`），来源和证据 ID 使用前缀加随机 UUID，`markdown.content` 是新报告中唯一允许 Markdown 的字段。
+  - 【报告节点】：`report_node` 改为通过统一结构化输出入口生成 `ReportDraft`，图表资源、因果图模型、来源和证据由后端注入；块 ID 重复、块类型未知、`asset_key` 不存在或类型不匹配、`evidence_id` 不存在时进入受控错误路径并生成降级报告文档，不保存部分报告。提示词中的数据概览改为按列压缩后的 JSON 文本，只保留数据规模、列清单和每列的类型与质量标记，去掉每列的取值分布；资源清单和证据清单同样以 JSON 文本传入，避免字典字面量表示和提示词长度随取值数量增长。
+  - 【移除旧格式依赖】：新报告不再使用 `visualization_mapping`、Base64 图片、HTML 图片标签和 `[[CHART:...]]` 占位符；预处理阶段改为生成直方图、分类柱状图和相关性热力图的结构化数据（`bins`/`counts`、`categories`/`counts`、`variables`/`matrix`），不再生成 Base64 图表。
+  - 【State 与追问】：`CausalAgentState` 用 `chart_assets` 保存结构化图表资源、用 `report_document` 保存结构化报告文档，移除 `final_report` 与 `visualization_mapping`；路由判断和报告追问只读取报告摘要、资源说明、来源说明和证据说明。
+- 【报告终态与持久化】
+  - 【SSE】：`process_final_result` 报告分支返回 `{type: "report", layout: "report", render_mode: "structured", document}`，保留 `finalization_status` 与联网搜索 `references` 附加字段，不新增 SSE 事件类型；结构化报告不产生文字增量，`final_result` 到达后整份渲染为结构化报告组件。
+  - 【附件与迁移】：新增迁移 `v8b9c0d1e2f3` 为 `chat_attachments.attachment_type` 增加 `report_document`，只追加枚举值并保留历史附件；`prepare_ai_response_for_storage` 把完整报告文档写入 `report_document` 附件，`chat_messages.content` 只保存报告标题预览，新报告不再写入 `visualization` 附件。
+  - 【历史恢复】：`/api/load_session` 读取 `report_document` 附件后重新通过后端 schema 校验，再包装成与 SSE 一致的结构化报告载荷；附件损坏或 schema 非法时记录 `chat.attachment.degraded` 并回退到消息预览正文。
+  - 【就绪检查】：数据库 readiness 的附件类型枚举检查同步要求 `report_document`。
+- 【普通端报告渲染】
+  - 【渲染器】：新增 `ReportRenderer.vue`、`ReportSection.vue`、`ReportBlockView.vue`、`MarkdownBlock.vue`、`ChartBlock.vue` 和 `CausalGraphBlock.vue`；`MessageBody.vue` 按 `type=report` 与 `render_mode=structured` 分发到报告渲染器，普通聊天消息继续使用 Markdown。
+  - 【防御性解析】：新增 `renderers/report-document.ts`，用 Zod 校验报告文档与资源；未知块类型降级为占位块，非法图表或因果图资源引用显示受控提示，顶层载荷不合法时显示报告不可用提示，都不影响页面其余部分。
+  - 【图表与因果图】：直方图和分类柱状图使用 SVG、相关性热力图使用 CSS 网格绘制，支持响应式宽度、数值提示与空数据提示，不引入第三方图表库；`graph-renderer.ts` 增加业务模型到 vis-network 的投影函数、`view`/`select` 模式和实例更新/销毁接口，`CausalGraph.vue` 支持图数据变化时原地更新并向上抛出 `selectNode`/`selectEdge`，图形库仍按需动态加载。
+  - 【样式】：报告主题变量集中在 `.report-document`，报告背景、标题层级、章节间距、Markdown 表格、证据提示和移动端布局由组件作用域样式控制，模型不返回类名或样式。
+- 【文档：结构化报告契约】
+  - 【API、架构与数据库】：更新 `Document/api/agent-jobs.md`、`Document/api/chat-files.md`、`Document/architecture/agent-runtime.md`、`Document/database/migrations-checkpoints.md` 和 `Document/development/chat-frontend.md`，写入报告文档结构、`report_document` 附件、历史恢复与降级行为、迁移 head 和前端渲染边界。
+- 【应用 README：Deep Agent 与 CDFM 能力补齐】
+  - 【中文 README：技术栈与运行流程】：技术栈加入 Deep Agents、TypeScript 和 Pinia；Agent 运行流程改为父图编排预处理、Deep Agent 子图、终态校验与报告节点，并补上 PostgreSQL 长期记忆的独立边界。
+  - 【中文 README：深度分析 Agent】：新增该章节，说明显式状态投影、父子图独立执行身份、按 `requires/produces` 分层的工具编排、长期记忆写入白名单、有界预算、终态校验与取消路径。
+  - 【中文 README：算法清单】：因果分析改为默认启用 PC、DirectLiNGAM 和 CDFM，补充 CDFM 只公开 `threshold`、缺失值掩码与分类变量不适用的边界，并说明 OLC 的实现保留但不进入默认工具面。
+  - 【中文 README：报告、配置与部署】：报告生成补充结构化报告渲染；最小配置新增 `DEEP_AGENT_*`、`CAUSAL_MCP_*` 和 `CDFM_MODEL_PATH`；Docker 说明改为 Node 24 分别构建普通端与管理员 Vue。
+  - 【中文 README：开发入口与项目结构】：新增“普通端前端（Vue）”章节，说明 `chat-frontend/` 构建产物的入口、缺少构建时的 503 边界、Vite 开发方式和检查命令；项目结构补充 `chat-frontend/`、`Agent/deep_agent` 和 `Agent/deep_agent_tools`。
+  - 【英文 README】：同步上述能力、配置、开发入口和项目结构。
+- 【旧普通端静态前端清理】
+  - 【删除静态文件】：删除 `app/static/chat.html`、`app/static/css/style.css` 与 `app/static/js/` 下的 `script.js`、`chat_layout_state.js`、`execution_phase_state.js`、`job_subscription_state.js`、`stream_state.js`、`marked.min.js`，并移除随之为空的 `app/static/css` 与 `app/static/js` 目录；`app/static/rag_eval_app/` 是 RAG 工作台自己的产物，保留原样。
+  - 【失效测试】：删除只覆盖旧页面的 `tests/unit/frontend/` 四个 Node 测试与 `admin-frontend/tests/e2e-mock/chat-auth.spec.ts`，管理员端 Mock E2E 仍由 `admin-ui.spec.ts` 承担。
+  - 【文档】：`Document/development/chat-frontend.md` 的“旧文件清理边界”改写为已完成的清理记录，并说明 `admin-frontend/tests/e2e/admin.spec.ts` 仍在使用旧页面元素 id，需要按 Vue 普通端选择器更新。
+- 【公开预览、登录拦截与匿名访问日志】
+  - 【公开预览】：普通端入口区分 `checking`、匿名和已登录三种状态，未登录访客先看到公开预览，包含产品说明、静态示例会话、结构化示例报告和示例因果图；示例数据放在 `chat-frontend/src/preview/public-preview-data.ts`，只在前端渲染，不经过任何公开数据接口，也不创建数据库 Session、消息、文件或分析 Job。
+  - 【登录拦截与草稿】：预览中的 Composer 以 `auth-required` 模式渲染，点击发送或上传只打开登录面板，上传按钮不弹出文件选择框；文字草稿保存在共享的 Composer store 并同步写入 `sessionStorage`（键 `causalagent.preview.draft`），登录面板关闭后文字仍在，登录成功后草稿进入正式 Composer 但不自动发送，用户再次点击发送才创建真实 Session 和 Job；文件对象、文件名和文件内容不写入任何存储或统计请求。
+  - 【匿名统计接口】：新增 `POST /api/analytics/events`，不要求登录也不创建任何业务数据，只接受 UUID `visitor_id` 和最多 10 个已登记事件，请求体上限 8 KiB，不接受客户端时间，非法批次整体拒绝且不产生部分日志，成功返回 `202` 和已接受数量。
+  - 【事件与脱敏】：事件目录新增 `analytics.public_preview.view`、`analytics.public_preview.demo_open`、`analytics.public_preview.send_click`、`analytics.auth.panel_open` 和 `analytics.auth.login_success`，详情只允许 `visitor_hash`、`page`、`demo_key` 且页面与示例标识按固定取值登记；浏览器匿名标识经服务端密钥 HMAC-SHA256 后只作为日志正文关联字段，原始标识、消息正文、文件名、文件内容和凭据都不进入日志，也不配置为 Loki 标签。登录成功事件由认证路由直接记录，不依赖前端上报。
+  - 【日志量控制】：同一浏览器会话内公开预览展示、示例打开和登录面板打开按页面与示例去重，发送点击每次真实点击上报一次；前端使用 `sendBeacon` 或 `keepalive` `fetch` 发送，不等待响应、失败不重试，统计异常不影响浏览、登录和真实业务接口。
+  - 【测试】：新增 `tests/unit/analytics/test_public_analytics_events.py`，覆盖接口边界、整体拒绝、访客标识脱敏、业务隔离和登录侧事件写入；`tests/unit/test_event_catalog.py` 与 `tests/integration/test_logging_policy.py` 同步新增事件；`chat-frontend` 新增匿名统计客户端单元测试、公开预览组件测试，并把 Mock E2E 改为未登录公开预览到登录后真实 Job 的完整流程。
+  - 【文档同步】：更新 `Document/api/conventions.md`、`Document/development/chat-frontend.md` 和 `Document/development/observability.md`，登记公开预览状态、登录拦截、草稿与文件边界、匿名事件合同、脱敏和日志量控制；同时修正日志事件目录表缺失的 `rag.runtime.ready`/`rag.sparse.ready` 行、`mcp.client.reconnected` 的 `pool_lane` 字段，以及测试文档引用失效测试文件路径的问题。
+
+---
+
+2026.9.19
+
+- 【普通用户前端：登录面板修复】
+  - 【卡片背景】：`AuthPanel` 的卡片此前没有设置背景色，公开预览的正文、按钮和消息会透过卡片显示，与登录标题、标签和输入框叠在一起；现在卡片改为不透明的白色表面，带边框、12px 圆角和阴影，遮罩保持 55% 深色以隔离底层页面。
+  - 【表单样式】：原样式只依赖浏览器默认输入框外观，现按 `tokens.css` 的设计变量重写标签、输入框、主按钮和次级链接的字号、间距、圆角与悬停/禁用状态，并保留全局键盘焦点轮廓；宽度收窄到 400px，480px 以下收窄内边距。
+  - 【面板交互】：面板改为带 `role="dialog"` 和 `aria-modal` 的模态卡片，打开时自动聚焦用户名输入框；匿名预览下可以按 Esc、点击遮罩或点击“先浏览公开预览”关闭面板，等待接口响应期间关闭动作不生效。
+  - 【注册与密码】：新增显示/隐藏密码按钮；注册成功消息改用独立的提示样式而不是错误样式，面板自动回到登录态，已填写的用户名和密码保留。
+  - 【测试与文档】：`tests/components/auth-panel.spec.ts` 新增密码切换、注册成功后回到登录态、Esc 与遮罩关闭的用例；Mock E2E 的密码定位改为精确匹配；`Document/development/chat-frontend.md` 补充面板遮罩、关闭方式和注册成功后的行为。
+- 【官网、应用入口与权限系统重构】
+  - 【RBAC 数据模型】：新增迁移 `w9c0d1e2f3a4` 建立 `roles`、`permissions`、`user_roles`、`role_permissions` 四张表，初始化 `user` 与 `admin` 两个角色和第一阶段 13 个权限键，并按现有 `users.role` 回填 `user_roles` 关系；`users.role` 保留为过渡兼容字段，启动就绪检查同步要求四张新表和两个已初始化角色。
+  - 【授权与身份缓存】：新增 `app/auth/rbac.py` 统一读取角色与权限；`get_current_session_user()` 与新增的 `get_current_permissions()` 在同一个请求内只解析一次身份和权限；新增 `require_authenticated_user()`、`require_permission()` 与 `enforce_permission()`，未登录 API 返回 `401`、已登录但权限不足返回 `403`、页面未登录跳转 `/auth/sign-in`、页面权限不足返回受控 403 页面；`admin_required` 改为要求 `admin.access` 权限，Session 仍只保存 `user_id`、`auth_version` 和展示用用户名。
+  - 【登录与回跳】：登录和 `check_auth` 返回角色、权限列表和统一登录默认落点；登录回跳改为白名单校验，只接受 `/dashboard`、`/dashboard/settings`、`/dashboard/session/<id>`、`/rag-eval` 和已知管理员页面，查询参数与片段一律丢弃；管理员登录入口由根路径改为 `/auth/sign-in`。
+  - 【RAG 评测台】：`/api/rag_eval` 蓝图统一要求 `rag_eval.access`，读请求要求 `rag_eval.read`、写请求要求 `rag_eval.run` 并额外要求 CSRF 令牌，发布、回滚和治理路由分别要求 `rag_eval.publish`、`rag_eval.rollback` 和 `rag_eval.governance`，并按下发状态把操作者、动作、目标、请求 ID 和结果写入 `admin_audit_events`；页面移动到 `/rag-eval`，页面与 `/rag-eval/assets/` 使用同一权限边界；旧的 `/rag_eval` 别名和 `app/static/rag_eval_app/` 无保护静态路径一并移除，应用不再暴露 Flask 默认 `/static` 目录，RAG 前端产物改为 `app/rag_eval/frontend_dist/`，构建 base 改为 `/rag-eval/`，前端写请求统一携带 CSRF 令牌。
+  - 【官网前端】：新增 `website-frontend/` 独立 Vue 工程，提供 `/`、`/product`、`/about`、`/docs`、`/changelog` 与 `/auth/sign-in`、`/auth/sign-up` 页面，包含类型化内容数据、导航、下载入口和登录注册表单，构建 base 为 `/site-assets/`；Flask 新增 `WEBSITE_FRONTEND_DIST_DIR` 与 `WEBSITE_VITE_DEV_SERVER_URL` 配置，缺少构建产物时返回 503 和 request ID。
+  - 【普通用户应用】：`chat-frontend/` 收窄为登录后的工作区，入口改为 `/dashboard`、`/dashboard/session/<id>` 和 `/dashboard/settings`，构建 base 改为 `/dashboard-assets/`，未登录访问跳转 `/auth/sign-in`，退出登录回到 `/`；地址成为当前会话的来源，浏览器前进后退可以回到同一会话，用户菜单按 `admin.access` 与 `rag_eval.access` 显示管理后台和 RAG 评测台入口；普通应用不再展示公开预览和内部登录面板，`/chat-next` 与 `/chat-assets/` 别名移除。
+  - 【部署与桌面端】：Dockerfile 新增 `website-builder` 与 `rag-eval-builder` 阶段，分别输出到 `/opt/causalagent-website` 和 `/opt/causalagent-rag-eval`；三套 Compose 向 app 传递官网与 RAG 的产物目录和开发服务器变量；Windows 客户端默认入口与 Release 默认地址由根路径改为 `/dashboard`。
+  - 【测试】：新增 `tests/unit/auth/test_rbac.py`、`tests/unit/auth/test_authorization_permissions.py`、`tests/unit/auth/test_rag_eval_gate.py` 和 `tests/integration/deployment/test_frontend_entrypoints.py`（替代原 `test_chat_frontend.py`），RAG 路由契约测试、管理员授权测试、迁移链路测试和 `chat-frontend` Mock E2E 按新入口与权限边界更新；`tests/support/authorization.py` 提供路由契约测试共用的身份与权限替身。
+- 【文档事实同步与前端清理】
+  - 【文档事实】：按当前实现更新 `Document/development/chat-frontend.md`（`/dashboard` 入口、地址与会话映射、删除公开预览与登录拦截章节）、`Document/development/setup.md`（桌面默认地址、四个前端的开发服务器与 base）、`Document/development/testing.md`（测试分层、四个前端的检查命令、迁移 head、dist 缺失断言）、`Document/development/deployment.md`（六个镜像阶段、四套入口与产物目录、head）、`Document/api/conventions.md`（权限化授权与回跳白名单）、`Document/api/rag-eval.md`（页面地址与蓝图权限）、`Document/architecture/overview.md`（桌面入口与四个前端边界）、`Document/architecture/rag-evaluation.md`、`Document/database/overview.md`（角色与权限表）、`Document/database/consistency.md`、`Document/database/migrations-checkpoints.md`（RBAC 迁移与 head）、`Document/admin/api.md`、`Document/admin/architecture.md`、`Document/admin/development.md`、`Document/admin/system-overview.md` 和 `Document/development/observability.md`（匿名访问事件），并新增 `Document/development/website-frontend.md`。
+  - 【README 与局部规则】：同步中文与英文 README 的可访问入口、前端章节和目录树；`chat-frontend/AGENTS.md` 与 `chat-frontend/BASELINE.md` 登记 `/dashboard` 入口、地址来源和已删除的预览与登录面板；`windows-client/README.md` 的默认地址改为 `/dashboard`。
+  - 【删除预览与登录面板】：删除 `chat-frontend/src/components/PublicPreview.vue`、`AuthPanel.vue`、`src/preview/public-preview-data.ts`、`src/runtime/analytics/analytics-client.ts` 及其组件/单元测试，移除只在预览中使用的 i18n 文案，并清理样式表中已无引用的登录面板与公开预览规则；登录与注册职责由官网前端承担。
+  - 【构建产物不入库】：管理员前端产物不再作为发布文件跟踪，`.gitignore` 移除 `!admin-frontend/dist/index.html` 例外，`git rm --cached admin-frontend/dist/index.html` 停止跟踪但保留本地文件；`tests/integration/admin/test_admin_deployment.py` 的用例改为断言四个前端产物都被忽略，`Document/admin/system-overview.md` 改为说明源码变更必须重新构建、未构建时 `/admin/` 返回带 request ID 的 503。
+- 【开发脚本：前端 Vite 一键启动】
+  - 【新增脚本】：新增 `scripts/dev_frontends.ps1`，用 `Start-Process` 按 `-Frontends` 参数在独立窗口启动 `website-frontend/`、`chat-frontend/`、`admin-frontend/` 和 `app/rag_eval/frontend/` 的 Vite 开发服务器；端口和资源前缀从各工程的 `vite.config.ts` 读取，支持 `-Install` 先执行 `npm ci`、`-WhatIf` 只打印将要执行的操作，端口已被占用或缺少 `node_modules` 的前端会跳过并打印原因，脚本只依赖 PowerShell 内置命令和本机 npm。
+  - 【文档】：`Document/development/setup.md` 新增四个前端开发服务器一键启动章节和端口表，并把 RAG 评测台的开发地址由 `http://127.0.0.1:5176/rag-eval/` 更正为 `http://localhost:5176/rag-eval/`（该工程的 `vite` 未指定 `host`，只监听 IPv6 的 `::1`）；`README.md` 与 `README_EN.md` 的前端开发章节改用这个入口，目录树补充 `scripts/` 的开发用途。
+---
+2026.9.20
+- 【Session 多分析上下文：跨 Job 的分析事实来源】
+  - 【数据模型】：新增迁移 `c9d0e1f2a3b4` 建立 `analysis_contexts` 表，保存创建时的文件快照（用户文件、对象、hash、文件名）、分析参数（target、treatment、分析问题）、最新结构化算法摘要、RAG/Web 证据摘要和最新报告引用；同时给 `sessions` 增加可空的 `active_analysis_context_id`，给 `analysis_jobs` 和 `analysis_job_inputs` 增加可空的 `analysis_context_id`。`sessions` 指向上下文的一侧不建外键，避免与 `analysis_contexts` 到 `sessions` 的级联删除形成环；上下文写入始终按 `user_id + session_id` 校验归属。
+  - 【上下文生命周期】：创建 Job 时在同一事务中按冻结文件复用当前 active 上下文或新建上下文；fold 解析出 target/treatment 后回填参数，参数与已绑定上下文不一致时先复用同一文件上参数一致的历史上下文，没有才新建并切换 active 指针。分析成功才写回算法摘要、证据摘要和报告引用，失败或澄清不覆盖原有有效结果。
+  - 【Agent 意图路由】：`agent_node` 改用结构化 `AgentIntentDecision`（normal_chat、start_analysis、answer_report、revise_report、rerun_analysis、switch_analysis_context、clarify），模型只能表达意图、上下文线索和澄清问题；图路由由后端按固定映射生成，模型无法输出分析上下文 ID 或用户文件 ID。原有“明确因果分析请求”的确定性分支保留，但用户点名了其他文件时不再抢路由。
+  - 【上下文切换】：新增 `context_switch` 节点，按用户表述匹配同一会话的历史分析（文件名、目标变量、处理变量、报告标题、问题描述或展示序号），唯一命中才切换；歧义、文件缺失、无匹配都返回澄清问题，并且不修改 active 指针。切换在一个 MySQL 事务里更新 Session 默认指针、当前 Job 和当前输入账本的上下文绑定，并带 worker/attempt/lease fencing 校验，节点重复执行得到同一结果。
+  - 【冻结输入与切换文件】：用户点名了文件库里其他文件时，切换事务会同时重写 `analysis_jobs` 的冻结文件快照（用户文件、对象、hash、文件名），即服务端主动重新冻结输入。新增 invocation 级可刷新引用 `FrozenInputRef`，使 MCP 输入摘要、适配器校验、FinalizationGate 的 provenance 校验和 Deep Agent 子图 execution scope 跟随同一次写入变化，切换后的算法调用按新文件通过 MCP 强读校验，旧上下文的算法结果、证据和因果图不进入新 State。
+  - 【报告与追问】：`report_node` 增加 `full_regeneration_from_context` 模式，只使用当前上下文已确认的事实重新生成完整报告，不修改算法图；`inquiry_answer_node` 改为回答报告问题或转达后端澄清问题，既不决定是否重跑算法，也不修改报告。
+- 【分析与运行事实同步】
+  - 【就绪检查】：`check_database_readiness()` 增加 `analysis_contexts` 表、`sessions.active_analysis_context_id`、`analysis_jobs.analysis_context_id`、`analysis_job_inputs.analysis_context_id` 和四个上下文索引；`Database/deep_audit.py` 的期望字段、索引与外键同步覆盖新结构。
+  - 【文档】：`Document/architecture/agent-runtime.md` 记录意图路由、上下文切换与报告修订模式；`Document/architecture/job-file-lifecycle.md` 记录 Session、AnalysisContext、Job、Checkpoint 的边界与切换后的重新冻结语义；`Document/api/agent-jobs.md` 记录创建 Job 的上下文绑定、澄清与切换行为；迁移 head 同步为 `c9d0e1f2a3b4`。
+- 【测试补充】
+  - 【Agent 与上下文】：新增 `tests/unit/agent/test_agent_intent_routing.py`、`test_context_switch_node.py` 和 `test_analysis_context_projection.py`，覆盖意图到路由的映射、结构化失败回退、报告意图在缺少报告时的降级、澄清路径不调用模型、上下文投影与匹配、冻结输入刷新；`tests/integration/migrations/test_migration_chain.py` 增加新迁移的结构、绑定字段、回滚边界与就绪检查断言。
+- 【运行错误修复：节点降级结果不再被引擎异常覆盖】
+  - 【worker 终态收敛】：LangGraph 在节点错误处理器提交降级结果后仍会把原任务异常抛给 `astream`，worker 现在检测 updates 流中带 `__error_handler__` 前缀的降级结果，并在确认图状态已经收敛（没有待执行节点、没有 pending interrupt）时按正常终态收尾，缺少任一条件时保持原有失败路径，避免报告节点降级后整个 Job 被判失败。
+  - 【结构化输出诊断】：`StructuredOutputError` 按底层异常类名归类出稳定原因代码，节点降级日志 `job.node.degraded` 新增 `cause_code`，事件目录同步登记该字段，用于区分模型未按结构化契约返回、JSON 解析失败、上下文截断、超时、连接、限流和服务端错误，不记录异常正文。
+  - 【测试补充】：新增节点错误处理器收敛与无处理器仍按失败处理两个用例，并补充结构化输出失败原因归类用例。
+- 【修复：上下文绑定的幂等写入与意图输入上限】
+  - 【幂等写入】：Session 默认指针的写入不再用 MySQL `rowcount` 判断越权。当指针本来就指向目标上下文时 `rowcount` 为 0，旧实现把这种正常情况误判成「会话不存在或不属于当前用户」，导致切换或重新分析在 `context_switch` 节点里抛错、降级，并最终让整个 Job 失败；归属校验保留在 `FOR UPDATE` 锁定 Session 与上下文的读取里，同时去掉重复的 `rollback`，让回滚归属唯一。
+  - 【意图输入上限】：`agent` 节点的历史渲染限制单条消息 400 字符、整体 2000 字符并优先保留最近的对话，避免上一轮的长报告或长解释整段重复进入意图判断提示词。
+  - 【测试补充】：新增分析上下文服务的事务语义用例（幂等写入不算越权、跨用户与跨会话上下文被拒绝、旧 lease 被 fencing）和意图历史长度上限用例。
+- 【普通用户前端：报告底色与执行记录重复】
+  - 【报告消息盒子】：报告正文不再自带浅灰色底色、边框和内边距，与普通聊天和追问消息共用同一条消息盒子；`.report-document` 只保留块间距和文字颜色，旧版 Markdown 报告的 `#f5f5f5` 底色与 16/20 内边距一并移除，图表和因果图块继续使用各自的白色卡片。
+  - 【执行记录归属】：`MessageTimeline` 不再让所有引用同一 Job 的消息都消费同一条运行态记录：历史阶段由 `thinking_after` 静态投影；答案已经作为独立消息存进历史时不再复用运行态记录，答案消息本身也不显示执行记录；只有本页新发送的提问消息才直接消费运行态记录。加载会话时只为仍在执行的 Job 建立运行态记录，`JobRecord.phaseInputId` 记录它代表的分析输入，同一 Job 更早的输入保持静态展示，重新加载后不再重复出现任务执行记录。
+  - 【追问恢复】：开始新一轮追问时把上一阶段的执行记录固定到发起它的用户消息上（`ChatMessage.frozenThinking`），运行态记录从空投影和原游标继续，同一份记录不再同时出现在两条消息下面。
+  - 【测试与文档】：新增 `chat-frontend/tests/unit/phase-ownership.spec.ts` 与 `chat-frontend/tests/e2e-mock/session-history.spec.ts`，并扩充 `chat-frontend/tests/components/message-timeline.spec.ts`，覆盖阶段归属、追问固定、刷新后仍在执行、等待补充输入等场景；`Document/development/chat-frontend.md` 补充执行记录归属和报告消息盒子事实。
+- 【修复：Store 工厂半构造实例启动日志】
+  - 【Store 装配】：`build_async_postgres_store` 改为按官方签名直接 `AsyncPostgresStore(conn=pool)`，不再用 `pool` 关键字试错；试错会让官方 `__init__` 绑定失败并留下 `_task` 未赋值的半构造实例，回收时 `__del__` 抛 `AttributeError`，在清理 worker 启动日志里打印一次。
+  - 【测试】：`tests/integration/agent/test_deep_agent_checkpoint.py` 新增用例，断言 Store 只按 `conn` 构造一次。
+- 【报告来源：RAG 知识库来源接入】
+  - 【来源装配】：报告来源装配同时接受 State 中的 pydantic 证据对象与等价字典，RAG 与 Web 证据不再因类型不匹配被静默丢弃；来源类别改由证据通道显式给出，知识库来源即使带可点击地址也保持 `knowledge_base`，不再按“是否存在 URL”推断。
+  - 【来源身份】：知识库来源的展示名由 release manifest 的 `document_id → relative_path` 解析，解析 active release 时随 `RagRuntimeConfig.document_names` 一并投影，不新增文件读取；manifest 未覆盖时回退到检索元数据的 title/source_name，`asset_uri` 不再充当 `source_url`，避免把内部资源路径渲染成点不开的相对链接。
+  - 【测试补充】：`tests/unit/agent/test_report_document.py` 覆盖证据对象与字典两种形态产出一致、知识库来源带地址仍为 knowledge_base、无法归一化的载荷被安全跳过；`tests/test_rag_service_and_tool.py` 覆盖 manifest 展示名解析、`asset_uri` 不进入 `source_url`，以及 manifest 未覆盖时的回退。
+  - 【文档】：`Document/architecture/agent-runtime.md` 记录知识库来源展示名的解析来源与来源类别显式规则。
+- 【分析运行强制算法结果】
+  - 【按运行注入约束】：进入 Deep Agent 的运行都是分析运行（`agent` 的 `start_analysis`/`rerun_analysis` 直接路由到 `fold`，`context_switch` 也会把 `route_decision` 改写成后续节点名），因此父图投影时按运行追加一条“必须至少调用一个算法工具并在最终决策中引用算法结果”的系统约束；该约束不写进 worker 级系统提示词，同一次部署里不同 Job 的要求互不干扰。
+  - 【Gate 新规则】：`FinalizationGate` 在分析路由下新增 `analysis_route_without_algorithm_result`：没有任何算法结果时不得提交 `evidence_only` 或 `no_valid_algorithm`，按既有的一次修正预算要求模型补做；算法确实返回未就绪或失败时会留下算法结果，不受该规则影响。
+  - 【测试补充】：`tests/unit/agent/test_deep_agent_state.py` 覆盖分析路由注入与非分析路由不注入；`tests/unit/agent/test_final_analysis_decision.py` 覆盖分析路由缺少算法结果被拒、非分析路由放行，以及算法结果被丢弃时放行。
+- 【文档】：`Document/architecture/agent-runtime.md` 记录分析运行的按运行约束与新的 Gate 规则。
+- 【分析运行强制 RAG 检索】
+  - 【按运行注入约束】：进入因果分析的 Deep Agent 必须至少调用一次 `rag_evidence_search`；有证据、无相关证据或知识库不可用都保留真实 terminal 状态后再提交最终决策。
+  - 【Gate 校验】：`FinalizationGate` 新增 `analysis_route_without_rag_invocation`，没有当前 Job attempt 的 RAG 调用记录时拒绝终态并交回一次受控修正。
+  - 【测试与文档】：补充 Deep Agent State、FinalizationGate 的强制检索合同测试，并同步 `Document/architecture/agent-runtime.md`。
+- 【分析运行强制联网搜索】
+  - 【按开关注入约束】：Job 的 `web_search_enabled=true` 时，Deep Agent 按运行收到“至少调用一次 `web_evidence_search`”的系统约束；关闭时不注入该要求，工具仍由 runtime 开关阻断真实触网。
+  - 【Gate 校验】：`FinalizationGate` 新增 `analysis_route_without_web_invocation`，开启联网搜索但没有当前 Job attempt 的 Web terminal 调用时拒绝终态并交回一次受控修正；无结果或暂不可用仍保留真实 terminal 状态。
+  - 【测试与文档】：补充 Web 开关的 State 投影、父图上下文传递和 Gate 合同测试，并同步 `Document/architecture/agent-runtime.md`。
+
+---
+2026.9.21
+- 【报告来源正文定位】：报告装配时把正文中出现且属于当前证据清单的 `ev_...` ID 回填到 `markdown.evidence_refs`，前端兼容历史报告中的同类漏填数据，恢复来源证据到正文块的“定位正文”按钮和高亮跳转。
+- 【分析运行工具选择调整】：取消“分析运行必须至少调用一次 `rag_evidence_search`”的运行级提示与 `FinalizationGate` 门禁，知识库检索恢复为 Agent 自主决策；至少一个因果算法调用和开启联网搜索时至少一次 `web_evidence_search` 的约束保持不变。
+- 【报告来源展示】：知识库来源的长证据引用默认收起，来源标题旁新增展开/收起按钮；文件来源与联网来源保持原有展示方式。
+- 【报告引用控件调整】：撤回带边框和“引用 N 条”文字的展开控件，改为来源标题旁的纯折叠箭头；引用数量不再占用收起状态的展示空间。
+- 【Agent 报告节点容错】
+  - 【结构化输出分类】：统一入口新增 `tool_call_invalid` 原因代码，模型没有返回任何可解析工具调用时不再被误报成 `schema_invalid`；`NoToolCallError` 在结构化结果为空时抛出，并按类名归类。
+  - 【有界重试】：`Agent/llm_structured_output.py` 对「模型本次产出的结构化结果不可用」的失败（`tool_call_invalid`、`schema_invalid`、`json_invalid`、`output_parser_error`）重试一次，第二次调用前重新确认 Job 执行资格；模型自身异常、超时、限流、连接和供应商错误不在入口内重试，撤销控制流不再被包装成结构化输出失败。
+  - 【降级日志】：`job.node.degraded` 新增 `schema_name`、`structured_attempts`、`validation_error_count`、`validation_first_type` 和 `validation_first_loc`，字段路径只保留 schema 字段名、额外字段统一写成 extra，不记录模型取值、提示词和异常正文；事件目录同步登记这些字段，并修正观测文档中该事件遗漏的 `cause_code`。
+  - 【报告节点流式边界】：报告节点改用非流式模型生成报告草稿，其空闲超时从 60 秒放宽到 120 秒，以容纳只在调用开始和结束时刷新计时的非流式长响应；普通问答和报告追问继续使用流式模型。
+  - 【测试补充】：`tests/unit/agent/test_structured_output_runtime.py` 覆盖原因分类、单次重试、重试成功恢复、模型异常不重试和撤销时停止重试；`tests/unit/agent/test_execution_guard.py` 覆盖降级日志新字段与脱敏边界；`tests/unit/agent/test_graph_llm_streaming_scope.py` 约束报告节点绑定非流式模型与新的空闲超时。
+  - 【文档】：`Document/architecture/agent-runtime.md`、`Document/development/observability.md` 和 `Document/api/agent-jobs.md` 同步原因代码、重试约定、日志字段和报告节点的文字增量边界。
+- 【CDFM 工具描述改为选择依据】
+  - 【描述改写】：`CDFM_SPEC.description` 不再只写“零样本推断 + 免责声明”，改为说明单次调用返回整张候选有向图、同一个 checkpoint 覆盖线性与非线性、异方差、有序或离散观测、测量误差和潜在混杂等多类机制，因此机制未知或明显非线性时比依赖单一假设的工具更合适，也可与 PC、DirectLiNGAM 的结果并行对照；同时写明不传 `threshold` 时由服务端按模型自带校准器自动决定判决边界、缺失值按 NaN/±Inf 掩码传递、当前只接受连续数值列，以及输出只有边及其方向，方向可能随阈值变化、不可识别场景下方向证据不足、两条相反方向的边也可能对应潜在混杂。
+  - 【参数与元数据】：`CausalCdfmInput.threshold` 增加字段说明，模型在 schema 中即可读到自动校准语义；`description_source` 改为覆盖机制覆盖、阈值与自动校准和结果解读，`assumptions` 增补“零样本识别以预训练机制覆盖当前数据分布为前提”。
+  - 【文档与快照】：`README.md` 与 `README_EN.md` 的 CDFM 条目同步为新描述；`Document/architecture/agent-runtime.md` 补充对称邻接对应潜在混杂的读法；`tests/unit/agent/snapshots/` 的 Tool schema 固定快照按新描述与新的 `spec_digest` 重新生成。
+- 【runner 诊断映射统一】
+  - 【共享映射】：新增 `build_diagnostics_from_runner_payload()`，把 runner 的 `n_samples`、`n_features` 和其余标量诊断统一映射为 `sample_count`、`variable_count` 与受限 `metrics`；worker 侧的 `result_from_runner_payload()` 与 causal-mcp 的 `service` 改用它，删掉服务端本地的重复实现，避免一侧白名单与 runner 键名不一致时诊断被静默丢弃。
+  - 【文档】：`Document/architecture/mcp-runtime.md` 记录 runner 诊断的共享映射函数，并明确两侧不得各写一套键名白名单。
+  - 【测试补充】：`tests/unit/agent/test_algorithm_adapters.py` 新增 legacy runner payload 的诊断映射用例；`tests/unit/agent/test_mcp_v2_contract.py` 的成功路径断言补充 `sample_count`、`variable_count` 与 `metrics` 映射结果。
+- 【前端设计系统：设计文档与共享组件包】
+  - 【文档体系】：新增 `Document/design-system/`，包含视觉方向决策（design-decision.md）、token 清单与原型变量映射（tokens.md）、共享组件契约（components.md）和四个前端改造前的样式现状与迁移顺序（current-state.md）；`Document/README.md` 增加导航，`Document/documentation.md` 增加主题归属，根 `AGENTS.md` 增加局部规则入口，新增 `packages/design-system/AGENTS.md`。
+  - 【视觉基础】：`packages/design-system/src/styles/` 从官网原型页面提取纸白到墨黑的灰阶、单字重字体栈、字号与行高、间距与阅读宽度、四档圆角、三层投影和动效时长与缓动，按基础取值与语义取值两层组织；颜色字面值只出现在 colors.css，声明放在 `@layer ca-tokens` 中，业务页面可以覆盖同名变量。
+  - 【品牌基础与字体】：品牌基础只包含字体、字重、焦点环、文字链接和减少动态规则，不重置外边距、不改变布局结构，因此可以按前端逐个页面引入；随包提供 Geist Sans 400 拉丁字形，中文回退系统无衬线。
+  - 【共享组件】：`packages/design-system/src/components/` 提供 CaButton、CaCard、CaBadge、CaPageHeader、CaTabs、CaInput、CaEmptyState、CaLoadingState 和 CaErrorState 九个基础组件，只开放受控变体，不接受自定义颜色、圆角或投影；标签页自带方向键与首尾跳转，输入控件自带标签绑定和错误描述关联。
+  - 【自检与开发入口】：`packages/design-system` 是独立 npm 工程，`npm run check` 执行类型检查和组件行为测试（变体类名、禁用与加载状态、键盘操作、无障碍关联和加载进度声明），`.npmrc` 固定 `legacy-peer-deps`，`node_modules` 进入忽略规则；`Document/development/setup.md` 与 `testing.md` 增加该包的开发入口和验证矩阵条目。四个前端尚未接入共享包。
+---
+2026.9.23
+- 【普通用户聊天工作区视觉重建】
+  - 【工作区布局】：将普通用户工作区调整为原型中的固定会话侧栏、会话与文件分区、账户区和居中的消息输入布局；窄屏下侧栏改为带遮罩的抽屉。
+  - 【侧边栏宽度与收起】：展开宽度从 264px 调整为 280px；新增桌面收起与展开操作，改用单一宽度过渡并交叉淡入淡出侧栏内容和快捷栏；微调展开箭头的位置，使它与上方品牌标志、下方新建图标的间距更均匀，其他快捷图标位置不变，窄屏抽屉行为保持不变。
+  - 【已发送文件附件】：文件发送后在对应用户消息上方展示文件名；历史加载按用户消息、初始输入账本和 Job 快照的关联恢复附件，不返回文件内容或内部文件标识。
+  - 【侧栏、字体与输入控件】：会话行固定高度并禁止 flex 收缩，新建会话和设置入口使用原型中的圆角及图标；加载 Geist Sans 400 拉丁字形，将联网搜索、上传和发送控件改为原型图标样式，保留现有开关和上传行为。
+  - 【页面与处理动效】：移除中央文字水印，按原型节点和边绘制浅色因果网络背景与流动粒子；活动任务显示不定长进度线，并遵守减少动态偏好。
+  - 【报告排版】：报告正文统一占满正文宽度并在报告边缘换行，移除段落 62ch 限宽；报告表格横向占满正文宽度并在窄屏下于正文区域滚动，表格使用轻量横向分隔线；相关矩阵按绝对值变化灰阶并显示数值，条状图按各条频数相对最大值的比例调整灰阶深浅，引用定位改用中性灰底。
+  - 【现有功能】：保留当前会话地址映射、历史加载与重命名删除、文件上传与选择、权限控制入口、联网搜索开关、消息发送、任务取消和设置内容加载行为；删除前继续要求用户确认，并将确认操作放入应用内对话框。
+  - 【共享品牌字体】：设计系统以 Geist Sans 400 绘制拉丁字形，以随前端发布的 Noto Sans SC 400 绘制中文与 CJK 标点；通过 unicode-range 阻止 Geist 窄全角标点抢占中文排版，四个前端统一使用 --ca-font-sans，并保留两种字体的 OFL 授权文件。
+  - 【发布构建与说明】：Docker 的四个前端构建阶段纳入共享字体源码；Vite 将字体 OFL 文本复制到前端产物的 font-licenses 目录，镜像构建上下文保留许可文件并排除设计系统 node_modules；同步修正四个前端测试命令的实际覆盖范围。
+
+---
+2026.9.22
+- 【RAG评测台前端：接入共享设计系统】
+  - 【构建接入】：为 `app/rag_eval/frontend/` 增加共享设计系统源码别名、样式入口和 TypeScript 路径映射，生产构建同时带出 Geist Sans 字体资源。
+  - 【页面迁移】：页面标题、后端连接状态和报告标签页改用共享组件；保留评测工作流与高信息密度布局，将纸面/墨色、token、圆角、描边、焦点和动效规则收敛到共享视觉方向。
+  - 【Docker 构建链】：RAG builder 复制 `packages/design-system/` 源码并排除其本机 `node_modules`，确保共享样式能进入镜像且不携带本地依赖；部署契约同步覆盖该复制边界。
+  - 【组件级迁移】：评测台实际使用 `CaButton`、`CaCard`、`CaBadge`、`CaPageHeader`、`CaTabs`、`CaInput`、`CaEmptyState`、`CaLoadingState` 和 `CaErrorState`，并新增页面质量层统一密度、焦点、悬停和进度表达。
+
+---
+2026.9.23
+- 【RAG 评测台：尺寸与长文本适配】
+  - 【长标识换行】：索引版本、来源身份、样本编号和文件元数据在容器内断行显示，避免内容撑宽整页；筛选选择框限制在面板宽度内，表格仅在自己的滚动区域横向浏览。
+  - 【收敛卡片高度】：移除工作台、评测区和报告区按视口设置的空白最小高度，让面板跟随真实内容；评测事件无数据时不再保留大块空白。
+  - 【窄屏工作流】：步骤条改为三列网格，候选集面板头改用真实网格并在窄屏堆叠，页脚版本号可断行。
+  - 【导航与报告列表组件化】：侧边导航与报告历史项改用 CausalAgent `CaButton`，导航选中态改为白底墨色侧标，报告历史改为细分隔线列表和墨色选中标记，保留键盘焦点提示。
+  - 【全局工作索引控件】：将选择器标题改为“全局工作索引”，移除说明行，删除操作收敛为与选择框等高、居中显示的垃圾桶图标按钮。
+  - 【评测配置对齐】：正式回答 evidence 压缩控件移入右侧参数列并缩短选择栏；子导航文字增加左内边距，避免与墨色选中标记重叠。
+  - 【索引与卡片间距】：索引控件左缘与多模态说明文字对齐，收起态截断过长索引名但保留完整下拉选项；策略配置和候选发布卡增加底部留白。
+  - 【连接状态徽标】：将状态点固定在徽标左侧并单独定位，使“后端接口已连接”在灰色背景中水平居中。
+  - 【删除按钮与元信息间距】：索引删除按钮改用来源删除按钮的红色描边与图标色，并将右缘对齐来源操作列；候选发布卡元信息行增加顶部间距。
+
+---
+2026.9.24
+- 【RAG 评测台前端：统一品牌字体落地】
+  - 【字体渲染】：工作台构建产物切换到统一品牌字体栈 `--ca-font-sans`（Geist Sans 400 绘制拉丁与数字、随包 Noto Sans SC 400 绘制中文与 CJK 标点、系统字体最后回退），正文、页面质量层与共享迁移样式一致生效。
+  - 【产物重建】：重建 `app/rag_eval/frontend_dist/`，随产物携带字体子集与 OFL 授权文件（`assets/font-licenses/`），入口改引新的内容哈希资源并移除旧构建产物。
+
+---
+2026.9.24
+- 【RAG 评测台前端：中文标题层级收敛】
+  - 【标题文案】：移除评测集、评测配置、评测进度、评测对比、正式发布和报告工作区等卡片中文标题上方重复的英文眉标题，保留中文语义和必要的其他状态标签。
+  - 【标题布局】：收紧标题组内部间距，增加中文标题的自然换行和最小宽度约束，避免英文副标题挤压中文或在窄屏下造成不协调断行。
+  - 【标题覆盖补齐】：同步移除知识源、统一评测流程和报告历史卡片中遗漏的 `SOURCE INPUT`、`NEXT STEP` 和 `REPORT HISTORY` 英文眉标题。
+- 【品牌图标资源与网页入口】
+  - 【矢量与位图资源】：新增 CausalAgent 无文字标志的透明 SVG、白底实体 SVG、maskable SVG，以及 1024 像素透明、实体和 maskable PNG；同步生成 favicon、Apple 主屏幕图标、PWA 图标和 Web App Manifest 资源。
+  - 【前端资源目录】：将品牌资源保留在共享设计系统和官网、普通用户应用、管理员端、RAG 评测台的前端资源目录中，保留原有 PNG 参考文件。
+  - 【入口接入】：四个网页入口增加 favicon、Apple 主屏幕图标和主题色；三个应用入口增加 Web App Manifest 引用。
+---
+2026.9.25
+- 【管理员后台设计统一】
+  - 【共享组件接入】：管理员后台 8 个页面、应用外壳和 4 个局部组件接入共享设计系统；Element Plus 复杂控件使用共享 token 适配。
+  - 【品牌标识】：侧栏和移动端改用共享 CausalAgent 图标，展开侧栏显示品牌名与“管理后台”，移除旧 logo 裁切显示。
+  - 【视觉收尾】：统一次要说明文字、普通错误内容入口及局部加载进度表现，保留危险操作的警示样式。
+  - 【构建配置】：管理员 Vite 同时接入共享组件别名和字体许可证插件，保持字体许可文本进入构建产物。
+  - 【品牌资源托管】：新增管理员授权保护的品牌资源路由，为后台网页提供新 favicon、应用图标和 manifest。
+---
+2026.9.28
+- 【官网正式页面重建】
+  - 【页面与路由】：官网正式页面固定为 `/`、`/product`、`/pricing`、`/about`、`/docs`、`/changelog`、`/auth/sign-in`、`/auth/sign-up`，Flask 官网路由与部署入口契约同步登记 `/pricing`；导航、页脚和页面索引移除原型中的“专家智囊”“应用原型”等不存在页面，`/dashboard`、`/rag-eval`、`/admin` 只作为真实系统入口链接。
+  - 【设计系统接入】：官网入口改为引入 `packages/design-system` 的完整样式与共享组件，Vite 与 TypeScript 增加 `@causalagent/design-system` 别名；字体、颜色、圆角、描边、投影和减少动态规则与共享包保持一致，官网专属动效保留在官网内。
+  - 【公共壳层】：新增统一黄色通告条、站点页头与页脚；通告内容来自单一数据源，关闭状态只保存在浏览器本地，导航与页脚按当前路径高亮。
+  - 【移动端提示】：宽度低于断点时显示统一的桌面端访问提示页，不再压缩渲染桌面布局。
+  - 【首页展示区】：首屏保留滚动交接结构，展示区继续使用可点击的结论、因果图、指标与联网检索示意，并把演示内容统一标注为结构示意；核心能力、运行指标、分析流程和算法库改为类型化内容模块驱动。
+  - 【产品与定价】：产品页按 CausalAgent、CDFM、DMIR 算法库、RAG 测评端、管理员端五个入口组织，提供入口切换、作用说明、访问地址与权限边界；定价页只公开 FREE 与 FUTURE 两个已确认方案，不编造价格与权益。
+  - 【文档与更新日志】：公开文档按概览、快速开始、工作区、材料与文件、任务执行与过程、结果与报告、算法说明、账号与权限、常见问题重写并支持关键词过滤；官网公开更新日志提供版本索引，顶部公告指向当前版本。
+  - 【静态素材】：官网发布应用工作区截图与 CDFM 基准图两张静态素材，RAG 测评端与管理员端改为说明面板呈现作用与权限边界。
+- 【部署与界面截图补充】
+  - 【镜像重建】：按当前源码重建 app 与 worker 镜像并启动完整开发拓扑；官网构建阶段补齐 `packages/design-system` 的依赖链接，使官网新增的设计系统依赖能在镜像内解析。
+  - 【RAG 测评台品牌标志】：侧栏标志改用设计系统提供的 CausalAgent 品牌图，替换原来的通用柱状图图标；品牌图以内联资源进入构建产物，不依赖额外请求。
+  - 【RAG 品牌资源路由】：新增 `/rag-eval/brand/` 路由，沿用页面与 `assets/` 相同的权限边界，修复 favicon 与应用清单此前返回 404 的问题。
+  - 【产品页截图】：在产品矩阵的 RAG 测评端与管理端模块接入登录后采集的真实界面截图，RAG 截图不含知识源清单与内容哈希，管理员截图只保留聚合指标，避免公开内部数据。
+  - 【文档同步】：部署文档补充 `/rag-eval/brand/` 与 `/admin/brand/` 两个资源前缀；部署入口契约测试增加 RAG 品牌资源的未登录跳转与授权读取断言。
+- 【官网按原型逐页重建】
+  - 【页面移植】：六个公开页面（`/`、`/product`、`/pricing`、`/about`、`/docs`、`/changelog`）改为逐字沿用官网原型的结构、样式与交互；每个页面组件承载原型对应页面的完整标记，原型的内联样式与内联脚本分别转写到 `src/styles/pages/<page>.css` 与 `src/scripts/<page>.js`，脚本导出初始化函数由页面挂载后调用。
+  - 【路由与页面选择】：`src/App.vue` 按 `location.pathname` 异步引入对应页面组件，整页加载时同一个文档只解析一个页面；未登记的公开地址仍由 `main_bp` 返回 404，构建产物内的 `not-found` 页面只作为兜底。
+  - 【文档元信息】：新增 `SITE_PAGE_META`，按地址写入各页原型 `head` 中的标题与说明。
+  - 【认证页面】：`/auth/sign-in` 与 `/auth/sign-up` 改用原型 `auth/` 的结构与样式，保留真实接口调用、服务端回跳白名单与 `?notice=admin_required` 提示；字段校验、密码显隐、密码规则与提交状态沿用原型脚本，认证页共用 `src/scripts/causal-map.js` 的三维因果图动效。
+  - 【静态素材】：原型引用的标志、专家照片、研究论文页面、基准图与团队图发布到 `public/assets/` 与 `public/`，通过 `/site-assets/` 同源提供。
+  - 【滚动动效依赖】：原型脚本以 `window.gsap` 与 `window.ScrollTrigger` 使用 GSAP，但原型目录导出的 vendor 文件缺失；新增 `gsap@3.15.0` 依赖与 `src/scripts/vendor-gsap.js`，由首页与更新日志页挂载时按原型的全局约定挂载，恢复标题拆字、滚动渐入与数字滚动动效。
+  - 【样式入口】：官网入口改为引入共享设计系统的品牌字体与基础规则，加上站点自身的 `src/styles/base.css`；原型的页面级样式在共享基础之外生效，页面排版保持原型取值。
+  - 【单元测试】：官网网页内容契约测试改为校验页面元信息、页面引用的发布素材是否都已发布、以及页面内站内链接是否指向已登记路径或真实系统入口。
+  - 【文档同步】：`Document/development/website-frontend.md` 与 `Document/design-system/current-state.md` 同步记录原型移植方式与官网样式入口的当前事实。
+
+---
+2026.9.29
+- 【官网图标、真实界面截图与素材清理】
+  - 【品牌标志】：六个公开页面页头与登录注册页顶栏的文字字形改为仓库品牌图 `public/brand/causalagent-mark.svg`，`img` 以 28px 与 34px 两档等比显示、`object-fit: contain` 不裁切；同步移除各页画文字圆形的旧样式。
+  - 【真实界面截图】：首页“隐私、保护与RAG管理”轮播的三张产品截图与产品页五处配图占位替换为登录后采集的真实界面截图，统一 1600×1000（16:10）、顶部对齐裁切；对应素材为工作台 `workspace-console.png`、管理员端 `admin-console.png`、RAG 测评台 `rag-eval-console.png` 与日志仪表盘 `observability-logs.png`。
+  - 【截图边界】：四张截图只保留聚合指标、配置项与日志状态，不含知识源清单、内容哈希或用户文件内容；配置与评测内容以“当前配置”形式呈现，不承载真实评测数据。
+  - 【配图说明】：产品页五处配图的说明改为描述各自界面，不再声明“截图位置已预留”。
+  - 【无用源码移除】：删除已被原型页面取代且不再被引用的 `src/components/` 壳层组件、`src/content/` 类型化内容模块、`src/assets.ts` 与 `src/styles/site.css`，并移除不再使用的 `SITE_NAV` 导出。
+  - 【无用素材移除】：删除页面从未引用的发布素材，包括三张被真实截图取代的旧截图、原型自带字体、与既有文件重复的 `xu-baiyan.jpg`、以及仅作为原件的 PDF 与图片。
+  - 【临时产物清理】：清空 `output/` 下的一次性对照与验收截图（含此前提交的两张字体对比图），并在 `.gitignore` 增加 `/output/`，此后本地截图不再进入版本库。
+  - 【官网交互与导航】：移除首页滚动停手后的章节自动吸附，统一各页面主导航为首页、产品、文档、更新日志和关于，统一页脚导航并移除旧的“应用原型”“专家智囊”选项；更新日志页面的历史版本说明，修正页脚文字为“即刻提出”。
+  - 【浏览器图标】：入口页面改用透明背景的 `causalagent-mark-transparent.png` 作为 favicon 与触摸图标，去除浏览器标签图标的白色背景。
+  - 【浏览器图标优化】：改用黑色标志配白色圆角底板的 `causalagent-mark-rounded.png`，四角保持透明，提升浅色浏览器标签栏中的可辨识度。
+  - 【官网导航补充】：将“价格”加入所有公开页面的顶部主导航和页脚官网导航，保持价格页与其他官网页面的导航一致。
+  - 【首页因果地球动效】：将首屏原有的环绕因果图改为缓慢自转的球面点阵，呈现变量之间的有向关系、周期性干预与影响传播，并在减少动态设置下显示静止图形；动效沿用官网灰阶风格，只替换首页 Canvas 绘制逻辑。
+
+---
+2026.9.23
+- 【数据集线性度信号接入 Deep Agent】
+  - 【指标】：新增 `Agent/Processing/nonlinearity.py`，`measure_nonlinearity()` 按 `S = mean(η²−r²)`（`η²` 为按秩分 10 等量箱后的组间方差占比）衡量变量间非线性，噪声上限 `null_p99` 由各列独立打乱重算 1000 次取 99 分位，`ratio = S / null_p99 ≥ 1` 判为非线性主导。阈值比较落在代码里（`verdict` 字段），`ratio < 1` 只表示未检出超过噪声的非线性结构、不等于线性。候选列取 `continuous` 且非 `possible_id`，列数上限 12、行数钳在 1000（`null_p99` 随 n 骤降，必须按数据集现算），列不足或行少于 100 判 `insufficient`。
+  - 【载荷】：写入 `analysis_parameters["nonlinearity"]` 的只有 `{ratio, verdict, n_vars, n_rows, sampled, reason}`；`S` 与 `null_p99` 只对人有价值，不进 prompt。
+  - 【故障边界与注入】：`measure_nonlinearity` 内部全兜、不抛异常，调用点放在 `Agent/causal_agent/nodes.py` 的 `fold_node` 里 `get_data_summary` 之后、且在该 `try` 块之外——该块异常分支会走 `interrupt()` 挂起等用户输入。结果随 `analysis_parameters` 自动流向预处理报告与 Deep Agent 子图两处消费端。
+  - 【消费端 prompt】：预处理报告任务清单加第 5 条「线性/非线性说明」；`MANDATORY_ALGORITHM_INSTRUCTION` 追加一句解释 `ratio` 含义。刻意不点具体算法名，算法仍由模型从既有 spec 自主选择，以免把自主决策变成照令执行、使后续召回提升无法归因。
+  - 【preprocess_summary 送达 Deep Agent】：此前预处理报告跑在 Deep Agent 之前却从不进入它，现由 `to_deep_agent_input` 把父图的 `preprocess_summary` 显式写进子图那条 system message 的 JSON；报告不投影进子图 state（无代码消费它，投影只多占 checkpoint），`ParentStateUpdate` / `from_deep_agent_output` 的回写白名单不动。
+  - 【测试与验证】：新增 `tests/unit/agent/test_nonlinearity.py`，断言本体在模块自检 `_self_check()` 里（`python -m Agent.Processing.nonlinearity` 可直跑）；`test_deep_agent_state.py` 新增用例锁住 `nonlinearity` 与 `preprocess_summary` 出现在那条 system message 里。25 个 d5 数据集复现归档倍率最大偏差 0.0049，λ=0 误报 0/5、λ=1.0 漏报 0/5，`pytest tests/unit` 全绿。
+  - 【已知边界】：序数程度而非刻度，同一强度 p=5 读 3.29~12.27、p=12 掉一半，故只保留 `ratio = 1` 一条判据线、不做强度分档。
+
+---
+2026.9.29
+- 【用户认证：新注册账号默认权限修复】
+  - 【默认角色关系】：注册用户时在同一数据库事务内写入 `user` 角色关系，使新账号按既有角色权限获得普通工作区访问能力，无需提升为管理员。
+  - 【遗留账号修复】：新增数据迁移，为缺少关系的历史账号补齐默认 `user` 角色，并保持兼容字段为 `admin` 的账号拥有管理员关系。
+  - 【回归覆盖】：新增注册事务与迁移链回归用例，锁定用户创建、默认角色写入和事务提交顺序以及无损回填边界。
+- 【预发部署与镜像发布】：新增独立的预发 Compose、搜索与可观测性服务、隔离网络和持久化卷。
+  - 【GHCR 镜像】：新增仅允许从 develop 手动触发的镜像发布流程，按 commit 生成 sha 标签并推送 app、MCP、MySQL 主库和从库镜像，同时输出不可变 digest。
+  - 【部署配置】：新增不含真实密钥的 .env.staging.example，规划服务器专用 .env.staging，并限制公网入口为 gateway。
+  - 【CI 合同】：增加 Compose、Dockerfile、预发部署和 Alloy 配置检查，镜像直接推送 GHCR，不通过 SSH 部署或导出镜像 artifact。
+  - 【搜索密钥注入】：开发与预发统一提交非密钥 settings.yml，删除 searxng-init 初始化容器、init_settings.sh 与对应的 init 单元测试；SEARXNG_SECRET 与其他密钥一样由环境变量注入，配置目录只读挂载。
+  - 【搜索与观测数据】：Grafana、Loki 和 Alloy 数据统一使用 staging 命名卷。
+  - 【预发参数对齐】：预发应用服务的并发、超时、连接池、监控、RAG 评测和 LangSmith 配置与 .env.example 取值一致。
+  - 【Grafana 同源入口】：Grafana 统一以 /grafana/ 为子路径；预发由 gateway 反代到同源路径且不再映射宿主端口，开发保留本机映射端口。管理员侧栏地址改由后端 /api/admin/runtime-config 下发 GRAFANA_PUBLIC_URL，不再硬编码 127.0.0.1:3000。
+- 【管理员前端品牌资源】：管理员侧栏 Logo 改为使用受保护的 /api/admin/brand/logo 接口，并补充可访问名称。
+
+---
+2026.9.30
+- 【汇报演示】：新增 CausalAgent 蓝色学术风 HTML 汇报 Demo，包含首页研究定位页与系统架构页，支持键盘和页码按钮翻页。
+  - 【首页】：展示自然语言问题、因果推理、证据约束与结构化报告之间的研究闭环。
+  - 【架构页】：展示 Web、Agent worker、LangGraph / Deep Agent、因果工具、RAG / Web evidence、MySQL 与 PostgreSQL 的当前协作边界。
+- 【审查修复】：补充预发网关对 Grafana 的启动依赖、CI 的 YAML 测试依赖和管理员 API 的 request ID；修正 SearXNG 密钥校验误判，并让 Grafana 运行期配置失败不阻塞管理员页面。
+
+---
+2026.10.6
+- 【仓库归属迁移到组织】把仓库从个人账号转移到 CausalAgent-team 组织后，同步仓库内指向旧地址的引用。
+  - 【README】：中英文 README 的 clone 地址与 Star History 图表来源改为组织地址，图表在新地址下仍返回有效图像。
+  - 【生产 Compose】：首次部署注释中的 clone 地址改为组织地址。
+  - 【管理员文档】：管理员系统总览引用的历史 PR 链接改为组织地址。
+  - 【预发镜像合同测试】：预发 Compose 契约不再断言固定组织名，改为校验 ghcr.io 下任意拥有者的摘要锁定镜像，使组织改名不会导致测试失败。
+- 【组织改名兼容】：镜像发布流程继续从运行环境解析拥有者，仓库内不再出现写死的组织名。
+- 【CI 存量失败修复】：修复 lightweight-ci 中三个长期失败的任务。
+  - 【Light tests】：该任务只安装 pytest，但被测模块 Agent/llm_structured_output.py 在顶层导入了 langchain_openai 和 pydantic。ChatOpenAI 仅用于类型标注，改为 TYPE_CHECKING 下延迟导入；pydantic 是运行时真实依赖，在安装步骤中显式安装锁定版本。
+  - 【前端检查】：admin-frontend 与 app/rag_eval/frontend 的类型检查会解析 packages/design-system 的源码组件，而 CI 只在各自目录安装依赖。矩阵增加 design_system 标记，命中时先安装设计系统依赖，并在 npm 缓存路径中登记其 lock 文件。
+- 【组织改名同步】组织名由 CausalAgent-team 改为 ArcheCausal 后，同步仓库内指向旧组织名的引用。
+  - 【README】：中英文 README 的 clone 地址与 Star History 图表来源改为 ArcheCausal 地址。
+  - 【生产 Compose】：首次部署注释中的 clone 地址改为 ArcheCausal 地址。
+  - 【管理员文档】：管理员系统总览引用的历史 PR 链接改为 ArcheCausal 地址。
+  - 【预发镜像】：预发环境变量模板中的 GHCR 镜像前缀改为 ghcr.io/archecausal。镜像发布流程继续从运行环境解析拥有者，镜像合同测试不校验固定拥有者，两者都不需要跟着改。
+- 【CI 分层与缓存】：把 lightweight-ci 的验证门禁收敛到 Pull Request，并让 Docker unit 测试镜像跨运行复用层缓存。
+  - 【触发边界】：push 到 main 或 develop 不再运行门禁，只保留一个不产生检查结果的缓存预热任务；合并 Pull Request 后自动写入层缓存，供后续 Pull Request 只读恢复。Pull Request 提交仍取消同分支旧运行，push 预热则不被取消，避免写入前被中断。
+  - 【按模块执行】：新增 .github/filters/paths.yaml，用 backend、frontends、contracts 三个过滤器按改动路径选择执行范围；面向 main 的 Pull Request 无条件运行全部检查，python-syntax、light-tests 与 pull-request-policy 始终执行。
+  - 【层缓存】：后端 unit 的镜像构建改用 docker buildx bake 并叠加 type=gha 层缓存，测试运行仍走原有的 docker compose run，隔离契约（network_mode: none、只读挂载、env_file）不变；docker-compose.test.yml 保持本地与 CI 共用，不含仅 CI 可用的缓存参数。
+
+---
+2026.10.7
+- 【Windows Developer Preview 发布】：将 tag 推送触发改为 GitHub Actions workflow_dispatch 手动启动，保留制品构建、Draft Release 创建和已发布附件补齐流程。

@@ -168,8 +168,9 @@ def test_same_origin_new_window_stays_in_client_and_error_page_can_open_browser(
 ) -> None:
     webview = FakeWebviewModule()
     opened: list[str] = []
+    config = _config(tmp_path)
     launcher = DesktopLauncher(
-        _config(tmp_path),
+        config,
         webview_module=webview,
         browser_opener=opened.append,
     )
@@ -184,10 +185,10 @@ def test_same_origin_new_window_stays_in_client_and_error_page_can_open_browser(
     assert opened == []
 
     launcher._error_page_visible = True
-    browser_action = FakeArgs(Uri="http://127.0.0.1:5001/")
+    browser_action = FakeArgs(Uri=config.url)
     core.NewWindowRequested.fire(core, browser_action)
     assert browser_action.Handled is True
-    assert opened == ["http://127.0.0.1:5001/"]
+    assert opened == [config.url]
 
 
 def test_navigation_failure_renders_reload_and_browser_actions_without_query_text(

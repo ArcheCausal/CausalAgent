@@ -177,6 +177,98 @@ class RagServiceTests(unittest.TestCase):
             vector_db=vector_db,
         )
 
+    def _evidence_service(self, *, document_names):
+        from Agent.knowledge_base.rag_runtime import RagRuntimeConfig
+
+        runtime = SimpleNamespace(
+            config=RagRuntimeConfig(
+                vector_db_dir="unit-db",
+                collection_name="unit-collection",
+                production_config_path="unit-config.json",
+                embedding_config={
+                    "status": "ready",
+                    "mode": "local",
+                    "provider": "huggingface",
+                    "model": "unit-model",
+                    "path": "unit-model-path",
+                },
+                release_id="mm_unit",
+                document_names=document_names,
+            ),
+            vector_db=object(),
+            embedding=object(),
+            sparse_retriever=object(),
+            answer_llm=object(),
+        )
+        return RagService(runtime)
+
+    def _project_evidence(self, service, candidates):
+        from Agent.knowledge_base import query_rag
+
+        with patch.object(
+            service,
+            "_runtime_identity_diagnostics",
+            return_value={"readiness": "ready", "release_id": "mm_unit", "embedding_fingerprint": None},
+        ), patch.object(
+            service, "_load_retrieval_config", return_value=query_rag.RagRetrievalConfig()
+        ), patch.object(
+            service, "build_retrieval_trace", return_value={"stages": {"final": candidates}}
+        ):
+            return service.get_evidence("恢复率是多少？")
+
+    def test_evidence_projection_uses_release_document_name_and_drops_asset_uri_url(self):
+        """知识库来源名来自 release manifest 的 document_id → 相对路径；asset_uri 不充当 URL。"""
+        service = self._evidence_service(document_names={"doc_b": "Pearl_2009_Causality.pdf"})
+        candidates = [
+            {
+                "page_content": "片段",
+                "metadata": {
+                    "document_id": "doc_b",
+                    "unit_id": "unit_a",
+                    "chunk_id": "unit_a",
+                    "modality": "page",
+                    "page": 12,
+                    "asset_uri": "doc_bbb/pages/p12.png",
+                },
+                "dense_score": 0.5,
+                "sparse_score": 0.4,
+                "rerank_score": 0.9,
+            }
+        ]
+
+        payload = self._project_evidence(service, candidates)
+
+        self.assertEqual(payload["status"], "available")
+        item = payload["evidence"][0]
+        self.assertEqual(item["evidence_ref"], "rag:mm_unit:E1")
+        self.assertEqual(item["source_title"], "Pearl_2009_Causality.pdf")
+        self.assertIsNone(item["source_url"])
+        self.assertEqual(item["locator"], "Pearl_2009_Causality.pdf#page=12#chunk=unit_a")
+
+    def test_evidence_projection_falls_back_when_document_is_not_in_manifest(self):
+        """manifest 未覆盖的 document_id 回退到检索元数据，不能因此丢失来源。"""
+        service = self._evidence_service(document_names={})
+        candidates = [
+            {
+                "page_content": "片段",
+                "metadata": {
+                    "document_id": "doc_unmapped",
+                    "chunk_id": "unit_a",
+                    "page": 12,
+                    "title": "论文.pdf",
+                    "source_name": "论文.pdf",
+                },
+                "rerank_score": 0.9,
+            }
+        ]
+
+        payload = self._project_evidence(service, candidates)
+
+        item = payload["evidence"][0]
+        self.assertEqual(item["source_title"], "论文.pdf")
+        self.assertIsNone(item["source_url"])
+        self.assertEqual(item["locator"], "论文.pdf#page=12#chunk=unit_a")
+
 
 class RagToolTests(unittest.TestCase):
     def test_rag_tool_registry_exposes_the_subgraph_tool(self):

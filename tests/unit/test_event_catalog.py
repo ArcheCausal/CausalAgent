@@ -4,7 +4,18 @@ from __future__ import annotations
 
 import logging
 
-from observability.event_catalog import EVENT_SPECS, validate_event_details
+from app.agent.worker.event_adapter import (
+    ERROR_CATEGORY_CHECKPOINT,
+    ERROR_CATEGORY_INTERNAL,
+    ERROR_CATEGORY_PROTOCOL,
+    ERROR_CATEGORY_PROVIDER,
+    ERROR_CATEGORY_RUNTIME_CONTRACT,
+)
+from observability.event_catalog import (
+    ERROR_CATEGORY,
+    EVENT_SPECS,
+    validate_event_details,
+)
 
 
 EXPECTED_CODES = {
@@ -47,6 +58,19 @@ EXPECTED_CODES = {
     "rag.multimodal.parse_failed",
     "mcp.tool.finished",
     "mcp.tool.failed",
+    "mcp.tool.canceled",
+    "mcp.tool.slow",
+    "mcp.request.received",
+    "mcp.request.rejected",
+    "mcp.request.accepted",
+    "mcp.cancel.finished",
+    "mcp.client.call.started",
+    "mcp.client.cancel.requested",
+    "mcp.client.cancel.finished",
+    "mcp.client.cancel.failed",
+    "mcp.capacity.rejected",
+    "mcp.process.recycled",
+    "mcp.client.reconnected",
     "mcp.transport.failed",
     "monitor.snapshot.failed",
     "monitor.snapshot.recovered",
@@ -54,10 +78,15 @@ EXPECTED_CODES = {
     "monitor.config.recovered",
     "monitor.lock.failed",
     "monitor.lock.recovered",
-    "checkpoint.cleanup.succeeded",
-    "checkpoint.cleanup.failed",
-    "checkpoint.cleanup.runtime.degraded",
-    "checkpoint.cleanup.runtime.recovered",
+    "agent.persistence.cleanup.succeeded",
+    "agent.persistence.cleanup.failed",
+    "agent.persistence.cleanup.runtime.degraded",
+    "agent.persistence.cleanup.runtime.recovered",
+    "analytics.public_preview.view",
+    "analytics.public_preview.demo_open",
+    "analytics.public_preview.send_click",
+    "analytics.auth.panel_open",
+    "analytics.auth.login_success",
 }
 EXPECTED_CODES.update(
     f"{service}.startup.{outcome}"
@@ -77,6 +106,8 @@ def _sample_value(field: str, rule):
         return 500
     if field == "statement_digest":
         return "a" * 64
+    if field == "visitor_hash":
+        return "b" * 64
     if field == "phases":
         return ["writer_abort"]
     if field == "reason_code":
@@ -91,6 +122,11 @@ def _sample_value(field: str, rule):
         "final_attempt",
         "outbox_id",
         "consecutive_failures",
+        "generation",
+        "retry_ordinal",
+        "retry_after_seconds",
+        "structured_attempts",
+        "timeout_seconds",
     }:
         return 1
     if field.endswith("_count") or field in {
@@ -99,6 +135,7 @@ def _sample_value(field: str, rule):
         "downtime_ms",
         "elapsed_ms",
         "input_bytes",
+        "queue_wait_ms",
         "lag_seconds",
         "lease_epoch",
         "max_workers",
@@ -179,3 +216,74 @@ def test_last_login_update_failure_has_stable_message_and_reason_contract():
     assert resolved is spec
     assert safe == {"reason_code": "unexpected_error"}
     assert violation is None
+
+
+def test_worker_job_failed_accepts_stable_error_category_and_drops_absent_one():
+    """失败事件接受稳定故障域；未分类时省略该键而不是写入非法值。"""
+    event_code = "worker.job.failed"
+    spec = EVENT_SPECS[event_code]
+    assert "error_category" in spec.details
+
+    resolved, safe, violation = validate_event_details(
+        event_code,
+        {
+            "failure_phase": "graph_terminal",
+            "reason_code": "rate_limited",
+            "error_category": "provider_error",
+            "attempt": 1,
+            "duration_ms": 12,
+        },
+    )
+    assert resolved is spec
+    assert violation is None
+    assert safe["error_category"] == "provider_error"
+
+    _resolved, safe, violation = validate_event_details(
+        event_code,
+        {"reason_code": "node_error", "error_category": None},
+    )
+    assert violation is None
+    assert safe == {"reason_code": "node_error"}
+
+    _resolved, _safe, violation = validate_event_details(
+        event_code,
+        {"reason_code": "node_error", "error_category": "RuntimeError"},
+    )
+    assert violation == "invalid_detail_value"
+
+
+def test_error_category_vocabulary_matches_the_worker_classifier():
+    """目录白名单与 worker 分类常量是两处声明，必须逐值一致。"""
+    assert ERROR_CATEGORY.choices == frozenset(
+        {
+            ERROR_CATEGORY_PROVIDER,
+            ERROR_CATEGORY_PROTOCOL,
+            ERROR_CATEGORY_CHECKPOINT,
+            ERROR_CATEGORY_RUNTIME_CONTRACT,
+            ERROR_CATEGORY_INTERNAL,
+        }
+    )
+def test_mcp_cancel_failure_reasons_and_reconnect_lane_are_catalogued():
+    for reason_code in (
+        "control_capacity_timeout",
+        "response_timeout",
+        "transport_error",
+        "invalid_response",
+    ):
+        _spec, safe, violation = validate_event_details(
+            "mcp.client.cancel.failed",
+            {"capability": "causal.pc", "reason_code": reason_code},
+        )
+        assert violation is None
+        assert safe == {
+            "capability": "causal.pc",
+            "reason_code": reason_code,
+        }
+
+    for lane in ("execute", "control"):
+        _spec, safe, violation = validate_event_details(
+            "mcp.client.reconnected",
+            {"generation": 1, "pool_lane": lane},
+        )
+        assert violation is None
+        assert safe == {"generation": 1, "pool_lane": lane}

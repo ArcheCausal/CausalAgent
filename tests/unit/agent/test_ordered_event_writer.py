@@ -1,7 +1,7 @@
 import asyncio
 import os
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 
 TEST_ENV = {
@@ -17,6 +17,7 @@ TEST_ENV = {
 for key, value in TEST_ENV.items():
     os.environ.setdefault(key, value)
 
+from app.agent.worker.event_adapter import classify_graph_failure  # noqa: E402
 from app.agent.worker.event_writer import (  # noqa: E402
     OrderedEventWriter,
     TEXT_FLUSH_CHARACTER_LIMIT,
@@ -44,10 +45,26 @@ def text_chunk(delta: str, stream_id: str = "stream-1") -> dict:
     }
 
 
+def decision_chunk(delta: str, stream_id: str = "decision-stream-1") -> dict:
+    """构造公开算法决策的内部增量 chunk。"""
+    return {
+        "type": "decision_chunk",
+        "step_id": "step-1",
+        "stream_id": stream_id,
+        "node_name": "deep_agent",
+        "title": "执行 Deep Agent 分析",
+        "decision_kind": "algorithm",
+        "tool_name": "causal_pc",
+        "sequence": 1,
+        "delta": delta,
+        "attempt": 2,
+    }
+
+
 class OrderedEventWriterTests(unittest.IsolatedAsyncioTestCase):
     """验证文字批处理的时间、字符和事件边界。"""
 
-    async def test_flushes_after_150ms_without_another_graph_event(self):
+    async def test_flushes_after_50ms_without_another_graph_event(self):
         """模型暂停时也必须由 timeout 主动刷新，而非等待下一事件。"""
         writer = OrderedEventWriter(build_job(), "worker-a")
         persisted = []
@@ -61,23 +78,23 @@ class OrderedEventWriterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persisted[0]["type"], "text_delta")
         self.assertEqual(persisted[0]["delta"], "hello")
 
-    async def test_150ms_is_measured_from_batch_start_not_last_chunk(self):
+    async def test_50ms_is_measured_from_batch_start_not_last_chunk(self):
         """持续到达的小 token 也不能无限延后时间阈值。"""
         writer = OrderedEventWriter(build_job(), "worker-a")
         persisted = []
         writer._persist = AsyncMock(side_effect=lambda payload: persisted.append(payload))
 
         await writer.submit(text_chunk("a"))
-        await asyncio.sleep(0.08)
+        await asyncio.sleep(0.02)
         await writer.submit(text_chunk("b"))
-        await asyncio.sleep(0.09)
+        await asyncio.sleep(0.04)
         await writer.close()
 
         self.assertGreaterEqual(len(persisted), 1)
         self.assertEqual(persisted[0]["delta"], "ab")
 
     async def test_flushes_at_character_limit(self):
-        """累计达到 384 字符时必须立即写入。"""
+        """累计达到字符阈值时必须立即写入。"""
         writer = OrderedEventWriter(build_job(), "worker-a")
         persisted = []
         writer._persist = AsyncMock(side_effect=lambda payload: persisted.append(payload))
@@ -103,6 +120,22 @@ class OrderedEventWriterTests(unittest.IsolatedAsyncioTestCase):
             [payload["type"] for payload in persisted],
             ["text_delta", "node_end", "final_result"],
         )
+
+    async def test_decision_chunks_are_persisted_as_decision_deltas(self):
+        """公开决策增量必须在工具开始事件前按同一队列落库。"""
+        writer = OrderedEventWriter(build_job(), "worker-a")
+        persisted = []
+        writer._persist = AsyncMock(side_effect=lambda payload: persisted.append(payload))
+
+        await writer.submit(decision_chunk("连续数据"))
+        await writer.submit({"type": "tool_call_start", "step_id": "step-1"})
+        await writer.close()
+
+        self.assertEqual(
+            [payload["type"] for payload in persisted],
+            ["decision_delta", "tool_call_start"],
+        )
+        self.assertEqual(persisted[0]["delta"], "连续数据")
 
     async def test_persisted_sequence_is_per_stream_and_not_token_sequence(self):
         """数据库 sequence 应按批次递增，不能沿用 token 序号。"""
@@ -177,10 +210,17 @@ class OrderedEventWriterTests(unittest.IsolatedAsyncioTestCase):
             return_value=FailJobResult.CANCELED_FENCED,
         ):
             with self.assertRaises(JobExecutionRevoked):
-                await writer.submit({"type": "error", "message": "迟到错误"})
+                await writer.submit(
+                    {
+                        "type": "error",
+                        "message": "迟到错误",
+                        "_diagnostic": classify_graph_failure(RuntimeError("boom")),
+                    }
+                )
 
         self.assertFalse(writer.terminal_seen)
         self.assertIsNone(writer.terminal_type)
+        self.assertIsNone(writer.terminal_diagnostic)
         await writer.abort(JobExecutionRevoked("cancelled"))
 
     async def test_terminal_type_distinguishes_final_interrupt_and_error(self):
@@ -205,6 +245,31 @@ class OrderedEventWriterTests(unittest.IsolatedAsyncioTestCase):
             await writer.close()
         self.assertTrue(writer.terminal_seen)
         self.assertEqual(writer.terminal_type, "error")
+
+    async def test_error_terminal_keeps_diagnostic_in_memory_without_persisting_it(self):
+        """内部诊断只挂在 writer 上供日志使用，落库仍只有脱敏文案。"""
+        error = ConnectionRefusedError("db.internal:5432 refused")
+        writer = OrderedEventWriter(build_job(), "worker-a")
+        fail_job = Mock(return_value=FailJobResult.APPLIED)
+        with patch("app.agent.job_service.fail_job", fail_job):
+            await writer.submit(
+                {
+                    "type": "error",
+                    "message": "节点执行失败",
+                    "attempt": 2,
+                    "_diagnostic": classify_graph_failure(error),
+                }
+            )
+            await writer.close()
+
+        fail_job.assert_called_once()
+        self.assertEqual(fail_job.call_args.args[3], "节点执行失败")
+        self.assertNotIn("db.internal", repr(fail_job.call_args))
+
+        diagnostic = writer.terminal_diagnostic
+        self.assertEqual(diagnostic.error_category, "provider_error")
+        self.assertEqual(diagnostic.reason_code, "connection_unavailable")
+        self.assertIs(diagnostic.exc_info[1], error)
 
 
 if __name__ == "__main__":

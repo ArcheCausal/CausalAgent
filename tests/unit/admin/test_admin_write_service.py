@@ -138,6 +138,16 @@ class ControlledAdminWriteTests(unittest.TestCase):
         self.assertIn("ORDER BY checkpoint_id DESC", inspection)
         self.assertIn('"job_id": job_id', graph_runner)
 
+    def test_user_delete_registers_checkpoint_and_memory_cleanup(self):
+        """用户物理删除同时登记父子图 checkpoint 与长期记忆清理。"""
+        text = Path("app/admin/write_service.py").read_text(encoding="utf-8")
+        self.assertIn("enqueue_checkpoint_cleanup_many(", text)
+        self.assertIn("enqueue_user_memory_cleanup(", text)
+        self.assertIn('"user_memory_cleanup"', text)
+        session_route = Path("app/chat/routes.py").read_text(encoding="utf-8")
+        self.assertIn("enqueue_checkpoint_cleanup_many(", session_route)
+        self.assertNotIn("enqueue_user_memory_cleanup", session_route)
+
     def test_lifecycle_repair_is_dry_run_and_requires_database_confirmation(self):
         """孤立修复 CLI 默认 dry-run，apply 必须精确确认数据库。"""
         text = Path("Database/lifecycle_repair.py").read_text(encoding="utf-8")
@@ -158,12 +168,12 @@ class ControlledAdminWriteTests(unittest.TestCase):
         started = time.monotonic()
         with (
             patch.object(
-                database_access.settings,
+                database_access.database_settings,
                 "MYSQL_POOL_ACQUIRE_TIMEOUT_SECONDS",
                 0.01,
             ),
             patch.object(
-                database_access.settings,
+                database_access.database_settings,
                 "MYSQL_POOL_ACQUIRE_RETRY_MS",
                 1,
             ),

@@ -1,0 +1,134 @@
+<mxfile host="Electron" modified="2026-09-10T14:00:00.000Z" agent="Codex" version="26.0.0" type="device">
+  <diagram id="causalagent-deep-agent-plan" name="目标混合架构">
+    <mxGraphModel dx="1700" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="CausalAgent × Deep Agents：外层确定性安全壳 + 内层单 Agent 决策循环" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;fontSize=24;fontStyle=1;fontColor=#172B4D;" vertex="1" parent="1">
+          <mxGeometry x="250" y="15" width="1200" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lane-control" value="产品与运行控制面（沿用现有能力）" style="swimlane;html=1;horizontal=1;startSize=32;rounded=1;container=1;collapsible=0;fillColor=#F4F5F7;strokeColor=#7A869A;fontColor=#172B4D;fontStyle=1;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="40" y="70" width="1620" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="user" value="&lt;b&gt;用户请求 / 冻结文件&lt;/b&gt;&lt;br&gt;普通问答或数据型因果分析" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6554C0;fontColor=#172B4D;fontSize=13;" vertex="1" parent="lane-control">
+          <mxGeometry x="45" y="50" width="235" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="job" value="&lt;b&gt;Job / Worker 控制&lt;/b&gt;&lt;br&gt;Lease · Fencing · Cancel · Stale recovery" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DEEBFF;strokeColor=#0747A6;fontColor=#172B4D;fontSize=13;" vertex="1" parent="lane-control">
+          <mxGeometry x="350" y="50" width="285" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="public-events" value="&lt;b&gt;公共事件适配器&lt;/b&gt;&lt;br&gt;摘要 / 运行事实 / 报告分流与脱敏" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3FCEF;strokeColor=#00875A;fontColor=#172B4D;fontSize=13;" vertex="1" parent="lane-control">
+          <mxGeometry x="1000" y="50" width="285" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="sse" value="&lt;b&gt;SSE 时间线&lt;/b&gt;&lt;br&gt;Last-Event-ID · 历史重放" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAE6FF;strokeColor=#6554C0;fontColor=#172B4D;fontSize=13;" vertex="1" parent="lane-control">
+          <mxGeometry x="1340" y="50" width="235" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lane-parent" value="外层 LangGraph：确定性安全壳" style="swimlane;html=1;horizontal=1;startSize=32;rounded=1;container=1;collapsible=0;fillColor=#DEEBFF;strokeColor=#0747A6;fontColor=#172B4D;fontStyle=1;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="40" y="220" width="1620" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="intent" value="&lt;b&gt;意图与产品边界&lt;/b&gt;&lt;br&gt;普通问答 / 追问 / 因果分析" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#0747A6;fontSize=13;" vertex="1" parent="lane-parent">
+          <mxGeometry x="40" y="70" width="210" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="admission" value="&lt;b&gt;确定性准入检查&lt;/b&gt;&lt;br&gt;身份 · 归属 · 可解析性 · 硬限制&lt;br&gt;用户可修复 → interrupt" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFEBE6;strokeColor=#DE350B;fontSize=13;" vertex="1" parent="lane-parent">
+          <mxGeometry x="300" y="60" width="235" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="profile" value="&lt;b&gt;基础 DataProfile&lt;/b&gt;&lt;br&gt;小而稳定，不提前替算法做全部预处理" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF0B3;strokeColor=#FF8B00;fontSize=13;" vertex="1" parent="lane-parent">
+          <mxGeometry x="585" y="70" width="225" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="deep-node" value="&lt;b&gt;Deep Agent 子图 / 节点&lt;/b&gt;&lt;br&gt;同一 Job · 受控 State 投影" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAE6FF;strokeColor=#6554C0;fontSize=13;fontStyle=1;" vertex="1" parent="lane-parent">
+          <mxGeometry x="860" y="70" width="220" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="auth-gate" value="&lt;b&gt;真实性闸门&lt;/b&gt;&lt;br&gt;至少一个真实因果算法成功&lt;br&gt;schema · input identity · provenance" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3FCEF;strokeColor=#00875A;fontSize=13;fontStyle=1;" vertex="1" parent="lane-parent">
+          <mxGeometry x="1130" y="55" width="245" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="report" value="&lt;b&gt;Postprocess / Report&lt;/b&gt;&lt;br&gt;结论 · 假设 · 引用 · 限制&lt;br&gt;或诚实的 analysis_failed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#00875A;fontSize=13;" vertex="1" parent="lane-parent">
+          <mxGeometry x="1420" y="60" width="165" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lane-agent" value="内层 Deep Agent：动态能力编排（MVP 单 Agent，不启用 SubAgent / Shell / 自由文件工具）" style="swimlane;html=1;horizontal=1;startSize=32;rounded=1;container=1;collapsible=0;fillColor=#EAE6FF;strokeColor=#6554C0;fontColor=#172B4D;fontStyle=1;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="40" y="450" width="1620" height="245" as="geometry" />
+        </mxCell>
+        <mxCell id="deep-agent" value="&lt;b&gt;单个 Deep Agent Loop&lt;/b&gt;&lt;br&gt;理解目标 → 选择能力 → 调用 → 观察&lt;br&gt;→ 补充 / 合法切换 / 停止" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6554C0;strokeColor=#403294;fontColor=#FFFFFF;fontSize=14;fontStyle=1;" vertex="1" parent="lane-agent">
+          <mxGeometry x="45" y="75" width="280" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="registry" value="&lt;b&gt;Capability Registry&lt;/b&gt;&lt;br&gt;目标 · 数据要求 · 假设&lt;br&gt;produces/consumes · 等价替代&lt;br&gt;版本 · 可用性 · Adapter binding" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6554C0;fontSize=13;" vertex="1" parent="lane-agent">
+          <mxGeometry x="380" y="55" width="245" height="125" as="geometry" />
+        </mxCell>
+        <mxCell id="algorithm-tools" value="&lt;b&gt;Algorithm Tools&lt;/b&gt;&lt;br&gt;PC · OLC · DirectLiNGAM · …&lt;br&gt;允许多次调用和同目标切换" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DEEBFF;strokeColor=#0747A6;fontSize=13;" vertex="1" parent="lane-agent">
+          <mxGeometry x="680" y="55" width="245" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="rag-tool" value="&lt;b&gt;Evidence RAG Tool&lt;/b&gt;&lt;br&gt;按需调用&lt;br&gt;证据 · 引用 · 充分性&lt;br&gt;不替代最终报告" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3FCEF;strokeColor=#00875A;fontSize=13;" vertex="1" parent="lane-agent">
+          <mxGeometry x="980" y="55" width="235" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="web-tool" value="&lt;b&gt;Academic Web Tool&lt;/b&gt;&lt;br&gt;按需、多次调用&lt;br&gt;snippet + 来源元数据&lt;br&gt;不冒充论文全文结论" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF0B3;strokeColor=#FF8B00;fontSize=13;" vertex="1" parent="lane-agent">
+          <mxGeometry x="1270" y="55" width="270" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="bounded-policy" value="&lt;b&gt;受控能力工具面&lt;/b&gt;　Registry allowlist + 结构化 Tool 状态 + 调用预算 + 父图真实性闸门（自动切换不只靠 prompt）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7A869A;dashed=1;fontColor=#42526E;fontSize=12;fontStyle=2;" vertex="1" parent="lane-agent">
+          <mxGeometry x="380" y="185" width="1160" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lane-exec" value="可信执行与数据处理边界" style="swimlane;html=1;horizontal=1;startSize=32;rounded=1;container=1;collapsible=0;fillColor=#E3FCEF;strokeColor=#00875A;fontColor=#172B4D;fontStyle=1;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="40" y="715" width="1620" height="220" as="geometry" />
+        </mxCell>
+        <mxCell id="algo-adapter" value="&lt;b&gt;Algorithm Adapter&lt;/b&gt;&lt;br&gt;可信身份注入 → 前置检查&lt;br&gt;→ 可逆临时准备 → MCP&lt;br&gt;→ 规范化 + provenance" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#00875A;fontSize=13;" vertex="1" parent="lane-exec">
+          <mxGeometry x="155" y="55" width="285" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="mcp" value="&lt;b&gt;现有 MCP Session&lt;/b&gt;&lt;br&gt;真实因果算法执行" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DEEBFF;strokeColor=#0747A6;fontSize=13;" vertex="1" parent="lane-exec">
+          <mxGeometry x="500" y="70" width="220" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="rag-runtime" value="&lt;b&gt;RAG Runtime&lt;/b&gt;&lt;br&gt;readiness · active release&lt;br&gt;dense/sparse/MMR/BM25/rerank&lt;br&gt;evidence compression" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#00875A;fontSize=13;" vertex="1" parent="lane-exec">
+          <mxGeometry x="800" y="55" width="280" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="web-runtime" value="&lt;b&gt;Web Search Runtime&lt;/b&gt;&lt;br&gt;SearXNG · arXiv&lt;br&gt;Crossref · OpenAlex&lt;br&gt;过滤与轮转归并" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#FF8B00;fontSize=13;" vertex="1" parent="lane-exec">
+          <mxGeometry x="1160" y="55" width="260" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="derived" value="&lt;b&gt;临时派生数据&lt;/b&gt;&lt;br&gt;调用内存在 · 不下载 · 不作长期真相源&lt;br&gt;只记录配方 / hash / provenance" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFEBE6;strokeColor=#DE350B;fontSize=12;" vertex="1" parent="lane-exec">
+          <mxGeometry x="1460" y="60" width="135" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lane-data" value="统一持久化与多租户边界" style="swimlane;html=1;horizontal=1;startSize=32;rounded=1;container=1;collapsible=0;fillColor=#F4F5F7;strokeColor=#7A869A;fontColor=#172B4D;fontStyle=1;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="40" y="955" width="1620" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="pg" value="&lt;b&gt;PostgreSQL Checkpoint&lt;/b&gt;&lt;br&gt;父图统一配置&lt;br&gt;thread_id = job_id" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;fillColor=#DEEBFF;strokeColor=#0747A6;fontSize=13;" vertex="1" parent="lane-data">
+          <mxGeometry x="170" y="55" width="240" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="mysql" value="&lt;b&gt;MySQL 业务事实&lt;/b&gt;&lt;br&gt;Job · 输入账本 · events&lt;br&gt;lease/fencing/终态事务" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;fillColor=#E3FCEF;strokeColor=#00875A;fontSize=13;" vertex="1" parent="lane-data">
+          <mxGeometry x="525" y="55" width="250" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="prefs" value="&lt;b&gt;用户偏好 Store（MVP）&lt;/b&gt;&lt;br&gt;按 user_id 隔离&lt;br&gt;不存数据、因果边或分析结论" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;fillColor=#EAE6FF;strokeColor=#6554C0;fontSize=13;" vertex="1" parent="lane-data">
+          <mxGeometry x="895" y="55" width="270" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="no-fs" value="&lt;b&gt;不新增第二真相源&lt;/b&gt;&lt;br&gt;Deep Agents 文件后端 / 宿主文件系统&lt;br&gt;MVP 不向模型开放" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFEBE6;strokeColor=#DE350B;fontSize=13;" vertex="1" parent="lane-data">
+          <mxGeometry x="1275" y="55" width="295" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e-user-job" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#42526E;strokeWidth=2;" edge="1" parent="1" source="user" target="job">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-job-intent" value="创建 / 恢复" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#0747A6;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;" edge="1" parent="1" source="job" target="intent">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-intent-admission" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#0747A6;strokeWidth=2;" edge="1" parent="1" source="intent" target="admission"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e-admission-profile" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#0747A6;strokeWidth=2;" edge="1" parent="1" source="admission" target="profile"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e-profile-deepnode" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#6554C0;strokeWidth=2;" edge="1" parent="1" source="profile" target="deep-node"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e-deepnode-agent" value="受控输入" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#6554C0;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="deep-node" target="deep-agent"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e-agent-registry" value="只读发现" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#6554C0;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;" edge="1" parent="1" source="deep-agent" target="registry"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e-agent-policy" value="按需调用 / 多次观察" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#6554C0;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;exitX=1;exitY=0.8;entryX=0;entryY=0.5;" edge="1" parent="1" source="deep-agent" target="bounded-policy"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e-algo-adapter" value="真实调用" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#0747A6;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;" edge="1" parent="1" source="algorithm-tools" target="algo-adapter"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e-adapter-mcp" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#0747A6;strokeWidth=2;" edge="1" parent="1" source="algo-adapter" target="mcp"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e-rag-runtime" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#00875A;strokeWidth=2;" edge="1" parent="1" source="rag-tool" target="rag-runtime"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e-web-runtime" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#FF8B00;strokeWidth=2;" edge="1" parent="1" source="web-tool" target="web-runtime"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e-agent-gate" value="结构化结果投影" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#00875A;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;" edge="1" parent="1" source="deep-node" target="auth-gate"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e-gate-report" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#00875A;strokeWidth=2;" edge="1" parent="1" source="auth-gate" target="report"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e-report-events" value="公开结果" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#00875A;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontSize=11;" edge="1" parent="1" source="report" target="public-events"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e-events-sse" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#00875A;strokeWidth=2;" edge="1" parent="1" source="public-events" target="sse"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="legend" value="&lt;b&gt;图例&lt;/b&gt;　蓝色：确定性运行/算法　紫色：Agent 决策　绿色：真实性/证据　橙色：外部学术检索　红色：安全边界或禁止项　虚线：持久化关系" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7A869A;fontColor=#42526E;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="250" y="1145" width="1200" height="35" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 import threading
-from typing import Any, Callable, Dict, List, Protocol, Union
+from typing import Any, Callable, Dict, List, Mapping, Protocol, Union
 
 from Agent.knowledge_base.embedding_runtime import EmbeddingApiError
 from Agent.knowledge_base.rag_runtime import RagRuntime
-from observability.logging_runtime import log_event
 
 
 UNAVAILABLE_RAG_RESULT = {
@@ -57,6 +55,185 @@ class RagService:
             embedding_function=self.runtime.embedding,
             sparse_retriever=self.runtime.sparse_retriever,
         )
+
+    def _runtime_identity_diagnostics(self) -> Dict[str, Any]:
+        """返回 evidence-only 必须携带的 active release 脱敏身份。"""
+
+        from Agent.knowledge_base.embedding_runtime import EmbeddingConfiguration
+
+        try:
+            fingerprint = EmbeddingConfiguration.from_mapping(
+                self.runtime.config.embedding_config
+            ).fingerprint()
+            release_id = str(self.runtime.config.release_id)
+        except Exception as exc:
+            # 诊断失败必须由 get_evidence 的 readiness 边界统一收口；
+            # 异常正文可能包含路径或凭据，不能向协议层传播。
+            raise RuntimeError("RAG runtime identity unavailable") from exc
+        return {
+            "readiness": "ready",
+            "release_id": release_id,
+            "embedding_fingerprint": fingerprint,
+        }
+
+    def _safe_runtime_identity_diagnostics(self) -> Dict[str, Any]:
+        """在协议错误路径上返回不泄露异常的最小 Runtime 身份。"""
+        try:
+            return self._runtime_identity_diagnostics()
+        except Exception:
+            return {
+                "readiness": "unavailable",
+                "release_id": None,
+                "embedding_fingerprint": None,
+            }
+
+    @staticmethod
+    def _unavailable_evidence_result(
+        query: str,
+        identity: Dict[str, Any],
+        reason_code: str,
+    ) -> Dict[str, Any]:
+        """构造不包含原始异常或运行时配置的稳定降级结果。"""
+        return {
+            "status": "unavailable",
+            "query": query,
+            "release_id": identity.get("release_id"),
+            "evidence": [],
+            "diagnostics": {**identity, "reason_code": reason_code},
+        }
+
+    def _document_display_name(self, metadata: Mapping[str, Any]) -> str | None:
+        """用 release manifest 的 document_id → 相对路径解析展示名，缺失时回退检索元数据。"""
+
+        document_names = getattr(self._runtime.config, "document_names", None) or {}
+        return (
+            document_names.get(str(metadata.get("document_id") or ""))
+            or metadata.get("title")
+            or metadata.get("source_name")
+            or None
+        )
+
+    def _build_evidence_result(
+        self,
+        question: str,
+        identity: Dict[str, Any],
+        config: Any,
+        payloads: List[Dict[str, Any]],
+        trace: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """把检索输出投影为稳定协议；调用方负责提供异常边界。"""
+        release_id = identity["release_id"]
+        evidence: list[dict[str, Any]] = []
+        for payload in payloads:
+            metadata = payload.get("metadata") or {}
+            evidence_id = str(payload.get("evidence_id") or len(evidence) + 1)
+            display_name = self._document_display_name(metadata)
+            evidence.append(
+                {
+                    "evidence_id": evidence_id,
+                    "evidence_ref": f"rag:{release_id}:{evidence_id}",
+                    "snippet": str(payload.get("content") or ""),
+                    "source_title": display_name,
+                    "source_url": metadata.get("source_url"),
+                    "locator": (
+                        f"{display_name or ''}"
+                        f"#page={metadata.get('page', '')}"
+                        f"#chunk={metadata.get('chunk_id', '')}"
+                    ).strip("#"),
+                    "modality": metadata.get("modality") or metadata.get("content_kind"),
+                    "score": payload.get("rerank_score"),
+                    "release_id": release_id,
+                    "degradation_flags": (),
+                    "dense_score": payload.get("dense_score"),
+                    "sparse_score": payload.get("sparse_score"),
+                    "rerank_score": payload.get("rerank_score"),
+                    "sufficiency": "sufficient",
+                }
+            )
+        return {
+            "status": "available" if evidence else "no_relevant_evidence",
+            "query": question,
+            "release_id": release_id,
+            "evidence": evidence,
+            "sufficiency": "sufficient" if evidence else "insufficient",
+            "diagnostics": {
+                **identity,
+                "retrieval_config": config.to_dict(),
+                "evidence_count": len(evidence),
+                "retrieval_trace": {
+                    "timings_ms": dict(trace.get("timings_ms") or {}),
+                    "stage_counts": {
+                        name: len(items) if isinstance(items, list) else 0
+                        for name, items in (trace.get("stages") or {}).items()
+                    },
+                },
+            },
+        }
+
+    def get_evidence(
+        self,
+        query: str,
+        *,
+        max_contexts: int | None = None,
+    ) -> Dict[str, Any]:
+        """只执行检索并返回证据，不调用 RAG answer model。
+
+        Deep Agent 路径使用该入口；旧 ``get_response`` 继续保留回答模型兼容
+        语义，避免把现有 RAG 评测/发布链路与新工具路径混在一起。
+        """
+
+        question = str(query or "").strip()
+        if not question:
+            identity = self._safe_runtime_identity_diagnostics()
+            return {
+                "status": "protocol_error",
+                "query": question,
+                "release_id": identity["release_id"],
+                "evidence": [],
+                "diagnostics": {**identity, "reason_code": "empty_query"},
+            }
+
+        identity = self._safe_runtime_identity_diagnostics()
+        stage = "retrieval_import"
+        try:
+            from Agent.knowledge_base import query_rag
+
+            stage = "retrieval_config"
+            config = self._load_retrieval_config()
+            stage = "readiness"
+            identity = self._runtime_identity_diagnostics()
+            stage = "retrieval"
+            trace = self.build_retrieval_trace(question, config=config)
+            payloads = query_rag._build_evidence_payloads(
+                trace["stages"]["final"],
+                max_chars=config.max_evidence_chars,
+            )
+            payloads = query_rag.compress_evidence_payloads(
+                payloads,
+                max_contexts=max_contexts,
+                strategy=config.answer_context_compression,
+            )
+            return self._build_evidence_result(
+                question, identity, config, payloads, trace
+            )
+        except EmbeddingApiError:
+            return self._unavailable_evidence_result(
+                question, identity, "embedding_unavailable"
+            )
+        except Exception:
+            if stage == "readiness":
+                identity = {
+                    "readiness": "unavailable",
+                    "release_id": None,
+                    "embedding_fingerprint": None,
+                }
+            reason_code = {
+                "retrieval_import": "retrieval_unavailable",
+                "retrieval_config": "retrieval_config_unavailable",
+                "readiness": "rag_readiness_unavailable",
+                "retrieval": "retrieval_unavailable",
+            }[stage]
+            return self._unavailable_evidence_result(question, identity, reason_code)
 
     def get_vector_db_metadata_summary(self, limit: int = 10000) -> Dict[str, Any]:
         """汇总 Runtime 已打开 collection 的 metadata。"""
@@ -132,17 +309,7 @@ class RagService:
                     candidates = trace["stages"]["final"]
                 else:
                     candidates = retrieve_candidates(question_text, config=production_config)
-            except EmbeddingApiError as exc:
-                log_event(
-                    logging.getLogger(__name__),
-                    "rag.enrichment.degraded",
-                    details={
-                        "status": "unavailable",
-                        "reason_code": exc.category,
-                        "question_count": 1,
-                        "evidence_count": 0,
-                    },
-                )
+            except EmbeddingApiError:
                 return dict(UNAVAILABLE_RAG_RESULT)
             evidence_payloads = query_rag._build_evidence_payloads(
                 candidates,
@@ -180,6 +347,21 @@ class UnavailableRagService:
     def get_response(self, questions: List[Union[str, Dict[str, Any]]]) -> Dict[str, Any]:
         """忽略输入并返回新的稳定降级对象。"""
         return dict(UNAVAILABLE_RAG_RESULT)
+
+    def get_evidence(self, query: str, *, max_contexts: int | None = None) -> Dict[str, Any]:
+        """返回 evidence-only 的稳定不可用结果，不访问模型或索引。"""
+        del max_contexts
+        return {
+            "status": "unavailable",
+            "query": str(query or ""),
+            "release_id": None,
+            "evidence": [],
+            "diagnostics": {
+                "readiness": "unavailable",
+                "embedding_fingerprint": None,
+                "reason_code": "rag_unavailable",
+            },
+        }
 
 
 class CompatibilityRagService(RagService):

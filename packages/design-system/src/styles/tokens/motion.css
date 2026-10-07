@@ -1,0 +1,17 @@
+/* CausalAgent 设计系统：动效层
+
+   小交互 200ms 上下，入场不超过 400ms，退出取入场的约三分之二。
+   系统偏好减少动态时，base.css 会关闭全部过渡和动画，
+   需要保留信息量的组件（进度条、加载线）另写静态终态。 */
+@layer ca-tokens {
+  :root {
+    --ca-motion-fast: 200ms;
+    --ca-motion-hover: 240ms;
+    --ca-motion-enter: 320ms;
+    --ca-motion-exit: 210ms;
+    /* 原型页面进度线的线性推进时长 */
+    --ca-motion-progress: 1400ms;
+    --ca-ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
+    --ca-ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+}

@@ -1,0 +1,42 @@
+/* 错误状态
+
+   沿用原型失败态的表达方式：正文色的下划线标题加次要说明，
+   不引入彩色。错误码用等宽字体，方便对照日志和 request ID。 */
+.ca-error {
+  display: grid;
+  gap: var(--ca-space-8);
+}
+
+.ca-error__title {
+  margin: 0;
+  color: var(--ca-text-default);
+  font-size: var(--ca-text-subheading);
+  line-height: var(--ca-leading-subheading);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: var(--ca-border-width);
+}
+
+.ca-error__description {
+  margin: 0;
+  max-width: var(--ca-measure-body);
+  color: var(--ca-text-muted);
+  font-size: var(--ca-text-body-sm);
+  line-height: var(--ca-leading-body-sm);
+}
+
+.ca-error__code {
+  margin: 0;
+  color: var(--ca-text-muted);
+  font-family: var(--ca-font-mono);
+  font-size: var(--ca-text-caption);
+  line-height: var(--ca-leading-caption);
+}
+
+.ca-error__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ca-space-16);
+  margin-top: var(--ca-space-8);
+}
