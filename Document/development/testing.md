@@ -27,7 +27,23 @@
 
 ## GitHub Actions CI
 
-`lightweight-ci.yml` 在面向 `main`、`develop` 的 Pull Request 和分支更新上运行完整后端 unit、五个前端工程的自检/构建、开发与预发 Compose 静态校验、预发服务暴露与 Alloy 标签合同、Alloy 配置验证，以及四个 Dockerfile 的 BuildKit 静态检查。Docker unit 镜像按 `tests/README.md` 中的固定 lock 构建；Compose 校验只展开配置，不启动服务。静态 Dockerfile 检查不会生成或推送镜像；实际 app、MCP、MySQL 主从镜像只由人工触发的发布工作流构建。
+`lightweight-ci.yml` 的验证门禁只由面向 `main`、`develop` 的 Pull Request 触发，并按改动路径决定执行范围。`push` 到 `main` 或 `develop` 不运行门禁，只用一个预热任务重建 Docker unit 测试镜像并导出层缓存；该任务不产生检查结果，合入 Pull Request 后自动写入缓存，供后续 Pull Request 只读恢复。
+
+Pull Request 上的执行范围由 `.github/filters/paths.yaml` 的三个过滤器决定：
+
+| 过滤器 | 覆盖范围 | 触发任务 |
+| --- | --- | --- |
+| `backend` | `app/`、`Agent/`、`Database/`、`config/`、`scripts/`、`tests/`、顶层入口脚本与依赖清单、`Dockerfile` | 后端 unit、Dockerfile 静态检查 |
+| `frontends` | `chat-frontend/`、`admin-frontend/`、`website-frontend/`、`app/rag_eval/frontend/`、`packages/design-system/` | 五个前端工程的自检与构建 |
+| `contracts` | `docker-compose*.yml`、`observability/`、`searxng/`、`deploy/`、预发与观测契约测试、环境变量模板 | Compose 与预发部署合同、Alloy 配置验证 |
+
+三个过滤器之外的改动（例如纯文档）只运行 Python 语法、轻量测试和 Pull Request 规范检查。面向 `main` 的 Pull Request 无条件运行以上全部任务，不受路径过滤影响。`pull-request-policy` 始终执行，校验标题格式与 `main` 只接受 `develop` 来源的分支流向。
+
+**维护规则**：`.github/filters/paths.yaml` 的 glob 与顶层目录一一对应，重命名或移动顶层目录时必须同步修改该文件。旧 glob 匹配不到任何文件时，对应任务会静默跳过，该模块不再被覆盖而 CI 仍显示通过，因此没有自动化兜底，只能靠这条规则和代码评审守住。
+
+Docker unit 镜像按 `tests/README.md` 中的固定 lock 构建，构建命令通过 `docker buildx bake` 叠加 `type=gha` 层缓存：Pull Request 只 `cache-from` 恢复，`push` 的预热任务负责 `cache-to` 写入。运行测试仍使用 `docker compose -f docker-compose.test.yml run --rm unit-test`，`docker-compose.test.yml` 保持本地与 CI 共用、不含仅 CI 可用的缓存参数，隔离契约（`network_mode: none`、只读挂载、`env_file`）不变。缓存上限与保留期由 GitHub 侧管理，公开仓库使用标准托管 runner 的用量不计费。
+
+Compose 校验只展开配置，不启动服务。静态 Dockerfile 检查不会生成或推送镜像；实际 app、MCP、MySQL 主从镜像只由人工触发的发布工作流构建。
 
 本地复现预发静态检查：
 

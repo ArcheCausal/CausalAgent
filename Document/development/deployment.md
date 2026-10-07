@@ -60,7 +60,7 @@
 
 ### CI 与人工镜像发布
 
-`.github/workflows/lightweight-ci.yml` 在面向 `main`/`develop` 的 PR 和分支更新上运行后端单元测试、五个前端工程自检/构建、Compose 与预发部署合同、Alloy 配置验证，以及 app、MCP、MySQL primary、MySQL replica 四个 Dockerfile 的 BuildKit 静态检查。该流程不推送镜像。完整镜像构建只由 `.github/workflows/publish-staging-images.yml` 的 `workflow_dispatch` 触发，并拒绝 `develop` 以外的分支；它把 app、MCP、MySQL primary、MySQL replica 分别构建并直接推送 GHCR，不创建镜像 artifact，也不通过 SSH 部署服务器。每个镜像使用 `sha-<commit 前 7 位>` 标签，摘要中同时给出 `sha256` digest；服务器配置必须使用 digest。
+`.github/workflows/lightweight-ci.yml` 只在面向 `main`/`develop` 的 PR 上运行门禁，并按改动路径选择后端单元测试、五个前端工程自检/构建、Compose 与预发部署合同、Alloy 配置验证和四个 Dockerfile 的 BuildKit 静态检查；面向 `main` 的 PR 无条件运行全部检查。`push` 到 `main`/`develop` 不运行门禁，只重建 Docker unit 测试镜像以导出层缓存。两处流程都不推送镜像。完整镜像构建只由 `.github/workflows/publish-staging-images.yml` 的 `workflow_dispatch` 触发，并拒绝 `develop` 以外的分支；它把 app、MCP、MySQL primary、MySQL replica 分别构建并直接推送 GHCR，不创建镜像 artifact，也不通过 SSH 部署服务器。每个镜像使用 `sha-<commit 前 7 位>` 标签，摘要中同时给出 `sha256` digest；服务器配置必须使用 digest。
 
 仓库默认分支是 `main`，因此首次手动触发前，发布 workflow 文件必须先合并到 `main`；触发时在 Actions 页面选择 `develop`。公开仓库的公开 GHCR Container 镜像按 GitHub Packages 计费规则免费存储和传输（见 [GitHub Packages 计费说明](https://docs.github.com/en/billing/concepts/product-billing/github-packages)）。新建 GHCR 包后，维护者需在包设置中将可见性改为 Public，之后测试服务器才可匿名拉取。构建使用普通 `ubuntu-latest` runner，并在构建前后记录磁盘余量；MCP 首次构建是否能在 runner 可用磁盘内完成，以该次 workflow 实际结果为准。镜像直接推送 GHCR，不导出为 Actions artifact。
 
@@ -118,7 +118,7 @@ docker cp causalagent_app:/app/Agent/knowledge_base/multimodal_indexes/<release_
 
 ## 源码 Release 与 CD 流程
 
-`.github/workflows/lightweight-ci.yml` 负责代码、前端、Compose、预发部署合同和 Dockerfile 静态检查；`.github/workflows/publish-staging-images.yml` 只由人工触发构建和推送测试镜像，不部署服务器或执行回滚。`.github/workflows/release-windows.yml` 只负责面向开发者的 Windows Developer Preview 制品，不代表服务端已经完成 CD。
+`.github/workflows/lightweight-ci.yml` 只在 PR 上运行，负责代码、前端、Compose、预发部署合同和 Dockerfile 静态检查，并按改动路径选择执行范围；`.github/workflows/publish-staging-images.yml` 只由人工触发构建和推送测试镜像，不部署服务器或执行回滚。`.github/workflows/release-windows.yml` 只负责面向开发者的 Windows Developer Preview 制品，不代表服务端已经完成 CD。
 公开说明维护在 [`.github/release-notes`](../../.github/release-notes)，workflow 在对应版本文件存在时优先读取该说明；其他 tag 才使用内置的通用 Draft 文案。
 
 正常发布时，先把 workflow 和目标版本代码合并到 `main`，再创建指向 `main` 历史的严格 SemVer tag。tag push 会在 GitHub 托管的 `windows-latest` runner 上检出该 tag，创建独立 `.venv-desktop`、运行桌面逻辑测试、构建 onefile、检查冻结通道与桌面环境，并生成 EXE 和 `SHA256SUMS.txt`。只有全部门禁通过后才创建 Draft Pre-release；维护者验收 Draft 后手动发布。构建发生在 GitHub runner，不是在触发者的电脑上。

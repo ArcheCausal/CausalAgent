@@ -17,18 +17,43 @@ on:
       - main
       - develop
 
+  workflow_dispatch:
+
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: lightweight-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Pull Request 的新提交取消同分支旧运行；push 的缓存预热不与后续运行互取消，
+  # 否则频繁合并会让预热构建在写入缓存前被中断。
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  detect-changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontends: ${{ steps.filter.outputs.frontends }}
+      contracts: ${{ steps.filter.outputs.contracts }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Filter changed paths
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          filters: .github/filters/paths.yaml
+
   python-syntax:
     name: Python syntax
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    if: github.event_name == 'pull_request'
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -48,6 +73,7 @@ jobs:
     name: Light tests
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    if: github.event_name == 'pull_request'
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -75,6 +101,10 @@ jobs:
     name: Backend unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: detect-changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      (needs.detect-changes.outputs.backend == 'true' || github.base_ref == 'main')
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -82,16 +112,52 @@ jobs:
       - name: Report runner disk capacity
         run: df -h /
 
-      - name: Build the repository unit-test image
-        run: docker compose -f docker-compose.test.yml build unit-test
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the repository unit-test image with layer cache
+        run: >-
+          docker buildx bake
+          -f docker-compose.test.yml
+          --set unit-test.cache-from=type=gha,scope=unit-test
+          --set unit-test.tags=causalagent-unit-test:latest
+          --provenance=false
+          --load
+          unit-test
 
       - name: Run all backend unit tests
-        run: docker compose -f docker-compose.test.yml run --rm unit-test
+        run: docker compose -p causalagent -f docker-compose.test.yml run --rm unit-test
+
+  warm-unit-test-cache:
+    name: Warm unit-test image cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Rebuild unit-test image and export layer cache
+        run: >-
+          docker buildx bake
+          -f docker-compose.test.yml
+          --set unit-test.cache-from=type=gha,scope=unit-test
+          --set "unit-test.cache-to=type=gha,scope=unit-test,mode=min"
+          --set "unit-test.output=type=cacheonly"
+          --provenance=false
+          unit-test
 
   frontend-builds:
     name: Frontend checks (${{ matrix.directory }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    needs: detect-changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      (needs.detect-changes.outputs.frontends == 'true' || github.base_ref == 'main')
     strategy:
       fail-fast: false
       matrix:
@@ -154,6 +220,10 @@ jobs:
     name: Compose and deployment contracts
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: detect-changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      (needs.detect-changes.outputs.contracts == 'true' || github.base_ref == 'main')
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -193,6 +263,10 @@ jobs:
     name: Dockerfile checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: detect-changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      (needs.detect-changes.outputs.backend == 'true' || github.base_ref == 'main')
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

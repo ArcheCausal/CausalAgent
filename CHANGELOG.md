@@ -1716,3 +1716,7 @@
   - 【生产 Compose】：首次部署注释中的 clone 地址改为 ArcheCausal 地址。
   - 【管理员文档】：管理员系统总览引用的历史 PR 链接改为 ArcheCausal 地址。
   - 【预发镜像】：预发环境变量模板中的 GHCR 镜像前缀改为 ghcr.io/archecausal。镜像发布流程继续从运行环境解析拥有者，镜像合同测试不校验固定拥有者，两者都不需要跟着改。
+- 【CI 分层与缓存】：把 lightweight-ci 的验证门禁收敛到 Pull Request，并让 Docker unit 测试镜像跨运行复用层缓存。
+  - 【触发边界】：push 到 main 或 develop 不再运行门禁，只保留一个不产生检查结果的缓存预热任务；合并 Pull Request 后自动写入层缓存，供后续 Pull Request 只读恢复。Pull Request 提交仍取消同分支旧运行，push 预热则不被取消，避免写入前被中断。
+  - 【按模块执行】：新增 .github/filters/paths.yaml，用 backend、frontends、contracts 三个过滤器按改动路径选择执行范围；面向 main 的 Pull Request 无条件运行全部检查，python-syntax、light-tests 与 pull-request-policy 始终执行。
+  - 【层缓存】：后端 unit 的镜像构建改用 docker buildx bake 并叠加 type=gha 层缓存，测试运行仍走原有的 docker compose run，隔离契约（network_mode: none、只读挂载、env_file）不变；docker-compose.test.yml 保持本地与 CI 共用，不含仅 CI 可用的缓存参数。
