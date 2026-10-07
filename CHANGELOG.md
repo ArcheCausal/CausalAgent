@@ -1720,3 +1720,7 @@
   - 【触发边界】：push 到 main 或 develop 不再运行门禁，只保留一个不产生检查结果的缓存预热任务；合并 Pull Request 后自动写入层缓存，供后续 Pull Request 只读恢复。Pull Request 提交仍取消同分支旧运行，push 预热则不被取消，避免写入前被中断。
   - 【按模块执行】：新增 .github/filters/paths.yaml，用 backend、frontends、contracts 三个过滤器按改动路径选择执行范围；面向 main 的 Pull Request 无条件运行全部检查，python-syntax、light-tests 与 pull-request-policy 始终执行。
   - 【层缓存】：后端 unit 的镜像构建改用 docker buildx bake 并叠加 type=gha 层缓存，测试运行仍走原有的 docker compose run，隔离契约（network_mode: none、只读挂载、env_file）不变；docker-compose.test.yml 保持本地与 CI 共用，不含仅 CI 可用的缓存参数。
+
+---
+2026.10.7
+- 【Windows Developer Preview 发布】：将 tag 推送触发改为 GitHub Actions workflow_dispatch 手动启动，保留制品构建、Draft Release 创建和已发布附件补齐流程。

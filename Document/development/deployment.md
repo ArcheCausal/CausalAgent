@@ -121,7 +121,7 @@ docker cp causalagent_app:/app/Agent/knowledge_base/multimodal_indexes/<release_
 `.github/workflows/lightweight-ci.yml` 只在 PR 上运行，负责代码、前端、Compose、预发部署合同和 Dockerfile 静态检查，并按改动路径选择执行范围；`.github/workflows/publish-staging-images.yml` 只由人工触发构建和推送测试镜像，不部署服务器或执行回滚。`.github/workflows/release-windows.yml` 只负责面向开发者的 Windows Developer Preview 制品，不代表服务端已经完成 CD。
 公开说明维护在 [`.github/release-notes`](../../.github/release-notes)，workflow 在对应版本文件存在时优先读取该说明；其他 tag 才使用内置的通用 Draft 文案。
 
-正常发布时，先把 workflow 和目标版本代码合并到 `main`，再创建指向 `main` 历史的严格 SemVer tag。tag push 会在 GitHub 托管的 `windows-latest` runner 上检出该 tag，创建独立 `.venv-desktop`、运行桌面逻辑测试、构建 onefile、检查冻结通道与桌面环境，并生成 EXE 和 `SHA256SUMS.txt`。只有全部门禁通过后才创建 Draft Pre-release；维护者验收 Draft 后手动发布。构建发生在 GitHub runner，不是在触发者的电脑上。
+正常发布时，先把 workflow 和目标版本代码合并到 `main`，再创建并推送指向 `main` 历史的严格 SemVer tag。推送 tag 不会自动触发构建；维护者需在 Actions 页面手动运行 `Windows Developer Preview Release`，填写 `target_tag`，并保持 `upload_to_published_release` 关闭。workflow 随后在 GitHub 托管的 `windows-latest` runner 上检出该 tag，创建独立 `.venv-desktop`、运行桌面逻辑测试、构建 onefile、检查冻结通道与桌面环境，并生成 EXE 和 `SHA256SUMS.txt`。只有全部门禁通过后才创建 Draft Pre-release；维护者验收 Draft 后手动发布。构建发生在 GitHub runner，不是在触发者的电脑上。
 
 如果 tag 对应的 Release 已经发布，但附件因 workflow 故障缺失，修复后的 workflow 合并到默认分支后可使用 `workflow_dispatch` 补齐：填写已经存在的 `target_tag`，并显式勾选 `upload_to_published_release`。手动运行使用默认分支上的修复版 workflow，但源码始终重新检出目标 tag，并验证 tag commit 与 `origin/main` 的祖先关系。补齐模式只接受已发布且未锁定的 Release，无论其当前是正式版还是 Pre-release；目标不存在、仍是 Draft、已 immutable 或已有同名附件时均失败，不覆盖现有附件，也不移动或重建 tag。
 
