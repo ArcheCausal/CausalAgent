@@ -7,12 +7,6 @@ gtid_mode=ON
 enforce_gtid_consistency=ON
 log_replica_updates=ON
 
-# Keep the read replica protected after restarts as well as after first-time
-# initialization. The init script temporarily disables these settings while
-# configuring replication, then restores them before the server is ready.
-read_only=ON
-super_read_only=ON
-
 plugin_load_add=semisync_replica.so
 loose-rpl_semi_sync_replica_enabled=ON
 

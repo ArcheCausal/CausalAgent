@@ -1724,3 +1724,7 @@
 ---
 2026.10.7
 - 【Windows Developer Preview 发布】：将 tag 推送触发改为 GitHub Actions workflow_dispatch 手动启动，保留制品构建、Draft Release 创建和已发布附件补齐流程。
+---
+2026.10.8
+- 【预发数据库：修复 MySQL 副本首次初始化】
+  - 【只读保护时序】：将副本只读设置改为复制初始化完成后持久化，避免 MySQL 官方入口脚本在首次建库和设置 root 密码时被 `super_read_only` 阻断；副本后续重启仍保持只读。
