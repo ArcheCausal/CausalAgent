@@ -2,7 +2,7 @@
 
 
 <p align="center">
-<img src="./README/CausalAgent.png" alt="Logo">
+<img src="./README/causalagent-mark.png" alt="CausalAgent 品牌图标" width="160">
 </p>
 
 <h1 align="center">
@@ -32,12 +32,10 @@ CausalAgent
 
   <p>
 
-*只需上传你的数据集，Causal-Agent 就能以对话的方式，自动帮你选用因果分析算法，并在生成可交互的对话面板和专业的分析报告。*
+*CausalAgent 面向表格数据提供因果分析工作区，支持上传数据、查看分析过程，并以交互图表和报告呈现结果。*
 
 > [!IMPORTANT]
-> **项目开发中**
-> <br>
-> 目前 CausalAgent 正在进行核心架构升级,我们正在努力完善功能，**请点击右上角 Star ⭐ 关注后续更新！**
+> CausalAgent 仍然在开发当中，欢迎Stars催更
 
 ## 目录
 
@@ -67,7 +65,7 @@ CausalAgent
   - [日志系统](#日志系统)
     - [开发环境启动](#开发环境启动)
   - [RAG评测工作台](#rag评测工作台)
-  - [普通端前端（Vue）](#普通端前端vue)
+  - [前端（Vue）](#前端vue)
   - [后端单元测试](#后端单元测试)
   - [windows部署](#windows部署)
 - [技术文档](#技术文档)
@@ -81,9 +79,9 @@ CausalAgent
 
 ## WHAT IS CausalAgent
 
-**新一代因果分析智能体**: CausalAgent 是一个集成了AGENT的因果分析工具，它能够自动识别因果关系，生成专业的分析报告，并提供可交互的因果图谱。
+**新一代因果分析智能体**：CausalAgent 是面向表格数据的因果分析应用。LangGraph 父图负责编排预处理、Deep Agent 子图、工具调用和报告生成；分析任务由独立 worker 执行。
 
-**缩减因果分析门槛**：什么是因果？为什么需要因果分析？简单来说，[因果分析](https://zh.wikipedia.org/wiki/%E5%9B%A0%E6%9E%9C%E6%8E%A8%E6%96%B7)就是对真实世界数据进行逻辑分析。
+**降低因果分析工具的使用门槛**：CausalAgent 帮助用户探索数据中的因果结构。分析结论受数据质量和方法假设限制，不能替代研究设计、领域知识或实验验证。
 
 ## WHY CausalAgent
 
@@ -94,7 +92,7 @@ CausalAgent
 |  **动态图谱** | 摒弃静态图片，生成可交互的 Network 图谱，支持节点拖拽、点击追问。 |
 |  **论文实时搜索** | SearXNG 实时搜索，获取最新论文与时事。 |
 |  **MCP 架构** | 采用MCP，将核心逻辑与工具解耦，极易扩展新算法。 |
-|  **RAG 增强** | 内置因果推断领域的专业知识库，确保生成的分析报告学术性与严谨性并存，提供个性化的rag评测桌面，定制化rag服务 |
+| **RAG 增强** | 普通分析可检索因果知识库；隔离评测工作台支持知识源摄取、检索评测和受控 release 发布。 |
 ## 技术栈
 
 | 类别 | 技术组件 |
@@ -109,14 +107,15 @@ CausalAgent
 ## 用户功能
 
 ### 用户端展示
+官网提供产品介绍、文档和更新日志；普通用户工作区用于发起分析、查看会话与报告。
 <p align="center">
-  <img src="./README/causalagent展示页.png" alt="主程序" width="850">
+  <img src="./README/website-home-2026-10.png" alt="CausalAgent 官网首页" width="850">
 </p>
 <p align="center">
-  <img src="./README/因果图页.png" alt="因果图" width="850">
+  <img src="./README/user-workspace-home-2026-10.png" alt="普通用户工作区首页" width="850">
 </p>
 <p align="center">
-  <img src="./README/image2.png" alt="因果图" width="450">
+  <img src="./README/user-analysis-report-2026-10.png" alt="工作区中的分析报告与图表" width="850">
 </p>
 
 ### 核心功能
@@ -296,7 +295,7 @@ docker compose -f docker-compose.yml run --rm app python Database/audit_before_d
 ### 管理员端展示
 
 <p align="center">
-  <img src="./README/管理员.png" alt="管理员后台" width="850">
+  <img src="./README/admin-database-dashboard-2026-10.png" alt="管理员数据库状态看板（主内容区域）" width="850">
 </p>
 
 ### 数据库生产化配置
@@ -375,7 +374,7 @@ docker compose -f docker-compose.yml logs -f app worker monitor alloy loki grafa
 ### RAG评测工作台
 
 <p align="center">
-  <img src="./README/rag评测工作台.png" alt="管理员后台" width="850">
+  <img src="./README/rag-workbench-2026-10.png" alt="隔离知识源工作台" width="850">
 </p>
 RAG 评测工作台面向管理员和 RAG 维护人员，用于在不影响当前生产知识库的前提下，完成知识源摄取、隔离索引构建、检索试跑、题集治理、Ragas 评测和正式 release 发布。详细文档请看： [`Document/architecture/rag-evaluation.md`](Document/architecture/rag-evaluation.md)
 
