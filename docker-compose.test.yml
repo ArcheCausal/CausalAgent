@@ -10,6 +10,8 @@ services:
     env_file:
       - ./tests/unit-test-env
     environment:
+      # 单元测试与部署使用同一个密钥文件入口；文件随仓库只读挂载。
+      CAUSALAGENT_SECRET_FILE: /app/tests/unit-test-secrets.env
       LANGCHAIN_API_KEY: ""
       LANGCHAIN_TRACING_V2: "false"
       LANGSMITH_TRACING: "false"

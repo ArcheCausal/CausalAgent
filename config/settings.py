@@ -1,10 +1,10 @@
 import os
 import logging
-import sys
 from pathlib import Path
 
 from config.checkpoint_settings import CheckpointPostgresConfig
 from config.database_settings import DatabaseConfig, database_settings
+from config.secret_file import get_secret, load_secrets, require_secret
 
 # 计算项目根目录
 # __file__ -> D:/.../CausalAgent/config/settings.py
@@ -12,41 +12,24 @@ from config.database_settings import DatabaseConfig, database_settings
 # os.path.dirname(os.path.dirname(__file__)) -> D:/.../CausalAgent (项目根目录)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# 加载 .env 文件（如果存在）
-# 这个库会自动读取项目根目录的 .env 文件，并将其中的变量加载到环境变量中
-try:
-    from dotenv import load_dotenv
-    env_path = Path(BASE_DIR) / '.env'
-    
-    if env_path.exists():
-        load_dotenv(dotenv_path=env_path)
-        logging.info(f"从 {env_path} 加载环境变量")
-    else:
-        logging.info("未找到 .env 文件，直接使用系统环境变量")
-except ImportError:
-    # 如果没有安装 python-dotenv，只使用系统环境变量（Docker环境下正常）
-    logging.info("未安装 python-dotenv，使用系统环境变量")
+# 密码、令牌和签名密钥只从服务器上的单个密钥文件读取；本模块不再自动加载 .env，
+# 因此生产运行时不存在环境变量回退路径。
+load_secrets()
 
 class AppConfig:
-    """
-    一个用于加载、管理和验证应用配置的类。
-    
-    配置来源（统一使用环境变量）：
-    - Docker环境：通过 docker-compose 的 environment 或 env_file 传递
-    - 本地开发：通过项目根目录的 .env 文件（由 python-dotenv 自动加载）
-    
+    """加载并校验应用配置。
+
+    非敏感配置来自进程环境变量，由 Compose 的非密钥配置文件或本地开发环境提供；
+    SECRET_KEY 与 API_KEY 只来自密钥文件，缺失时直接失败。
     """
     def __init__(self, *, database_config: DatabaseConfig | None = None):
-        """
-        初始化配置类。
-        所有配置都从环境变量加载（本地开发通过.env文件自动加载到环境变量）
-        """
-        
-        # 应用必需的配置
-        self.SECRET_KEY = self._get_config("SECRET_KEY")
+        """初始化配置类；密钥只从密钥文件读取，其余配置从环境变量读取。"""
 
-        # AI 模型配置
-        self.API_KEY = self._get_config("API_KEY")
+        # 应用必需的配置：密钥文件是唯一来源，没有环境变量回退。
+        self.SECRET_KEY = require_secret("SECRET_KEY")
+
+        # AI 模型配置：密钥来自密钥文件，地址与模型名来自环境变量。
+        self.API_KEY = require_secret("API_KEY")
         self.BASE_URL = self._get_config("BASE_URL")
         self.MODEL = self._get_config("MODEL")
 
@@ -299,8 +282,8 @@ class AppConfig:
             default=None
         )
         
-        # LangSmith 可选配置，继续兼容项目原有的 LANGCHAIN_* 变量。
-        self.LANGCHAIN_API_KEY = self._get_config("LANGCHAIN_API_KEY", required=False)
+        # LangSmith 可选配置：密钥来自密钥文件，项目名来自非密钥环境变量。
+        self.LANGCHAIN_API_KEY = get_secret("LANGCHAIN_API_KEY")
         self.LANGCHAIN_PROJECT = self._get_config(
             "LANGCHAIN_PROJECT",
             required=False,
@@ -362,9 +345,8 @@ class AppConfig:
             error_msg = (
                 f"配置错误: 缺少必需的环境变量 '{key}'。\n"
                 f"请确保：\n"
-                f"  - Docker环境：在项目根目录的 .env 文件中设置 {key}=...\n"
-                f"  - 本地开发：在项目根目录的 .env 文件中设置 {key}=...\n"
-                f"  - 或直接设置系统环境变量\n"
+                f"  - 服务器部署：在部署包的非密钥环境文件中设置 {key}=...\n"
+                f"  - 本地开发：在本地环境文件或直接设置系统环境变量\n"
             )
             logging.error(error_msg)
             raise ValueError(error_msg)

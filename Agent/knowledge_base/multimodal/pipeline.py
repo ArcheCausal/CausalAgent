@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import importlib.util
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from Agent.knowledge_base.embedding_runtime import EmbeddingConfiguration, resolve_production_embedding_configuration
+from config.secret_file import get_secret
 from .assets import AssetStore
 from .contracts import IngestionIssue, IssueSeverity, KnowledgeUnit, OutboundImageRecord, UnitStatus, VisionAnalysis, canonical_json, content_document_id, content_source_id, render_retrieval_text, sha256_bytes, stable_id
 from .defaults import load_production_defaults, production_source_paths, resolve_production_sources
@@ -2085,7 +2087,7 @@ class MultimodalKnowledgeBaseMaintenance:
             "embedding": embedding_fingerprint(),
             "vision_provider": "wcode",
             "vision_model": os.getenv("VISION_MODEL", REQUIRED_MODEL),
-            "vision_api_key_configured": bool(os.getenv("VISION_API_KEY")),
+            "vision_api_key_configured": bool(get_secret("VISION_API_KEY")),
             "vision_base_url_configured": bool(os.getenv("VISION_BASE_URL")),
             "allowed_remote_sources": ["Pearl fixed samples"],
             "asset_root": str(self.asset_root),
@@ -2095,12 +2097,7 @@ class MultimodalKnowledgeBaseMaintenance:
 
     def _parser_status(self) -> dict[str, Any]:
         """报告解析器包与 Docling 布局模型是否同时可用，不执行下载。"""
-        try:
-            import importlib.util
-
-            docling_installed = importlib.util.find_spec("docling") is not None
-        except Exception:
-            docling_installed = False
+        docling_installed = importlib.util.find_spec("docling") is not None
         artifacts_path = Path(os.getenv("MULTIMODAL_DOCLING_ARTIFACTS_DIR", Path.home() / ".cache" / "docling" / "models"))
         legacy_layout_model = Path.home() / ".cache" / "huggingface" / "hub" / "models--docling-project--docling-layout-heron"
         return {

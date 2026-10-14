@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 
+from config.secret_file import load_secrets
+
 
 def _int_env(name: str, default: int) -> int:
     raw = os.getenv(name)
@@ -53,8 +55,9 @@ class McpServerConfig:
     def from_env(cls, *, strict: bool = True) -> "McpServerConfig":
         """Load deployment configuration without importing the application settings."""
 
-        service_token = os.getenv("CAUSAL_MCP_SERVICE_TOKEN", "")
-        signing_key_current = os.getenv("CAUSAL_MCP_SIGNING_KEY_CURRENT", "")
+        secrets = load_secrets()
+        service_token = secrets.get("CAUSAL_MCP_SERVICE_TOKEN", "")
+        signing_key_current = secrets.get("CAUSAL_MCP_SIGNING_KEY_CURRENT", "")
         if strict and (not service_token or not signing_key_current):
             raise ValueError(
                 "CAUSAL_MCP_SERVICE_TOKEN and CAUSAL_MCP_SIGNING_KEY_CURRENT are required"
@@ -62,7 +65,7 @@ class McpServerConfig:
         config = cls(
             service_token=service_token,
             signing_key_current=signing_key_current,
-            signing_key_previous=os.getenv("CAUSAL_MCP_SIGNING_KEY_PREVIOUS") or None,
+            signing_key_previous=secrets.get("CAUSAL_MCP_SIGNING_KEY_PREVIOUS") or None,
             signing_key_id=os.getenv("CAUSAL_MCP_SIGNING_KEY_ID", "current"),
             signing_key_previous_id=os.getenv(
                 "CAUSAL_MCP_SIGNING_KEY_PREVIOUS_ID", "previous"
