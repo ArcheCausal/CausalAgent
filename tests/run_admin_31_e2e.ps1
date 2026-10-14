@@ -90,6 +90,41 @@ $env:PLAYWRIGHT_ADMIN_PASSWORD = $env:E2E_ADMIN_PASSWORD
 $env:PLAYWRIGHT_USER_USERNAME = "e2e-user-31"
 $env:PLAYWRIGHT_USER_PASSWORD = $env:E2E_USER_PASSWORD
 
+function New-E2eSecretValue {
+    $bytes = New-Object byte[] 32
+    $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $generator.GetBytes($bytes)
+    $generator.Dispose()
+    return [Convert]::ToBase64String($bytes)
+}
+
+$deepAgentApiKey = $env:DEEP_AGENT_API_KEY
+if ([string]::IsNullOrWhiteSpace($deepAgentApiKey)) {
+    $deepAgentApiKey = $env:API_KEY
+}
+$e2eMcpServiceToken = New-E2eSecretValue
+$e2eMcpSigningKey = New-E2eSecretValue
+$e2eGrafanaPassword = New-E2eSecretValue
+
+# 应用只从密钥文件读取密码与令牌；这里把隔离 E2E 的随机值写入临时密钥文件。
+$secretFilePath = Join-Path ([IO.Path]::GetTempPath()) "causalagent31e2e-$([Guid]::NewGuid().ToString('N').Substring(0, 8)).env"
+@"
+MYSQL_ROOT_PASSWORD=$($env:MYSQL_ROOT_PASSWORD)
+MYSQL_PASSWORD=$($env:MYSQL_PASSWORD)
+MYSQL_WRITE_PASSWORD=$($env:MYSQL_WRITE_PASSWORD)
+MYSQL_READ_PASSWORD=$($env:MYSQL_READ_PASSWORD)
+MYSQL_REPLICA_STATUS_PASSWORD=$($env:MYSQL_REPLICA_STATUS_PASSWORD)
+MYSQL_REPLICATION_PASSWORD=$($env:MYSQL_REPLICATION_PASSWORD)
+CHECKPOINT_POSTGRES_PASSWORD=$($env:CHECKPOINT_POSTGRES_PASSWORD)
+SECRET_KEY=$($env:SECRET_KEY)
+API_KEY=$($env:API_KEY)
+DEEP_AGENT_API_KEY=$($deepAgentApiKey)
+CAUSAL_MCP_SERVICE_TOKEN=$($e2eMcpServiceToken)
+CAUSAL_MCP_SIGNING_KEY_CURRENT=$($e2eMcpSigningKey)
+GRAFANA_ADMIN_PASSWORD=$($e2eGrafanaPassword)
+"@ | Set-Content -LiteralPath $secretFilePath -Encoding utf8 -NoNewline
+$env:CAUSALAGENT_SECRET_FILE = $secretFilePath
+
 $flaskProcess = $null
 $monitorProcess = $null
 try {
@@ -202,6 +237,9 @@ FLUSH PRIVILEGES;
     }
     if ($monitorProcess -and -not $monitorProcess.HasExited) {
         Stop-Process -Id $monitorProcess.Id
+    }
+    if (Test-Path -LiteralPath $secretFilePath) {
+        Remove-Item -LiteralPath $secretFilePath -Force
     }
     Write-Host "Isolated database containers and volumes were retained: $primaryContainer, $replicaContainer, $postgresContainer"
 }

@@ -439,7 +439,10 @@ class FrontendConfigTests(unittest.TestCase):
     """验证前端目录与开发服务器配置的默认值。"""
 
     def test_frontend_paths_default_to_local_dist(self):
-        with patch.dict(os.environ, TEST_ENV, clear=True):
+        env = dict(TEST_ENV)
+        # clear=True 会清掉密钥文件指针；测试仍必须从同一个密钥文件读取密钥。
+        env["CAUSALAGENT_SECRET_FILE"] = os.environ["CAUSALAGENT_SECRET_FILE"]
+        with patch.dict(os.environ, env, clear=True):
             config = AppConfig()
 
         self.assertEqual(config.WEBSITE_FRONTEND_DIST_DIR, "")

@@ -1,10 +1,11 @@
 #!/bin/bash
 set -eu
 
-if [ -z "${MYSQL_REPLICATION_PASSWORD:-}" ]; then
-  echo "MYSQL_REPLICATION_PASSWORD is required for replica replication setup" >&2
-  exit 1
-fi
+# 复制账号密码只来自服务器上的单个密钥文件。
+. /opt/causalagent/secret-env.sh
+
+REPLICATION_USER="${MYSQL_REPLICATION_USER:-replica}"
+REPLICATION_PASSWORD="$(secret_value MYSQL_REPLICATION_PASSWORD)"
 
 until mysqladmin ping -h mysql-primary -uroot -p"${MYSQL_ROOT_PASSWORD}" --silent; do
   echo "waiting for mysql-primary to become available..."
@@ -17,8 +18,8 @@ SET GLOBAL read_only = OFF;
 STOP REPLICA;
 CHANGE REPLICATION SOURCE TO
   SOURCE_HOST='mysql-primary',
-  SOURCE_USER='${MYSQL_REPLICATION_USER:-replica}',
-  SOURCE_PASSWORD='${MYSQL_REPLICATION_PASSWORD}',
+  SOURCE_USER='${REPLICATION_USER}',
+  SOURCE_PASSWORD='${REPLICATION_PASSWORD}',
   SOURCE_AUTO_POSITION=1,
   GET_SOURCE_PUBLIC_KEY=1;
 START REPLICA;
