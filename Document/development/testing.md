@@ -35,7 +35,7 @@ Pull Request 上的执行范围由 `.github/filters/paths.yaml` 的三个过滤�
 | --- | --- | --- |
 | `backend` | `app/`、`Agent/`、`Database/`、`config/`、`scripts/`、`tests/`、顶层入口脚本与依赖清单、`Dockerfile` | 后端 unit、Dockerfile 静态检查 |
 | `frontends` | `chat-frontend/`、`admin-frontend/`、`website-frontend/`、`app/rag_eval/frontend/`、`packages/design-system/` | 五个前端工程的自检与构建 |
-| `contracts` | `docker-compose*.yml`、`observability/`、`searxng/`、`deploy/`、预发与观测契约测试、环境变量模板 | Compose 与预发部署合同、Alloy 配置验证 |
+| `contracts` | `docker-compose*.yml`、`observability/`、`searxng/`、`deploy/`、发布与打包工作流、预发与观测契约测试、环境变量模板 | Compose 与预发部署合同、Alloy 配置验证 |
 
 三个过滤器之外的改动（例如纯文档）只运行 Python 语法、轻量测试和 Pull Request 规范检查。面向 `main` 的 Pull Request 无条件运行以上全部任务，不受路径过滤影响。`pull-request-policy` 始终执行，校验标题格式与 `main` 只接受 `develop` 来源的分支流向。
 
@@ -44,6 +44,8 @@ Pull Request 上的执行范围由 `.github/filters/paths.yaml` 的三个过滤�
 Docker unit 镜像按 `tests/README.md` 中的固定 lock 构建，构建命令通过 `docker buildx bake` 叠加 `type=gha` 层缓存：Pull Request 只 `cache-from` 恢复，`push` 的预热任务负责 `cache-to` 写入。运行测试仍使用 `docker compose -f docker-compose.test.yml run --rm unit-test`，`docker-compose.test.yml` 保持本地与 CI 共用、不含仅 CI 可用的缓存参数，隔离契约（`network_mode: none`、只读挂载、`env_file`）不变。缓存上限与保留期由 GitHub 侧管理，公开仓库使用标准托管 runner 的用量不计费。
 
 Compose 校验只展开配置，不启动服务。静态 Dockerfile 检查不会生成或推送镜像；实际 app、MCP、MySQL 主从镜像只由人工触发的发布工作流构建。
+
+发布工作流的静态契约及镜像解析器参数失败路径由 `tests/integration/deployment/test_release_workflow.py` 检查，包括四个构建全部成功后才打包、同一源码提交传递、可选手动输入、无效输入不写清单，以及拒绝无法验证 revision 的元数据。该文件不模拟 GHCR 成功响应；通过静态检查不代表仓库鉴权、真实镜像查询或 GitHub Actions 执行成功。真实发布需在 Actions 中检查四个 digest、完整源码提交、制品上传及服务器验收。
 
 本地复现预发静态检查：
 
@@ -225,7 +227,7 @@ checkpoint 清理不得触碰 `store`/`store_migrations` 表，用户长期记�
 
 ## SearXNG 部署验证
 
-SearXNG 不再有初始化脚本：开发与预发 Compose 都直接使用已提交的非密钥 `settings.yml`，密钥由 `SEARXNG_SECRET` 环境变量注入。Compose 部署契约由 `tests/integration/deployment/test_searxng_compose.py` 静态检查，确认镜像不是 `latest`、存在 `/healthz` healthcheck、注入 `SEARXNG_SECRET` 且配置目录只读挂载，同时默认 `app`/`worker` 不依赖 SearXNG。
+SearXNG 不再有初始化脚本：开发与预发 Compose 都直接使用已提交的非密钥 `settings.yml`，密钥由 `deploy/scripts/secret-env.sh` 从服务器密钥文件导出。Compose 部署契约由 `tests/integration/deployment/test_searxng_compose.py` 静态检查，确认镜像不是 `latest`、存在 `/healthz` healthcheck、启动适配脚本导出 `SEARXNG_SECRET` 且配置目录只读挂载，同时默认 `app`/`worker` 不依赖 SearXNG。
 
 需要 Docker Engine 才能执行真实容器验证：
 
