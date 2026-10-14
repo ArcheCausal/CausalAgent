@@ -238,8 +238,8 @@ jobs:
 
       - name: Validate development and staging Compose files
         env:
-          CHECKPOINT_POSTGRES_PASSWORD: compose-static-validation
-          GRAFANA_ADMIN_PASSWORD: compose-static-validation
+          # Compose 只校验密钥文件的挂载路径；密钥值来自仓库里的测试密钥文件。
+          CAUSALAGENT_SECRET_FILE: ./tests/unit-test-secrets.env
         run: |
           docker compose --env-file .env.example -f docker-compose.yml config --quiet
           docker compose --env-file .env.staging.example -f docker-compose.staging.yml config --quiet
@@ -249,7 +249,11 @@ jobs:
           python -m pytest -p no:cacheprovider
           tests/integration/deployment/test_staging_compose.py
           tests/integration/deployment/test_searxng_compose.py
+          tests/integration/deployment/test_secret_compose_permissions.py
+          tests/integration/deployment/test_release_workflow.py
           tests/integration/test_observability_compose.py
+          tests/unit/config/test_secret_file.py
+          tests/unit/deployment/test_release_bundle.py
           tests/test_staging_environment_guard.py
 
       - name: Validate Alloy configuration

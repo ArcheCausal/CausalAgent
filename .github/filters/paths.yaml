@@ -31,11 +31,16 @@ frontends:
 
 # Compose、可观测、搜索、部署与对应的静态契约检查。
 contracts:
+  - '.github/workflows/publish-staging-images.yml'
+  - '.github/workflows/build-release-bundle.yml'
   - 'docker-compose*.yml'
   - 'observability/**'
   - 'searxng/**'
   - 'deploy/**'
+  - 'scripts/**'
   - 'tests/integration/deployment/**'
+  - 'tests/unit/config/**'
+  - 'tests/unit/deployment/**'
   - 'tests/integration/test_observability_compose.py'
   - 'tests/test_staging_*.py'
   - '.env.example'
