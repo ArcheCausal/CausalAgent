@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 MATRIX_PATH = REPOSITORY_ROOT / "Document" / "rag_eval_production_acceptance_matrix.json"
 RUNNER_PATH = REPOSITORY_ROOT / "tests" / "acceptance" / "run_rag_eval_production_acceptance.py"
 

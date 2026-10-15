@@ -265,4 +265,7 @@ admin-frontend/dist/*
 # 本地验收与对照截图（Playwright 输出），只作为临时证据，不进入版本库。
 /output/
 
+# 压测客户端的本地凭据、运行产物与报告正文统一收在 local/，不进入版本库。
+/loadtest/local/
+
 tmp/

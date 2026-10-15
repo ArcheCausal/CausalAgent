@@ -47,6 +47,8 @@ AGENTS.md 只写“修改时必须怎么做”的执行约束，不复制完整�
 - admin-frontend/AGENTS.md：TypeScript、管理员 API、构建和浏览器验证。
 - observability/AGENTS.md：共享日志运行时、事件目录、降噪、脱敏和采集拓扑。
 - packages/design-system/AGENTS.md：设计 token、品牌基础样式、共享组件契约和本包自检。
+- tests/AGENTS.md：测试分层归属、真实依赖取证、默认执行范围，以及测试与 loadtest 的目录边界。
+- loadtest/AGENTS.md：压测客户端各目录用途、凭据与产物落盘位置、入库边界，以及报告归档与清理方式。
 
 ## 跨模块不可省略的约束
 

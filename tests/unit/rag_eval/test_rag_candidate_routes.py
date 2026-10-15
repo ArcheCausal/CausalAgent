@@ -106,7 +106,7 @@ class RagCandidateRouteTests(unittest.TestCase):
 
     def test_dataset_review_ui_owns_release_and_does_not_trigger_post_review_governance(self):
         """题集发布入口应位于候选审核页，对比页不得再发起治理任务。"""
-        app_source = (Path(__file__).resolve().parents[1] / "app" / "rag_eval" / "frontend" / "src" / "App.vue").read_text(
+        app_source = (Path(__file__).resolve().parents[3] / "app" / "rag_eval" / "frontend" / "src" / "App.vue").read_text(
             encoding="utf-8"
         )
 

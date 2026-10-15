@@ -1728,7 +1728,6 @@
 2026.10.8
 - 【预发数据库：修复 MySQL 副本首次初始化】
   - 【只读保护时序】：将副本只读设置改为复制初始化完成后持久化，避免 MySQL 官方入口脚本在首次建库和设置 root 密码时被 `super_read_only` 阻断；副本后续重启仍保持只读。
-
 ---
 2026.10.9
 - 【普通用户工作区文档：补全用户协议与操作说明】
@@ -1739,6 +1738,24 @@
 - 【品牌与项目首页：更新界面展示并修正管理员图标】
   - 【README 展示】：替换中英文首页、工作区、管理员和 RAG 工作台截图，并统一使用当前品牌图标。
   - 【管理员品牌】：管理员侧栏品牌接口改为读取设计系统正式资源，并要求浏览器重新校验缓存；同步更新管理员 API 说明。
+
+---
+2026.10.10
+- 【预发压测：新增本地压测客户端与分级负载证据】实现只在本机运行、只使用测试账号的普通用户混合流程压测，并在真实 staging 入口按档位执行。
+  - 【客户端】：新增 loadtest/ 本地客户端，覆盖登录、会话、上传、Job 创建、SSE 订阅、历史读取、活动 Job、取消与恢复；实时记录 HTTP 耗时与状态码、SSE 首事件与终态时间、断线与重连、重复与乱序事件、Job 排队与总耗时，并把事件 ID 缺口单列为信息项，反映 analysis_job_events.id 为全局自增主键的事实。
+  - 【分级负载】：新增单用户基线、2、5、10 用户混合与 30 分钟稳定性、20 用户突发档，按档位限制活动 Job 与 SSE 并发；Job 并发额度用满时排队等待，停止提交后核对队列清空与资源恢复。
+  - 【专项检查】：新增 SSE 断线恢复、创建幂等、取消排队与运行中 Job、取消后状态不反转、跨账号隔离检查。
+  - 【凭据与产物】：账号凭据只写入本地 local/accounts.local.json，运行产物写入 local/runs/，二者与 data/、.venv/ 一并加入 .gitignore；整理后的报告写入 local/evidence/。
+  - 【核查与服务器侧采集】：新增 local/evidence/log-verification.md，按档位给出 job_id 清单、时间窗口与 Request ID 样本；新增 loadtest/runner/logs.py 通过同源 Grafana 代理查询 Loki，凭据只在进程内读取且不回显；新增 loadtest/server_side_collect.sh 只读采集主机资源、容器重启与 OOM、MySQL 连接数与活动 Job 队列，输出可直接由 --server-json 合并进报告。
+  - 【日志侧核查】接入同源 Grafana 代理读取 Loki，按每档运行窗口统计各服务各级别条数、按算法能力拆分的收到/完成/失败/慢调用、事件码分布、web 请求失败、worker 降级告警、request_id 沿用，以及 MCP 最近七天成功与失败累计；结果写入 local/evidence/logcheck-<档位>.json，凭据只从环境变量或部署环境文件读取，不落盘。
+  - 【CDFM 失败定位】日志侧确认 causal.cdfm 在本轮全部档位完成数为 0、失败与慢调用数量相等、单条耗时约 139 秒，单用户档位同样复现；每次调用都从 HuggingFace Hub 重新加载权重且未返回，失败点在模型加载而非算法执行。本机用同一份 cdfm-base==0.1.0 能 7.2 秒取回权重，因此容器外的 Hub 侧不是原因。定位结论写入 local/evidence/cdfm-failure-analysis.md，代码未改动。
+  - 【服务器侧采集】新增可在服务器直接执行的只读采集脚本 loadtest/server_side_collect.sh，采集主机 CPU、内存、swap、磁盘、inode、容器状态与重启、OOM、镜像 digest、MySQL 连接数、复制状态与 Job 分布；新增 runner attach-server 把采集结果写入各档运行摘要，逐档报告的“服务器侧”一节改为实测值。另新增 loadtest/stage_resource_sample.sh 与 runner attach-sample，在每档负载窗口内采样主机资源，换算出 CPU 使用率、峰值负载与内存水位，逐档报告新增“负载窗口资源曲线”一节。
+  - 【主库 Job 终态核对】新增 loadtest/job_db_check.sh，在 staging 主库上只读查询 Job 终态分布与失败明细，结果写入 local/job-db-<date>.json 并渲染进合并报告的“主库 Job 终态核对”一节。
+  - 【一键执行与采样】新增 loadtest/ops/stage_sampling.py 与 loadtest/ops/run_stages.py，把“启动服务器采样、跑一档负载、等采样收尾、取回并写入摘要”串成一条命令，并支持按顺序执行多个档位；采样秒数在 SPECS 中配置且大于负载持续时间。
+  - 【跨档摘要】合并报告新增“跨档摘要”表，逐档列出 run_id、RPS、p95、5xx、Job 创建与终态、活动 Job 与 SSE 峰值、断线与漏事件、CPU 与可用内存水位，并说明 SSE 峰值受活动 Job 数制约。
+  - 【网关 5xx 核对】本轮 mid 档 1 次、stability 档 3 次 5xx，应用侧 web error 日志为 0 条；复核时对相同端点重放 300 次请求未复现，且 /health/probe 在当前入口返回 404，说明它属于网关自身路由；日志采集不含网关服务，因此这几次 502 的成因本轮未能确认，已在合并报告的“未执行项与原因”中如实记录。
+  - 【停止后快照】新增 runner attach-after，把负载结束后在服务器上的只读采集写入各档摘要的停止后快照；报告把负载前与停止后两份采集分列并标注采集时刻，修正此前把负载前快照标成“停止后”的问题。八档停止后队列均已清空（总数 477、排队 0、运行 0、成功 449、失败 1、取消 27），无 OOM、容器重启计数仍为 0。
+  - 【专项三态记录】取消与 SSE 恢复专项的检查结果改为通过、未通过、未触发三态；waiting_input 恢复分支在普通用户流程中始终未触发（终态都是 final_result），此前把它记为通过，现在如实记为未触发。触发该分支需要在 Job 执行期间让冻结文件不可用，普通用户接口无法制造，因此本轮不构造。
 
 ---
 2026.10.11
@@ -1781,3 +1798,13 @@
   - 【缓存读写】：后端 unit 与缓存预热改用 Docker 官方 Bake Action 获取 GHA 缓存运行时变量，统一使用 v2 缓存与 `unit-test` 范围；PR 只恢复缓存并加载测试镜像，预热任务只导出缓存，不推送镜像或上传构建记录附件。
   - 【检查范围】：移除独立 `light-tests` 任务，保留测试文件并由后端完整单元测试执行；CI 工作流修改纳入后端路径过滤，同步测试文档中的触发范围和缓存验收步骤。
   - 【测试文件权限】：密钥单元测试创建的普通临时文件在 POSIX 系统上默认设置为 `0600`，权限专项用例继续显式设置各自需要的权限。
+
+- 【测试与压测目录治理：明确测试分层与压测证据边界】
+  - 【层级归属】新增 tests/AGENTS.md，规定先按依赖范围、再按业务目录选择测试位置；根 AGENTS.md 的局部规则列表同步登记 tests/AGENTS.md 与 loadtest/AGENTS.md。
+  - 【测试与压测边界】tests/ 放 pytest 测试与人工验收入口，loadtest/ 放对 staging 入口跑真实 HTTP/SSE 的压测客户端与采样脚本，不进入默认 pytest 与 CI 范围；需要把压测结论固化为回归检查时另写 integration/ 或 e2e/ 测试。
+  - 【压测证据入库边界】新增 loadtest/evidence/index.md，作为唯一进入版本库的压测证据链索引，登记每档 run_id、测试时间、被测镜像 digest、归档位置与结论，并单列 causal.cdfm 与 source-catalog 500 两个缺陷。
+  - 【本地产物集中】把压测客户端的全部不入库内容收进 loadtest/local/：runs/、data/、evidence/、accounts.local.json、server-side-*.json 与 job-db-*.json 一并迁入；.gitignore 从逐目录逐文件名规则收敛为一条 /loadtest/local/，清理产物改为整目录操作。loadtest/runner/config.py 的 LOCAL_DIR、RUNS_DIR、DATA_DIR、EVIDENCE_DIR、ACCOUNTS_PATH 随之指向 local/，ops/ 的编排脚本与 loadtest/README.md 的命令同步更新；evidence 命令的主库核对文件由写死的日期名改为按 local/ 下最新的 job-db-*.json 选取。
+  - 【报告归档约定】loadtest/README.md 增加“每次输出报告后立即归档并追加索引”的约定；loadtest/AGENTS.md 以目录树形式说明入库与不入库两类的分布。
+  - 【废弃测试清理】删除 tests/test_rag_eval_core_logic.py：该文件在模块级抛出 SkipTest，标注“旧医疗 RAG 评测已退出默认测试链路，保留待后续清理”，收集阶段不产生任何用例；删除前确认全仓无引用、无本地未提交修改。删除 tests/test_mcp_result_contract.py：与 tests/unit/agent/test_mcp_result_contract.py 逐字节重复，保留 unit/agent 一份。
+  - 【测试目录归位】把 tests/ 顶层的 focused tests 按业务移入子目录：RAG 评测台本体进入 tests/unit/rag_eval/，多模态与知识库 RAG 契约进入 tests/unit/agent/，部署契约进入 tests/integration/deployment/，迁移契约进入 tests/integration/migrations/；全部用 git mv 保留历史，移动后把 7 个文件里指向仓库根的 parents[1] 修正为 parents[3]。
+  - 【文档同步】tests/README.md 的目录示意图补全 unit/agent、unit/rag_eval、integration/agent、integration/database、integration/migrations 的分工；tests/AGENTS.md 的分层归属条目改为归位后的实际规则与路径深度提醒；Document/development/testing.md 的 RAG/多模态与隔离评测两处路径引用改为新位置。
