@@ -73,7 +73,7 @@ class MultimodalProductionDefaultsTests(unittest.TestCase):
     def test_manual_evaluation_set_has_24_complete_reviewed_cases(self) -> None:
         """首轮评测集必须是 20 至 30 条且具备截图要求的人工字段。"""
         config = load_production_defaults()
-        dataset_path = Path(__file__).parents[1] / config["evaluation"]["dataset_path"]
+        dataset_path = Path(__file__).parents[3] / config["evaluation"]["dataset_path"]
         payload = json.loads(dataset_path.read_text(encoding="utf-8"))
 
         self.assertEqual(payload["schema_version"], "multimodal_retrieval_eval_v1")
@@ -116,7 +116,7 @@ class MultimodalProductionDefaultsTests(unittest.TestCase):
     def test_reviewed_modality_cases_match_physical_pdf_evidence(self) -> None:
         """人工复核过的页码与模态必须对应 PDF 物理页上的实际证据。"""
         config = load_production_defaults()
-        dataset_path = Path(__file__).parents[1] / config["evaluation"]["dataset_path"]
+        dataset_path = Path(__file__).parents[3] / config["evaluation"]["dataset_path"]
         payload = json.loads(dataset_path.read_text(encoding="utf-8"))
         actual = {
             case["case_id"]: (case["gold_page_numbers"], case["expected_modality"])

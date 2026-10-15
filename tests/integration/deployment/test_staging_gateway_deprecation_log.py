@@ -13,7 +13,7 @@ import shlex
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 ROUTES_PY = REPO_ROOT / "app" / "rag_eval" / "routes.py"
 NGINX_CONF = REPO_ROOT / "deploy" / "staging" / "nginx.conf"
 REQUEST_CONTEXT_PY = REPO_ROOT / "app" / "request_context.py"

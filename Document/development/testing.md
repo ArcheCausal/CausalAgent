@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | 后端 unit | `tests/unit/` | 单模块状态机、权限、Job fencing、结构化输出和 monitor 逻辑 |
 | 后端 integration | `tests/integration/` | 跨模块静态契约、日志政策、部署边界和 migration 链 |
-| RAG/多模态与隔离评测 | `tests/test_multimodal_*.py`、`tests/test_rag_eval_*.py`、`tests/acceptance/` | 来源/索引/release 契约、隔离队列与评测矩阵的分层检查 |
+| RAG/多模态与隔离评测 | `tests/unit/agent/test_multimodal_*.py`、`tests/unit/rag_eval/`、`tests/acceptance/` | 来源/索引/release 契约、隔离队列与评测矩阵的分层检查 |
 | 管理员 Vue unit | `admin-frontend/tests/*.spec.ts` | API DTO、组件、看板/设置语义和 SQL digest 展示 |
 | 管理员 Mock E2E | `admin-frontend` `test:e2e:mock` | 无真实数据库的页面导航、鉴权和交互 |
 | 普通用户应用 Vue unit/contract | `chat-frontend/tests/unit`、`tests/contract` | SSE parser、游标、Job reducer、公开决策与明细补绘、展示推进纯函数、地址路由、幂等和 Flask JSON schema |
@@ -185,7 +185,7 @@ docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p
 
 ## RAG、多模态与隔离评测
 
-多模态来源、staged index、release publish/rollback、便携 embedding 配置、隔离来源与持久评测队列的 focused tests 位于 `tests/test_multimodal_*.py`、`tests/test_rag_release_portable_embedding.py`、`tests/test_isolated_rag_eval_routes.py` 和 `tests/test_rag_eval_*.py`；RAG 子图 State 隔离与不可用降级由 `tests/unit/agent/test_rag_subgraph_state.py` 覆盖。它们使用 fixture/fake 或静态契约，不代表真实模型、远程 VLM、向量库、SearXNG 或生产数据已执行。
+多模态来源、staged index、release publish/rollback、便携 embedding 配置、隔离来源与持久评测队列的测试位于 `tests/unit/agent/` 的 `test_multimodal_*.py`、`test_rag_release_portable_embedding.py` 与 `tests/unit/rag_eval/` 的 `test_isolated_rag_eval_routes.py`、`test_rag_eval_*.py`；RAG 子图 State 隔离与不可用降级由 `tests/unit/agent/test_rag_subgraph_state.py` 覆盖。它们使用 fixture/fake 或静态契约，不代表真实模型、远程 VLM、向量库、SearXNG 或生产数据已执行。
 
 正式多模态 embedding 默认使用 `EMBEDDING_API_KEY` 与 `EMBEDDING_BASE_URL`；缺少配置时相关运行只应报告 embedding 不可用。需要测试本地 embedding 时必须在隔离测试中显式传入配置，生产 defaults 的 `local_embedding.enabled` 当前为 `false`。
 

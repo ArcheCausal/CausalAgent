@@ -10,14 +10,18 @@
 tests/
 ├── unit/               # 单个模块或最小 Flask 应用，外部依赖使用 fake/mock
 │   ├── admin/
-│   ├── agent/
+│   ├── agent/          # Agent、Deep Agent、知识库 RAG 与多模态契约
+│   ├── analytics/
 │   ├── auth/
 │   ├── chat/
-│   └── database/
+│   ├── database/
+│   └── rag_eval/       # RAG 评测台本体：路由、队列、生命周期与生产验收
 ├── integration/        # 跨模块静态契约、部署边界和 migration 链路
 │   ├── admin/
-│   ├── deployment/
-│   └── migrations/
+│   ├── agent/
+│   ├── database/
+│   ├── deployment/     # Compose、网关、入口与预发合同
+│   └── migrations/     # Alembic 图与迁移版本修复
 ├── acceptance/         # 分层 RAG contract/integration/production runner
 ├── e2e/admin/          # 隔离主从 + PostgreSQL checkpoint E2E 模块
 ├── run_admin_31_e2e.ps1
@@ -26,6 +30,10 @@ tests/
 ```
 
 `unit` 和 `integration` 表示依赖范围，`admin`、`auth`、`database` 等目录表示业务归属。新增测试时先判断是否需要真实跨模块依赖，再选择业务目录。仓库测试同时包含 pytest 风格函数与 `unittest.TestCase`，统一由 pytest 负责发现和执行。
+
+原 `tests/` 顶层的 focused tests 已按业务归位：RAG 评测台本体（`test_rag_eval_*.py`、`test_rag_candidate_*.py`、`test_isolated_*.py`、`test_rag_dataset_governance.py`、`test_rag_eval_production_acceptance.py`）进入 `tests/unit/rag_eval/`；多模态指数与检索（`test_multimodal_*.py`）与知识库 RAG 契约（`test_rag_release_portable_embedding.py`、`test_rag_runtime_lifecycle.py`、`test_rag_service_and_tool.py`、`test_ragas_generate_with_chunks_engine.py`、`test_rag_candidate_generation_and_sweep.py`）进入 `tests/unit/agent/`；部署契约（`test_staging_*.py`）进入 `tests/integration/deployment/`；迁移契约（`test_alembic_migration_graph.py`、`test_migration_version_repair.py`）进入 `tests/integration/migrations/`。这批测试由默认 pytest 直接收集，文件下沉后相对 `__file__` 的仓库根引用已同步为三级父目录。跨越测试与压测的边界约束见 `tests/AGENTS.md`。
+
+对 staging 入口执行真实 HTTP/SSE 负载的压测客户端不在 `tests/` 之下，位于仓库根 `loadtest/`，不进入默认 pytest 与 CI 执行范围。压测的运行产物、凭据和报告正文都不提交，唯一入库的压测索引是 `loadtest/evidence/index.md`。
 
 `integration/deployment/` 只做不启动容器的 Compose 部署契约检查，包括预发服务、网络、卷、镜像 digest 和公网端口边界；SearXNG 的 `SEARXNG_SECRET` 注入和 `/healthz` 真实容器验证通过 `tests/run_searxng_docker_validation.ps1` 手工执行，不属于默认 pytest 范围。
 
@@ -84,7 +92,7 @@ docker compose -f docker-compose.test.yml run --rm unit-test sh
 
 ## RAG 多模态与隔离评测验收
 
-多模态来源、staged index、release 和隔离评测的 focused tests 位于仓库根 `tests/test_multimodal_*.py`、`tests/test_isolated_rag_eval_routes.py`、`tests/test_rag_eval_*.py`；持久队列由默认开发 Compose 的 `rag-eval-worker` 执行。声明式矩阵在 `Document/rag_eval_production_acceptance_matrix.json`，安全 runner 在 `tests/acceptance/run_rag_eval_production_acceptance.py`：
+多模态来源、staged index、release 和隔离评测的测试位于 `tests/unit/agent/test_multimodal_*.py` 与 `tests/unit/rag_eval/test_isolated_rag_eval_routes.py`、`tests/unit/rag_eval/test_rag_eval_*.py`；持久队列由默认开发 Compose 的 `rag-eval-worker` 执行。声明式矩阵在 `Document/rag_eval_production_acceptance_matrix.json`，安全 runner 在 `tests/acceptance/run_rag_eval_production_acceptance.py`：
 
 ```bash
 # 只列出 contract 检查；不执行检查或写入报告
