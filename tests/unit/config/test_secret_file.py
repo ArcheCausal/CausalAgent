@@ -21,6 +21,8 @@ from config.secret_file import (
 
 def _write(path: Path, lines: list[str]) -> Path:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if os.name != "nt":
+        path.chmod(0o600)
     return path
 
 
