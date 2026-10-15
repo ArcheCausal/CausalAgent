@@ -4,19 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
-from pathlib import Path
 
-
-def _load_dotenv_if_available() -> None:
-    """在独立命令入口中加载项目根目录 .env，不输出任何敏感值。"""
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        return
-    base_dir = Path(__file__).resolve().parents[1]
-    env_path = base_dir / ".env"
-    if env_path.exists():
-        load_dotenv(env_path)
+from config.secret_file import load_secrets, require_secret
 
 
 def _int_env(name: str, default: int) -> int:
@@ -56,14 +45,14 @@ class CheckpointPostgresConfig:
 
     @classmethod
     def from_env(cls) -> "CheckpointPostgresConfig":
-        """从环境变量读取 PostgreSQL checkpoint 配置。"""
-        _load_dotenv_if_available()
+        """读取 checkpoint 配置：连接参数来自环境变量，密码只来自密钥文件。"""
+        load_secrets()
         return cls(
             host=os.getenv("CHECKPOINT_POSTGRES_HOST", "postgres-checkpoint"),
             port=_int_env("CHECKPOINT_POSTGRES_PORT", 5432),
             database=os.getenv("CHECKPOINT_POSTGRES_DATABASE", "causalagent_checkpoints"),
             user=os.getenv("CHECKPOINT_POSTGRES_USER", "causalagent_checkpoint"),
-            password=os.getenv("CHECKPOINT_POSTGRES_PASSWORD") or None,
+            password=require_secret("CHECKPOINT_POSTGRES_PASSWORD"),
             connect_timeout_seconds=_float_env(
                 "CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS",
                 5.0,

@@ -9,20 +9,30 @@
 #   4. 不暴露MySQL端口（安全性）
 #   5. 使用构建好的镜像标签
 
+secrets:
+  # 服务器上的唯一密钥文件；只读挂载到 /run/secrets/causalagent.env。
+  causalagent_env:
+    file: ${CAUSALAGENT_SECRET_FILE:-/etc/causalagent/secrets/causalagent.env}
+
 services:
 
   # --- MySQL 数据库服务（生产配置）---
   mysql:
-    image: mysql:8.0
+    group_add:
+      - "3000"
+    image: ${MYSQL_IMAGE:-mysql:8.0}
     container_name: causalagent_mysql_prod
     
     # 原因：添加_prod后缀，区分开发和生产容器
     
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    # 官方入口需要的密码由适配脚本从同一个密钥文件导出，容器只认识官方变量名。
+    entrypoint:
+      - sh
+      - -c
+      - . /opt/causalagent/secret-env.sh && export_secret MYSQL_ROOT_PASSWORD MYSQL_ROOT_PASSWORD && export_secret MYSQL_PASSWORD MYSQL_PASSWORD && exec docker-entrypoint.sh mysqld
     
     # 注意：生产环境应该使用更强的密码
     # 可以考虑使用Docker secrets而不是环境变量（更安全）
@@ -40,6 +50,10 @@ services:
     
     volumes:
       - mysql_data_prod:/var/lib/mysql
+      - ./deploy/scripts/secret-env.sh:/opt/causalagent/secret-env.sh:ro
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     
     # 原因：使用独立的生产数据卷
     # - 与开发环境数据隔离
@@ -49,7 +63,7 @@ services:
       - causalagent_network_prod
     
     healthcheck:
-      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping --protocol=tcp -h 127.0.0.1 -P 3306 -u root"]
+      test: ["CMD-SHELL", ". /opt/causalagent/secret-env.sh && MYSQL_PWD=\"$$(secret_value MYSQL_ROOT_PASSWORD)\" mysqladmin ping --protocol=tcp -h 127.0.0.1 -P 3306 -u root"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -84,14 +98,23 @@ services:
 
   # --- LangGraph checkpoint PostgreSQL（生产配置）---
   postgres-checkpoint:
-    image: postgres:16-alpine
+    group_add:
+      - "3000"
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
     container_name: causalagent_postgres_checkpoint_prod
     environment:
       POSTGRES_DB: ${CHECKPOINT_POSTGRES_DATABASE:-causalagent_checkpoints}
       POSTGRES_USER: ${CHECKPOINT_POSTGRES_USER:-causalagent_checkpoint}
-      POSTGRES_PASSWORD: ${CHECKPOINT_POSTGRES_PASSWORD:?CHECKPOINT_POSTGRES_PASSWORD must be set}
+    command:
+      - sh
+      - -c
+      - . /opt/causalagent/secret-env.sh && export_secret CHECKPOINT_POSTGRES_PASSWORD POSTGRES_PASSWORD && exec docker-entrypoint.sh postgres
     volumes:
       - postgres_checkpoint_data_prod:/var/lib/postgresql/data
+      - ./deploy/scripts/secret-env.sh:/opt/causalagent/secret-env.sh:ro
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     networks:
       - causalagent_network_prod
     healthcheck:
@@ -116,19 +139,15 @@ services:
       - MYSQL_READ_HOSTS=
       - MYSQL_PORT=3306
       - MYSQL_USER=${MYSQL_USER:?MYSQL_USER is required}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+
       - MYSQL_WRITE_USER=${MYSQL_WRITE_USER:-${MYSQL_USER}}
-      - MYSQL_WRITE_PASSWORD=${MYSQL_WRITE_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_READ_USER=${MYSQL_READ_USER:-${MYSQL_USER}}
-      - MYSQL_READ_PASSWORD=${MYSQL_READ_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_DATABASE=${MYSQL_DATABASE:?MYSQL_DATABASE is required}
       - MYSQL_POOL_SIZE_WRITE=${MYSQL_POOL_SIZE_WRITE:-2}
       - MYSQL_POOL_SIZE_READ=${MYSQL_POOL_SIZE_READ:-1}
       - MYSQL_CONNECT_TIMEOUT_SECONDS=${MYSQL_CONNECT_TIMEOUT_SECONDS:-5}
       - MYSQL_POOL_ACQUIRE_TIMEOUT_SECONDS=${MYSQL_POOL_ACQUIRE_TIMEOUT_SECONDS:-3}
-      - CAUSAL_MCP_SERVICE_TOKEN=${CAUSAL_MCP_SERVICE_TOKEN:?CAUSAL_MCP_SERVICE_TOKEN is required}
-      - CAUSAL_MCP_SIGNING_KEY_CURRENT=${CAUSAL_MCP_SIGNING_KEY_CURRENT:?CAUSAL_MCP_SIGNING_KEY_CURRENT is required}
-      - CAUSAL_MCP_SIGNING_KEY_PREVIOUS=${CAUSAL_MCP_SIGNING_KEY_PREVIOUS:-}
+
       - CAUSAL_MCP_SIGNING_KEY_ID=${CAUSAL_MCP_SIGNING_KEY_ID:-current}
       - CAUSAL_MCP_PROCESS_WORKERS=${CAUSAL_MCP_PROCESS_WORKERS:-2}
       - CAUSAL_MCP_QUEUE_CAPACITY=${CAUSAL_MCP_QUEUE_CAPACITY:-4}
@@ -147,6 +166,9 @@ services:
         condition: service_completed_successfully
     networks:
       - causalagent_network_prod
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=2)"]
       interval: 10s
@@ -164,7 +186,7 @@ services:
   # --- Flask 应用服务（生产配置）---
   app:
     # === 关键区别4：使用镜像而非构建 ===
-    image: causalagent:latest
+    image: ${APP_IMAGE:-causalagent:latest}
     # 原因：
     # - 生产环境应该使用预构建的镜像
     # - 镜像应该在CI/CD中构建并测试
@@ -181,7 +203,7 @@ services:
     environment:
       - MYSQL_HOST=mysql  # 仍然使用服务名
       - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+
       - MYSQL_DATABASE=${MYSQL_DATABASE}
       - MYSQL_POOL_SIZE_WRITE=${MYSQL_POOL_SIZE_WRITE:-5}
       - MYSQL_POOL_SIZE_READ=${MYSQL_POOL_SIZE_READ:-5}
@@ -196,7 +218,7 @@ services:
       - CHECKPOINT_POSTGRES_PORT=5432
       - CHECKPOINT_POSTGRES_DATABASE=${CHECKPOINT_POSTGRES_DATABASE:-causalagent_checkpoints}
       - CHECKPOINT_POSTGRES_USER=${CHECKPOINT_POSTGRES_USER:-causalagent_checkpoint}
-      - CHECKPOINT_POSTGRES_PASSWORD=${CHECKPOINT_POSTGRES_PASSWORD}
+
       - CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS=${CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS:-5}
       - CHECKPOINT_POSTGRES_POOL_MIN_SIZE=${CHECKPOINT_POSTGRES_POOL_MIN_SIZE:-1}
       - CHECKPOINT_POSTGRES_POOL_MAX_SIZE=${CHECKPOINT_POSTGRES_POOL_MAX_SIZE:-5}
@@ -205,13 +227,13 @@ services:
       - JOB_STALE_AFTER_SECONDS=${JOB_STALE_AFTER_SECONDS:-120}
       - JOB_MAX_ATTEMPTS=${JOB_MAX_ATTEMPTS:-3}
       - JOB_CHAT_HISTORY_LIMIT=${JOB_CHAT_HISTORY_LIMIT:-20}
-      - API_KEY=${API_KEY}
+
       - BASE_URL=${BASE_URL}
       - MODEL=${MODEL}
-      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-}
+
       - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-qwen3.7-text-embedding}
-      - SECRET_KEY=${SECRET_KEY}
+
       - CHAT_FRONTEND_DIST_DIR=${CHAT_FRONTEND_DIST_DIR:-/opt/causalagent-chat}
       - CHAT_VITE_DEV_SERVER_URL=${CHAT_VITE_DEV_SERVER_URL:-}
       - WEBSITE_FRONTEND_DIST_DIR=${WEBSITE_FRONTEND_DIST_DIR:-/opt/causalagent-website}
@@ -227,13 +249,17 @@ services:
       - DB_MONITOR_SLOW_QUERY_WARNING_DELTA=${DB_MONITOR_SLOW_QUERY_WARNING_DELTA:-1}
       - DB_MONITOR_INTEGRITY_ENABLED=${DB_MONITOR_INTEGRITY_ENABLED:-false}
       - DB_MONITOR_INTEGRITY_INTERVAL_SECONDS=${DB_MONITOR_INTEGRITY_INTERVAL_SECONDS:-86400}
-      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-}
+
       - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT:-}
       
       # === 关键区别5：生产环境变量 ===
       - FLASK_ENV=production
       - RAG_EVAL_ROOT=/app/tmp/rag_eval
       - RAG_EVAL_DATASET_ROOT=/app/tmp/rag_eval/datasets/registered
+      # 正式 RAG 索引与发布指针位于独立命名卷；评测产物位于评测卷。
+      - MULTIMODAL_INDEX_ROOT=/var/lib/causalagent/rag/formal/indexes
+      - MULTIMODAL_ACTIVE_INDEX_CONFIG=/var/lib/causalagent/rag/formal/active_index.json
+      - RAG_PRODUCTION_CONFIG_PATH=/var/lib/causalagent/rag/formal/production_rag_config.json
       
       # 原因：
       # - production模式关闭调试信息
@@ -258,20 +284,14 @@ services:
       # 代码已经在构建时COPY到镜像内了
       
       # 只挂载需要持久化的数据
-      - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
-      - ./Agent/knowledge_base/source:/app/Agent/knowledge_base/source:ro
-      - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
-      - kb_multimodal_indexes_prod:/app/Agent/knowledge_base/multimodal_indexes
-      - ./Agent/knowledge_base/multimodal_runtime:/app/Agent/knowledge_base/multimodal_runtime:ro
-      - ./Agent/knowledge_base/multimodal_assets:/app/Agent/knowledge_base/multimodal_assets:ro
-      - ./Agent/knowledge_base/rag/runtime:/app/Agent/knowledge_base/rag/runtime:ro
-      - ./app/static/generated_graphs:/app/app/static/generated_graphs
+      - rag_models_prod:/app/Agent/knowledge_base/models
+      - ${CAUSALAGENT_KB_SOURCE_DIR:-/var/lib/causalagent/kb/source}:/app/Agent/knowledge_base/source:ro
+      - ${CAUSALAGENT_KB_DB_DIR:-/var/lib/causalagent/kb/db}:/app/Agent/knowledge_base/db
+      - ${CAUSALAGENT_KB_ASSETS_DIR:-/var/lib/causalagent/kb/assets}:/app/Agent/knowledge_base/multimodal_assets:ro
+      - rag_formal_prod:/var/lib/causalagent/rag/formal
+      - ${CAUSALAGENT_GRAPH_OUTPUT_DIR:-/var/lib/causalagent/reports/graphs}:/app/app/static/generated_graphs
       - app_logs_prod:/app/logs  # 新增：应用日志持久化
-      - rag_eval_isolated_runs:/app/tmp/rag_eval/runs                    # 隔离运行目录（与 rag-eval-worker 共享）
-      - rag_eval_sources:/app/tmp/rag_eval/sources                       # 知识源目录（与 rag-eval-worker 共享）
-      - rag_eval_datasets:/app/tmp/rag_eval/datasets/registered          # 数据集目录（与 rag-eval-worker 共享）
-      - rag_eval_artifacts:/app/tmp/rag_eval/artifacts
-      - rag_eval_reports:/app/tmp/rag_eval/reports
+      - rag_eval_prod:/app/tmp/rag_eval                                   # 评测数据统一卷（与 rag-eval-worker 共享）
     
     # 原因：
     # - 代码在镜像内，不依赖宿主机文件系统
@@ -286,11 +306,12 @@ services:
         condition: service_healthy
       db-bootstrap:
         condition: service_completed_successfully
-      kb-indexes-sync:
-        condition: service_completed_successfully
     
     networks:
       - causalagent_network_prod
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     
     restart: unless-stopped
     
@@ -315,7 +336,7 @@ services:
     # 如果是单机部署，使用docker run的--cpus和--memory参数
 
   worker:
-    image: causalagent:latest
+    image: ${APP_IMAGE:-causalagent:latest}
     container_name: causalagent_worker_prod
     command: python -m app.agent.worker
     environment:
@@ -324,11 +345,9 @@ services:
       - MYSQL_READ_HOSTS=
       - MYSQL_PORT=3306
       - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+
       - MYSQL_WRITE_USER=${MYSQL_WRITE_USER:-${MYSQL_USER}}
-      - MYSQL_WRITE_PASSWORD=${MYSQL_WRITE_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_READ_USER=${MYSQL_READ_USER:-${MYSQL_USER}}
-      - MYSQL_READ_PASSWORD=${MYSQL_READ_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_DATABASE=${MYSQL_DATABASE}
       - MYSQL_POOL_SIZE_WRITE=${MYSQL_POOL_SIZE_WRITE:-5}
       - MYSQL_POOL_SIZE_READ=${MYSQL_POOL_SIZE_READ:-5}
@@ -340,7 +359,7 @@ services:
       - CHECKPOINT_POSTGRES_PORT=5432
       - CHECKPOINT_POSTGRES_DATABASE=${CHECKPOINT_POSTGRES_DATABASE:-causalagent_checkpoints}
       - CHECKPOINT_POSTGRES_USER=${CHECKPOINT_POSTGRES_USER:-causalagent_checkpoint}
-      - CHECKPOINT_POSTGRES_PASSWORD=${CHECKPOINT_POSTGRES_PASSWORD}
+
       - CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS=${CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS:-5}
       - CHECKPOINT_POSTGRES_POOL_MIN_SIZE=${CHECKPOINT_POSTGRES_POOL_MIN_SIZE:-1}
       - CHECKPOINT_POSTGRES_POOL_MAX_SIZE=${CHECKPOINT_POSTGRES_POOL_MAX_SIZE:-5}
@@ -352,16 +371,15 @@ services:
       - JOB_CHAT_HISTORY_LIMIT=${JOB_CHAT_HISTORY_LIMIT:-20}
       - WEB_SEARCH_PROVIDER=${WEB_SEARCH_PROVIDER:-searxng}
       - SEARXNG_URL=${SEARXNG_URL:-http://searxng:8080}
-      - API_KEY=${API_KEY}
+
       - BASE_URL=${BASE_URL}
       - MODEL=${MODEL}
       - DEEP_AGENT_MODEL=${DEEP_AGENT_MODEL:?DEEP_AGENT_MODEL is required}
       - DEEP_AGENT_BASE_URL=${DEEP_AGENT_BASE_URL:?DEEP_AGENT_BASE_URL is required}
-      - DEEP_AGENT_API_KEY=${DEEP_AGENT_API_KEY:?DEEP_AGENT_API_KEY is required}
+
       - DEEP_AGENT_CONTEXT_WINDOW_TOKENS=${DEEP_AGENT_CONTEXT_WINDOW_TOKENS:?DEEP_AGENT_CONTEXT_WINDOW_TOKENS is required}
       - CAUSAL_MCP_URL=http://causal-mcp:8080/mcp
-      - CAUSAL_MCP_SERVICE_TOKEN=${CAUSAL_MCP_SERVICE_TOKEN:?CAUSAL_MCP_SERVICE_TOKEN is required}
-      - CAUSAL_MCP_SIGNING_KEY_CURRENT=${CAUSAL_MCP_SIGNING_KEY_CURRENT:?CAUSAL_MCP_SIGNING_KEY_CURRENT is required}
+
       - CAUSAL_MCP_SIGNING_KEY_ID=${CAUSAL_MCP_SIGNING_KEY_ID:-current}
       - CAUSAL_MCP_CLIENT_POOL_SIZE=${CAUSAL_MCP_CLIENT_POOL_SIZE:-2}
       - CAUSAL_MCP_MAX_IN_FLIGHT_PER_CLIENT=${CAUSAL_MCP_MAX_IN_FLIGHT_PER_CLIENT:-1}
@@ -373,32 +391,35 @@ services:
       - CAUSAL_MCP_HTTP_MAX_CONNECTIONS=${CAUSAL_MCP_HTTP_MAX_CONNECTIONS:-8}
       - CAUSAL_MCP_HTTP_MAX_KEEPALIVE_CONNECTIONS=${CAUSAL_MCP_HTTP_MAX_KEEPALIVE_CONNECTIONS:-4}
       - CAUSAL_MCP_HTTP_READ_TIMEOUT_SECONDS=${CAUSAL_MCP_HTTP_READ_TIMEOUT_SECONDS:-660}
-      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-}
+
       - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-qwen3.7-text-embedding}
-      - SECRET_KEY=${SECRET_KEY}
+
       - FLASK_ENV=production
       - MULTIMODAL_DOCLING_ARTIFACTS_DIR=/app/Agent/knowledge_base/models/docling
-      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-}
+      # worker 通过正式 RAG 卷读取 active release 的索引与发布指针。
+      - MULTIMODAL_INDEX_ROOT=/var/lib/causalagent/rag/formal/indexes
+      - MULTIMODAL_ACTIVE_INDEX_CONFIG=/var/lib/causalagent/rag/formal/active_index.json
+      - RAG_PRODUCTION_CONFIG_PATH=/var/lib/causalagent/rag/formal/production_rag_config.json
+
       - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT:-}
     volumes:
-      - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
-      - ./Agent/knowledge_base/source:/app/Agent/knowledge_base/source:ro
-      - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
-      - kb_multimodal_indexes_prod:/app/Agent/knowledge_base/multimodal_indexes
-      - ./Agent/knowledge_base/multimodal_runtime:/app/Agent/knowledge_base/multimodal_runtime:ro
-      - ./Agent/knowledge_base/multimodal_assets:/app/Agent/knowledge_base/multimodal_assets:ro
-      - ./Agent/knowledge_base/rag/runtime:/app/Agent/knowledge_base/rag/runtime:ro
+      - rag_models_prod:/app/Agent/knowledge_base/models
+      - ${CAUSALAGENT_KB_SOURCE_DIR:-/var/lib/causalagent/kb/source}:/app/Agent/knowledge_base/source:ro
+      - ${CAUSALAGENT_KB_DB_DIR:-/var/lib/causalagent/kb/db}:/app/Agent/knowledge_base/db
+      - ${CAUSALAGENT_KB_ASSETS_DIR:-/var/lib/causalagent/kb/assets}:/app/Agent/knowledge_base/multimodal_assets:ro
+      - rag_formal_prod:/var/lib/causalagent/rag/formal
       - app_logs_prod:/app/logs
     depends_on:
       db-bootstrap:
         condition: service_completed_successfully
       causal-mcp:
         condition: service_healthy
-      kb-indexes-sync:
-        condition: service_completed_successfully
     networks:
       - causalagent_network_prod
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     restart: unless-stopped
     stop_grace_period: 75s
     logging:
@@ -408,7 +429,7 @@ services:
         max-file: "3"
 
   agent-persistence-cleanup:
-    image: causalagent:latest
+    image: ${APP_IMAGE:-causalagent:latest}
     container_name: causalagent_agent_persistence_cleanup_prod
     command: python -m Database.agent_persistence_cleanup_worker
     environment:
@@ -417,11 +438,9 @@ services:
       - MYSQL_READ_HOSTS=
       - MYSQL_PORT=3306
       - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+
       - MYSQL_WRITE_USER=${MYSQL_WRITE_USER:-${MYSQL_USER}}
-      - MYSQL_WRITE_PASSWORD=${MYSQL_WRITE_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_READ_USER=${MYSQL_READ_USER:-${MYSQL_USER}}
-      - MYSQL_READ_PASSWORD=${MYSQL_READ_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_DATABASE=${MYSQL_DATABASE}
       - MYSQL_POOL_SIZE_WRITE=${MYSQL_POOL_SIZE_WRITE:-3}
       - MYSQL_POOL_SIZE_READ=${MYSQL_POOL_SIZE_READ:-1}
@@ -432,17 +451,17 @@ services:
       - CHECKPOINT_POSTGRES_PORT=5432
       - CHECKPOINT_POSTGRES_DATABASE=${CHECKPOINT_POSTGRES_DATABASE:-causalagent_checkpoints}
       - CHECKPOINT_POSTGRES_USER=${CHECKPOINT_POSTGRES_USER:-causalagent_checkpoint}
-      - CHECKPOINT_POSTGRES_PASSWORD=${CHECKPOINT_POSTGRES_PASSWORD}
+
       - CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS=${CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS:-5}
       - CHECKPOINT_POSTGRES_POOL_MIN_SIZE=1
       - CHECKPOINT_POSTGRES_POOL_MAX_SIZE=2
       - AGENT_PERSISTENCE_CLEANUP_POLL_INTERVAL_SECONDS=${AGENT_PERSISTENCE_CLEANUP_POLL_INTERVAL_SECONDS:-1}
       - AGENT_PERSISTENCE_CLEANUP_HEARTBEAT_INTERVAL_SECONDS=${AGENT_PERSISTENCE_CLEANUP_HEARTBEAT_INTERVAL_SECONDS:-10}
       - AGENT_PERSISTENCE_CLEANUP_LEASE_SECONDS=${AGENT_PERSISTENCE_CLEANUP_LEASE_SECONDS:-300}
-      - API_KEY=${API_KEY}
+
       - BASE_URL=${BASE_URL}
       - MODEL=${MODEL}
-      - SECRET_KEY=${SECRET_KEY}
+
       - FLASK_ENV=production
     volumes:
       - app_logs_prod:/app/logs
@@ -451,6 +470,9 @@ services:
         condition: service_completed_successfully
     networks:
       - causalagent_network_prod
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -459,14 +481,14 @@ services:
         max-file: "3"
 
   monitor:
-    image: causalagent:latest
+    image: ${APP_IMAGE:-causalagent:latest}
     container_name: causalagent_monitor_prod
     command: python -m Database.monitor_worker
 
     environment:
       - MYSQL_HOST=mysql
       - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+
       - MYSQL_DATABASE=${MYSQL_DATABASE}
       - MYSQL_POOL_SIZE_WRITE=${MYSQL_POOL_SIZE_WRITE:-5}
       - MYSQL_POOL_SIZE_READ=${MYSQL_POOL_SIZE_READ:-5}
@@ -479,14 +501,14 @@ services:
       - CHECKPOINT_POSTGRES_PORT=5432
       - CHECKPOINT_POSTGRES_DATABASE=${CHECKPOINT_POSTGRES_DATABASE:-causalagent_checkpoints}
       - CHECKPOINT_POSTGRES_USER=${CHECKPOINT_POSTGRES_USER:-causalagent_checkpoint}
-      - CHECKPOINT_POSTGRES_PASSWORD=${CHECKPOINT_POSTGRES_PASSWORD}
+
       - CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS=${CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS:-5}
       - CHECKPOINT_POSTGRES_POOL_MIN_SIZE=${CHECKPOINT_POSTGRES_POOL_MIN_SIZE:-1}
       - CHECKPOINT_POSTGRES_POOL_MAX_SIZE=${CHECKPOINT_POSTGRES_POOL_MAX_SIZE:-5}
-      - API_KEY=${API_KEY}
+
       - BASE_URL=${BASE_URL}
       - MODEL=${MODEL}
-      - SECRET_KEY=${SECRET_KEY}
+
       - DB_INSPECTION_QUERY_TIMEOUT_MS=${DB_INSPECTION_QUERY_TIMEOUT_MS:-3000}
       - DB_DASHBOARD_CONNECTION_WARNING_PERCENT=${DB_DASHBOARD_CONNECTION_WARNING_PERCENT:-70}
       - DB_DASHBOARD_CONNECTION_CRITICAL_PERCENT=${DB_DASHBOARD_CONNECTION_CRITICAL_PERCENT:-85}
@@ -497,7 +519,7 @@ services:
       - DB_MONITOR_SLOW_QUERY_WARNING_DELTA=${DB_MONITOR_SLOW_QUERY_WARNING_DELTA:-1}
       - DB_MONITOR_INTEGRITY_ENABLED=${DB_MONITOR_INTEGRITY_ENABLED:-false}
       - DB_MONITOR_INTEGRITY_INTERVAL_SECONDS=${DB_MONITOR_INTEGRITY_INTERVAL_SECONDS:-86400}
-      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-}
+
       - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT:-}
       - FLASK_ENV=production
 
@@ -511,6 +533,9 @@ services:
 
     networks:
       - causalagent_network_prod
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
 
     restart: unless-stopped
 
@@ -521,14 +546,14 @@ services:
         max-file: "3"
 
   rag-eval-worker:
-    image: causalagent:latest
+    image: ${APP_IMAGE:-causalagent:latest}
     container_name: causalagent_rag_eval_worker_prod
     command: python -m app.rag_eval.worker
 
     environment:
       - MYSQL_HOST=mysql
       - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+
       - MYSQL_DATABASE=${MYSQL_DATABASE}
       - MYSQL_POOL_SIZE_WRITE=${MYSQL_POOL_SIZE_WRITE:-5}
       - MYSQL_POOL_SIZE_READ=${MYSQL_POOL_SIZE_READ:-5}
@@ -549,27 +574,28 @@ services:
       - RAG_EVAL_EVALUATION_HEARTBEAT_INTERVAL_SECONDS=${RAG_EVAL_EVALUATION_HEARTBEAT_INTERVAL_SECONDS:-10}
       - RAG_EVAL_EVALUATION_JOB_STALE_AFTER_SECONDS=${RAG_EVAL_EVALUATION_JOB_STALE_AFTER_SECONDS:-120}
       - RAG_EVAL_EVALUATION_STALE_AFTER_SECONDS=${RAG_EVAL_EVALUATION_STALE_AFTER_SECONDS:-1800}
-      - API_KEY=${API_KEY}
+
       - BASE_URL=${BASE_URL}
       - MODEL=${MODEL}
-      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-}
+
       - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-qwen3.7-text-embedding}
-      - SECRET_KEY=${SECRET_KEY}
+
       - FLASK_ENV=production
       - MULTIMODAL_DOCLING_ARTIFACTS_DIR=/app/Agent/knowledge_base/models/docling
-      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-}
+      # rag-eval-worker 读取同一正式 RAG 卷进行评测与发布校验。
+      - MULTIMODAL_INDEX_ROOT=/var/lib/causalagent/rag/formal/indexes
+      - MULTIMODAL_ACTIVE_INDEX_CONFIG=/var/lib/causalagent/rag/formal/active_index.json
+      - RAG_PRODUCTION_CONFIG_PATH=/var/lib/causalagent/rag/formal/production_rag_config.json
+
       - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT:-}
 
     volumes:
-      - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
-      - ./Agent/knowledge_base/source:/app/Agent/knowledge_base/source:ro
-      - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
-      - rag_eval_isolated_runs:/app/tmp/rag_eval/runs
-      - rag_eval_sources:/app/tmp/rag_eval/sources
-      - rag_eval_datasets:/app/tmp/rag_eval/datasets/registered
-      - rag_eval_artifacts:/app/tmp/rag_eval/artifacts
-      - rag_eval_reports:/app/tmp/rag_eval/reports
+      - rag_models_prod:/app/Agent/knowledge_base/models
+      - ${CAUSALAGENT_KB_SOURCE_DIR:-/var/lib/causalagent/kb/source}:/app/Agent/knowledge_base/source:ro
+      - ${CAUSALAGENT_KB_DB_DIR:-/var/lib/causalagent/kb/db}:/app/Agent/knowledge_base/db
+      - rag_eval_prod:/app/tmp/rag_eval
+      - rag_formal_prod:/var/lib/causalagent/rag/formal
 
     depends_on:
       mysql:
@@ -579,6 +605,9 @@ services:
 
     networks:
       - causalagent_network_prod
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
 
     restart: unless-stopped
 
@@ -589,7 +618,7 @@ services:
         max-file: "3"
 
   db-bootstrap:
-    image: causalagent:latest
+    image: ${APP_IMAGE:-causalagent:latest}
     container_name: causalagent_db_bootstrap_prod
     command: python -m Database.bootstrap
 
@@ -597,17 +626,16 @@ services:
       - MYSQL_HOST=mysql
       - MYSQL_WRITE_HOST=mysql
       - MYSQL_PORT=3306
-      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+
       - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+
       - MYSQL_WRITE_USER=${MYSQL_WRITE_USER:-${MYSQL_USER}}
-      - MYSQL_WRITE_PASSWORD=${MYSQL_WRITE_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_DATABASE=${MYSQL_DATABASE}
       - CHECKPOINT_POSTGRES_HOST=postgres-checkpoint
       - CHECKPOINT_POSTGRES_PORT=5432
       - CHECKPOINT_POSTGRES_DATABASE=${CHECKPOINT_POSTGRES_DATABASE:-causalagent_checkpoints}
       - CHECKPOINT_POSTGRES_USER=${CHECKPOINT_POSTGRES_USER:-causalagent_checkpoint}
-      - CHECKPOINT_POSTGRES_PASSWORD=${CHECKPOINT_POSTGRES_PASSWORD}
+
       - CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS=${CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS:-5}
       - CHECKPOINT_POSTGRES_POOL_MIN_SIZE=1
       - CHECKPOINT_POSTGRES_POOL_MAX_SIZE=2
@@ -621,24 +649,9 @@ services:
 
     networks:
       - causalagent_network_prod
-
-  kb-indexes-sync:
-    image: python:3.11-slim
-    container_name: causalagent_kb_indexes_sync_prod
-    volumes:
-      - ./Agent/knowledge_base/multimodal_indexes:/src:ro
-      - kb_multimodal_indexes_prod:/app/Agent/knowledge_base/multimodal_indexes
-    command:
-      - sh
-      - -c
-      - cp -a /src/. /app/Agent/knowledge_base/multimodal_indexes/
-    networks:
-      - causalagent_network_prod
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
 
 networks:
   causalagent_network_prod:
@@ -649,7 +662,16 @@ networks:
     # - 设置为internal（无外网访问）
 
 volumes:
-  kb_multimodal_indexes_prod:
+  # 正式 RAG 数据（索引、active pointer、生产配置、隔离区、回滚审计）
+  rag_formal_prod:
+    driver: local
+
+  # 评测数据（runs、sources、datasets、artifacts、reports）
+  rag_eval_prod:
+    driver: local
+
+  # 模型缓存或模型文件
+  rag_models_prod:
     driver: local
 
   mysql_data_prod:
@@ -663,21 +685,6 @@ volumes:
     driver: local
   
   app_logs_prod:
-    driver: local
-
-  rag_eval_isolated_runs:
-    driver: local
-
-  rag_eval_sources:
-    driver: local
-
-  rag_eval_datasets:
-    driver: local
-
-  rag_eval_artifacts:
-    driver: local
-
-  rag_eval_reports:
     driver: local
 
 # ==========================================

@@ -12,6 +12,7 @@ import psycopg
 
 from app.db import get_read_connection, get_replica_status
 from config.checkpoint_settings import CheckpointPostgresConfig
+from config.secret_file import require_secret
 
 from tests.e2e.admin.seed_admin_31_e2e import (
     ATTACHMENT_ID,
@@ -281,7 +282,7 @@ def verify() -> None:
                 host=replica_host,
                 port=int(os.environ["MYSQL_PORT"]),
                 user=os.environ["MYSQL_READ_USER"],
-                password=os.environ["MYSQL_READ_PASSWORD"],
+                password=require_secret("MYSQL_READ_PASSWORD"),
                 database=os.environ["MYSQL_DATABASE"],
             ) as conn:
                 cursor = conn.cursor(dictionary=True)

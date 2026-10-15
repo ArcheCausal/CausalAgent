@@ -25,7 +25,7 @@
 
 ## 开发部署
 
-默认 `docker-compose.yml` 是包含主系统、RAG 评测、联网搜索和可观测性的 16 服务开发拓扑；服务职责如下：
+默认 `docker-compose.yml` 是包含主系统、RAG 评测、联网搜索和可观测性的 15 服务开发拓扑；服务职责如下：
 
 | 服务 | 作用 |
 | --- | --- |
@@ -38,23 +38,30 @@
 | `monitor` | 数据库共享快照采集 |
 | `agent-persistence-cleanup` | 跨库删除 Job 父子图 checkpoint 和用户长期记忆 Store |
 | `rag-eval-worker` | 独立领取 RAG 摄取、候选、评测和治理队列任务 |
-| `kb-indexes-sync` | 一次性同步，把仓库里的多模态 release 复制进命名卷 `kb_multimodal_indexes`；作为 app、worker、rag-eval-worker 的启动依赖先运行 |
 | `searxng` / `valkey` | 固定版本的 SearXNG 联网学术搜索及其缓存/队列依赖 |
 | `loki` / `alloy` / `grafana` | 开发环境运行日志采集、存储和查看；只加入独立的 observability network |
 
-`app`、Agent worker、`causal-mcp`、monitor、RAG evaluation worker 和 agent-persistence-cleanup 依赖 `db-bootstrap` 成功退出；`causal-mcp` 另外等待 `mysql-primary` 健康，并以 `/health`/`/ready` 提供进程、MySQL strong read 和执行器就绪边界。`causal-mcp` 不映射宿主端口，算法在有界容量内按 invocation 使用独立子进程，因此控制面取消只终止目标算法，不回收并行 sibling；`CAUSAL_MCP_SLOW_LOG_SECONDS` 在开发、预发和生产 Compose 中默认 60 秒。因果 MCP 镜像先安装 CPU Torch，再安装固定版本 `cdfm-base==0.1.0` 与现有 CDMIR；`CDFM_MODEL_PATH` 默认指向 `DMIRLAB/CDFM`，开发 smoke 可从 Hugging Face 加载，生产仍应通过不可变镜像/模型内容治理避免漂移。服务通过 `config/database_settings.py` 读取 MySQL 配置，只注入自身 Bearer/HMAC 密钥和算法参数，不注入应用的 `API_KEY`、`BASE_URL`、`MODEL` 或 `SECRET_KEY`；Bearer/HMAC 密钥只通过环境变量或部署 secret 注入。当前 worker 新路径还依赖 `causal-mcp` healthy，启动时按“PostgreSQL checkpoint pool/schema → AsyncPostgresStore setup → 静态 Registry → 进程级 MCP Client pool handshake → RAG readiness → Deep Agent/父图编译”的顺序完成 fail-fast 初始化；slot 不再创建 stdio MCP session。`searxng` 依赖 Valkey 健康。联网搜索是 Job 级可选能力，worker readiness 不等待 SearXNG，运行期不可用时新 `web_evidence_search` 返回受控 unavailable/disabled 结果；非搜索 Job 不会因此阻止启动。开发拓扑当前不提供自动故障切换。启动命令见 [`setup.md`](setup.md)。
+`app`、Agent worker、`causal-mcp`、monitor、RAG evaluation worker 和 agent-persistence-cleanup 依赖 `db-bootstrap` 成功退出；`causal-mcp` 另外等待 `mysql-primary` 健康，并以 `/health`/`/ready` 提供进程、MySQL strong read 和执行器就绪边界。`causal-mcp` 不映射宿主端口，算法在有界容量内按 invocation 使用独立子进程，因此控制面取消只终止目标算法，不回收并行 sibling；`CAUSAL_MCP_SLOW_LOG_SECONDS` 在开发、预发和生产 Compose 中默认 60 秒。因果 MCP 镜像先安装 CPU Torch，再安装固定版本 `cdfm-base==0.1.0` 与现有 CDMIR；`CDFM_MODEL_PATH` 默认指向 `DMIRLAB/CDFM`，开发 smoke 可从 Hugging Face 加载，生产仍应通过不可变镜像/模型内容治理避免漂移。服务通过 `config/database_settings.py` 读取 MySQL 配置，通过统一密钥文件读取 Bearer/HMAC 材料。Compose 不向 MCP 直接注入应用或模型密钥环境变量，也不要求模型地址和名称；但挂载的完整文件会经过全局必需键检查，仍需包含应用和模型等必需密钥。当前 worker 新路径还依赖 `causal-mcp` healthy，启动时按“PostgreSQL checkpoint pool/schema → AsyncPostgresStore setup → 静态 Registry → 进程级 MCP Client pool handshake → RAG readiness → Deep Agent/父图编译”的顺序完成 fail-fast 初始化；slot 不再创建 stdio MCP session。`searxng` 依赖 Valkey 健康。联网搜索是 Job 级可选能力，worker readiness 不等待 SearXNG，运行期不可用时新 `web_evidence_search` 返回受控 unavailable/disabled 结果；非搜索 Job 不会因此阻止启动。开发拓扑当前不提供自动故障切换。启动命令见 [`setup.md`](setup.md)。
+
+### 服务器密钥文件
+
+密码、令牌和签名密钥统一保存在服务器上的单个密钥文件里，默认路径为 `/etc/causalagent/secrets/causalagent.env`，可以用环境变量 `CAUSALAGENT_SECRET_FILE` 覆盖。服务器发布必须将文件设为 `0640`、属主设为 `root`、属组设为容器专用 GID `3000`。Compose 会把该组加入 MySQL、PostgreSQL、Grafana 和 SearXNG 容器；发布校验检查服务器权限，验收还需确认各容器的实际读取身份可读。单进程本地运行仍可使用 `0600` 或 `0400`。该文件不进入 Git、部署包或镜像。允许出现的键由 `config/secret_file.py` 的 `SECRET_KEYS` 定义，模板见 [`deploy/secrets/causalagent.env.example`](../../deploy/secrets/causalagent.env.example)；未知键、重复键、空值、缺键和权限不安全都会让进程启动失败。
+
+应用容器通过 Compose secret 把该文件只读挂载到 `/run/secrets/causalagent.env`，应用、worker、MCP 和数据库配置由 `config/secret_file.py` 显式读取；加载器清除继承的密钥环境变量，不会把文件值重新写入进程环境。可选 LangSmith 集成会单独导出其 SDK 所需密钥。所有服务仍由 Compose 启动。Compose 负责选择镜像、提供普通环境变量并挂载密钥文件；镜像内的应用负责解释文件内容。项目 Python 服务直接调用密钥加载器；MySQL、PostgreSQL、SearXNG 和 Grafana 的上游入口不认识项目自定义的多键格式，由 `deploy/scripts/secret-env.sh` 只导出对应入口需要的变量，再执行上游入口。MySQL 主从使用基于官方 MySQL 构建的自有镜像，适配入口已写入镜像。离线开发工具 `Agent/knowledge_base/build_knowledge.py` 与 `Agent/knowledge_base/multimodal/cli.py` 可读取本地 `.env`，但不属于 app 或 worker 的生产启动路径。非敏感配置继续使用环境变量或非密钥配置文件。
+
+开发 Compose 使用仓库根目录的 `causalagent.env`（已加入 `.gitignore`）作为同一个密钥文件入口；首次启动前把它从 [`deploy/secrets/causalagent.env.example`](../../deploy/secrets/causalagent.env.example) 复制到仓库根目录并按需填写。
 
 ## 联网搜索（SearXNG）
 
-开发与预发 Compose 使用同一套密钥注入方式：`searxng/core-config/settings.yml` 与 `deploy/staging/searxng/config/settings.yml` 都是提交在仓库里的非密钥配置，只包含引擎白名单、JSON 输出、Valkey 地址等字段，不写 `secret_key`。密钥与其他密钥一致，由环境变量注入：开发 Compose 默认 `local-searxng-secret`，预发由 `.env.staging` 的 `SEARXNG_SECRET` 显式提供。SearXNG 直接读取该变量并覆盖配置文件中的同名字段，因此预发密钥只存在于服务器本地环境文件，不进入 Git。
+开发与预发 Compose 使用同一套密钥注入方式：`searxng/core-config/settings.yml` 与 `deploy/staging/searxng/config/settings.yml` 都是提交在仓库里的非密钥配置，只包含引擎白名单、JSON 输出、Valkey 地址等字段，不写 `secret_key`。`SEARXNG_SECRET` 与其他密钥一致，保存在服务器密钥文件里；容器启动时由 `deploy/scripts/secret-env.sh` 从该文件导出为环境变量，SearXNG 随后读取它并覆盖配置文件中的同名字段，因此密钥不进入 Git 或 Compose 的直接环境配置，但启动后的 SearXNG 进程环境仍含自身所需密钥。
 
 开发与预发 Compose 都固定使用 `searxng/searxng:2026.8.21-bbb3c7d82`。升级镜像时必须重新验证 `settings.yml`、JSON 输出格式、三学术引擎配置和 `/healthz`，并确认 `SEARXNG_SECRET` 仍会覆盖文件中的同名字段；不要直接改回 `latest`。`/healthz` 只检查 SearXNG Web 进程和配置加载后的 HTTP 响应，不检查外部学术引擎、DNS 或出站网络；真实搜索可用性仍由 web_search 的运行期重试和降级处理。
 
-开发 Compose 的可观测组件使用固定版本和独立命名卷：Loki、Alloy 不开放宿主机端口，Grafana 只绑定 `127.0.0.1:3000` 并以 `/grafana/` 为入口子路径。启动 Grafana 前必须设置非空的 `GRAFANA_ADMIN_PASSWORD`；采集范围由应用容器的 `causalagent_observability` 标签筛选，不包含 MySQL、PostgreSQL、Loki、Alloy 或 Grafana 自身。完整字段、标签和真实验收边界见 [`observability.md`](observability.md)。
+开发 Compose 的可观测组件使用固定版本和独立命名卷：Loki、Alloy 不开放宿主机端口，Grafana 只绑定 `127.0.0.1:3000` 并以 `/grafana/` 为入口子路径。启动 Grafana 前必须在密钥文件里设置非空的 `GRAFANA_ADMIN_PASSWORD`；采集范围由应用容器的 `causalagent_observability` 标签筛选，不包含 MySQL、PostgreSQL、Loki、Alloy 或 Grafana 自身。完整字段、标签和真实验收边界见 [`observability.md`](observability.md)。
 
 ## 预发部署
 
-`docker-compose.staging.yml` 是隔离预发拓扑，包含网关、应用、Agent 与 RAG worker、私有 MCP、MySQL 主从、PostgreSQL checkpoint、SearXNG/Valkey 和 Loki/Alloy/Grafana。数据库、搜索、Grafana 和观测数据都使用 staging 专属命名卷；应用服务与观测服务分属两个 Docker 网络。所有 Python 服务先通过 `scripts/staging_environment_guard.py` 校验项目/DSN/数据库/卷名中的 production/prod 标识，`db-bootstrap` 成功后才启动应用服务；worker 还等待 `causal-mcp` healthy，并要求显式的 Deep Agent model/base/API key/context window 与 MCP service token/signing key。SearXNG 使用 `deploy/staging/searxng/config/` 下已提交的非密钥 `settings.yml`。Grafana 数据保存在命名卷 `rag_eval_staging_grafana`，不依赖宿主目录权限。多模态 index 使用可写命名卷 `kb_multimodal_indexes_staging`，active/previous runtime、assets 与 retrieval policy 仍为只读挂载。
+`docker-compose.staging.yml` 是隔离预发拓扑，包含网关、应用、Agent 与 RAG worker、私有 MCP、MySQL 主从、PostgreSQL checkpoint、SearXNG/Valkey 和 Loki/Alloy/Grafana。数据库、搜索、Grafana 和观测数据都使用 staging 专属命名卷；应用服务与观测服务分属两个 Docker 网络。所有 Python 服务先通过 `scripts/staging_environment_guard.py` 校验项目/DSN/数据库/卷名中的 production/prod 标识，`db-bootstrap` 成功后才启动应用服务；worker 还等待 `causal-mcp` healthy，并要求显式的 Deep Agent model/base/API key/context window 与 MCP service token/signing key。SearXNG 使用 `deploy/staging/searxng/config/` 下已提交的非密钥 `settings.yml`。Grafana 数据保存在命名卷 `rag_eval_staging_grafana`，不依赖宿主目录权限。正式 RAG 索引、active pointer 与发布配置使用可写命名卷 `rag_eval_staging_formal`，评测数据使用 `rag_eval_staging_eval`，模型缓存使用 `rag_eval_staging_models`；assets 仍为只读挂载，正式发布配置位于可写正式卷内。
 
 公网只发布 gateway 的 8088 端口。Grafana 不再映射宿主端口，由 gateway 反代到同源 `/grafana/`；SearXNG、Valkey、Loki、Alloy、MySQL、PostgreSQL、app、worker 和 MCP 均不发布宿主端口。该入口是明文 HTTP，仅用于测试服务器，管理员凭据会在链路上以明文传输；云安全组和主机防火墙只允许需要的公网入口端口。
 
@@ -66,55 +73,123 @@
 
 GitHub 当前的公开 Linux x64 标准 runner 配置为 4 核、16 GB 内存和 14 GB SSD，公开仓库使用标准 runner 不计费；具体规格以 [GitHub-hosted runners 文档](https://docs.github.com/en/actions/reference/runners/github-hosted-runners) 为准。GHCR 第一次发布的新包默认为 Private，维护者需按 [包访问与可见性说明](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility) 手动改成 Public。
 
-服务器首次部署时，在仓库目录复制模板并只在服务器编辑真实配置：
+服务器不执行 `git pull`，也不需要完整源码；它只解压部署包并使用服务器上的非密钥配置与密钥文件。
 
-~~~bash
-cp .env.staging.example .env.staging
-chmod 600 .env.staging
-~~~
+首次部署时，在服务器上准备两份文件；模型名、地址等普通参数与密钥的分工见 [`setup.md`](setup.md#配置前提)：
 
-把四个 STAGING_*_IMAGE 替换为发布摘要中的完整 GHCR @sha256:... 值；为 MySQL root/app/write/read/replication、PostgreSQL、Flask、模型、视觉、Embedding、MCP、SearXNG 和 Grafana 设置互不重复的真实凭据，并把 SearXNG 的 `SEARXNG_SECRET` 填为独立随机值。不要在服务器以外复制 .env.staging，也不要把它提交到 Git。.gitignore 会排除该文件，.dockerignore 也会排除环境文件与本地数据，避免本地构建时把它们放进镜像上下文。
+1. 非密钥配置 `/etc/causalagent/config/production.env`：从部署包的 `deploy/config/production.env.example` 复制，填入普通环境配置；
+2. 密钥文件 `/etc/causalagent/secrets/causalagent.env`：从 `deploy/secrets/causalagent.env.example` 复制，填入互不重复的真实随机值，并设置 `chown root:3000 /etc/causalagent/secrets/causalagent.env` 与 `chmod 640 /etc/causalagent/secrets/causalagent.env`。
 
-~~~bash
-docker compose --env-file .env.staging -f docker-compose.staging.yml config --quiet
-docker compose --env-file .env.staging -f docker-compose.staging.yml pull
-docker compose --env-file .env.staging -f docker-compose.staging.yml up -d
-~~~
+不要在服务器以外复制密钥文件，也不要把它提交到 Git；`.gitignore` 会排除 `causalagent.env` 与 `deploy/secrets/*.env`，`.dockerignore` 也会排除环境文件与本地数据，避免本地构建时把它们放进镜像上下文。
 
-不要运行 docker compose down -v；它会删除预发数据库、checkpoint、搜索和观测数据。首次启动后还需在云安全组与主机防火墙核实只有 gateway 端口对公网开放。
+部署前先下载 Actions 制品并解压其中的 `.tar.gz`。`deploy.sh` 接收已经解压的目录，复制到 `/opt/causalagent/releases/<release_id>`，从清单生成 `images.env`，更新 `current`，再执行 Compose `pull` 和 `up -d`。下面以预发为例；生产使用 `docker-compose.prod.yml` 和相应服务器配置。两种环境必须使用不同的 Compose project、配置和数据卷。
+
+```bash
+export CAUSALAGENT_CONFIG_FILE=/etc/causalagent/config/production.env
+export CAUSALAGENT_SECRET_FILE=/etc/causalagent/secrets/causalagent.env
+export CAUSALAGENT_COMPOSE_FILE=docker-compose.staging.yml
+archive=/tmp/causalagent-release.tar.gz
+bundle_dir=/tmp/causalagent-release
+mkdir -p "$bundle_dir"
+tar -xzf "$archive" -C "$bundle_dir"
+bash "$bundle_dir/scripts/deploy.sh" "$bundle_dir" /opt/causalagent/releases
+```
+
+脚本不负责下载和解压制品、创建服务器配置、镜像仓库登录、旧 RAG 数据迁移或最终验收。它在 `pull/up` 前切换 `current`，失败时不会自动恢复链接。部署完成后按 [`release-acceptance.md`](release-acceptance.md) 选择明确的 Compose 文件执行检查。
+
+需要验证 Compose 合并后的部署契约时，使用 `docker compose config`；不要运行 `docker compose down -v`，它会删除预发数据库、checkpoint、搜索、观测和正式 RAG 数据卷。首次启动后还需在云安全组与主机防火墙核实只有 gateway 端口对公网开放。
+
+### 服务器数据目录
+
+预发与生产 Compose 还会挂载少量宿主数据目录。它们属于服务器数据而不是仓库源码，因此使用绝对路径，不依赖发布目录，也不随部署包分发：
+
+| 环境变量 | 默认宿主路径 | 容器路径 | 用途 |
+| --- | --- | --- | --- |
+| `CAUSALAGENT_KB_SOURCE_DIR` | `/var/lib/causalagent/kb/source` | `/app/Agent/knowledge_base/source` | 受控知识源目录（只读） |
+| `CAUSALAGENT_KB_DB_DIR` | `/var/lib/causalagent/kb/db` | `/app/Agent/knowledge_base/db` | 旧 Chroma 知识库向量库 |
+| `CAUSALAGENT_KB_ASSETS_DIR` | `/var/lib/causalagent/kb/assets` | `/app/Agent/knowledge_base/multimodal_assets` | 多模态资产（图片、PDF 等，只读） |
+| `CAUSALAGENT_GRAPH_OUTPUT_DIR` | `/var/lib/causalagent/reports/graphs` | `/app/app/static/generated_graphs` | 报告生成的因果图 |
+
+这些路径不随部署包分发，需要在服务器上预先创建、放入所需数据并为对应容器设置访问权限；只读来源目录仍需可读。目录不存在时 Docker 可能新建空目录，不能把目录创建成功视为资料已经迁移。知识源和图输出目录由生产 Compose 挂载；预发仅挂载表中的旧向量库和多模态资产目录。绝对路径使这些数据不随发布目录切换，也不需要服务器保留 Git 仓库。`rag_formal` 与 `rag_eval` 仍然只使用命名卷，不依赖这些宿主目录。
 
 ## 生产部署
 
 `docker-compose.prod.yml` 使用生产 MySQL、PostgreSQL checkpoint、统一 bootstrap、Web、Agent worker、独立 `causal-mcp`、monitor、checkpoint cleanup 和独立 `rag-eval-worker`；生产环境不挂载源代码，使用独立卷、网络和日志轮转设置。worker 通过进程级 MCP Client pool 调用私有服务，必须显式提供不可变 Deep Agent 配置和 MCP 鉴权材料；它依赖 `causal-mcp` healthy 后才开始 claim Job。`causal-mcp` 使用独立不可变镜像、单 ASGI worker、默认最多 2 个并行 invocation 和 4 个等待队列，不开放宿主端口；每个已运行 invocation 使用独立单进程 executor 以支持精确取消。镜像内的 CDMIR 与 `cdfm-base==0.1.0` 固定版本，并使用 CPU Torch 依赖闭合 `pip check`；`CDFM_MODEL_PATH` 由部署环境显式传入。RAG evaluation worker 与主系统进程隔离，并通过独立评测卷共享必要的运行产物；它不带开发可观测性标签，不应把评测日志混入主系统观测流。当前生产 Compose 是单独的生产配置，不能假设它自动提供开发 Compose 的 MySQL replica、SearXNG、Loki/Alloy/Grafana 或故障切换能力。
 当前生产 Compose 未定义 SearXNG 服务；如果生产环境启用 `web_search_enabled`，必须另外提供可访问的 `SEARXNG_URL` 和对应的搜索服务部署，搜索不可用时仍遵循 worker 运行期降级语义。生产 readiness 和发布证据必须按 [`testing.md`](testing.md) 重新执行并记录，不能用单元或静态 Compose 检查替代。
 
+## 部署包与发布清单
+
+发布后的服务器验收命令见 [`release-acceptance.md`](release-acceptance.md)。
+
+服务器只部署部署包，不执行 `git pull`，也不需要完整源码。CI 用 `scripts/build_release_bundle.py` 在某个源码提交上生成部署包，包含：两个 Compose 文件、`deploy/` 下的网关与配置模板、`observability/` 的采集与看板配置，以及 `scripts/` 下的部署脚本。部署包不包含 Python、Vue、TypeScript 源码，也不包含真实密码、API key、数据库数据或 RAG 正式索引。
+
+镜像范围：应用代码、MCP 代码和 MySQL 自定义初始化逻辑进入自有镜像（`causalagent-app`、`causalagent-mcp`、`causalagent-mysql-primary`、`causalagent-mysql-replica`）；PostgreSQL、Nginx、SearXNG、Valkey、Loki、Alloy 和 Grafana 使用官方镜像。两类镜像都必须在 `images.lock.json` 与 `release.manifest.json` 中固定 digest；`scripts/resolve_official_images.py` 用 `docker buildx imagetools` 解析官方镜像 digest，未固定 digest 时构建直接失败。
+
+正常发布只需人工触发一次 Actions，镜像构建与部署包生成已自动衔接：
+
+1. 在 `develop` 上运行 `Publish staging images`，构建并推送 app、MCP、MySQL primary 和 MySQL replica 到 GHCR。四个构建全部成功后，工作流自动调用 `Build release bundle`，传入本次完整源码提交 SHA；任意构建失败时不生成部署包。这里的发布是推送容器仓库，不要求创建 GitHub Release。
+2. 打包工作流用该提交的 `sha-<前7位>` 标签查询四个 GHCR 镜像的 digest，并在不可变引用上核对各平台的 OCI revision。第三方镜像 digest 也由工作流自动查询；随后生成发布清单、镜像锁和压缩包并上传制品。发布标识默认由 UTC 日期、提交短 SHA、运行编号及重试次数组成，摘要显示完整提交和四个镜像引用。查询只读取镜像元数据，不下载完整镜像层。
+3. 下载 Actions 制品，把其中的压缩包传到服务器并解压。服务器配置与密钥保持独立；已有数据的存储迁移只在首次采用新卷结构时执行。
+4. 运行 `deploy.sh`。脚本把清单的镜像映射为 `APP_IMAGE`、`CAUSAL_MCP_IMAGE`、`MYSQL_IMAGE` 等变量，同时生成预发使用的 `STAGING_*` 别名，并写入发布目录的 `images.env`。
+5. 脚本以服务器普通配置和 `images.env` 两个 `--env-file` 启动 Compose，执行 `pull` 和 `up -d`。服务器不再需要逐项手填新发布的镜像 digest。部署 shell 不应保留旧的同名镜像环境变量，以免覆盖清单生成值。
+6. 按服务器验收清单确认实际容器镜像、数据库、MCP、SSE、worker 和 RAG；清单生成或容器启动成功不等于验收通过。
+
+```mermaid
+flowchart LR
+    A[人工运行镜像发布 Action] --> B[构建并推送四个镜像]
+    B --> C[查询同一提交的 digest 并校验 revision]
+    C --> D[自动生成清单和部署包]
+    D --> E[人工下载、上传和解压]
+    E --> F[服务器运行 deploy.sh]
+    F --> G[Compose 拉取镜像并启动]
+```
+
+需要复用已有镜像或修正人工发现的版本错误时，单独运行 `Build release bundle`。输入全部留空时，它通过 Actions API 选择最近一次成功的 `Publish staging images` 所对应的 `develop` 提交，不分别取四个仓库各自的最新镜像。`source_commit` 可填写 7–40 位提交 SHA；工作流 checkout 后记录完整 SHA，部署配置与镜像据此保持同一版本。`release_id` 可手填；四个 `*_sha256` 可分别填写 64 位十六进制 digest，允许 `sha256:` 前缀，未覆盖的项继续自动查询。手动 digest 同样必须属于所选源码提交；切换到另一提交的镜像时需同时修改 `source_commit`。所选提交须包含当前发布工具及对应部署结构，早期不支持部署包的提交不能直接按此方式打包。
+
+没有成功发布记录、任意镜像缺失、仓库访问失败、digest 无效或 OCI revision 不一致时，工作流立即失败，不生成部署包，不自动补建镜像，也不退回旧版本。单独打包不执行镜像构建和推送；新版本仍通过镜像发布 Action 生成。私有 GHCR 镜像需允许本仓库的 `GITHUB_TOKEN` 读取；服务器拉取私有镜像仍需预先执行 `docker login ghcr.io`。
+
+`production.env.example` 只提供服务器普通配置模板；填写后的 `production.env` 与自动生成的 `images.env` 是 Compose 的两个输入文件。参数先经 Compose 的 `environment` 声明进入对应容器，再由 `settings.py`、数据库配置类或 worker 的 `os.getenv` 读取；目前普通参数没有统一的 Python 读取入口。
+
+服务器目录为 `/opt/causalagent/releases/<release_id>/` 加一个 `current` 符号链接；`/etc/causalagent/config/production.env` 保存普通参数，`/etc/causalagent/secrets/causalagent.env` 保存密钥。`verify.sh` 只校验部分静态条件：镜像引用带 digest、密钥权限与必需键名，以及 Compose 配置可解析。它不检查运行中容器、密钥完整格式或部署文件摘要；调用时还需显式用标准 `COMPOSE_FILE` 环境变量选择目标文件，见验收清单。`rollback.sh` 按目录修改时间选择非当前目录并启动其中的 Compose，不记录上一成功发布，也不恢复数据库、密钥或 RAG 数据。
+
+测试环境和生产环境使用同一个 `release.manifest.json`，只替换普通环境配置、密钥文件和数据卷；不替换 app 镜像、MCP 镜像、网关配置包、数据库迁移版本和已验收的第三方镜像 digest。
+
 ## 多模态索引目录与挂载
 
-`Agent/knowledge_base/multimodal_indexes/` 同时承担两个角色：它是正式 release 的存放位置，也是运行期读取的向量索引。发布接口在 `app` 容器内把通过门禁的 staged index 物化成 `<release_id>/chroma`；运行期各服务按 `multimodal_runtime/active_index.json` 的 `index_path` 打开其中的 `chroma`。
+
+正式 release 的存放位置与运行期读取的向量索引在预发和生产统一由独立命名卷提供。发布接口在 `app` 容器内把通过门禁的 staged index 物化成 `<release_id>/chroma`；运行期各服务按 active pointer 的 `index_path` 打开其中的 `chroma`。预发与生产用同一组环境变量指向卷内路径：
+
+- `MULTIMODAL_INDEX_ROOT`：正式索引根目录，容器内为 `/var/lib/causalagent/rag/formal/indexes`；
+- `MULTIMODAL_ACTIVE_INDEX_CONFIG`：active pointer，容器内为 `/var/lib/causalagent/rag/formal/active_index.json`；
+- `RAG_PRODUCTION_CONFIG_PATH`：正式发布配置，容器内为 `/var/lib/causalagent/rag/formal/production_rag_config.json`。
+
+这三项都属于可写命名卷 `rag_formal`（预发为 `rag_eval_staging_formal`，生产为 `rag_formal_prod`），由 `app`、`worker` 和 `rag-eval-worker` 共享；索引、指针、发布配置、隔离区和回滚审计都在同一卷内，重建容器不会丢失。评测数据（runs、sources、datasets、artifacts、reports）收敛为评测卷 `rag_eval`（预发 `rag_eval_staging_eval`，生产 `rag_eval_prod`），模型缓存或模型文件使用模型卷 `rag_models`（预发 `rag_eval_staging_models`，生产 `rag_models_prod`）。删除评测数据不会影响正式索引，更新正式索引也不需要重建 app 镜像。
 
 这份索引不能只读挂载。Chroma 的持久层是 SQLite，`PersistentClient` 在构造阶段就要写入跨进程写锁记录（`acquire_write` 表），只读挂载下会抛 `error returned from database: (code: 8) attempt to write a readonly database`，第一次 RAG 查询就降级为 `rag_unavailable`；readiness 检查只读 pointer、manifest、embedding 和目录，不打开向量库，所以这个失败不会在 worker 启动时暴露。release 的字节稳定性由 manifest 校验保证：`_stable_file_chunks` 在计算 `chroma` 目录哈希时已经剔除 `acquire_write` 的建表和插入语句，锁记录不会让 release 校验失败。
 
-开发、兼容副本、预发和生产都把这条路径挂到可写命名卷：开发和兼容副本 Compose 使用 `kb_multimodal_indexes`（`app`、`worker`、`rag-eval-worker`），预发使用 `kb_multimodal_indexes_staging`（`app`、`worker`），生产使用 `kb_multimodal_indexes_prod`（`app`、`worker`）。四份 Compose 各有一个一次性 `kb-indexes-sync` 服务，把宿主目录里的 release 复制进卷，并作为上述服务的 `service_completed_successfully` 依赖在启动前运行；开发和兼容副本从仓库根目录复制，预发和生产从宿主 `Agent/knowledge_base/multimodal_indexes/` 复制。复制是合并式的，不删除卷内已有的 release。
+开发和兼容副本 Compose 直接挂载仓库内的 `Agent/knowledge_base/multimodal_indexes` 与 `Agent/knowledge_base/multimodal_runtime`，不再使用一次性同步容器，也不再使用 `kb_multimodal_indexes` 命名卷。预发和生产不再挂载宿主仓库目录，也不再从 `./Agent/knowledge_base/multimodal_indexes` 同步。
 
-卷内容与宿主 release 必须指向同一个 release id。指针文件 `multimodal_runtime/active_index.json` 仍从宿主目录读取，不在卷内；两侧不一致时 `_resolve_multimodal_release` 会因找不到目录而抛错、RAG 不可用，如果指针里存在 fallback 项还会触发自动回退，改写指针并把原 active release 目录移入 `quarantine/`。需要在不重启整套服务的前提下重新同步时执行：
-
-```bash
-docker compose run --rm kb-indexes-sync
-```
-
-发布新 release 后仍按既有约定重启读取索引的服务（发布响应的 `requires_worker_restart=true`）。开发环境在容器内发布的新 release 只写入卷，需要导出到仓库后再提交：
+已有部署采用新卷结构前，需要把现有正式索引和 active 指针转入新位置，否则新卷为空，运行期无法找到原 active release。全新安装没有旧数据时不需要执行迁移；之后切换应用镜像也不需要每次迁移。一次性工具只接收旧宿主目录，把索引复制到卷内 `indexes/`，把 `active_index.json` 复制到卷根目录，并保留旧目录：
 
 ```bash
-docker cp causalagent_app:/app/Agent/knowledge_base/multimodal_indexes/<release_id> ./Agent/knowledge_base/multimodal_indexes/
+bash scripts/migrate-rag-storage.sh <旧索引目录> <旧 runtime 目录> <命名卷名>
 ```
 
-卷内容落后于宿主目录时按显式步骤重建，而不是依赖 `down -v`：停止读取索引的服务，删除对应命名卷（开发为 `<项目名>_kb_multimodal_indexes`，预发和生产分别为 `<项目名>_kb_multimodal_indexes_staging`、`<项目名>_kb_multimodal_indexes_prod`），再重新 `up`，卷会先由 `kb-indexes-sync` 从宿主目录填充。`docker compose down -v` 会连同 MySQL、PostgreSQL、SearXNG 数据卷一起删除，任何时候都不要使用。
+该工具不复制 `production_rag_config.json`、旧评测卷或模型目录，也不直接迁移旧索引命名卷。执行前必须定位最新正式数据，停止相关写入并保留备份；目标参数需使用实际 Docker 卷名。正式发布配置、评测数据和模型是否保留须分别处理，复制后还需验证 manifest、active 指针相对路径和真实查询。脚本不检查目标为空、不提供复制后校验或原子切换，重复执行可能覆盖同名文件。
+
+发布新 release 后按响应中的 `requires_worker_restart=true` 重启读取索引的服务。开发发布直接写入宿主仓库目录；使用 `restart` 明确重启已有容器，普通 `up -d` 在配置未变化时不保证重启：
+
+```bash
+docker compose -f docker-compose.yml restart app worker rag-eval-worker
+```
+
+`docker compose down -v` 会连同 MySQL、PostgreSQL、SearXNG 和正式 RAG 卷一起删除，任何时候都不要使用。正式 RAG 卷需要定期备份；恢复完整的正式卷和发布绑定数据后不需要重新评测，只有正式索引、manifest 或评测绑定丢失时才需要重新构建和评测。
 
 ## RAG release 与 worker 生命周期
 
 开发、兼容副本和 staging 的 Agent worker 使用 `JOB_DRAIN_TIMEOUT_SECONDS`（默认 60 秒）进行优雅 drain，并设置至少 75 秒的 Compose `stop_grace_period`。worker 启动只做 active pointer、manifest 冻结来源身份、embedding、版本、collection 和向量目录的轻量 readiness 检查，不读取原始 PDF；失败时继续运行并标记内部 `rag_unavailable`，不加载 RAG 重资源。构建、evaluate、gate-check 和 publish 阶段仍严格要求构建者在受控目录内提供并校验正式 PDF。发布新 release 后必须先完成隔离评测和显式 publish，再通过停止/重启 worker 使 active pointer 生效；不支持热切换、蓝绿切换或零停机。active pointer 发布会保留 previous pointer，candidate/资产/评测产物不自动删除。完整行为契约见 [`../architecture/rag-evaluation.md`](../architecture/rag-evaluation.md)。
 
-生产必须通过环境变量或安全的 secret 机制提供 `SECRET_KEY`、模型配置、MySQL 职责账号、非空 `CHECKPOINT_POSTGRES_PASSWORD` 和 RAG evaluation worker 所需配置。不要在文档、镜像层、命令行日志或 API 响应中打印密钥。
+生产的模型名、地址、MySQL 账号名和 worker 参数由普通环境配置提供；`SECRET_KEY`、模型 API key、MySQL 和 checkpoint 密码、MCP 鉴权材料只从统一密钥文件读取。不要在文档、镜像层、命令行日志或 API 响应中打印密钥。
 
 ## 源码 Release 与 CD 流程
 

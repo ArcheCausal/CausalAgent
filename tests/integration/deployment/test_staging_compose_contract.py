@@ -24,12 +24,17 @@ class StagingComposeContractTests(unittest.TestCase):
     def test_staging_requires_remote_vlm_credentials_when_egress_is_enabled(self) -> None:
         compose = (REPOSITORY_ROOT / "docker-compose.staging.yml").read_text(encoding="utf-8")
         example = (REPOSITORY_ROOT / ".env.example").read_text(encoding="utf-8")
+        secret_example = (
+            REPOSITORY_ROOT / "deploy/secrets/causalagent.env.example"
+        ).read_text(encoding="utf-8")
 
         self.assertIn('VISION_ALLOW_REMOTE_DATA: "true"', compose)
-        self.assertIn("VISION_API_KEY: ${VISION_API_KEY:?", compose)
         self.assertIn("VISION_BASE_URL: ${VISION_BASE_URL:?", compose)
         self.assertIn("VISION_MODEL: ${VISION_MODEL:-qwen-vl-plus}", compose)
-        for key in ("VISION_API_KEY=", "VISION_BASE_URL=", "VISION_MODEL=qwen-vl-plus"):
+        # 远程 VLM 的密钥只在服务器密钥文件里，非密钥地址仍在环境文件。
+        self.assertIn("VISION_API_KEY=", secret_example)
+        self.assertNotIn("VISION_API_KEY=", compose)
+        for key in ("VISION_BASE_URL=", "VISION_MODEL=qwen-vl-plus"):
             self.assertIn(key, example)
 
     def test_worker_compose_contract_has_bounded_drain_and_release_mounts(self) -> None:
@@ -42,26 +47,33 @@ class StagingComposeContractTests(unittest.TestCase):
         staging = (REPOSITORY_ROOT / "docker-compose.staging.yml").read_text(encoding="utf-8")
         self.assertIn("JOB_DRAIN_TIMEOUT_SECONDS: ${JOB_DRAIN_TIMEOUT_SECONDS:-60}", staging)
         self.assertIn("stop_grace_period: 75s", staging)
-        for path in (
-            "./Agent/knowledge_base/multimodal_runtime:/app/Agent/knowledge_base/multimodal_runtime:ro",
-            "./Agent/knowledge_base/rag/runtime:/app/Agent/knowledge_base/rag/runtime:ro",
-        ):
-            self.assertIn(path, staging)
+        # 预发不再挂载宿主 runtime 指针；active pointer 位于正式 RAG 命名卷。
+        self.assertNotIn("multimodal_runtime", staging)
+        self.assertNotIn("rag/runtime", staging)
+        self.assertIn("rag_eval_staging_formal:/var/lib/causalagent/rag/formal", staging)
 
     def test_multimodal_index_mounts_use_writable_named_volumes(self) -> None:
-        """多模态索引目录必须挂到可写命名卷，不能只读挂载或直挂宿主仓库。"""
+        """正式索引改用独立 RAG 卷；预发与生产不再挂宿主仓库目录。"""
+        formal = "/var/lib/causalagent/rag/formal"
         expectations = {
-            "docker-compose.yml": ("kb_multimodal_indexes", 4),
-            "docker-compose.replica.yml": ("kb_multimodal_indexes", 4),
-            "docker-compose.prod.yml": ("kb_multimodal_indexes_prod", 3),
-            "docker-compose.staging.yml": ("kb_multimodal_indexes_staging", 3),
+            # 预发：app、worker、rag-eval-worker 各挂一次正式卷。
+            "docker-compose.staging.yml": ("rag_eval_staging_formal:" + formal, 3),
+            # 生产：app、worker、rag-eval-worker 各挂一次正式卷。
+            "docker-compose.prod.yml": ("rag_formal_prod:" + formal, 3),
         }
-        target = "/app/Agent/knowledge_base/multimodal_indexes"
-        host_mount = "./Agent/knowledge_base/multimodal_indexes:" + target
-        for filename, (volume_key, expected_mounts) in expectations.items():
+        for filename, (mount, expected_mounts) in expectations.items():
             with self.subTest(filename=filename):
                 compose = (REPOSITORY_ROOT / filename).read_text(encoding="utf-8")
-                self.assertEqual(compose.count(volume_key + ":" + target), expected_mounts)
-                self.assertNotIn(volume_key + ":" + target + ":ro", compose)
-                self.assertNotIn(host_mount, compose)
-                self.assertIn("\n  " + volume_key + ":", compose)
+                self.assertEqual(compose.count(mount), expected_mounts)
+                self.assertNotIn("kb_multimodal_indexes", compose)
+                self.assertNotIn("kb-indexes-sync", compose)
+
+        # 开发环境直接挂载宿主源码目录，不再使用一次性同步容器。
+        for filename in ("docker-compose.yml", "docker-compose.replica.yml"):
+            with self.subTest(filename=filename):
+                compose = (REPOSITORY_ROOT / filename).read_text(encoding="utf-8")
+                self.assertNotIn("kb-indexes-sync", compose)
+                self.assertIn(
+                    "./Agent/knowledge_base/multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes",
+                    compose,
+                )

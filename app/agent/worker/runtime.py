@@ -28,6 +28,7 @@ from Agent.deep_agent_tools.rag_evidence_tool import build_default_rag_evidence_
 from Agent.deep_agent_tools.registry import build_default_registry
 from Agent.deep_agent_tools.web_evidence_tool import build_default_web_evidence_tool
 from app.agent.worker.mcp_client_pool import McpClientPool, McpClientPoolConfig
+from config.secret_file import load_secrets, require_secret
 from config.settings import settings
 from observability.logging_runtime import log_event
 
@@ -263,9 +264,10 @@ def _required_positive_environment_integer(name: str) -> int:
 def create_deep_agent_model() -> ChatOpenAI:
     """创建带 Responses API 和显式 profile 的 Deep Agent 模型。"""
 
+    load_secrets()
     model_name = os.getenv("DEEP_AGENT_MODEL", "deepseek-v4-flash").strip()
     base_url = (os.getenv("DEEP_AGENT_BASE_URL") or settings.BASE_URL or "").strip()
-    api_key = (os.getenv("DEEP_AGENT_API_KEY") or settings.API_KEY or "").strip()
+    api_key = require_secret("DEEP_AGENT_API_KEY").strip()
     if not model_name or not base_url or not api_key:
         raise RuntimeError("Deep Agent 模型配置不完整，无法初始化")
     return ChatOpenAI(
@@ -294,9 +296,7 @@ async def initialize_production_runtime(
     process_stack.push_async_callback(mcp_pool.close)
     await mcp_pool.start()
 
-    signing_key = (os.getenv("CAUSAL_MCP_SIGNING_KEY_CURRENT") or "").strip()
-    if not signing_key:
-        raise RuntimeError("CAUSAL_MCP_SIGNING_KEY_CURRENT is required")
+    signing_key = require_secret("CAUSAL_MCP_SIGNING_KEY_CURRENT").strip()
     algorithm_executor = McpAlgorithmExecutor(
         mcp_pool,
         signing_key=signing_key,

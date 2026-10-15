@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 
 from observability.logging_runtime import configure_logging, current_environment, log_event
+from config.secret_file import load_secrets, require_secret
 
 
 LOGGER = logging.getLogger(__name__)
@@ -43,22 +44,13 @@ class DatabaseBootstrap:
         self.load_database_config()
 
     def load_database_config(self) -> None:
-        try:
-            from dotenv import load_dotenv
-
-            env_path = self.project_root / ".env"
-            if env_path.exists():
-                load_dotenv(dotenv_path=env_path)
-        except ImportError:
-            pass
-
+        load_secrets()
         host = os.environ.get("MYSQL_WRITE_HOST") or os.environ.get("MYSQL_HOST")
         write_user = os.environ.get("MYSQL_WRITE_USER") or os.environ.get("MYSQL_USER")
-        write_password = os.environ.get("MYSQL_WRITE_PASSWORD") or os.environ.get("MYSQL_PASSWORD")
+        write_password = require_secret("MYSQL_WRITE_PASSWORD")
         required = {
             "MYSQL_HOST 或 MYSQL_WRITE_HOST": host,
             "MYSQL_WRITE_USER 或 MYSQL_USER": write_user,
-            "MYSQL_WRITE_PASSWORD 或 MYSQL_PASSWORD": write_password,
             "MYSQL_DATABASE": os.environ.get("MYSQL_DATABASE"),
         }
         missing = [key for key, value in required.items() if not value]
@@ -74,7 +66,7 @@ class DatabaseBootstrap:
         }
 
     def create_database_if_not_exists(self) -> None:
-        root_password = os.environ.get("MYSQL_ROOT_PASSWORD") or str(self.mysql_config["password"])
+        root_password = require_secret("MYSQL_ROOT_PASSWORD")
         database_name = str(self.mysql_config["database"])
         try:
             conn = mysql.connector.connect(

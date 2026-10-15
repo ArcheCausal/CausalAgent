@@ -154,14 +154,20 @@ def admin_brand_asset(filename: str):
 @admin_bp.route("/brand/logo")
 @admin_required
 def admin_brand_logo():
-    """从仓库唯一品牌原图返回管理员侧栏 Logo。"""
+    """返回管理员侧栏使用的设计系统正式品牌图标。"""
     response = send_file(
-        PROJECT_ROOT / "README" / "CausalAgent.png",
+        PROJECT_ROOT
+        / "packages"
+        / "design-system"
+        / "src"
+        / "assets"
+        / "brand"
+        / "causalagent-mark-transparent-1024.png",
         mimetype="image/png",
         conditional=True,
-        max_age=86400,
+        max_age=0,
     )
-    response.headers["Cache-Control"] = "private, max-age=86400"
+    response.headers["Cache-Control"] = "private, max-age=0, must-revalidate"
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 

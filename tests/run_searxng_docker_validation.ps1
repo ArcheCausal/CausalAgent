@@ -10,6 +10,7 @@ $projectName = "causalagent-searxng-validation-$([Guid]::NewGuid().ToString('N')
 $artifactRoot = Join-Path ([IO.Path]::GetTempPath()) $projectName
 $configRoot = Join-Path $artifactRoot "core-config"
 $overridePath = Join-Path $artifactRoot "compose.validation.yml"
+$secretPath = Join-Path $artifactRoot "causalagent.env"
 $validationSecret = "validation-searxng-secret-$([Guid]::NewGuid().ToString('N'))"
 $composeArgs = @(
     "--project-name", $projectName,
@@ -32,7 +33,12 @@ Copy-Item `
     -LiteralPath (Join-Path $repoRoot "searxng/core-config/settings.yml") `
     -Destination (Join-Path $configRoot "settings.yml")
 
+# 隔离验证同样只从密钥文件读取密钥；这里写一个只含 SEARXNG_SECRET 的临时文件。
+Set-Content -LiteralPath $secretPath -Value "SEARXNG_SECRET=$validationSecret" -Encoding utf8 -NoNewline
+
 $configRootForCompose = $configRoot.Replace("\", "/")
+$secretPathForCompose = $secretPath.Replace("\", "/")
+$secretEnvPathForCompose = (Join-Path $repoRoot "deploy/scripts/secret-env.sh").Replace("\", "/")
 @"
 services:
   searxng:
@@ -43,6 +49,14 @@ services:
         target: /etc/searxng
         read_only: true
       - searxng_validation_core_data:/var/cache/searxng
+      - type: bind
+        source: '$secretEnvPathForCompose'
+        target: /opt/causalagent/secret-env.sh
+        read_only: true
+      - type: bind
+        source: '$secretPathForCompose'
+        target: /run/secrets/causalagent.env
+        read_only: true
 
   valkey:
     container_name: ${projectName}_valkey
@@ -63,12 +77,12 @@ function Invoke-ValidationCompose {
     }
 }
 
-$env:SEARXNG_SECRET = $validationSecret
+$env:CAUSALAGENT_SECRET_FILE = $secretPath
 
 try {
     Invoke-ValidationCompose -Arguments @("up", "-d", "--wait", "searxng")
 
-    # 配置文件不含 secret_key，运行期取值必须等于环境变量注入值。
+    # 配置文件不含 secret_key，运行期取值必须等于密钥文件里的值。
     $settingsText = Get-Content -Raw -LiteralPath (Join-Path $configRoot "settings.yml")
     $declaredSecretKey = $settingsText -split '\r?\n' |
         Where-Object { $_ -notmatch '^\s*#' -and $_ -match '^\s*secret_key\s*:' }
@@ -98,7 +112,7 @@ try {
 }
 finally {
     & docker compose @composeArgs down --volumes --remove-orphans *> $null
-    Remove-Item Env:SEARXNG_SECRET -ErrorAction SilentlyContinue
+    Remove-Item Env:CAUSALAGENT_SECRET_FILE -ErrorAction SilentlyContinue
     if (-not $KeepArtifacts -and (Test-Path -LiteralPath $artifactRoot)) {
         Remove-Item -LiteralPath $artifactRoot -Recurse -Force
     }

@@ -8,14 +8,6 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv(PROJECT_ROOT / ".env", override=False)
-except ImportError:
-    pass
-
-
 def _resolve_path(value: str | Path) -> Path:
     path = Path(value)
     if not path.is_absolute():
