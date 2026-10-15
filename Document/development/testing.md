@@ -33,15 +33,17 @@ Pull Request 上的执行范围由 `.github/filters/paths.yaml` 的三个过滤�
 
 | 过滤器 | 覆盖范围 | 触发任务 |
 | --- | --- | --- |
-| `backend` | `app/`、`Agent/`、`Database/`、`config/`、`scripts/`、`tests/`、顶层入口脚本与依赖清单、`Dockerfile` | 后端 unit、Dockerfile 静态检查 |
+| `backend` | CI 工作流、`app/`、`Agent/`、`Database/`、`config/`、`scripts/`、`tests/`、顶层入口脚本与依赖清单、`Dockerfile` | 后端 unit、Dockerfile 静态检查 |
 | `frontends` | `chat-frontend/`、`admin-frontend/`、`website-frontend/`、`app/rag_eval/frontend/`、`packages/design-system/` | 五个前端工程的自检与构建 |
 | `contracts` | `docker-compose*.yml`、`observability/`、`searxng/`、`deploy/`、发布与打包工作流、预发与观测契约测试、环境变量模板 | Compose 与预发部署合同、Alloy 配置验证 |
 
-三个过滤器之外的改动（例如纯文档）只运行 Python 语法、轻量测试和 Pull Request 规范检查。面向 `main` 的 Pull Request 无条件运行以上全部任务，不受路径过滤影响。`pull-request-policy` 始终执行，校验标题格式与 `main` 只接受 `develop` 来源的分支流向。
+三个过滤器之外的改动（例如纯文档）只运行 Python 语法和 Pull Request 规范检查。结构化输出等单元测试统一由后端 unit 任务执行，不单独设置 `light-tests` 任务。修改 `.github/workflows/lightweight-ci.yml` 会触发后端 unit 与 Dockerfile 检查。面向 `main` 的 Pull Request 无条件运行以上全部任务，不受路径过滤影响。`pull-request-policy` 始终执行，校验标题格式与 `main` 只接受 `develop` 来源的分支流向。
 
 **维护规则**：`.github/filters/paths.yaml` 的 glob 与顶层目录一一对应，重命名或移动顶层目录时必须同步修改该文件。旧 glob 匹配不到任何文件时，对应任务会静默跳过，该模块不再被覆盖而 CI 仍显示通过，因此没有自动化兜底，只能靠这条规则和代码评审守住。
 
-Docker unit 镜像按 `tests/README.md` 中的固定 lock 构建，构建命令通过 `docker buildx bake` 叠加 `type=gha` 层缓存：Pull Request 只 `cache-from` 恢复，`push` 的预热任务负责 `cache-to` 写入。运行测试仍使用 `docker compose -f docker-compose.test.yml run --rm unit-test`，`docker-compose.test.yml` 保持本地与 CI 共用、不含仅 CI 可用的缓存参数，隔离契约（`network_mode: none`、只读挂载、`env_file`）不变。缓存上限与保留期由 GitHub 侧管理，公开仓库使用标准托管 runner 的用量不计费。
+Docker unit 镜像按 `tests/README.md` 中的固定 lock 构建，由 `docker/bake-action@v6` 执行 Bake，以获得 GitHub Actions 提供的缓存运行时令牌和服务地址；无需把令牌写入工作流或服务器配置。两个构建步骤使用 GHA v2 层缓存和同一 `scope=unit-test`：Pull Request 只通过 `cache-from` 恢复并将镜像加载到 Docker，`push` 或手动启动的预热任务通过 `cache-to` 写入，使用 `mode=min` 和 `type=cacheonly`，不加载或推送镜像。构建记录附件上传关闭，构建日志与摘要保留。运行测试仍使用 `docker compose -f docker-compose.test.yml run --rm unit-test`，`docker-compose.test.yml` 保持本地与 CI 共用、不含仅 CI 可用的缓存参数，隔离契约（`network_mode: none`、只读挂载、`env_file`）不变。缓存上限与保留期由 GitHub 侧管理，公开仓库使用标准托管 runner 的用量不计费。
+
+验证缓存时，应先在目标基础分支成功运行一次预热任务，确认日志出现 GHA 缓存导出记录，再查看后续 Pull Request 日志的缓存导入和依赖层 `CACHED` 记录。第一次预热或依赖锁、Dockerfile、基础镜像发生变化时，依赖层可能重新构建；任务成功或配置中存在 `cache-from/cache-to` 不代表缓存已实际写入或命中。
 
 Compose 校验只展开配置，不启动服务。静态 Dockerfile 检查不会生成或推送镜像；实际 app、MCP、MySQL 主从镜像只由人工触发的发布工作流构建。
 
