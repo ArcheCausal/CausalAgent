@@ -329,6 +329,8 @@ class DatabaseMonitorConfigTests(unittest.TestCase):
     def build_config(self, **overrides):
         """使用最小必需环境变量构造隔离的配置实例。"""
         env = {**TEST_ENV, **{key: str(value) for key, value in overrides.items()}}
+        # clear=True 会清掉密钥文件指针；测试仍必须从同一个密钥文件读取密钥。
+        env["CAUSALAGENT_SECRET_FILE"] = os.environ["CAUSALAGENT_SECRET_FILE"]
         with patch.dict(os.environ, env, clear=True):
             return AppConfig()
 

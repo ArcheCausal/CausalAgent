@@ -11,6 +11,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
+from config.secret_file import load_secrets, require_secret
+
 
 class PostgresStoreDependencyError(RuntimeError):
     """当前环境没有可用的官方 Store 依赖。"""
@@ -29,6 +31,7 @@ class PostgresStoreConfig:
 
     @classmethod
     def from_environment(cls) -> "PostgresStoreConfig":
+        """读取 Store 连接参数；密码只来自密钥文件。"""
         def integer(name: str, default: int) -> int:
             raw = os.getenv(name, str(default))
             try:
@@ -36,12 +39,13 @@ class PostgresStoreConfig:
             except ValueError as exc:
                 raise ValueError(f"{name} must be an integer") from exc
 
+        load_secrets()
         return cls(
             host=os.getenv("CHECKPOINT_POSTGRES_HOST", "postgres-checkpoint"),
             port=integer("CHECKPOINT_POSTGRES_PORT", 5432),
             database=os.getenv("CHECKPOINT_POSTGRES_DATABASE", "causalagent_checkpoints"),
             user=os.getenv("CHECKPOINT_POSTGRES_USER", "causalagent_checkpoint"),
-            password=os.getenv("CHECKPOINT_POSTGRES_PASSWORD") or None,
+            password=require_secret("CHECKPOINT_POSTGRES_PASSWORD"),
             connect_timeout_seconds=integer("CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS", 5),
             pool_min_size=integer("CHECKPOINT_POSTGRES_POOL_MIN_SIZE", 1),
             pool_max_size=integer("CHECKPOINT_POSTGRES_POOL_MAX_SIZE", 5),

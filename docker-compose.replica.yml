@@ -1,48 +1,62 @@
 # 兼容旧路径：当前开发请使用 docker-compose.yml；本文件暂保留，不作为默认入口。
 
+secrets:
+  # 本地开发同样只从项目根目录的 causalagent.env 读取密码与令牌。
+  causalagent_env:
+    file: ${CAUSALAGENT_SECRET_FILE:-./causalagent.env}
+
 services:
   mysql-primary:
+    group_add:
+      - "3000"
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     build:
       context: ./Database/mysql
       dockerfile: Dockerfile.primary
     container_name: causalagent_mysql_primary
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       MYSQL_WRITE_USER: ${MYSQL_WRITE_USER:-${MYSQL_USER}}
-      MYSQL_WRITE_PASSWORD: ${MYSQL_WRITE_PASSWORD:-${MYSQL_PASSWORD}}
       MYSQL_READ_USER: ${MYSQL_READ_USER:-${MYSQL_USER}}
-      MYSQL_READ_PASSWORD: ${MYSQL_READ_PASSWORD:-${MYSQL_PASSWORD}}
       MYSQL_REPLICA_STATUS_USER: ${MYSQL_REPLICA_STATUS_USER:-}
-      MYSQL_REPLICA_STATUS_PASSWORD: ${MYSQL_REPLICA_STATUS_PASSWORD:-}
       MYSQL_REPLICATION_USER: ${MYSQL_REPLICATION_USER:-replica}
-      MYSQL_REPLICATION_PASSWORD: ${MYSQL_REPLICATION_PASSWORD}
     ports:
       - "3307:3306"
     volumes:
       - mysql_primary_data:/var/lib/mysql
+      - ./deploy/scripts/secret-env.sh:/opt/causalagent/secret-env.sh:ro
     networks:
       - causalagent_replica_network
     healthcheck:
-      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping --protocol=tcp -h 127.0.0.1 -P 3306 -u root"]
+      test: ["CMD-SHELL", ". /opt/causalagent/secret-env.sh && MYSQL_PWD=\"$$(secret_value MYSQL_ROOT_PASSWORD)\" mysqladmin ping --protocol=tcp -h 127.0.0.1 -P 3306 -u root"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
 
   postgres-checkpoint:
+    group_add:
+      - "3000"
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     image: postgres:16-alpine
     container_name: causalagent_postgres_checkpoint
     environment:
       POSTGRES_DB: ${CHECKPOINT_POSTGRES_DATABASE:-causalagent_checkpoints}
       POSTGRES_USER: ${CHECKPOINT_POSTGRES_USER:-causalagent_checkpoint}
-      POSTGRES_PASSWORD: ${CHECKPOINT_POSTGRES_PASSWORD:?CHECKPOINT_POSTGRES_PASSWORD must be set}
     ports:
       - "5433:5432"
+    command:
+      - sh
+      - -c
+      - . /opt/causalagent/secret-env.sh && export_secret CHECKPOINT_POSTGRES_PASSWORD POSTGRES_PASSWORD && exec docker-entrypoint.sh postgres
     volumes:
       - postgres_checkpoint_data:/var/lib/postgresql/data
+      - ./deploy/scripts/secret-env.sh:/opt/causalagent/secret-env.sh:ro
     networks:
       - causalagent_replica_network
     healthcheck:
@@ -52,31 +66,38 @@ services:
       retries: 10
 
   mysql-replica:
+    group_add:
+      - "3000"
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     build:
       context: ./Database/mysql
       dockerfile: Dockerfile.replica
     container_name: causalagent_mysql_replica
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_REPLICATION_USER: ${MYSQL_REPLICATION_USER:-replica}
-      MYSQL_REPLICATION_PASSWORD: ${MYSQL_REPLICATION_PASSWORD}
     ports:
       - "3308:3306"
     volumes:
       - mysql_replica_data:/var/lib/mysql
+      - ./deploy/scripts/secret-env.sh:/opt/causalagent/secret-env.sh:ro
     networks:
       - causalagent_replica_network
     depends_on:
       mysql-primary:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping --protocol=tcp -h 127.0.0.1 -P 3306 -u root"]
+      test: ["CMD-SHELL", ". /opt/causalagent/secret-env.sh && MYSQL_PWD=\"$$(secret_value MYSQL_ROOT_PASSWORD)\" mysqladmin ping --protocol=tcp -h 127.0.0.1 -P 3306 -u root"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
 
   app:
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     build:
       context: .
       dockerfile: Dockerfile
@@ -88,13 +109,9 @@ services:
       - MYSQL_READ_HOSTS=mysql-replica
       - MYSQL_PORT=3306
       - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - MYSQL_WRITE_USER=${MYSQL_WRITE_USER:-${MYSQL_USER}}
-      - MYSQL_WRITE_PASSWORD=${MYSQL_WRITE_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_READ_USER=${MYSQL_READ_USER:-${MYSQL_USER}}
-      - MYSQL_READ_PASSWORD=${MYSQL_READ_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_REPLICA_STATUS_USER=${MYSQL_REPLICA_STATUS_USER:-}
-      - MYSQL_REPLICA_STATUS_PASSWORD=${MYSQL_REPLICA_STATUS_PASSWORD:-}
       - MYSQL_DATABASE=${MYSQL_DATABASE}
       - MYSQL_POOL_SIZE_WRITE=${MYSQL_POOL_SIZE_WRITE:-5}
       - MYSQL_POOL_SIZE_READ=${MYSQL_POOL_SIZE_READ:-5}
@@ -108,7 +125,6 @@ services:
       - CHECKPOINT_POSTGRES_PORT=5432
       - CHECKPOINT_POSTGRES_DATABASE=${CHECKPOINT_POSTGRES_DATABASE:-causalagent_checkpoints}
       - CHECKPOINT_POSTGRES_USER=${CHECKPOINT_POSTGRES_USER:-causalagent_checkpoint}
-      - CHECKPOINT_POSTGRES_PASSWORD=${CHECKPOINT_POSTGRES_PASSWORD}
       - CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS=${CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS:-5}
       - CHECKPOINT_POSTGRES_POOL_MIN_SIZE=${CHECKPOINT_POSTGRES_POOL_MIN_SIZE:-1}
       - CHECKPOINT_POSTGRES_POOL_MAX_SIZE=${CHECKPOINT_POSTGRES_POOL_MAX_SIZE:-5}
@@ -141,13 +157,10 @@ services:
       - RAG_EVAL_EVALUATION_JOB_STALE_AFTER_SECONDS=${RAG_EVAL_EVALUATION_JOB_STALE_AFTER_SECONDS:-120}
       - RAG_EVAL_EVALUATION_STALE_AFTER_SECONDS=${RAG_EVAL_EVALUATION_STALE_AFTER_SECONDS:-1800}
       - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-20}
-      - API_KEY=${API_KEY}
       - BASE_URL=${BASE_URL}
       - MODEL=${MODEL}
-      - SECRET_KEY=${SECRET_KEY}
       - FLASK_ENV=development
       - MULTIMODAL_DOCLING_ARTIFACTS_DIR=/app/Agent/knowledge_base/models/docling
-      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-}
       - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT:-}
     ports:
       - "5001:5001"
@@ -157,7 +170,8 @@ services:
       - /app/杂项
       - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
       - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
-      - kb_multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
+      - ./Agent/knowledge_base/multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
+      - ./Agent/knowledge_base/multimodal_runtime:/app/Agent/knowledge_base/multimodal_runtime
       - ./tmp/rag_eval:/app/tmp/rag_eval
     depends_on:
       mysql-primary:
@@ -166,13 +180,14 @@ services:
         condition: service_healthy
       db-bootstrap:
         condition: service_completed_successfully
-      kb-indexes-sync:
-        condition: service_completed_successfully
     networks:
       - causalagent_replica_network
     restart: unless-stopped
 
   worker:
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     build:
       context: .
       dockerfile: Dockerfile
@@ -184,13 +199,9 @@ services:
       - MYSQL_READ_HOSTS=mysql-replica
       - MYSQL_PORT=3306
       - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - MYSQL_WRITE_USER=${MYSQL_WRITE_USER:-${MYSQL_USER}}
-      - MYSQL_WRITE_PASSWORD=${MYSQL_WRITE_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_READ_USER=${MYSQL_READ_USER:-${MYSQL_USER}}
-      - MYSQL_READ_PASSWORD=${MYSQL_READ_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_REPLICA_STATUS_USER=${MYSQL_REPLICA_STATUS_USER:-}
-      - MYSQL_REPLICA_STATUS_PASSWORD=${MYSQL_REPLICA_STATUS_PASSWORD:-}
       - MYSQL_DATABASE=${MYSQL_DATABASE}
       - MYSQL_POOL_SIZE_WRITE=${MYSQL_POOL_SIZE_WRITE:-5}
       - MYSQL_POOL_SIZE_READ=${MYSQL_POOL_SIZE_READ:-5}
@@ -204,7 +215,6 @@ services:
       - CHECKPOINT_POSTGRES_PORT=5432
       - CHECKPOINT_POSTGRES_DATABASE=${CHECKPOINT_POSTGRES_DATABASE:-causalagent_checkpoints}
       - CHECKPOINT_POSTGRES_USER=${CHECKPOINT_POSTGRES_USER:-causalagent_checkpoint}
-      - CHECKPOINT_POSTGRES_PASSWORD=${CHECKPOINT_POSTGRES_PASSWORD}
       - CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS=${CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS:-5}
       - CHECKPOINT_POSTGRES_POOL_MIN_SIZE=${CHECKPOINT_POSTGRES_POOL_MIN_SIZE:-1}
       - CHECKPOINT_POSTGRES_POOL_MAX_SIZE=${CHECKPOINT_POSTGRES_POOL_MAX_SIZE:-5}
@@ -218,13 +228,10 @@ services:
       - RAG_EVAL_EVALUATION_HEARTBEAT_INTERVAL_SECONDS=${RAG_EVAL_EVALUATION_HEARTBEAT_INTERVAL_SECONDS:-10}
       - RAG_EVAL_EVALUATION_JOB_STALE_AFTER_SECONDS=${RAG_EVAL_EVALUATION_JOB_STALE_AFTER_SECONDS:-120}
       - RAG_EVAL_EVALUATION_STALE_AFTER_SECONDS=${RAG_EVAL_EVALUATION_STALE_AFTER_SECONDS:-1800}
-      - API_KEY=${API_KEY}
       - BASE_URL=${BASE_URL}
       - MODEL=${MODEL}
-      - SECRET_KEY=${SECRET_KEY}
       - FLASK_ENV=development
       - MULTIMODAL_DOCLING_ARTIFACTS_DIR=/app/Agent/knowledge_base/models/docling
-      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-}
       - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT:-}
     volumes:
       - .:/app
@@ -232,7 +239,8 @@ services:
       - /app/杂项
       - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
       - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
-      - kb_multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
+      - ./Agent/knowledge_base/multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
+      - ./Agent/knowledge_base/multimodal_runtime:/app/Agent/knowledge_base/multimodal_runtime
     depends_on:
       mysql-primary:
         condition: service_healthy
@@ -240,14 +248,15 @@ services:
         condition: service_healthy
       db-bootstrap:
         condition: service_completed_successfully
-      kb-indexes-sync:
-        condition: service_completed_successfully
     networks:
       - causalagent_replica_network
     restart: unless-stopped
     stop_grace_period: 75s
 
   db-bootstrap:
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     build:
       context: .
       dockerfile: Dockerfile
@@ -257,17 +266,13 @@ services:
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_PORT=3306
-      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
       - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - MYSQL_WRITE_USER=${MYSQL_WRITE_USER:-${MYSQL_USER}}
-      - MYSQL_WRITE_PASSWORD=${MYSQL_WRITE_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_DATABASE=${MYSQL_DATABASE}
       - CHECKPOINT_POSTGRES_HOST=postgres-checkpoint
       - CHECKPOINT_POSTGRES_PORT=5432
       - CHECKPOINT_POSTGRES_DATABASE=${CHECKPOINT_POSTGRES_DATABASE:-causalagent_checkpoints}
       - CHECKPOINT_POSTGRES_USER=${CHECKPOINT_POSTGRES_USER:-causalagent_checkpoint}
-      - CHECKPOINT_POSTGRES_PASSWORD=${CHECKPOINT_POSTGRES_PASSWORD}
       - CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS=${CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS:-5}
       - CHECKPOINT_POSTGRES_POOL_MIN_SIZE=1
       - CHECKPOINT_POSTGRES_POOL_MAX_SIZE=2
@@ -282,6 +287,9 @@ services:
       - causalagent_replica_network
 
   agent-persistence-cleanup:
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     build:
       context: .
       dockerfile: Dockerfile
@@ -293,11 +301,8 @@ services:
       - MYSQL_READ_HOSTS=mysql-replica
       - MYSQL_PORT=3306
       - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - MYSQL_WRITE_USER=${MYSQL_WRITE_USER:-${MYSQL_USER}}
-      - MYSQL_WRITE_PASSWORD=${MYSQL_WRITE_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_READ_USER=${MYSQL_READ_USER:-${MYSQL_USER}}
-      - MYSQL_READ_PASSWORD=${MYSQL_READ_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_DATABASE=${MYSQL_DATABASE}
       - MYSQL_POOL_SIZE_WRITE=${MYSQL_POOL_SIZE_WRITE:-3}
       - MYSQL_POOL_SIZE_READ=${MYSQL_POOL_SIZE_READ:-1}
@@ -308,16 +313,13 @@ services:
       - CHECKPOINT_POSTGRES_PORT=5432
       - CHECKPOINT_POSTGRES_DATABASE=${CHECKPOINT_POSTGRES_DATABASE:-causalagent_checkpoints}
       - CHECKPOINT_POSTGRES_USER=${CHECKPOINT_POSTGRES_USER:-causalagent_checkpoint}
-      - CHECKPOINT_POSTGRES_PASSWORD=${CHECKPOINT_POSTGRES_PASSWORD}
       - CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS=${CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS:-5}
       - CHECKPOINT_POSTGRES_POOL_MIN_SIZE=1
       - CHECKPOINT_POSTGRES_POOL_MAX_SIZE=2
       - AGENT_PERSISTENCE_CLEANUP_POLL_INTERVAL_SECONDS=${AGENT_PERSISTENCE_CLEANUP_POLL_INTERVAL_SECONDS:-1}
       - AGENT_PERSISTENCE_CLEANUP_LEASE_SECONDS=${AGENT_PERSISTENCE_CLEANUP_LEASE_SECONDS:-300}
-      - API_KEY=${API_KEY}
       - BASE_URL=${BASE_URL}
       - MODEL=${MODEL}
-      - SECRET_KEY=${SECRET_KEY}
     volumes:
       - .:/app
     depends_on:
@@ -332,6 +334,9 @@ services:
     restart: unless-stopped
 
   monitor:
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     build:
       context: .
       dockerfile: Dockerfile
@@ -343,13 +348,9 @@ services:
       - MYSQL_READ_HOSTS=mysql-replica
       - MYSQL_PORT=3306
       - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - MYSQL_WRITE_USER=${MYSQL_WRITE_USER:-${MYSQL_USER}}
-      - MYSQL_WRITE_PASSWORD=${MYSQL_WRITE_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_READ_USER=${MYSQL_READ_USER:-${MYSQL_USER}}
-      - MYSQL_READ_PASSWORD=${MYSQL_READ_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_REPLICA_STATUS_USER=${MYSQL_REPLICA_STATUS_USER:-}
-      - MYSQL_REPLICA_STATUS_PASSWORD=${MYSQL_REPLICA_STATUS_PASSWORD:-}
       - MYSQL_DATABASE=${MYSQL_DATABASE}
       - MYSQL_POOL_SIZE_WRITE=${MYSQL_POOL_SIZE_WRITE:-5}
       - MYSQL_POOL_SIZE_READ=${MYSQL_POOL_SIZE_READ:-5}
@@ -370,12 +371,9 @@ services:
       - DB_MONITOR_SLOW_QUERY_WARNING_DELTA=${DB_MONITOR_SLOW_QUERY_WARNING_DELTA:-1}
       - DB_MONITOR_INTEGRITY_ENABLED=${DB_MONITOR_INTEGRITY_ENABLED:-false}
       - DB_MONITOR_INTEGRITY_INTERVAL_SECONDS=${DB_MONITOR_INTEGRITY_INTERVAL_SECONDS:-86400}
-      - API_KEY=${API_KEY}
       - BASE_URL=${BASE_URL}
       - MODEL=${MODEL}
-      - SECRET_KEY=${SECRET_KEY}
       - FLASK_ENV=development
-      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-}
       - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT:-}
     volumes:
       - .:/app
@@ -393,6 +391,9 @@ services:
     restart: unless-stopped
 
   rag-eval-worker:
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     build:
       context: .
       dockerfile: Dockerfile
@@ -407,13 +408,9 @@ services:
       - MYSQL_READ_HOSTS=mysql-replica
       - MYSQL_PORT=3306
       - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - MYSQL_WRITE_USER=${MYSQL_WRITE_USER:-${MYSQL_USER}}
-      - MYSQL_WRITE_PASSWORD=${MYSQL_WRITE_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_READ_USER=${MYSQL_READ_USER:-${MYSQL_USER}}
-      - MYSQL_READ_PASSWORD=${MYSQL_READ_PASSWORD:-${MYSQL_PASSWORD}}
       - MYSQL_REPLICA_STATUS_USER=${MYSQL_REPLICA_STATUS_USER:-}
-      - MYSQL_REPLICA_STATUS_PASSWORD=${MYSQL_REPLICA_STATUS_PASSWORD:-}
       - MYSQL_DATABASE=${MYSQL_DATABASE}
       - MYSQL_POOL_SIZE_WRITE=${MYSQL_POOL_SIZE_WRITE:-5}
       - MYSQL_POOL_SIZE_READ=${MYSQL_POOL_SIZE_READ:-5}
@@ -432,52 +429,33 @@ services:
       - RAG_EVAL_EVALUATION_HEARTBEAT_INTERVAL_SECONDS=${RAG_EVAL_EVALUATION_HEARTBEAT_INTERVAL_SECONDS:-10}
       - RAG_EVAL_EVALUATION_JOB_STALE_AFTER_SECONDS=${RAG_EVAL_EVALUATION_JOB_STALE_AFTER_SECONDS:-120}
       - RAG_EVAL_EVALUATION_STALE_AFTER_SECONDS=${RAG_EVAL_EVALUATION_STALE_AFTER_SECONDS:-1800}
-      - API_KEY=${API_KEY}
       - BASE_URL=${BASE_URL}
       - MODEL=${MODEL}
-      - SECRET_KEY=${SECRET_KEY}
       - FLASK_ENV=development
       - MULTIMODAL_DOCLING_ARTIFACTS_DIR=/app/Agent/knowledge_base/models/docling
-      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-}
       - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT:-}
     volumes:
       - .:/app
       - /app/__pycache__
       - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
       - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
-      - kb_multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
+      - ./Agent/knowledge_base/multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
+      - ./Agent/knowledge_base/multimodal_runtime:/app/Agent/knowledge_base/multimodal_runtime
       - ./tmp/rag_eval:/app/tmp/rag_eval
     depends_on:
       mysql-primary:
         condition: service_healthy
       mysql-replica:
         condition: service_healthy
-      kb-indexes-sync:
-        condition: service_completed_successfully
     networks:
       - causalagent_replica_network
     restart: unless-stopped
-
-  kb-indexes-sync:
-    image: python:3.11-slim
-    container_name: causalagent_kb_indexes_sync
-    volumes:
-      - .:/src:ro
-      - kb_multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
-    command:
-      - sh
-      - -c
-      - cp -a /src/Agent/knowledge_base/multimodal_indexes/. /app/Agent/knowledge_base/multimodal_indexes/
-    networks:
-      - causalagent_replica_network
 
 networks:
   causalagent_replica_network:
     driver: bridge
 
 volumes:
-  kb_multimodal_indexes:
-    driver: local
   mysql_primary_data:
     driver: local
   mysql_replica_data:

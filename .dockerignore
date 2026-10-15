@@ -32,6 +32,8 @@ secrets.json
 .env
 .env.*
 .env.local
+causalagent.env
+deploy/secrets/*.env
 *.pem
 *.key
 *.cert

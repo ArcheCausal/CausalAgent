@@ -23,7 +23,6 @@ services:
     container_name: causalagent31e2e_app
     environment:
       ADMIN_FRONTEND_DIST_DIR: /app/admin-frontend/dist
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
     ports: !override
       - "127.0.0.1:15011:5001"
 

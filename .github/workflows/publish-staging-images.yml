@@ -6,6 +6,7 @@ on:
 permissions:
   contents: read
   packages: write
+  actions: read
 
 concurrency:
   group: staging-images-${{ github.ref }}
@@ -108,3 +109,10 @@ jobs:
             echo
           } >> "$GITHUB_STEP_SUMMARY"
           echo "$IMAGE_NAME:$IMAGE_TAG $IMAGE_DIGEST"
+
+  build-release-bundle:
+    name: Package the published images
+    needs: [prepare, build-and-push]
+    uses: ./.github/workflows/build-release-bundle.yml
+    with:
+      source_commit: ${{ github.sha }}
