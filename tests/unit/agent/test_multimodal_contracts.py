@@ -353,7 +353,7 @@ class MultimodalContractTests(unittest.TestCase):
     def test_remote_policy_allows_only_fixed_pearl_pages(self) -> None:
         """Pearl 资料必须同时匹配受控来源身份和固定页码。"""
         service = MultimodalKnowledgeBaseMaintenance()
-        pearl = Path(__file__).resolve().parents[3] / "Agent" / "knowledge_base" / "source" / "Pearl_2009_Causality-mono(1).pdf"
+        pearl = Path(__file__).resolve().parents[3] / "Agent" / "knowledge_base" / "source" / "Pearl_2009_Causality-mono.pdf"
         if not pearl.is_file():
             self.skipTest("正式 Pearl 来源未安装")
         self.assertTrue(service._remote_resource_allowed(pearl, 1))
@@ -365,7 +365,7 @@ class MultimodalContractTests(unittest.TestCase):
     def test_remote_policy_does_not_guess_when_formal_source_resolution_fails(self) -> None:
         """正式来源零命中或多命中时，不能退回文件名猜测来放行 VLM。"""
         service = MultimodalKnowledgeBaseMaintenance()
-        pearl = Path(__file__).resolve().parents[3] / "Agent" / "knowledge_base" / "source" / "Pearl_2009_Causality-mono(1).pdf"
+        pearl = Path(__file__).resolve().parents[3] / "Agent" / "knowledge_base" / "source" / "Pearl_2009_Causality-mono.pdf"
         with patch("Agent.knowledge_base.multimodal.pipeline.resolve_production_sources", side_effect=ValueError("2 matches")):
             self.assertFalse(service._remote_resource_allowed(pearl, 1))
 

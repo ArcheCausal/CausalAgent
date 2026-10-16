@@ -34,7 +34,7 @@ from Agent.knowledge_base.embedding_runtime import (
     resolve_production_embedding_configuration,
     validate_embedding_env_references,
 )
-from Agent.knowledge_base.multimodal.defaults import production_source_paths
+from Agent.knowledge_base.multimodal.defaults import resolve_production_source_metadata
 from Agent.knowledge_base.multimodal.contracts import canonical_json, content_source_id
 from Agent.knowledge_base.multimodal.index import embedding_fingerprint, replace_with_retry
 from Agent.knowledge_base.multimodal.parsers import SUPPORTED_SUFFIXES, inspect_source
@@ -860,18 +860,21 @@ def _source_catalog_records() -> List[tuple[Path, Dict[str, Any]]]:
     """构造来源目录及其内部路径，内部路径不会进入 HTTP 响应。"""
     display_names = _read_source_display_names()
     catalog: List[tuple[Path, Dict[str, Any]]] = []
-    for path in production_source_paths():
-        content = path.read_bytes()
-        content_hash = hashlib.sha256(content).hexdigest()
+    for source in resolve_production_source_metadata():
+        content_hash = str(source["content_hash"])
         source_id = content_source_id(content_hash)
+        name = Path(str(source["configured_path"])).name
+        available = bool(source["available"]) and source["path"] is not None
+        path = source["path"] if available else (_PROJECT_ROOT / str(source["configured_path"]))
         catalog.append((path, {
                 "source_id": source_id,
-                "name": path.name,
-                "display_name": display_names.get(source_id) or path.name,
-                "size_bytes": len(content),
+                "name": name,
+                "display_name": display_names.get(source_id) or name,
+                "size_bytes": source["size_bytes"],
                 "content_sha256": content_hash,
                 "source_kind": "frozen",
-                "page_count": _pdf_page_count(content),
+                "page_count": source["page_count"],
+                "available": available,
             }))
     return catalog + _uploaded_source_catalog_records()
 
@@ -1059,6 +1062,15 @@ def _resolve_source_inputs(
             raise ValueError(f"unknown source_id: {missing[0]}")
         ordered = [entries[source_id] for source_id in requested]
         ordered_paths = [match[0] for match in ordered]
+        unavailable = [
+            source_id
+            for source_id, match in zip(requested, ordered)
+            if match[1].get("available") is False or not match[0].is_file()
+        ]
+        if unavailable:
+            raise ValueError(
+                f"该来源在当前环境不可用: {unavailable[0]}"
+            )
         resolved_ids = [str(match[1]["source_id"]) for match in ordered]
         display_names = [str(match[1].get("display_name") or source_id) for source_id, match in zip(requested, ordered)]
         return ordered_paths, resolved_ids, display_names

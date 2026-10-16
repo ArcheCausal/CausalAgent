@@ -1808,3 +1808,22 @@
   - 【废弃测试清理】删除 tests/test_rag_eval_core_logic.py：该文件在模块级抛出 SkipTest，标注“旧医疗 RAG 评测已退出默认测试链路，保留待后续清理”，收集阶段不产生任何用例；删除前确认全仓无引用、无本地未提交修改。删除 tests/test_mcp_result_contract.py：与 tests/unit/agent/test_mcp_result_contract.py 逐字节重复，保留 unit/agent 一份。
   - 【测试目录归位】把 tests/ 顶层的 focused tests 按业务移入子目录：RAG 评测台本体进入 tests/unit/rag_eval/，多模态与知识库 RAG 契约进入 tests/unit/agent/，部署契约进入 tests/integration/deployment/，迁移契约进入 tests/integration/migrations/；全部用 git mv 保留历史，移动后把 7 个文件里指向仓库根的 parents[1] 修正为 parents[3]。
   - 【文档同步】tests/README.md 的目录示意图补全 unit/agent、unit/rag_eval、integration/agent、integration/database、integration/migrations 的分工；tests/AGENTS.md 的分层归属条目改为归位后的实际规则与路径深度提醒；Document/development/testing.md 的 RAG/多模态与隔离评测两处路径引用改为新位置。
+---
+2026.10.16
+- 【CDFM 权重入卷】
+  - 【构建期下载】：新增 `Agent/CausalAgentMCP/cdfm_weights.py`，把 `DMIRLAB/CDFM` 的 revision 与逐文件 SHA-256、字节数写死；`Agent/CausalAgentMCP/Dockerfile` 在构建末尾下载到镜像内只读目录 `/opt/cdfm-weights-image` 并逐文件校验，不合格直接构建失败，下载端点由构建参数 `HF_ENDPOINT` 控制。
+  - 【预发入卷】：新增一次性服务 `cdfm-weights-seed` 与命名卷 `rag_eval_staging_cdfm_weights`，按 `version.json` 幂等同步；`causal-mcp` 只读挂载 `/opt/cdfm-weights`、设置 `CDFM_MODEL_PATH=/opt/cdfm-weights` 与 `HF_HUB_OFFLINE=1`，并等待 seed 成功退出。
+- 【CDFM 失败诊断】
+  - 【runner 诊断字段】：`Agent/causal/cdfm_runner.py` 的模型加载与推理失败改为绑定异常对象，`diagnostics` 新增 `error_type`、`error_message`（截断 500 字符）、`model_path` 与 `model_source`（`local_dir` 或 `hub`）；`_failure()` 增加可选 `diagnostics` 参数。
+  - 【跨进程异常类名】：`Agent/CausalAgentMCP/executor_pool.py` 在 runner 抛异常时只把异常类名随 `RunnerExecutionError` 带回父进程，子进程输出仍被丢弃，不进入协议或日志流。
+  - 【受控事件】：`Agent/CausalAgentMCP/service.py` 新增 `mcp.runner.failed` 事件，只写 `capability`、`error_type`、`reason_code` 与 `model_source` 等稳定字段，不写异常自由文本；事件目录与 `Document/development/observability.md` 同步登记。
+- 【来源目录解耦】
+  - 【元数据解析】：`Agent/knowledge_base/multimodal/defaults.py` 新增 `resolve_production_source_metadata()`，只读 `production_defaults.json` 元数据，文件缺失时标记不可用而不抛异常；严格语义的 `resolve_production_sources()` 继续用于发布与评测。
+  - 【目录与摄取】：`app/rag_eval/isolated_runs.py` 的来源目录改为基于新函数构造，去掉 `read_bytes()`，条目增加 `available` 字段；`source_ids` 摄取在返回路径前显式校验文件存在，缺失时报“该来源在当前环境不可用”。
+  - 【前端过滤】：RAG 评测台前端不再展示 `available === false` 的来源条目。
+  - 【文件名一致】：`production_defaults.json` 两条来源的 `path` 去掉 `(1)` 后缀，`remote_samples.json` 的远程视觉白名单键同步改名，保持远程 VLM 授权与配置文件名一致；旧文件名兼容逻辑保留，历史运行的 source ID 仍可解析。
+- 【压测待修复项】
+  - 【P2 记录】：把“取消后阶段列表仍显示进行中”登记到 `loadtest/evidence/index.md` 的待修复项，现象为 Job 终态已是“任务已取消”，阶段列表仍保留“执行 Deep Agent 分析 进行中”字样。
+- 【CI 修复】
+  - 【测试路径】：`tests/test_staging_environment_guard.py` 在 #88 归位后已移动到 `tests/integration/deployment/`，工作流与路径过滤器仍指向旧位置，导致 Compose 契约任务以“file or directory not found”失败；两处引用同步更新，并移除不再匹配任何文件的 `tests/test_staging_*.py` glob。
+  - 【来源目录测试】：`test_source_display_name_persists_in_local_metadata` 改为 patch 新的 `resolve_production_source_metadata`，与来源目录实现保持一致。

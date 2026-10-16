@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import io
 import inspect
 import logging
+import re
 import time
 from typing import Any, Callable, Mapping
 
@@ -196,6 +197,51 @@ def _rejection_reason(code: SafeErrorCode) -> str:
     if code == SafeErrorCode.MCP_CAPACITY_EXHAUSTED:
         return "pool_exhausted"
     return "invalid_schema"
+
+
+def _terminal_reason(code: SafeErrorCode) -> str:
+    """把终态错误码映射为事件目录登记的稳定原因码。"""
+    if code == SafeErrorCode.ALGORITHM_TIMED_OUT:
+        return "timeout"
+    if code == SafeErrorCode.MCP_LEASE_STALE:
+        return "fenced"
+    if code == SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID:
+        return "invalid_result"
+    return "tool_error"
+
+
+def _runner_failure_reason(code: SafeErrorCode) -> str:
+    """runner 自身返回失败时的稳定原因码；区分依赖缺失与其他执行失败。"""
+    if code == SafeErrorCode.ALGORITHM_NOT_READY:
+        return "readiness_failed"
+    if code == SafeErrorCode.ALGORITHM_INPUT_INVALID:
+        return "invalid_schema"
+    return _terminal_reason(code)
+
+
+def _runner_error_type(raw_result: Mapping[str, Any]) -> str:
+    """只接受受限格式的错误类型名，不回显 runner 的自由文本。"""
+
+    diagnostics = raw_result.get("diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    candidate = str(diagnostics.get("error_type") or raw_result.get("error_type") or "")
+    return _runner_exception_type(candidate)
+
+
+def _runner_exception_type(value: Any) -> str:
+    """只接受受限格式的异常类名，拒绝把自由文本写进事件详情。"""
+
+    candidate = str(value or "")
+    return candidate if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", candidate) else "UnknownError"
+
+
+def _runner_model_source(raw_result: Mapping[str, Any]) -> str:
+    """返回权重来源枚举，用于区分本地卷与远端 Hub 两种失败现场。"""
+
+    diagnostics = raw_result.get("diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    value = str(diagnostics.get("model_source") or "")
+    return value if value in {"local_dir", "hub"} else "unknown"
 
 
 def _error_result(
@@ -571,6 +617,17 @@ class CausalMcpService:
                         "input_bytes": len(csv_data.encode("utf-8")),
                     },
                 )
+                if exc.safe_error_code == SafeErrorCode.ALGORITHM_EXECUTION_FAILED:
+                    log_event(
+                        LOGGER,
+                        "mcp.runner.failed",
+                        details={
+                            "capability": entry.capability_id,
+                            "error_type": _runner_exception_type(exc.runner_error_type),
+                            "reason_code": _terminal_reason(exc.safe_error_code),
+                            "model_source": "unknown",
+                        },
+                    )
             trace["executor_slot_id"] = None
             if exc.safe_error_code in {
                 SafeErrorCode.ALGORITHM_TIMED_OUT,
@@ -648,6 +705,16 @@ class CausalMcpService:
                 if error_type == "ResultValidationError"
                 else SafeErrorCode.ALGORITHM_EXECUTION_FAILED
             )
+            log_event(
+                LOGGER,
+                "mcp.runner.failed",
+                details={
+                    "capability": entry.capability_id,
+                    "error_type": _runner_error_type(raw_result),
+                    "reason_code": _runner_failure_reason(code),
+                    "model_source": _runner_model_source(raw_result),
+                },
+            )
             result = _error_result(
                 command,
                 context,
@@ -709,15 +776,7 @@ class CausalMcpService:
             )
         else:
             safe_code = result.diagnostics.safe_error_code
-            reason_code = (
-                "timeout"
-                if safe_code == SafeErrorCode.ALGORITHM_TIMED_OUT
-                else "fenced"
-                if safe_code == SafeErrorCode.MCP_LEASE_STALE
-                else "invalid_result"
-                if safe_code == SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID
-                else "tool_error"
-            )
+            reason_code = _terminal_reason(safe_code)
             log_event(
                 LOGGER,
                 "mcp.tool.failed",

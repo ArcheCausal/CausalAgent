@@ -233,7 +233,7 @@ jobs:
           tests/integration/test_observability_compose.py
           tests/unit/config/test_secret_file.py
           tests/unit/deployment/test_release_bundle.py
-          tests/test_staging_environment_guard.py
+          tests/integration/deployment/test_staging_environment_guard.py
 
       - name: Validate Alloy configuration
         run: >-

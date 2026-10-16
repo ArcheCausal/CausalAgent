@@ -133,6 +133,33 @@ def test_staging_observability_labels_and_private_networks_are_separate():
     assert "rag_eval_staging_observability" in services["grafana"]["networks"]
 
 
+def test_staging_cdfm_weights_are_seeded_into_a_read_only_named_volume():
+    """CDFM 权重由一次性 seed 服务入卷，causal-mcp 只读挂载且禁用联网。"""
+    config = _staging_config()
+    services = config["services"]
+
+    assert "cdfm-weights-seed" in services
+    seed = services["cdfm-weights-seed"]
+    assert seed["image"] == services["causal-mcp"]["image"]
+    seed_mounts = [
+        mount for mount in seed["volumes"] if mount["target"] == "/opt/cdfm-weights"
+    ]
+    assert len(seed_mounts) == 1
+    assert seed_mounts[0]["type"] == "volume"
+    assert seed_mounts[0]["source"] == "rag_eval_staging_cdfm_weights"
+
+    mcp = services["causal-mcp"]
+    assert mcp["environment"]["CDFM_MODEL_PATH"] == "/opt/cdfm-weights"
+    assert mcp["environment"]["HF_HUB_OFFLINE"] == "1"
+    mcp_mounts = [
+        mount for mount in mcp["volumes"] if mount["target"] == "/opt/cdfm-weights"
+    ]
+    assert len(mcp_mounts) == 1
+    assert mcp_mounts[0]["read_only"] is True
+    assert mcp["depends_on"]["cdfm-weights-seed"]["condition"] == "service_completed_successfully"
+    assert "rag_eval_staging_cdfm_weights" in config["volumes"]
+
+
 def test_search_embedding_storage_and_secret_exclusions_are_configured():
     config = _staging_config()
     services = config["services"]

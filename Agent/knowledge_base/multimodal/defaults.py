@@ -115,6 +115,48 @@ def production_source_paths(config: dict[str, Any] | None = None) -> list[Path]:
     return [source["path"] for source in resolve_production_sources(config)]
 
 
+def resolve_production_source_metadata(config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """只读清单元数据解析正式来源身份，文件缺失时标记不可用而不抛异常。
+
+    该函数不扫描受控目录、不读取来源内容，也不校验文件签名和哈希，因此可以在
+    没有安装正式 PDF 的环境（例如只挂载了评测卷的预发应用容器）中列出正式来源。
+    发布、评测和远程视觉授权仍必须使用严格语义的
+    :func:`resolve_production_sources`，不能用本函数的输出代替正式身份校验。
+    """
+    config = config or load_production_defaults()
+    resolved: list[dict[str, Any]] = []
+    for source in config["sources"]:
+        configured = Path(str(source["path"]))
+        candidate: Path | None = None
+        try:
+            inside = (ROOT / configured).resolve()
+            inside.relative_to(ROOT)
+            candidate = inside
+        except (OSError, ValueError):
+            candidate = None
+        available = bool(candidate is not None and candidate.is_file())
+        size_bytes: int | None = None
+        if available:
+            try:
+                size_bytes = candidate.stat().st_size
+            except OSError:
+                size_bytes = None
+        resolved.append(
+            {
+                "source_id": canonical_source_id(source),
+                "document_id": canonical_document_id(source),
+                "configured_path": configured.as_posix(),
+                "content_hash": source["sha256"],
+                "page_count": source["page_count"],
+                "path": candidate,
+                "available": available,
+                "size_bytes": size_bytes,
+                "remote_authorized": bool(source.get("remote_authorized", False)),
+            }
+        )
+    return resolved
+
+
 def resolve_production_embedding_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
     """从受版本控制的策略解析正式 embedding；生产默认使用 API key。"""
     config = config or load_production_defaults()
