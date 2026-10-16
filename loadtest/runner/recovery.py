@@ -8,7 +8,7 @@ import time
 from runner import config
 from runner.accounts import Account
 from runner.api import ApiError, UserClient, new_idempotency_key
-from runner.flows import MESSAGE, VirtualUser, build_csv
+from runner.flows import MESSAGE, build_csv
 from runner.manifest import collect_client_manifest
 from runner.metrics import Recorder
 

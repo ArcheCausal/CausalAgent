@@ -1827,3 +1827,16 @@
 - 【CI 修复】
   - 【测试路径】：`tests/test_staging_environment_guard.py` 在 #88 归位后已移动到 `tests/integration/deployment/`，工作流与路径过滤器仍指向旧位置，导致 Compose 契约任务以“file or directory not found”失败；两处引用同步更新，并移除不再匹配任何文件的 `tests/test_staging_*.py` glob。
   - 【来源目录测试】：`test_source_display_name_persists_in_local_metadata` 改为 patch 新的 `resolve_production_source_metadata`，与来源目录实现保持一致。
+
+- 【压测台阶：突发、排队与多会话并发】
+  - 【服务器只读脚本恢复】：重建 `loadtest/server_side_collect.sh`、`loadtest/stage_resource_sample.sh` 与 `loadtest/job_db_check.sh`，三个脚本都接收 run_id、输出带 schema_version 的 JSON、只读执行、从受控凭据文件读取认证信息，缺失数据写成 missing/error 而不用 0 冒充；job_db_check.sh 改为按本轮 job_id 清单逐 Job 核对终态、会话归属、创建/开始/结束时间与执行释放状态。
+  - 【新增档位】：`burst_ungated`（20 账号、不限客户端活动 Job、sse 20、混合 600 秒）、`queue_pressure`（30 账号、不限客户端活动 Job、sse 30、混合 300 秒、每账号最多成功创建 20 个 Job）、`multi_session_smoke`（1 账号 2 真实会话）与 `multi_session_pressure`（10 账号 × 2 会话、sse 20）；`users` 继续表示逻辑账号，多会话数由 `sessions_per_user` 单独表示。
+  - 【并发模型】：`CountingGate` 支持 `capacity=None`，不限制创建但继续记录实际峰值；每个账号持有多条真实会话，每条会话最多一个活动 Job，账号级创建额度由线程安全计数器控制。
+  - 【提交与观察分离】：创建 Job 后立即由后台观察器订阅 SSE，主线程继续执行读取、翻页、上传或其他会话；系统会话仍限制每会话最多一个活动 Job。
+  - 【计数口径】：每账号上限只统计“成功返回一个唯一新 Job”的创建；4xx/5xx 与连接失败不计数，幂等重放记为不占额度，Job 终态作为独立指标。
+  - 【时间预算拆分】：把 SSE 空闲读取超时、单个 Job 总观察期限与停止后排空期限拆成独立配置，默认空闲读取 1800 秒；订阅建立后立即观察，不先轮询到 running。
+  - 【报告口径】：将长排队 Job 从 p50/p95 中单独报告，输出已完成 Job 排队时间、观察超时数量、排队等待下界与 SSE 断线重连统计；逐 Job 对比客户端与主库结果，移除历史硬编码结论。
+  - 【编排失败判断】：`ops/run_stages.py` 在任一档失败时停止后续档位；`ops/stage_sampling.py` 把负载、资源采样、服务器采样与逐 Job 核对串成一档，任一环节失败都返回非零。
+  - 【资源采样格式】：窗口采样由扁平格式改为 host / containers / queue / connections 四层结构，同时兼容旧格式；`runner/resource.py` 新增队列深度、主库连接数与容器状态汇总，缺失值写成未采集而不写成 0。
+  - 【上传与自检】：`runner` 新增 `export-job-ids` 与 `attach-job-db` 子命令；新增 `loadtest/selftest.py`，用本地桩服务验证同一账号两会话并发、会话级活动 Job 约束、账号级额度、`active_jobs=None` 不阻塞创建，以及排队超过观测窗口不算 SSE 断线。
+  - 【文档同步】：`loadtest/README.md` 新增档位表与自检说明，并更新三个脚本的调用方式；`loadtest/AGENTS.md` 记录脚本职责、JSON 格式与凭据来源。
