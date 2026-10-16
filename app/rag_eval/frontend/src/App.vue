@@ -57,10 +57,12 @@ interface SourceEntry {
   source_id: string;
   name: string;
   display_name?: string;
-  size_bytes: number;
+  // 正式来源文件缺失时后端只能给出未知大小；这类条目会被 available=false 过滤。
+  size_bytes: number | null;
   content_sha256: string;
   source_kind?: "frozen" | "uploaded";
   page_count?: number | null;
+  available?: boolean;
 }
 
 interface ReleaseCheck {
@@ -555,7 +557,8 @@ const customPageTotal = computed(() => selectedSources.value.reduce((total, sour
   return total + (Number.isInteger(start) && Number.isInteger(end) && end >= start ? end - start + 1 : 0);
 }, 0));
 
-function formatBytes(value = 0): string {
+function formatBytes(value: number | null | undefined = 0): string {
+  if (value === null || value === undefined) return "大小未知";
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
@@ -816,14 +819,16 @@ async function loadCatalog() {
   catalogError.value = "";
   try {
     const data = await api<{ sources: SourceEntry[] }>("/api/rag_eval/isolated/source-catalog");
-    sources.value = data.sources;
+    // 当前环境缺少正式来源文件时后端标记 available=false；这类来源不能摄取，直接不展示。
+    const visibleSources = data.sources.filter((source) => source.available !== false);
+    sources.value = visibleSources;
     const nextRanges = { ...pageRanges.value };
-    data.sources.forEach((source) => { nextRanges[source.source_id] ||= { start: "1", end: String(Math.min(source.page_count || 12, 12)) }; });
+    visibleSources.forEach((source) => { nextRanges[source.source_id] ||= { start: "1", end: String(Math.min(source.page_count || 12, 12)) }; });
     pageRanges.value = nextRanges;
-    const availableIds = new Set(data.sources.map((item) => item.source_id));
+    const availableIds = new Set(visibleSources.map((item) => item.source_id));
     selectedSourceIds.value = selectedSourceIds.value.filter((value) => availableIds.has(value));
     remoteAuthorizedSourceIds.value = remoteAuthorizedSourceIds.value.filter((value) => availableIds.has(value));
-    if (!selectedSourceIds.value.length) selectedSourceIds.value = data.sources.map((item) => item.source_id);
+    if (!selectedSourceIds.value.length) selectedSourceIds.value = visibleSources.map((item) => item.source_id);
   } catch (error) {
     catalogError.value = error instanceof Error ? error.message : "来源目录加载失败";
   } finally { sourceLoading.value = false; }

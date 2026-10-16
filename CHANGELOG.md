@@ -1817,3 +1817,8 @@
   - 【runner 诊断字段】：`Agent/causal/cdfm_runner.py` 的模型加载与推理失败改为绑定异常对象，`diagnostics` 新增 `error_type`、`error_message`（截断 500 字符）、`model_path` 与 `model_source`（`local_dir` 或 `hub`）；`_failure()` 增加可选 `diagnostics` 参数。
   - 【跨进程异常类名】：`Agent/CausalAgentMCP/executor_pool.py` 在 runner 抛异常时只把异常类名随 `RunnerExecutionError` 带回父进程，子进程输出仍被丢弃，不进入协议或日志流。
   - 【受控事件】：`Agent/CausalAgentMCP/service.py` 新增 `mcp.runner.failed` 事件，只写 `capability`、`error_type`、`reason_code` 与 `model_source` 等稳定字段，不写异常自由文本；事件目录与 `Document/development/observability.md` 同步登记。
+- 【来源目录解耦】
+  - 【元数据解析】：`Agent/knowledge_base/multimodal/defaults.py` 新增 `resolve_production_source_metadata()`，只读 `production_defaults.json` 元数据，文件缺失时标记不可用而不抛异常；严格语义的 `resolve_production_sources()` 继续用于发布与评测。
+  - 【目录与摄取】：`app/rag_eval/isolated_runs.py` 的来源目录改为基于新函数构造，去掉 `read_bytes()`，条目增加 `available` 字段；`source_ids` 摄取在返回路径前显式校验文件存在，缺失时报“该来源在当前环境不可用”。
+  - 【前端过滤】：RAG 评测台前端不再展示 `available === false` 的来源条目。
+  - 【文件名一致】：`production_defaults.json` 两条来源的 `path` 去掉 `(1)` 后缀，`remote_samples.json` 的远程视觉白名单键同步改名，保持远程 VLM 授权与配置文件名一致；旧文件名兼容逻辑保留，历史运行的 source ID 仍可解析。

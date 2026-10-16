@@ -369,6 +369,34 @@ class IsolatedRagEvalRouteTests(unittest.TestCase):
             self.assertEqual(paths, [source.resolve()])
             self.assertEqual(source_ids, [current_id])
 
+    def test_frozen_source_missing_file_is_listed_unavailable_and_cannot_ingest(self):
+        """正式来源文件缺失时目录仍可列出，但摄取必须显式报不可用而不是路径错误。"""
+        content_hash = "a" * 64
+        source_id = "source_" + content_hash
+        metadata = {
+            "source_id": "pearl-2009-causality",
+            "document_id": "doc_" + "b" * 64,
+            "configured_path": "Agent/knowledge_base/source/absent.pdf",
+            "content_hash": content_hash,
+            "page_count": 487,
+            "path": None,
+            "available": False,
+            "size_bytes": None,
+            "remote_authorized": False,
+        }
+        with (
+            patch.object(isolated_runs, "resolve_production_source_metadata", return_value=[metadata]),
+            patch.object(isolated_runs, "_uploaded_source_catalog_records", return_value=[]),
+        ):
+            catalog = isolated_runs.list_source_catalog()
+            self.assertEqual(catalog[0]["source_id"], source_id)
+            self.assertFalse(catalog[0]["available"])
+            self.assertIsNone(catalog[0]["size_bytes"])
+            self.assertEqual(catalog[0]["name"], "absent.pdf")
+
+            with self.assertRaisesRegex(ValueError, "该来源在当前环境不可用"):
+                isolated_runs._resolve_source_inputs([source_id], None)
+
     def test_multimodal_release_api_contract_requires_explicit_publish_confirmation(self):
         status = self.client.get(
             "/api/rag_eval/multimodal/releases/status?ingestion_run_id=ingest-test&index_version=mm-test"
