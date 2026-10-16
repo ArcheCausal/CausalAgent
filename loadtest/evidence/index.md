@@ -24,4 +24,10 @@
 | causal.cdfm 全部失败 | 全部档位完成数为 0，单条耗时约 139 秒，属服务实现与模型依赖 | 待归档 |
 | source-catalog 返回 500 | GET /api/rag_eval/isolated/source-catalog 返回 500，知识源清单与 .dockerignore 口径不一致 | 待归档 |
 
+压测观察到的待修复项（未计入上表档位结论，暂按 P2 记录）：
+
+| 缺陷 | 现象 | 优先级 |
+| --- | --- | --- |
+| 取消后阶段列表仍显示进行中 | Job 终态已是“任务已取消”，阶段列表仍保留“执行 Deep Agent 分析 进行中”字样，状态理解存在歧义 | P2 |
+
 被测版本的完整 digest 为 ghcr.io/archecausal/causalagent-app@sha256:00786479a432cf60a892b4a3a351b14f87b26d29c2fc18d0208789d86861947a（app_image_revision_label 94c6374ce70ef9f715a771b9ba21a22b78b9321b），各档一致。

@@ -1822,3 +1822,5 @@
   - 【目录与摄取】：`app/rag_eval/isolated_runs.py` 的来源目录改为基于新函数构造，去掉 `read_bytes()`，条目增加 `available` 字段；`source_ids` 摄取在返回路径前显式校验文件存在，缺失时报“该来源在当前环境不可用”。
   - 【前端过滤】：RAG 评测台前端不再展示 `available === false` 的来源条目。
   - 【文件名一致】：`production_defaults.json` 两条来源的 `path` 去掉 `(1)` 后缀，`remote_samples.json` 的远程视觉白名单键同步改名，保持远程 VLM 授权与配置文件名一致；旧文件名兼容逻辑保留，历史运行的 source ID 仍可解析。
+- 【压测待修复项】
+  - 【P2 记录】：把“取消后阶段列表仍显示进行中”登记到 `loadtest/evidence/index.md` 的待修复项，现象为 Job 终态已是“任务已取消”，阶段列表仍保留“执行 Deep Agent 分析 进行中”字样。
