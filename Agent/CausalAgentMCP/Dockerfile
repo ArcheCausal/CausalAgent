@@ -9,6 +9,10 @@ ENV PIP_DEFAULT_TIMEOUT=300 \
     MKL_NUM_THREADS=1 \
     PYTHONDONTWRITEBYTECODE=1
 
+# CDFM 权重在构建期下载并逐文件校验；revision 与摘要写死在 cdfm_weights.py，
+# 镜像内副本位于只读目录，运行期不再访问网络。
+ARG HF_ENDPOINT=https://hf-mirror.com
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        gcc \
@@ -43,6 +47,14 @@ COPY app ./app
 COPY config ./config
 COPY Database ./Database
 COPY observability ./observability
+# 预发环境门禁脚本由一次性 seed 服务复用；只复制该脚本，不带入部署工具。
+COPY scripts/staging_environment_guard.py ./scripts/staging_environment_guard.py
+
+# 只读权重目录：构建末尾下载并校验，不合格直接构建失败。
+RUN python -m Agent.CausalAgentMCP.cdfm_weights fetch \
+      --destination /opt/cdfm-weights-image \
+      --endpoint "${HF_ENDPOINT}" \
+    && chmod -R a-w /opt/cdfm-weights-image
 
 EXPOSE 8080
 

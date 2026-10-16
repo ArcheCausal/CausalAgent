@@ -1808,3 +1808,8 @@
   - 【废弃测试清理】删除 tests/test_rag_eval_core_logic.py：该文件在模块级抛出 SkipTest，标注“旧医疗 RAG 评测已退出默认测试链路，保留待后续清理”，收集阶段不产生任何用例；删除前确认全仓无引用、无本地未提交修改。删除 tests/test_mcp_result_contract.py：与 tests/unit/agent/test_mcp_result_contract.py 逐字节重复，保留 unit/agent 一份。
   - 【测试目录归位】把 tests/ 顶层的 focused tests 按业务移入子目录：RAG 评测台本体进入 tests/unit/rag_eval/，多模态与知识库 RAG 契约进入 tests/unit/agent/，部署契约进入 tests/integration/deployment/，迁移契约进入 tests/integration/migrations/；全部用 git mv 保留历史，移动后把 7 个文件里指向仓库根的 parents[1] 修正为 parents[3]。
   - 【文档同步】tests/README.md 的目录示意图补全 unit/agent、unit/rag_eval、integration/agent、integration/database、integration/migrations 的分工；tests/AGENTS.md 的分层归属条目改为归位后的实际规则与路径深度提醒；Document/development/testing.md 的 RAG/多模态与隔离评测两处路径引用改为新位置。
+---
+2026.10.16
+- 【CDFM 权重入卷】
+  - 【构建期下载】：新增 `Agent/CausalAgentMCP/cdfm_weights.py`，把 `DMIRLAB/CDFM` 的 revision 与逐文件 SHA-256、字节数写死；`Agent/CausalAgentMCP/Dockerfile` 在构建末尾下载到镜像内只读目录 `/opt/cdfm-weights-image` 并逐文件校验，不合格直接构建失败，下载端点由构建参数 `HF_ENDPOINT` 控制。
+  - 【预发入卷】：新增一次性服务 `cdfm-weights-seed` 与命名卷 `rag_eval_staging_cdfm_weights`，按 `version.json` 幂等同步；`causal-mcp` 只读挂载 `/opt/cdfm-weights`、设置 `CDFM_MODEL_PATH=/opt/cdfm-weights` 与 `HF_HUB_OFFLINE=1`，并等待 seed 成功退出。

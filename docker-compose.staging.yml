@@ -87,7 +87,7 @@ services:
     command: ["sh", "-c", "python scripts/staging_environment_guard.py && exec python -m Database.bootstrap"]
     environment: &app_environment
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME is required}
-      STAGING_VOLUME_NAMES: rag_eval_staging_mysql_primary,rag_eval_staging_mysql_replica,rag_eval_staging_postgres_checkpoint,rag_eval_staging_formal,rag_eval_staging_eval,rag_eval_staging_models,rag_eval_staging_gateway_logs,rag_eval_staging_searxng_cache,rag_eval_staging_valkey,rag_eval_staging_loki,rag_eval_staging_alloy_positions,rag_eval_staging_grafana
+      STAGING_VOLUME_NAMES: rag_eval_staging_mysql_primary,rag_eval_staging_mysql_replica,rag_eval_staging_postgres_checkpoint,rag_eval_staging_formal,rag_eval_staging_eval,rag_eval_staging_models,rag_eval_staging_cdfm_weights,rag_eval_staging_gateway_logs,rag_eval_staging_searxng_cache,rag_eval_staging_valkey,rag_eval_staging_loki,rag_eval_staging_alloy_positions,rag_eval_staging_grafana
       MYSQL_HOST: mysql-primary
       MYSQL_WRITE_HOST: mysql-primary
       MYSQL_READ_HOSTS: mysql-replica
@@ -206,10 +206,13 @@ services:
       CAUSAL_MCP_ENQUEUE_TIMEOUT_SECONDS: ${CAUSAL_MCP_ENQUEUE_TIMEOUT_SECONDS:-5}
       CAUSAL_MCP_ALGORITHM_DEADLINE_SECONDS: ${CAUSAL_MCP_ALGORITHM_DEADLINE_SECONDS:-600}
       CAUSAL_MCP_SLOW_LOG_SECONDS: ${CAUSAL_MCP_SLOW_LOG_SECONDS:-60}
-      CDFM_MODEL_PATH: ${CDFM_MODEL_PATH:-DMIRLAB/CDFM}
+      CDFM_MODEL_PATH: ${CDFM_MODEL_PATH:-/opt/cdfm-weights}
+      HF_HUB_OFFLINE: "1"
       OMP_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
       MKL_NUM_THREADS: "1"
+    volumes:
+      - rag_eval_staging_cdfm_weights:/opt/cdfm-weights:ro
     secrets:
       - source: causalagent_env
         target: causalagent.env
@@ -217,12 +220,32 @@ services:
     depends_on:
       mysql-primary: {condition: service_healthy}
       db-bootstrap: {condition: service_completed_successfully}
+      cdfm-weights-seed: {condition: service_completed_successfully}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=2)"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 15s
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+  # 一次性入卷服务：把镜像内已校验的 CDFM 权重同步进命名卷；
+  # version.json 与镜像一致时直接退出，不做重复拷贝。
+  cdfm-weights-seed:
+    image: ${STAGING_MCP_IMAGE:?STAGING_MCP_IMAGE must be an immutable image digest}
+    labels:
+      causalagent_observability: "true"
+      causalagent_service: maintenance
+      causalagent_environment: staging
+    command: ["sh", "-c", "python scripts/staging_environment_guard.py && exec python -m Agent.CausalAgentMCP.cdfm_weights seed --source /opt/cdfm-weights-image --target /opt/cdfm-weights"]
+    environment:
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME is required}
+      STAGING_VOLUME_NAMES: rag_eval_staging_mysql_primary,rag_eval_staging_mysql_replica,rag_eval_staging_postgres_checkpoint,rag_eval_staging_formal,rag_eval_staging_eval,rag_eval_staging_models,rag_eval_staging_cdfm_weights,rag_eval_staging_gateway_logs,rag_eval_staging_searxng_cache,rag_eval_staging_valkey,rag_eval_staging_loki,rag_eval_staging_alloy_positions,rag_eval_staging_grafana
+    volumes:
+      - rag_eval_staging_cdfm_weights:/opt/cdfm-weights
+    networks: [rag_eval_staging]
     logging:
       driver: json-file
       options: {max-size: 10m, max-file: "3"}
@@ -484,6 +507,8 @@ volumes:
   rag_eval_staging_eval: {driver: local}
   # 模型缓存或模型文件
   rag_eval_staging_models: {driver: local}
+  # CDFM 权重（由一次性 seed 服务从镜像只读副本同步）
+  rag_eval_staging_cdfm_weights: {driver: local}
   rag_eval_staging_mysql_primary: {driver: local}
   rag_eval_staging_mysql_replica: {driver: local}
   rag_eval_staging_postgres_checkpoint: {driver: local}
