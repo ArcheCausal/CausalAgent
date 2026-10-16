@@ -19,9 +19,8 @@ def _compose_config() -> dict:
         pytest.skip("docker CLI 不可用，跳过 Compose 配置验证")
 
     env = os.environ.copy()
-    # docker compose config 只需通过 Compose 的非空变量校验；不读取或输出仓库密钥。
-    env["CHECKPOINT_POSTGRES_PASSWORD"] = "compose-test-only"
-    env["GRAFANA_ADMIN_PASSWORD"] = "compose-test-only"
+    # Compose 校验只解析密钥文件的挂载路径；使用仓库里的测试密钥文件。
+    env["CAUSALAGENT_SECRET_FILE"] = str(REPO_ROOT / "tests/unit-test-secrets.env")
     proc = subprocess.run(
         [
             "docker",
@@ -50,8 +49,11 @@ def test_searxng_has_pinned_image_and_shallow_healthcheck():
     assert healthcheck["test"]
     assert "/healthz" in " ".join(healthcheck["test"])
     assert "searxng-init" not in config["services"]
-    # 密钥由 SEARXNG_SECRET 环境变量注入，配置目录只读挂载。
-    assert searxng["environment"]["SEARXNG_SECRET"]
+    # 密钥由容器启动适配脚本从密钥文件导出，配置目录只读挂载。
+    entrypoint = searxng["entrypoint"]
+    assert any("export_secret SEARXNG_SECRET" in str(item) for item in entrypoint)
+    assert "SEARXNG_SECRET" not in searxng.get("environment", {})
+    assert any(item["source"] == "causalagent_env" for item in searxng.get("secrets", []))
     assert any(
         mount["target"] == "/etc/searxng" and mount.get("read_only") is True
         for mount in searxng["volumes"]

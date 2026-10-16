@@ -93,12 +93,14 @@ class AdminFrontendDeploymentTests(unittest.TestCase):
         self.assertNotIn("GRANT SELECT ON performance_schema.*", script)
         self.assertNotIn("GRANT SELECT ON *.* TO '${APP_READ_USER}'", script)
 
-    def test_replica_config_remains_read_only_after_restart(self):
-        """从库配置必须在容器重启后继续禁止直接写入。"""
-        replica_config = Path("Database/mysql/conf/replica.cnf").read_text(encoding="utf-8")
+    def test_replica_initialization_persists_read_only_after_restart(self):
+        """从库完成复制配置后，必须持久化重启后的只读保护。"""
+        replica_init = Path(
+            "Database/mysql/init/replica/01-configure-replication.sh"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn("read_only=ON", replica_config)
-        self.assertIn("super_read_only=ON", replica_config)
+        self.assertIn("SET PERSIST read_only = ON;", replica_init)
+        self.assertIn("SET PERSIST super_read_only = ON;", replica_init)
 
     def test_rag_eval_dataset_and_concurrency_compose_contract(self):
         """三份运行 Compose 必须共享数据集目录并使用实际并发配置键。"""
@@ -140,15 +142,15 @@ class AdminFrontendDeploymentTests(unittest.TestCase):
                 )
 
                 if filename == "docker-compose.prod.yml":
-                    expected_mount = "rag_eval_datasets:/app/tmp/rag_eval/datasets/registered"
-                    self.assertIn("rag_eval_datasets", compose["volumes"])
+                    expected_mount = "rag_eval_prod:/app/tmp/rag_eval"
+                    self.assertIn("rag_eval_prod", compose["volumes"])
                 else:
                     expected_mount = "./tmp/rag_eval:/app/tmp/rag_eval"
                 self.assertIn(expected_mount, app["volumes"])
                 self.assertIn(expected_mount, worker["volumes"])
 
     def test_rag_eval_worker_uses_project_llm_config_without_host_override(self):
-        """本地隔离评测 worker 必须使用项目 .env，而不是宿主机同名模型变量。"""
+        """隔离评测 worker 只从 Compose 注入非密钥模型地址；密钥只来自密钥文件。"""
         for filename in ("docker-compose.yml", "docker-compose.replica.yml"):
             with self.subTest(filename=filename):
                 compose = yaml.safe_load(Path(filename).read_text(encoding="utf-8"))
@@ -160,8 +162,15 @@ class AdminFrontendDeploymentTests(unittest.TestCase):
                     env_file,
                     (".env", [{"path": ".env", "required": False}]),
                 )
-                for name in ("API_KEY", "BASE_URL", "MODEL"):
+                # 密钥只从密钥文件读取，不能作为环境变量出现在 worker 配置里。
+                for name in ("API_KEY", "SECRET_KEY", "EMBEDDING_API_KEY", "LANGCHAIN_API_KEY"):
                     self.assertNotIn(name, worker_env)
+                # 非密钥的模型地址与名称仍由 Compose 提供。
+                self.assertIn("BASE_URL", worker_env)
+                self.assertIn("MODEL", worker_env)
+                self.assertTrue(
+                    any(item["source"] == "causalagent_env" for item in worker["secrets"])
+                )
 
 
 if __name__ == "__main__":

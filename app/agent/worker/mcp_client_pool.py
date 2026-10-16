@@ -11,6 +11,7 @@ import traceback
 from typing import Any, Callable, Literal
 
 from Agent.deep_agent_tools.error_codes import SafeErrorCode
+from config.secret_file import load_secrets, require_secret
 
 
 class _ExpectedMcpCleanupLogFilter(logging.Filter):
@@ -135,12 +136,14 @@ class McpClientPoolConfig:
 
     @classmethod
     def from_env(cls) -> "McpClientPoolConfig":
+        """读取连接池参数；服务令牌只来自密钥文件。"""
         def integer(name: str, default: int) -> int:
             return int(os.getenv(name, str(default)))
 
+        load_secrets()
         return cls(
             url=os.getenv("CAUSAL_MCP_URL", "http://causal-mcp:8080/mcp"),
-            service_token=os.getenv("CAUSAL_MCP_SERVICE_TOKEN", ""),
+            service_token=require_secret("CAUSAL_MCP_SERVICE_TOKEN"),
             pool_size=integer("CAUSAL_MCP_CLIENT_POOL_SIZE", 2),
             max_in_flight_per_client=integer(
                 "CAUSAL_MCP_MAX_IN_FLIGHT_PER_CLIENT", 1

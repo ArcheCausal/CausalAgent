@@ -38,7 +38,8 @@
 
 - [`development/setup.md`](development/setup.md)：本地、Docker 和四个前端的开发入口。
 - [`development/testing.md`](development/testing.md)：后端、前端、迁移、Web Search/Observability、RAG 多模态与隔离评测的验证矩阵。
-- [`development/deployment.md`](development/deployment.md)：镜像构建、16 服务开发 Compose、staging gateway/guard 边界、生产现有拓扑和 release 发布边界。
+- [`development/deployment.md`](development/deployment.md)：镜像构建、15 服务开发 Compose、staging gateway/guard 边界、生产现有拓扑和 release 发布边界；测试服务器首次部署与旧服务更新按[测试预发操作流程](development/deployment.md#测试预发操作流程)执行。
+- [`development/release-acceptance.md`](development/release-acceptance.md)：部署包发布后在服务器上必须逐条执行的密钥、digest、卷持久化与 RAG 回滚验收命令。
 - [`development/website-frontend.md`](development/website-frontend.md)：官网公开页面与登录注册页面的入口、认证回跳、内容组织、构建和验收边界。
 - [`development/chat-frontend.md`](development/chat-frontend.md)：普通用户应用 Vue 前端的 `/dashboard` 入口、地址与会话映射、SSE、状态边界、构建、验收和回退。
 - [`../windows-client/README.md`](../windows-client/README.md)：Windows WebView2 桌面壳的独立依赖、配置、打包和 smoke 验收入口。

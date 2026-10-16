@@ -54,11 +54,15 @@ def test_process_runtime_returns_explicit_llm_and_rag_state():
     assert runtime.rag_error_code == "active_release_missing"
 
 
-def test_deep_agent_model_uses_validated_responses_profile(monkeypatch):
+def test_deep_agent_model_uses_validated_responses_profile(monkeypatch, secret_file_path):
     """生产模型必须沿用 P0 验证过的无 reasoning Responses 配置。"""
     monkeypatch.setenv("DEEP_AGENT_MODEL", "deepseek-v4-flash")
     monkeypatch.setenv("DEEP_AGENT_BASE_URL", "https://provider.example")
-    monkeypatch.setenv("DEEP_AGENT_API_KEY", "test-only")
+    # Deep Agent 密钥只来自密钥文件；这里指向 conftest 提供的测试密钥文件。
+    monkeypatch.setenv("CAUSALAGENT_SECRET_FILE", str(secret_file_path))
+    from config import secret_file as secret_file_module
+
+    secret_file_module.reset_secret_cache()
     configured = Mock(name="deep-agent-model")
 
     with patch("app.agent.worker.runtime.ChatOpenAI", return_value=configured) as model_cls:
@@ -68,7 +72,7 @@ def test_deep_agent_model_uses_validated_responses_profile(monkeypatch):
     model_cls.assert_called_once_with(
         model="deepseek-v4-flash",
         base_url="https://provider.example",
-        api_key="test-only",
+        api_key="unit-test-deep-agent-api-key",
         streaming=True,
         use_responses_api=True,
         output_version="responses/v1",

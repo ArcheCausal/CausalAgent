@@ -69,34 +69,6 @@ jobs:
           app Agent Database config tests
           CausalAgent.py Run_causal.py
 
-  light-tests:
-    name: Light tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    if: github.event_name == 'pull_request'
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-          cache-dependency-path: requirements-base.txt
-
-      - name: Install test runner
-        run: >-
-          python -m pip install --disable-pip-version-check
-          "pytest>=8,<9"
-          "pydantic==2.13.5"
-
-      - name: Run dependency-free tests
-        run: >-
-          python -m pytest --quiet
-          tests/unit/agent/test_llm_structured_output_usage.py
-          tests/unit/agent/test_llm_structured_output_config.py
-
   backend-unit-tests:
     name: Backend unit tests
     runs-on: ubuntu-latest
@@ -116,14 +88,18 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build the repository unit-test image with layer cache
-        run: >-
-          docker buildx bake
-          -f docker-compose.test.yml
-          --set unit-test.cache-from=type=gha,scope=unit-test
-          --set unit-test.tags=causalagent-unit-test:latest
-          --provenance=false
-          --load
-          unit-test
+        # Action 可读取 GHA 缓存运行时变量，普通 run 步骤不会自动获得它们。
+        uses: docker/bake-action@v6
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+        with:
+          files: docker-compose.test.yml
+          targets: unit-test
+          load: true
+          provenance: false
+          set: |
+            unit-test.cache-from=type=gha,version=2,scope=unit-test
+            unit-test.tags=causalagent-unit-test:latest
 
       - name: Run all backend unit tests
         run: docker compose -p causalagent -f docker-compose.test.yml run --rm unit-test
@@ -141,14 +117,17 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Rebuild unit-test image and export layer cache
-        run: >-
-          docker buildx bake
-          -f docker-compose.test.yml
-          --set unit-test.cache-from=type=gha,scope=unit-test
-          --set "unit-test.cache-to=type=gha,scope=unit-test,mode=min"
-          --set "unit-test.output=type=cacheonly"
-          --provenance=false
-          unit-test
+        uses: docker/bake-action@v6
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+        with:
+          files: docker-compose.test.yml
+          targets: unit-test
+          provenance: false
+          set: |
+            unit-test.cache-from=type=gha,version=2,scope=unit-test
+            unit-test.cache-to=type=gha,version=2,scope=unit-test,mode=min
+            unit-test.output=type=cacheonly
 
   frontend-builds:
     name: Frontend checks (${{ matrix.directory }})
@@ -238,8 +217,8 @@ jobs:
 
       - name: Validate development and staging Compose files
         env:
-          CHECKPOINT_POSTGRES_PASSWORD: compose-static-validation
-          GRAFANA_ADMIN_PASSWORD: compose-static-validation
+          # Compose 只校验密钥文件的挂载路径；密钥值来自仓库里的测试密钥文件。
+          CAUSALAGENT_SECRET_FILE: ./tests/unit-test-secrets.env
         run: |
           docker compose --env-file .env.example -f docker-compose.yml config --quiet
           docker compose --env-file .env.staging.example -f docker-compose.staging.yml config --quiet
@@ -249,8 +228,12 @@ jobs:
           python -m pytest -p no:cacheprovider
           tests/integration/deployment/test_staging_compose.py
           tests/integration/deployment/test_searxng_compose.py
+          tests/integration/deployment/test_secret_compose_permissions.py
+          tests/integration/deployment/test_release_workflow.py
           tests/integration/test_observability_compose.py
-          tests/test_staging_environment_guard.py
+          tests/unit/config/test_secret_file.py
+          tests/unit/deployment/test_release_bundle.py
+          tests/integration/deployment/test_staging_environment_guard.py
 
       - name: Validate Alloy configuration
         run: >-

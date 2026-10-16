@@ -34,8 +34,13 @@ def _run_runner(runner: Callable[..., Any], csv_data: str, parameters: Mapping[s
     # Third-party causal libraries may print progress, warnings or file paths;
     # never let child-process output share the service protocol/log stream.
     before = _resource.getrusage(_resource.RUSAGE_SELF) if _resource else None
-    with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-        value = runner(csv_data, parameters)
+    try:
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            value = runner(csv_data, parameters)
+    except Exception as exc:
+        # 子进程内的第三方输出仍不进入协议或日志流；只把异常类名带回父进程，
+        # 让服务层能在不记录自由文本的前提下区分失败类型。
+        raise RunnerExecutionError(type(exc).__name__) from exc
     after = _resource.getrusage(_resource.RUSAGE_SELF) if _resource else None
     peak_rss_bytes = int(getattr(after, "ru_maxrss", 0) or 0) * 1024
     cpu_seconds = 0.0
@@ -48,16 +53,31 @@ def _run_runner(runner: Callable[..., Any], csv_data: str, parameters: Mapping[s
     return _ProcessExecutionEnvelope(value, peak_rss_bytes, cpu_seconds)
 
 
+class RunnerExecutionError(RuntimeError):
+    """runner 在子进程内抛异常，并携带异常类名。"""
+
+    def __init__(self, exception_type: str) -> None:
+        super().__init__("runner raised")
+        self.exception_type = exception_type
+
+    def __reduce__(self) -> tuple[Any, tuple[str]]:
+        # 该异常要跨越 ProcessPoolExecutor 的子进程边界，必须显式保留异常类名，
+        # 否则默认的 ``(cls, self.args)`` 归约只会还原固定消息。
+        return self.__class__, (self.exception_type,)
+
+
 class PoolExecutionError(RuntimeError):
     def __init__(
         self,
         code: SafeErrorCode,
         *,
         retry_after_seconds: int | None = None,
+        runner_error_type: str = "",
     ) -> None:
         super().__init__(code.value)
         self.safe_error_code = code
         self.retry_after_seconds = retry_after_seconds
+        self.runner_error_type = runner_error_type
 
 
 @dataclass(frozen=True)
@@ -347,8 +367,14 @@ class BoundedProcessPool:
             except Exception as exc:
                 if isinstance(exc, PoolExecutionError):
                     raise
+                runner_error_type = (
+                    exc.exception_type
+                    if isinstance(exc, RunnerExecutionError)
+                    else ""
+                )
                 raise PoolExecutionError(
-                    SafeErrorCode.ALGORITHM_EXECUTION_FAILED
+                    SafeErrorCode.ALGORITHM_EXECUTION_FAILED,
+                    runner_error_type=runner_error_type,
                 ) from exc
             else:
                 terminal_state = "completed"

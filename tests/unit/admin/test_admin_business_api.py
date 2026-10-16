@@ -147,7 +147,7 @@ class AdminBusinessApiTests(unittest.TestCase):
         self.assertIsNone(audit.call_args.kwargs["new_values"])
 
     def test_brand_logo_is_also_protected_from_normal_users(self):
-        """侧栏 Logo 复用原图，但图片接口本身仍属于管理员权限边界。"""
+        """侧栏 Logo 接口仍属于管理员权限边界。"""
         app = build_app()
         with (
             authorized_as(NORMAL_USER, USER_PERMISSIONS),

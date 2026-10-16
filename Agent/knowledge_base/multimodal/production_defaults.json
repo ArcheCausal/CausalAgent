@@ -40,7 +40,7 @@
     {
       "source_id": "pearl-2009-causality",
       "document_id": "doc_0af71971e6cf65479b70a4aee2240d41dc5eceec43f6bdd87ec071099b34659d",
-      "path": "Agent/knowledge_base/source/Pearl_2009_Causality-mono(1).pdf",
+      "path": "Agent/knowledge_base/source/Pearl_2009_Causality-mono.pdf",
       "sha256": "13b947cd4597aea6b59c52e8f63503943ee475f36543e7e76cbb09b1ec1e0a25",
       "page_count": 487,
       "required": true
@@ -48,7 +48,7 @@
     {
       "source_id": "pearl-mackenzie-2018-book-of-why",
       "document_id": "doc_ae3548236a0d5658f28911036af96d89fc0a1a66590b6dc60d6107dc1bba7709",
-      "path": "Agent/knowledge_base/source/Pearl_Mackenzie_2018_The_Book_of_Why-mono(1).pdf",
+      "path": "Agent/knowledge_base/source/Pearl_Mackenzie_2018_The_Book_of_Why-mono.pdf",
       "sha256": "dbc004c038a10cf213bd81f685ffe0ea934bb1494a52ecc889b9a03ea3f8babd",
       "page_count": 402,
       "required": true

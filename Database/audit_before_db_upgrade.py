@@ -23,27 +23,22 @@ except ModuleNotFoundError:  # 兼容 `python Database/audit_before_db_upgrade.p
     from inspection import execute_migration_preflight_checks
 
 def load_env() -> None:
-    try:
-        from dotenv import load_dotenv
+    """加载服务器密钥文件；读取密码等敏感配置。"""
+    from config.secret_file import load_secrets
 
-        project_root = Path(__file__).resolve().parents[1]
-        env_path = project_root / ".env"
-        if env_path.exists():
-            load_dotenv(dotenv_path=env_path)
-            logging.info("已加载环境变量")
-    except ImportError:
-        logging.info("未安装 python-dotenv，使用系统环境变量")
+    load_secrets()
 
 
 def get_connection():
     load_env()
     host = os.environ.get("MYSQL_WRITE_HOST") or os.environ.get("MYSQL_HOST")
     user = os.environ.get("MYSQL_READ_USER") or os.environ.get("MYSQL_USER")
-    password = os.environ.get("MYSQL_READ_PASSWORD") or os.environ.get("MYSQL_PASSWORD")
+    from config.secret_file import require_secret
+
+    password = require_secret("MYSQL_READ_PASSWORD")
     required = {
         "MYSQL_HOST 或 MYSQL_WRITE_HOST": host,
         "MYSQL_READ_USER 或 MYSQL_USER": user,
-        "MYSQL_READ_PASSWORD 或 MYSQL_PASSWORD": password,
         "MYSQL_DATABASE": os.environ.get("MYSQL_DATABASE"),
     }
     missing = [key for key, value in required.items() if not value]

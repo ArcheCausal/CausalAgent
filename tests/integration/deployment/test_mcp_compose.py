@@ -64,8 +64,11 @@ def test_staging_and_production_mcp_keep_private_image_boundary() -> None:
         assert "ports:" not in block
         assert "healthcheck:" in block
         assert "http://127.0.0.1:8080/ready" in block
-        assert "CAUSAL_MCP_SERVICE_TOKEN" in block
-        assert "CAUSAL_MCP_SIGNING_KEY_CURRENT" in block
+        # MCP 鉴权材料只从密钥文件读取；Compose 只挂载密钥文件并保留签名键 ID。
+        assert "source: causalagent_env" in block
+        assert "CAUSAL_MCP_SIGNING_KEY_ID" in block
+        assert "CAUSAL_MCP_SERVICE_TOKEN=" not in block
+        assert "CAUSAL_MCP_SIGNING_KEY_CURRENT=" not in block
         _assert_mcp_does_not_receive_app_or_model_config(block)
     _assert_worker_control_lane_config(staging_worker)
     _assert_worker_control_lane_config(production_worker)

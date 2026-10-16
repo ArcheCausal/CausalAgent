@@ -251,6 +251,12 @@ app/rag_eval/frontend_dist/
 *.governance.lock
 .env.staging
 
+# 服务器唯一密钥文件；本地开发与部署都只保留模板，真实密钥不进入版本库。
+causalagent.env
+deploy/secrets/*.env
+!deploy/secrets/*.env.example
+deploy/config/*.env
+
 # docs
 docs/
 
@@ -259,5 +265,8 @@ admin-frontend/dist/*
 
 # 本地验收与对照截图（Playwright 输出），只作为临时证据，不进入版本库。
 /output/
+
+# 压测客户端的本地凭据、运行产物与报告正文统一收在 local/，不进入版本库。
+/loadtest/local/
 
 tmp/

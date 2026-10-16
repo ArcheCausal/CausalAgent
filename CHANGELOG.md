@@ -1724,3 +1724,125 @@
 ---
 2026.10.7
 - 【Windows Developer Preview 发布】：将 tag 推送触发改为 GitHub Actions workflow_dispatch 手动启动，保留制品构建、Draft Release 创建和已发布附件补齐流程。
+---
+2026.10.8
+- 【预发数据库：修复 MySQL 副本首次初始化】
+  - 【只读保护时序】：将副本只读设置改为复制初始化完成后持久化，避免 MySQL 官方入口脚本在首次建库和设置 root 密码时被 `super_read_only` 阻断；副本后续重启仍保持只读。
+---
+2026.10.9
+- 【普通用户工作区文档：补全用户协议与操作说明】
+  - 【用户协议】：说明账号使用、用户责任、分析结果边界、数据处理、管理员访问和数据删除行为。
+  - 【操作文档】：补充注册登录、会话、CSV 文件、联网搜索、任务恢复、取消、报告查看、设置和退出步骤。
+  - 【文档维护】：明确设置页两份用户文档的职责及内容核对依据。
+
+- 【品牌与项目首页：更新界面展示并修正管理员图标】
+  - 【README 展示】：替换中英文首页、工作区、管理员和 RAG 工作台截图，并统一使用当前品牌图标。
+  - 【管理员品牌】：管理员侧栏品牌接口改为读取设计系统正式资源，并要求浏览器重新校验缓存；同步更新管理员 API 说明。
+
+---
+2026.10.10
+- 【预发压测：新增本地压测客户端与分级负载证据】实现只在本机运行、只使用测试账号的普通用户混合流程压测，并在真实 staging 入口按档位执行。
+  - 【客户端】：新增 loadtest/ 本地客户端，覆盖登录、会话、上传、Job 创建、SSE 订阅、历史读取、活动 Job、取消与恢复；实时记录 HTTP 耗时与状态码、SSE 首事件与终态时间、断线与重连、重复与乱序事件、Job 排队与总耗时，并把事件 ID 缺口单列为信息项，反映 analysis_job_events.id 为全局自增主键的事实。
+  - 【分级负载】：新增单用户基线、2、5、10 用户混合与 30 分钟稳定性、20 用户突发档，按档位限制活动 Job 与 SSE 并发；Job 并发额度用满时排队等待，停止提交后核对队列清空与资源恢复。
+  - 【专项检查】：新增 SSE 断线恢复、创建幂等、取消排队与运行中 Job、取消后状态不反转、跨账号隔离检查。
+  - 【凭据与产物】：账号凭据只写入本地 local/accounts.local.json，运行产物写入 local/runs/，二者与 data/、.venv/ 一并加入 .gitignore；整理后的报告写入 local/evidence/。
+  - 【核查与服务器侧采集】：新增 local/evidence/log-verification.md，按档位给出 job_id 清单、时间窗口与 Request ID 样本；新增 loadtest/runner/logs.py 通过同源 Grafana 代理查询 Loki，凭据只在进程内读取且不回显；新增 loadtest/server_side_collect.sh 只读采集主机资源、容器重启与 OOM、MySQL 连接数与活动 Job 队列，输出可直接由 --server-json 合并进报告。
+  - 【日志侧核查】接入同源 Grafana 代理读取 Loki，按每档运行窗口统计各服务各级别条数、按算法能力拆分的收到/完成/失败/慢调用、事件码分布、web 请求失败、worker 降级告警、request_id 沿用，以及 MCP 最近七天成功与失败累计；结果写入 local/evidence/logcheck-<档位>.json，凭据只从环境变量或部署环境文件读取，不落盘。
+  - 【CDFM 失败定位】日志侧确认 causal.cdfm 在本轮全部档位完成数为 0、失败与慢调用数量相等、单条耗时约 139 秒，单用户档位同样复现；每次调用都从 HuggingFace Hub 重新加载权重且未返回，失败点在模型加载而非算法执行。本机用同一份 cdfm-base==0.1.0 能 7.2 秒取回权重，因此容器外的 Hub 侧不是原因。定位结论写入 local/evidence/cdfm-failure-analysis.md，代码未改动。
+  - 【服务器侧采集】新增可在服务器直接执行的只读采集脚本 loadtest/server_side_collect.sh，采集主机 CPU、内存、swap、磁盘、inode、容器状态与重启、OOM、镜像 digest、MySQL 连接数、复制状态与 Job 分布；新增 runner attach-server 把采集结果写入各档运行摘要，逐档报告的“服务器侧”一节改为实测值。另新增 loadtest/stage_resource_sample.sh 与 runner attach-sample，在每档负载窗口内采样主机资源，换算出 CPU 使用率、峰值负载与内存水位，逐档报告新增“负载窗口资源曲线”一节。
+  - 【主库 Job 终态核对】新增 loadtest/job_db_check.sh，在 staging 主库上只读查询 Job 终态分布与失败明细，结果写入 local/job-db-<date>.json 并渲染进合并报告的“主库 Job 终态核对”一节。
+  - 【一键执行与采样】新增 loadtest/ops/stage_sampling.py 与 loadtest/ops/run_stages.py，把“启动服务器采样、跑一档负载、等采样收尾、取回并写入摘要”串成一条命令，并支持按顺序执行多个档位；采样秒数在 SPECS 中配置且大于负载持续时间。
+  - 【跨档摘要】合并报告新增“跨档摘要”表，逐档列出 run_id、RPS、p95、5xx、Job 创建与终态、活动 Job 与 SSE 峰值、断线与漏事件、CPU 与可用内存水位，并说明 SSE 峰值受活动 Job 数制约。
+  - 【网关 5xx 核对】本轮 mid 档 1 次、stability 档 3 次 5xx，应用侧 web error 日志为 0 条；复核时对相同端点重放 300 次请求未复现，且 /health/probe 在当前入口返回 404，说明它属于网关自身路由；日志采集不含网关服务，因此这几次 502 的成因本轮未能确认，已在合并报告的“未执行项与原因”中如实记录。
+  - 【停止后快照】新增 runner attach-after，把负载结束后在服务器上的只读采集写入各档摘要的停止后快照；报告把负载前与停止后两份采集分列并标注采集时刻，修正此前把负载前快照标成“停止后”的问题。八档停止后队列均已清空（总数 477、排队 0、运行 0、成功 449、失败 1、取消 27），无 OOM、容器重启计数仍为 0。
+  - 【专项三态记录】取消与 SSE 恢复专项的检查结果改为通过、未通过、未触发三态；waiting_input 恢复分支在普通用户流程中始终未触发（终态都是 final_result），此前把它记为通过，现在如实记为未触发。触发该分支需要在 Job 执行期间让冻结文件不可用，普通用户接口无法制造，因此本轮不构造。
+
+---
+2026.10.11
+- 【部署：统一密钥文件读取与发布包】
+  - 【密钥读取】：新增 `config/secret_file.py` 作为密码、令牌和签名密钥的唯一读取入口，默认读取 `/run/secrets/causalagent.env`，支持 `CAUSALAGENT_SECRET_FILE` 覆盖；未知键、重复键、空值、缺键和权限不安全都会让进程启动失败。
+  - 【配置入口】：`config/settings.py`、`config/database_settings.py`、`config/checkpoint_settings.py`、`config/rag_eval_paths.py`、`Agent/CausalAgentMCP/config.py`、`Agent/deep_agent/postgres_store.py`、`app/agent/worker/runtime.py`、`app/agent/worker/mcp_client_pool.py`、`Database/database_init.py`、`Database/migrations/env.py` 和 `Database/audit_before_db_upgrade.py` 改为只从密钥文件读取敏感值，移除运行时 `.env` 加载和密码环境变量回退。
+  - 【官方镜像适配】：新增 `deploy/scripts/secret-env.sh`，MySQL、PostgreSQL、SearXNG 和 Grafana 由容器启动适配脚本从同一个密钥文件导出官方入口需要的环境变量；MySQL 主从镜像新增入口脚本读取密钥文件，不再要求 Compose 传入密码。
+  - 【Compose】：开发、兼容副本、预发和生产 Compose 改为挂载 `causalagent_env` secret 到 `/run/secrets/causalagent.env`；`docker-compose.admin-e2e.yml` 和 `tests/run_admin_31_e2e.ps1` 同步改为通过临时密钥文件提供隔离 E2E 凭据。
+  - 【RAG 存储】：预发与生产的正式索引、active pointer 与发布配置收敛到 `rag_formal` 命名卷，评测数据收敛到 `rag_eval` 卷，模型缓存使用 `rag_models` 卷；移除 `kb-indexes-sync` 启动同步和 `kb_multimodal_indexes*` 命名卷，开发与兼容副本改为直接挂载仓库目录。
+  - 【部署包】：新增 `scripts/build_release_bundle.py` 与 `scripts/resolve_official_images.py` 生成部署包、`images.lock.json` 和 `release.manifest.json`，新增 `.github/workflows/build-release-bundle.yml` 在指定提交上构建部署包。
+  - 【部署脚本】：新增 `scripts/deploy.sh`、`scripts/verify.sh`、`scripts/rollback.sh` 和一次性 `scripts/migrate-rag-storage.sh`；新增 `deploy/secrets/causalagent.env.example` 与 `deploy/config/production.env.example` 模板。
+  - 【文档】：`Document/development/deployment.md` 与 `Document/development/setup.md` 更新服务器密钥文件、RAG 存储结构和部署包说明。
+  - 【服务器数据目录】：预发与生产的宿主数据目录（知识源、旧向量库、多模态资产、报告因果图）改用绝对路径并支持环境变量覆盖，Compose 不再挂载仓库源码目录，服务器无需保留 Git 仓库。
+  - 【发布验收】：新增 Document/development/release-acceptance.md，给出部署包发布后在服务器上必须逐条执行的密钥读取、镜像 digest、命名卷持久化、active release 一致、RAG 回滚和数据库/MCP/SSE 验收命令与判定标准。
+
+---
+2026.10.12
+- 【发布改造验收修正】
+  - 【密钥读取】：应用不再把密钥文件中的全部密钥复制到进程环境；知识库 embedding 与视觉调用改为显式读取密钥文件，官方镜像适配只导出对应入口所需的密钥。
+  - 【容器文件权限】：数据库、Grafana 与 SearXNG 容器使用专用 GID 3000 读取 `root:3000`、0640 密钥文件；发布校验强制此权限，容器入口检查当前用户可读。
+  - 【部署与测试】：兼容副本 Compose 改为从密钥文件读取健康检查密码；发布包通过 AST 读取 migration head；E2E 临时密钥补齐为每次运行生成的随机认证值。
+  - 【运维与文档】：修正密钥模板空值、数据库账号说明、桌面客户端重复标题和回滚目录选择逻辑。
+
+---
+2026.10.14
+- 【部署改造：密钥隔离、RAG 存储与发布包】
+  - 【统一密钥读取】：新增 `config/secret_file.py`，集中定义可用键和必需键，校验重复键、未知键、空值、缺失项与文件权限；应用、数据库、checkpoint、MCP、worker、embedding 和视觉调用从密钥文件读取密码、令牌及 API key，不再依赖密钥环境变量回退。可选 LangSmith 集成只为对应 SDK 导出所需键；离线知识库构建和多模态命令行工具仍可读取本地 `.env`，不属于 app/worker 生产启动路径。
+  - 【官方镜像与 Compose】：开发、预发、生产及兼容副本 Compose 统一挂载服务器密钥文件；MySQL 主从使用自定义入口镜像，PostgreSQL、Grafana、SearXNG 通过适配脚本读取各自所需键。数据库与非 root 官方服务加入 GID 3000；服务器密钥文件固定为 `root:3000`、`0640`，容器入口检查当前读取身份可读，发布校验拒绝其他服务器权限配置。本地单进程仍可使用 `0600/0400`。
+  - 【RAG 数据目录】：预发与生产将正式索引、active 指针和生产配置放入 `rag_formal` 卷，将 runs、sources、datasets、artifacts、reports 合并到 `rag_eval` 卷，并以 `rag_models` 保存模型缓存；移除 app/worker 启动时的索引同步服务。开发和兼容副本保留仓库目录挂载，预发与生产使用服务器数据目录和命名卷。新增一次性迁移脚本复制旧索引与 active 指针，保留旧目录供人工核验。
+  - 【发布包与镜像清单】：新增发布包构建脚本，生成包含发布标识、源码提交、部署文件摘要、镜像 digest、数据库迁移 head、RAG schema 和密钥 schema 的 `release.manifest.json`，并生成 `images.lock.json` 与压缩部署包；migration head 通过 AST 读取元数据，不执行 migration 文件。官方镜像 digest 可由 `docker buildx imagetools` 查询。新增手动 GitHub Actions 流程，以指定源码提交及自有镜像 digest 生成并上传制品，不直接部署服务器或修改 tag。
+  - 【发布操作】：新增 `deploy.sh` 从同一发布清单生成生产和预发 Compose 所需的 `images.env`，复制发布目录、更新 `current` 并拉取及启动清单镜像；`verify.sh` 检查 digest、密钥权限和必需键；`rollback.sh` 切回上一个发布；`migrate-rag-storage.sh` 执行旧 RAG 数据的一次性迁移。
+  - 【自动化检查与文档】：新增密钥解析、发布包和 Compose 权限契约测试，并纳入轻量 CI；补充发布验收清单、部署配置模板、密钥模板、服务器目录与发布流程说明。兼容副本健康检查从密钥文件读取 MySQL 密码，E2E 临时文件为每次运行生成认证值，密钥模板将可选键标为注释并避免空值行。
+  - 【验收文档修正】：服务器权限步骤统一要求 `640:0:3000`，避免文档仍允许非 root 容器无法读取的 `0600/0400`。
+  - 【配置与发布说明】：明确普通参数、密钥加载器和应用配置的职责，以及全局必需键检查；补充镜像发布、部署包生成和服务器拉取的人工与自动步骤，统一服务器权限、Compose 文件选择、实际镜像验收、服务重启和旧 RAG 数据迁移范围。
+  - 【发布流程简化】：镜像发布 Action 在四个镜像全部构建并推送成功后自动生成部署包；打包 Action 默认复用最近一次成功发布的同一提交镜像，自动解析 digest 并校验 OCI revision，保留提交、发布标识和四个 digest 的手动输入，任意镜像缺失或版本不匹配时立即失败。普通配置模板移除镜像占位项，由发布清单生成 `images.env`；配置文档明确 Compose 注入环境变量与 Python 各模块读取的分工。
+
+---
+2026.10.15
+- 【CI：修复后端镜像层缓存并移除独立轻量测试任务】
+  - 【缓存读写】：后端 unit 与缓存预热改用 Docker 官方 Bake Action 获取 GHA 缓存运行时变量，统一使用 v2 缓存与 `unit-test` 范围；PR 只恢复缓存并加载测试镜像，预热任务只导出缓存，不推送镜像或上传构建记录附件。
+  - 【检查范围】：移除独立 `light-tests` 任务，保留测试文件并由后端完整单元测试执行；CI 工作流修改纳入后端路径过滤，同步测试文档中的触发范围和缓存验收步骤。
+  - 【测试文件权限】：密钥单元测试创建的普通临时文件在 POSIX 系统上默认设置为 `0600`，权限专项用例继续显式设置各自需要的权限。
+
+- 【测试与压测目录治理：明确测试分层与压测证据边界】
+  - 【层级归属】新增 tests/AGENTS.md，规定先按依赖范围、再按业务目录选择测试位置；根 AGENTS.md 的局部规则列表同步登记 tests/AGENTS.md 与 loadtest/AGENTS.md。
+  - 【测试与压测边界】tests/ 放 pytest 测试与人工验收入口，loadtest/ 放对 staging 入口跑真实 HTTP/SSE 的压测客户端与采样脚本，不进入默认 pytest 与 CI 范围；需要把压测结论固化为回归检查时另写 integration/ 或 e2e/ 测试。
+  - 【压测证据入库边界】新增 loadtest/evidence/index.md，作为唯一进入版本库的压测证据链索引，登记每档 run_id、测试时间、被测镜像 digest、归档位置与结论，并单列 causal.cdfm 与 source-catalog 500 两个缺陷。
+  - 【本地产物集中】把压测客户端的全部不入库内容收进 loadtest/local/：runs/、data/、evidence/、accounts.local.json、server-side-*.json 与 job-db-*.json 一并迁入；.gitignore 从逐目录逐文件名规则收敛为一条 /loadtest/local/，清理产物改为整目录操作。loadtest/runner/config.py 的 LOCAL_DIR、RUNS_DIR、DATA_DIR、EVIDENCE_DIR、ACCOUNTS_PATH 随之指向 local/，ops/ 的编排脚本与 loadtest/README.md 的命令同步更新；evidence 命令的主库核对文件由写死的日期名改为按 local/ 下最新的 job-db-*.json 选取。
+  - 【报告归档约定】loadtest/README.md 增加“每次输出报告后立即归档并追加索引”的约定；loadtest/AGENTS.md 以目录树形式说明入库与不入库两类的分布。
+  - 【废弃测试清理】删除 tests/test_rag_eval_core_logic.py：该文件在模块级抛出 SkipTest，标注“旧医疗 RAG 评测已退出默认测试链路，保留待后续清理”，收集阶段不产生任何用例；删除前确认全仓无引用、无本地未提交修改。删除 tests/test_mcp_result_contract.py：与 tests/unit/agent/test_mcp_result_contract.py 逐字节重复，保留 unit/agent 一份。
+  - 【测试目录归位】把 tests/ 顶层的 focused tests 按业务移入子目录：RAG 评测台本体进入 tests/unit/rag_eval/，多模态与知识库 RAG 契约进入 tests/unit/agent/，部署契约进入 tests/integration/deployment/，迁移契约进入 tests/integration/migrations/；全部用 git mv 保留历史，移动后把 7 个文件里指向仓库根的 parents[1] 修正为 parents[3]。
+  - 【文档同步】tests/README.md 的目录示意图补全 unit/agent、unit/rag_eval、integration/agent、integration/database、integration/migrations 的分工；tests/AGENTS.md 的分层归属条目改为归位后的实际规则与路径深度提醒；Document/development/testing.md 的 RAG/多模态与隔离评测两处路径引用改为新位置。
+---
+2026.10.16
+- 【CDFM 权重入卷】
+  - 【构建期下载】：新增 `Agent/CausalAgentMCP/cdfm_weights.py`，把 `DMIRLAB/CDFM` 的 revision 与逐文件 SHA-256、字节数写死；`Agent/CausalAgentMCP/Dockerfile` 在构建末尾下载到镜像内只读目录 `/opt/cdfm-weights-image` 并逐文件校验，不合格直接构建失败，下载端点由构建参数 `HF_ENDPOINT` 控制。
+  - 【预发入卷】：新增一次性服务 `cdfm-weights-seed` 与命名卷 `rag_eval_staging_cdfm_weights`，按 `version.json` 幂等同步；`causal-mcp` 只读挂载 `/opt/cdfm-weights`、设置 `CDFM_MODEL_PATH=/opt/cdfm-weights` 与 `HF_HUB_OFFLINE=1`，并等待 seed 成功退出。
+- 【CDFM 失败诊断】
+  - 【runner 诊断字段】：`Agent/causal/cdfm_runner.py` 的模型加载与推理失败改为绑定异常对象，`diagnostics` 新增 `error_type`、`error_message`（截断 500 字符）、`model_path` 与 `model_source`（`local_dir` 或 `hub`）；`_failure()` 增加可选 `diagnostics` 参数。
+  - 【跨进程异常类名】：`Agent/CausalAgentMCP/executor_pool.py` 在 runner 抛异常时只把异常类名随 `RunnerExecutionError` 带回父进程，子进程输出仍被丢弃，不进入协议或日志流。
+  - 【受控事件】：`Agent/CausalAgentMCP/service.py` 新增 `mcp.runner.failed` 事件，只写 `capability`、`error_type`、`reason_code` 与 `model_source` 等稳定字段，不写异常自由文本；事件目录与 `Document/development/observability.md` 同步登记。
+- 【来源目录解耦】
+  - 【元数据解析】：`Agent/knowledge_base/multimodal/defaults.py` 新增 `resolve_production_source_metadata()`，只读 `production_defaults.json` 元数据，文件缺失时标记不可用而不抛异常；严格语义的 `resolve_production_sources()` 继续用于发布与评测。
+  - 【目录与摄取】：`app/rag_eval/isolated_runs.py` 的来源目录改为基于新函数构造，去掉 `read_bytes()`，条目增加 `available` 字段；`source_ids` 摄取在返回路径前显式校验文件存在，缺失时报“该来源在当前环境不可用”。
+  - 【前端过滤】：RAG 评测台前端不再展示 `available === false` 的来源条目。
+  - 【文件名一致】：`production_defaults.json` 两条来源的 `path` 去掉 `(1)` 后缀，`remote_samples.json` 的远程视觉白名单键同步改名，保持远程 VLM 授权与配置文件名一致；旧文件名兼容逻辑保留，历史运行的 source ID 仍可解析。
+- 【压测待修复项】
+  - 【P2 记录】：把“取消后阶段列表仍显示进行中”登记到 `loadtest/evidence/index.md` 的待修复项，现象为 Job 终态已是“任务已取消”，阶段列表仍保留“执行 Deep Agent 分析 进行中”字样。
+- 【CI 修复】
+  - 【测试路径】：`tests/test_staging_environment_guard.py` 在 #88 归位后已移动到 `tests/integration/deployment/`，工作流与路径过滤器仍指向旧位置，导致 Compose 契约任务以“file or directory not found”失败；两处引用同步更新，并移除不再匹配任何文件的 `tests/test_staging_*.py` glob。
+  - 【来源目录测试】：`test_source_display_name_persists_in_local_metadata` 改为 patch 新的 `resolve_production_source_metadata`，与来源目录实现保持一致。
+
+- 【压测台阶：突发、排队与多会话并发】
+  - 【服务器只读脚本恢复】：重建 `loadtest/server_side_collect.sh`、`loadtest/stage_resource_sample.sh` 与 `loadtest/job_db_check.sh`，三个脚本都接收 run_id、输出带 schema_version 的 JSON、只读执行、从受控凭据文件读取认证信息，缺失数据写成 missing/error 而不用 0 冒充；job_db_check.sh 改为按本轮 job_id 清单逐 Job 核对终态、会话归属、创建/开始/结束时间与执行释放状态。
+  - 【新增档位】：`burst_ungated`（20 账号、不限客户端活动 Job、sse 20、混合 600 秒）、`queue_pressure`（30 账号、不限客户端活动 Job、sse 30、混合 300 秒、每账号最多成功创建 20 个 Job）、`multi_session_smoke`（1 账号 2 真实会话）与 `multi_session_pressure`（10 账号 × 2 会话、sse 20）；`users` 继续表示逻辑账号，多会话数由 `sessions_per_user` 单独表示。
+  - 【并发模型】：`CountingGate` 支持 `capacity=None`，不限制创建但继续记录实际峰值；每个账号持有多条真实会话，每条会话最多一个活动 Job，账号级创建额度由线程安全计数器控制。
+  - 【提交与观察分离】：创建 Job 后立即由后台观察器订阅 SSE，主线程继续执行读取、翻页、上传或其他会话；系统会话仍限制每会话最多一个活动 Job。
+  - 【计数口径】：每账号上限只统计“成功返回一个唯一新 Job”的创建；4xx/5xx 与连接失败不计数，幂等重放记为不占额度，Job 终态作为独立指标。
+  - 【时间预算拆分】：把 SSE 空闲读取超时、单个 Job 总观察期限与停止后排空期限拆成独立配置，默认空闲读取 1800 秒；订阅建立后立即观察，不先轮询到 running。
+  - 【报告口径】：将长排队 Job 从 p50/p95 中单独报告，输出已完成 Job 排队时间、观察超时数量、排队等待下界与 SSE 断线重连统计；逐 Job 对比客户端与主库结果，移除历史硬编码结论。
+  - 【编排失败判断】：`ops/run_stages.py` 在任一档失败时停止后续档位；`ops/stage_sampling.py` 把负载、资源采样、服务器采样与逐 Job 核对串成一档，任一环节失败都返回非零。
+  - 【资源采样格式】：窗口采样由扁平格式改为 host / containers / queue / connections 四层结构，同时兼容旧格式；`runner/resource.py` 新增队列深度、主库连接数与容器状态汇总，缺失值写成未采集而不写成 0。
+  - 【上传与自检】：`runner` 新增 `export-job-ids` 与 `attach-job-db` 子命令；新增 `loadtest/selftest.py`，用本地桩服务验证同一账号两会话并发、会话级活动 Job 约束、账号级额度、`active_jobs=None` 不阻塞创建，以及排队超过观测窗口不算 SSE 断线。
+  - 【文档同步】：`loadtest/README.md` 新增档位表与自检说明，并更新三个脚本的调用方式；`loadtest/AGENTS.md` 记录脚本职责、JSON 格式与凭据来源。
+
+- 【许可证：将当前版本切换为 GNU AGPL-3.0】：更新根目录 LICENSE，并在中英文 README 中说明商业与竞争性服务、网络交互源码义务、第三方组件各自授权，以及项目名称和图形标识不由代码许可证授权。
+
+- 【部署文档：补充测试预发操作流程】
+  - 【服务器操作】：在现有构建与部署文档内补充首次部署和旧 staging 服务更新的连续步骤，覆盖项目名确认、ZIP 与 tar.gz 解压、配置迁移、上传权限、镜像拉取、容器更新、验收与失败处理。
+  - 【文档导航】：合并原预发命令示例，共用密钥机制、数据迁移与验收说明通过链接引用，技术文档入口增加章节链接。

@@ -8,6 +8,8 @@ from alembic import context
 import json
 import os
 
+from config.secret_file import load_secrets, require_secret
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
@@ -21,33 +23,21 @@ if (
     fileConfig(config.config_file_name)
 
 
-# 从环境变量加载数据库连接信息（Docker友好）
-# 优先从环境变量读取，其次尝试.env文件（本地开发）
-try:
-    from dotenv import load_dotenv
-    from pathlib import Path
-    
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    env_path = Path(base_dir) / '.env'
-    
-    if env_path.exists():
-        load_dotenv(dotenv_path=env_path)
-except ImportError:
-    pass  # Docker环境下可能没有python-dotenv
-
-# 从环境变量读取配置
+# 连接参数来自环境变量，写库密码只来自密钥文件。
+load_secrets()
 mysql_host = os.environ.get('MYSQL_WRITE_HOST') or os.environ.get('MYSQL_HOST')
 mysql_port = os.environ.get('MYSQL_PORT', '3306')
 mysql_user = os.environ.get('MYSQL_WRITE_USER') or os.environ.get('MYSQL_USER')
-mysql_password = os.environ.get('MYSQL_WRITE_PASSWORD') or os.environ.get('MYSQL_PASSWORD')
+mysql_password = require_secret('MYSQL_WRITE_PASSWORD')
 mysql_database = os.environ.get('MYSQL_DATABASE')
 
 # 检查必需配置
 if not all([mysql_host, mysql_user, mysql_password, mysql_database]):
     raise ValueError(
-        "缺少数据库配置环境变量。\n"
-        "请确保.env文件包含: MYSQL_HOST/MYSQL_WRITE_HOST, "
-        "MYSQL_WRITE_USER/MYSQL_USER, MYSQL_WRITE_PASSWORD/MYSQL_PASSWORD, MYSQL_DATABASE"
+        "缺少数据库连接配置。\n"
+        "请确保非密钥环境文件包含 MYSQL_HOST/MYSQL_WRITE_HOST, "
+        "MYSQL_WRITE_USER/MYSQL_USER, MYSQL_DATABASE，"
+        "并在密钥文件中提供 MYSQL_WRITE_PASSWORD。"
     )
 
 # 使用 SQLAlchemy URL 对象编码用户名、密码和数据库名中的保留字符。

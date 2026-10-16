@@ -45,7 +45,9 @@ RAG 评测是一个与生产聊天链路隔离的长任务工作流。它允许�
 - `frozen`：正式受控目录中的冻结来源，source identity 由内容哈希和正式配置共同确认。
 - `uploaded`：工作台登记的用户来源，只具备隔离评测资格。正式 release 的 `controlled_source_identity` 门禁仍要求受控正式来源。
 
-来源目录向 HTTP 客户端暴露摘要，不暴露宿主机路径。记录至少包含 `source_id`、`name`、`display_name`、`size_bytes`、`content_sha256`、`source_kind` 和可用时的 `page_count`。显示名保存在来源目录的 `source_metadata.json`，不改变 source ID、内容哈希或历史运行。
+来源目录向 HTTP 客户端暴露摘要，不暴露宿主机路径。记录至少包含 `source_id`、`name`、`display_name`、`size_bytes`、`content_sha256`、`source_kind`、`available` 和可用时的 `page_count`。显示名保存在来源目录的 `source_metadata.json`，不改变 source ID、内容哈希或历史运行。
+
+正式来源的目录记录只读 `production_defaults.json` 的 `source_id`、`sha256` 和 `page_count`，不扫描受控目录、不读取文件内容。受控文件缺失时该条目标记为 `available: false`、`size_bytes: null`，前端不展示这类条目；`source_ids` 摄取在返回路径前显式校验文件存在，缺失时报“该来源在当前环境不可用”。发布、评测与远程视觉授权仍使用严格语义的 `resolve_production_sources()`，不能用目录记录代替正式身份校验。
 
 默认上传目录是 `tmp/rag_eval/sources/`，可由 `RAG_EVAL_ROOT` 或 `RAG_EVAL_SOURCE_ROOT` 覆盖；单文件默认上限为 20 MiB。当前解析器支持：`.pdf`、`.txt`、`.md`、`.markdown`、`.csv`、`.xlsx`、`.png`、`.jpg`、`.jpeg`、`.webp`、`.tif`、`.tiff`。
 

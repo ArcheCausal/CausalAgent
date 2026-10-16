@@ -1,7 +1,8 @@
 """独立的 MySQL 数据库配置。
 
-该模块供 ``app.db`` 以及不需要模型能力的数据库消费者使用。它不能依赖
-``config.settings``，因此导入数据库访问层不会触发应用密钥或模型配置校验。
+该模块供 ``app.db`` 以及不需要模型能力的数据库消费者使用，不导入
+``config.settings``，也不检查模型地址和名称。但它调用的密钥加载器会校验全部
+``REQUIRED_SECRET_KEYS``，因此仍要求应用和模型等全局必需密钥存在于同一个文件中。
 """
 
 from __future__ import annotations
@@ -9,19 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import os
-from pathlib import Path
+
+from config.secret_file import get_secret, load_secrets, require_secret
 
 
-def _load_dotenv_if_available() -> None:
-    """在独立配置入口中加载项目根目录 ``.env``，不输出任何敏感值。"""
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        return
-
-    env_path = Path(__file__).resolve().parents[1] / ".env"
-    if env_path.exists():
-        load_dotenv(env_path)
+def _secret(name: str) -> str:
+    """从密钥文件读取数据库密码；缺失时直接失败，不回退到环境变量。"""
+    return require_secret(name)
 
 
 def _get_config(name: str, *, required: bool = True, default: str | None = None) -> str | None:
@@ -33,9 +28,8 @@ def _get_config(name: str, *, required: bool = True, default: str | None = None)
         error_msg = (
             f"配置错误: 缺少必需的环境变量 '{name}'。\n"
             f"请确保：\n"
-            f"  - Docker环境：在项目根目录的 .env 文件中设置 {name}=...\n"
-            f"  - 本地开发：在项目根目录的 .env 文件中设置 {name}=...\n"
-            f"  - 或直接设置系统环境变量\n"
+            f"  - 服务器部署：在部署包的非密钥环境文件中设置 {name}=...\n"
+            f"  - 本地开发：在本地环境文件或直接设置系统环境变量\n"
         )
         logging.error(error_msg)
         raise ValueError(error_msg)
@@ -96,8 +90,8 @@ class DatabaseConfig:
 
     @classmethod
     def from_env(cls) -> "DatabaseConfig":
-        """从环境变量加载数据库配置，不读取应用或模型配置。"""
-        _load_dotenv_if_available()
+        """加载数据库配置：连接参数来自环境变量，密码只来自密钥文件。"""
+        load_secrets()
 
         legacy_host = _get_config("MYSQL_HOST", required=False)
         write_host = _get_config(
@@ -111,34 +105,24 @@ class DatabaseConfig:
             )
 
         user = _get_config("MYSQL_USER", required=False)
-        password = _get_config("MYSQL_PASSWORD", required=False)
+        password = _secret("MYSQL_PASSWORD")
         write_user = _get_config(
             "MYSQL_WRITE_USER",
             required=False,
             default=user,
         )
-        write_password = _get_config(
-            "MYSQL_WRITE_PASSWORD",
-            required=False,
-            default=password,
-        )
+        write_password = _secret("MYSQL_WRITE_PASSWORD")
         read_user = _get_config(
             "MYSQL_READ_USER",
             required=False,
             default=user,
         )
-        read_password = _get_config(
-            "MYSQL_READ_PASSWORD",
-            required=False,
-            default=password,
-        )
+        read_password = _secret("MYSQL_READ_PASSWORD")
         missing_credentials = [
             name
             for name, value in {
                 "MYSQL_WRITE_USER 或 MYSQL_USER": write_user,
-                "MYSQL_WRITE_PASSWORD 或 MYSQL_PASSWORD": write_password,
                 "MYSQL_READ_USER 或 MYSQL_USER": read_user,
-                "MYSQL_READ_PASSWORD 或 MYSQL_PASSWORD": read_password,
             }.items()
             if not value
         ]
@@ -163,10 +147,8 @@ class DatabaseConfig:
                 "MYSQL_REPLICA_STATUS_USER",
                 required=False,
             ),
-            MYSQL_REPLICA_STATUS_PASSWORD=_get_config(
-                "MYSQL_REPLICA_STATUS_PASSWORD",
-                required=False,
-            ),
+            # 复制状态账号是可选能力：缺少密码时 eventual 读回退主库，因此不强制存在。
+            MYSQL_REPLICA_STATUS_PASSWORD=get_secret("MYSQL_REPLICA_STATUS_PASSWORD"),
             MYSQL_DATABASE=_get_config("MYSQL_DATABASE"),
             MYSQL_POOL_SIZE_WRITE=_int_env("MYSQL_POOL_SIZE_WRITE", 5),
             MYSQL_POOL_SIZE_READ=_int_env("MYSQL_POOL_SIZE_READ", 5),

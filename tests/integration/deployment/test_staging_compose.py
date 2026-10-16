@@ -35,7 +35,11 @@ def _staging_config() -> dict:
             "json",
         ],
         cwd=REPO_ROOT,
-        env=os.environ.copy(),
+        env={
+            **os.environ,
+            # Compose 校验只解析密钥文件的挂载路径；使用仓库里的测试密钥文件。
+            "CAUSALAGENT_SECRET_FILE": str(REPO_ROOT / "tests/unit-test-secrets.env"),
+        },
         capture_output=True,
         text=True,
     )
@@ -129,6 +133,33 @@ def test_staging_observability_labels_and_private_networks_are_separate():
     assert "rag_eval_staging_observability" in services["grafana"]["networks"]
 
 
+def test_staging_cdfm_weights_are_seeded_into_a_read_only_named_volume():
+    """CDFM 权重由一次性 seed 服务入卷，causal-mcp 只读挂载且禁用联网。"""
+    config = _staging_config()
+    services = config["services"]
+
+    assert "cdfm-weights-seed" in services
+    seed = services["cdfm-weights-seed"]
+    assert seed["image"] == services["causal-mcp"]["image"]
+    seed_mounts = [
+        mount for mount in seed["volumes"] if mount["target"] == "/opt/cdfm-weights"
+    ]
+    assert len(seed_mounts) == 1
+    assert seed_mounts[0]["type"] == "volume"
+    assert seed_mounts[0]["source"] == "rag_eval_staging_cdfm_weights"
+
+    mcp = services["causal-mcp"]
+    assert mcp["environment"]["CDFM_MODEL_PATH"] == "/opt/cdfm-weights"
+    assert mcp["environment"]["HF_HUB_OFFLINE"] == "1"
+    mcp_mounts = [
+        mount for mount in mcp["volumes"] if mount["target"] == "/opt/cdfm-weights"
+    ]
+    assert len(mcp_mounts) == 1
+    assert mcp_mounts[0]["read_only"] is True
+    assert mcp["depends_on"]["cdfm-weights-seed"]["condition"] == "service_completed_successfully"
+    assert "rag_eval_staging_cdfm_weights" in config["volumes"]
+
+
 def test_search_embedding_storage_and_secret_exclusions_are_configured():
     config = _staging_config()
     services = config["services"]
@@ -137,12 +168,18 @@ def test_search_embedding_storage_and_secret_exclusions_are_configured():
         environment = services[service_name]["environment"]
         assert environment["WEB_SEARCH_PROVIDER"] == "searxng"
         assert environment["SEARXNG_URL"] == "http://searxng:8080"
-        assert "EMBEDDING_API_KEY" in environment
+        # embedding 密钥只在服务器密钥文件；地址与模型名仍在非密钥环境变量。
         assert "EMBEDDING_BASE_URL" in environment
         assert "EMBEDDING_MODEL" in environment
+        assert "EMBEDDING_API_KEY" not in environment
 
-    assert services["grafana"]["environment"]["GF_SECURITY_ADMIN_PASSWORD"]
-    assert services["searxng"]["environment"]["SEARXNG_SECRET"]
+    # Grafana 与 SearXNG 的密码由容器启动适配脚本从密钥文件导出，不再作为环境变量出现在 Compose 配置。
+    assert "GF_SECURITY_ADMIN_PASSWORD" not in services["grafana"]["environment"]
+    assert "SEARXNG_SECRET" not in services["searxng"].get("environment", {})
+    assert config["secrets"]["causalagent_env"]
+    for service_name in ("app", "worker", "causal-mcp", "grafana", "searxng"):
+        mounts = services[service_name].get("secrets") or []
+        assert any(item["source"] == "causalagent_env" for item in mounts), service_name
     assert any(
         mount["target"] == "/etc/searxng"
         and Path(mount["source"]) == (REPO_ROOT / "deploy/staging/searxng/config").resolve()
@@ -211,3 +248,18 @@ def test_publish_workflow_is_manual_develop_only_and_does_not_deploy_or_export_i
     assert "upload-artifact" not in workflow
     assert "docker save" not in workflow
     assert "ssh " not in workflow.lower()
+
+
+def test_staging_and_production_never_mount_the_repository_source_tree():
+    """服务器只部署部署包；预发与生产 Compose 不得挂载仓库源码目录。"""
+    allowed_prefixes = ("./deploy/", "./observability/")
+    for filename in ("docker-compose.staging.yml", "docker-compose.prod.yml"):
+        compose = (REPO_ROOT / filename).read_text(encoding="utf-8")
+        for line in compose.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("- ") or ":" not in stripped:
+                continue
+            source = stripped[2:].split(":", 1)[0]
+            if not source.startswith("./"):
+                continue
+            assert source.startswith(allowed_prefixes), f"{filename} mounts repository path: {source}"

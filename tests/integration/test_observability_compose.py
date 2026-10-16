@@ -40,7 +40,9 @@ def test_observability_network_ports_and_password_boundary():
 
     assert "observability_network" in compose
     assert '"127.0.0.1:3000:3000"' in grafana
-    assert "GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set" in grafana
+    # Grafana 管理员密码只来自密钥文件，由适配脚本导出官方环境变量。
+    assert "export_secret GRAFANA_ADMIN_PASSWORD GF_SECURITY_ADMIN_PASSWORD" in grafana
+    assert "GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD" not in grafana
     assert "GF_USERS_DEFAULT_LANGUAGE: zh-Hans" in grafana
     # Grafana 在开发环境同样以 /grafana/ 为子路径，浏览器访问 /grafana/ 入口。
     assert "GF_SERVER_ROOT_URL: /grafana/" in grafana

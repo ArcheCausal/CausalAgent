@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from dotenv import load_dotenv
 import chromadb
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyMuPDFLoader, PyPDFLoader
@@ -12,12 +13,6 @@ from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-try:
-    from dotenv import load_dotenv
-except ImportError:  # pragma: no cover - python-dotenv 是可选依赖
-    load_dotenv = None
-
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parents[1]
@@ -36,8 +31,6 @@ MEDICAL_CORPUS_PATH = Path(MEDICAL_KNOWLEDGE_BUILD_CONFIG["corpus_path"])
 
 def _load_project_env() -> None:
     """加载项目根目录 .env，便于本地填写 API embedding 配置。"""
-    if load_dotenv is None:
-        return
     env_path = PROJECT_ROOT / ".env"
     if env_path.exists():
         load_dotenv(dotenv_path=env_path, override=False)

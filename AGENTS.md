@@ -47,12 +47,14 @@ AGENTS.md 只写“修改时必须怎么做”的执行约束，不复制完整�
 - admin-frontend/AGENTS.md：TypeScript、管理员 API、构建和浏览器验证。
 - observability/AGENTS.md：共享日志运行时、事件目录、降噪、脱敏和采集拓扑。
 - packages/design-system/AGENTS.md：设计 token、品牌基础样式、共享组件契约和本包自检。
+- tests/AGENTS.md：测试分层归属、真实依赖取证、默认执行范围，以及测试与 loadtest 的目录边界。
+- loadtest/AGENTS.md：压测客户端各目录用途、凭据与产物落盘位置、入库边界，以及报告归档与清理方式。
 
 ## 跨模块不可省略的约束
 
 - 修改 Job 或文件流程时，必须核对 Session 真实存在/归属、analysis_job_inputs 输入账本、文件快照、active Job 唯一约束、worker lease/fencing、SSE Last-Event-ID 和 checkpoint cleanup outbox。
 - 修改数据库 schema、读写路径或 Compose 时，必须分别核对 migration、check_database_readiness()、strong/eventual read、主从回退、PostgreSQL checkpoint 和 Docker 服务依赖。
-- 修改多模态索引目录的挂载、发布写入位置或容器卷时，必须核对 Agent/knowledge_base/multimodal_indexes 的双重角色（运行期读取与发布写入）、命名卷与宿主 release 的同步方向、multimodal_runtime/active_index.json 与卷内内容的一致性、readiness 检查与实际打开向量库的差异，并同步 Document/development/deployment.md 的挂载说明。
+- 修改多模态索引目录的挂载、发布写入位置或容器卷时，必须核对 正式索引的存储位置（开发与兼容副本直接挂载仓库目录，预发与生产使用 rag_formal 命名卷）、active pointer 与索引内容的一致性、readiness 检查与实际打开向量库的差异，并同步 Document/development/deployment.md 的挂载说明。
 - 修改 Agent、MCP、RAG 或 worker 初始化时，必须核对 worker runtime/bootstrap、slot 资源、显式 State 路由、结构化输出配置、工具失败路径和公共事件适配器。
 - 修改管理员后端或前端时，必须核对实时主库授权、CSRF、request ID、分页上限、敏感读取审计、受控写入幂等和 401/403/empty/error 状态。
 - 修改目录、启动方式、schema 或部署事实时，必须同步检查唯一权威 Document/ 页面和局部 AGENTS.md。

@@ -1,54 +1,76 @@
 # 预发 V1：与生产目标一致的 MySQL 主从 + PostgreSQL checkpoint 拓扑。
 # 仅能搭配隔离 `.env.staging` 使用；每个 Python 进程启动前都会执行环境门禁。
+secrets:
+  # 服务器上的唯一密钥文件；只读挂载到 /run/secrets/causalagent.env。
+  causalagent_env:
+    file: ${CAUSALAGENT_SECRET_FILE:-/etc/causalagent/secrets/causalagent.env}
+
 services:
   mysql-primary:
+    group_add:
+      - "3000"
     image: ${STAGING_MYSQL_PRIMARY_IMAGE:?STAGING_MYSQL_PRIMARY_IMAGE must be an immutable image digest}
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-rag_eval_staging}
       MYSQL_USER: ${MYSQL_USER:?MYSQL_USER is required}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
       MYSQL_WRITE_USER: ${MYSQL_WRITE_USER:?MYSQL_WRITE_USER is required}
-      MYSQL_WRITE_PASSWORD: ${MYSQL_WRITE_PASSWORD:?MYSQL_WRITE_PASSWORD is required}
       MYSQL_READ_USER: ${MYSQL_READ_USER:?MYSQL_READ_USER is required}
-      MYSQL_READ_PASSWORD: ${MYSQL_READ_PASSWORD:?MYSQL_READ_PASSWORD is required}
       MYSQL_REPLICA_STATUS_USER: ${MYSQL_REPLICA_STATUS_USER:?MYSQL_REPLICA_STATUS_USER is required}
-      MYSQL_REPLICA_STATUS_PASSWORD: ${MYSQL_REPLICA_STATUS_PASSWORD:?MYSQL_REPLICA_STATUS_PASSWORD is required}
       MYSQL_REPLICATION_USER: ${MYSQL_REPLICATION_USER:-replica}
-      MYSQL_REPLICATION_PASSWORD: ${MYSQL_REPLICATION_PASSWORD:?MYSQL_REPLICATION_PASSWORD is required}
-    volumes: [rag_eval_staging_mysql_primary:/var/lib/mysql]
+    volumes:
+      - rag_eval_staging_mysql_primary:/var/lib/mysql
+      - ./deploy/scripts/secret-env.sh:/opt/causalagent/secret-env.sh:ro
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     networks: [rag_eval_staging]
     healthcheck:
-      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping --protocol=tcp -h 127.0.0.1 -P 3306 -u root"]
+      test: ["CMD-SHELL", ". /opt/causalagent/secret-env.sh && MYSQL_PWD=\"$$(secret_value MYSQL_ROOT_PASSWORD)\" mysqladmin ping --protocol=tcp -h 127.0.0.1 -P 3306 -u root"]
       interval: 10s
       timeout: 5s
       retries: 10
 
   mysql-replica:
+    group_add:
+      - "3000"
     image: ${STAGING_MYSQL_REPLICA_IMAGE:?STAGING_MYSQL_REPLICA_IMAGE must be an immutable image digest}
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
       MYSQL_REPLICATION_USER: ${MYSQL_REPLICATION_USER:-replica}
-      MYSQL_REPLICATION_PASSWORD: ${MYSQL_REPLICATION_PASSWORD:?MYSQL_REPLICATION_PASSWORD is required}
       MYSQL_PRIMARY_HOST: mysql-primary
       MYSQL_PRIMARY_PORT: "3306"
-    volumes: [rag_eval_staging_mysql_replica:/var/lib/mysql]
+    volumes:
+      - rag_eval_staging_mysql_replica:/var/lib/mysql
+      - ./deploy/scripts/secret-env.sh:/opt/causalagent/secret-env.sh:ro
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     networks: [rag_eval_staging]
     depends_on:
       mysql-primary: {condition: service_healthy}
     healthcheck:
-      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping --protocol=tcp -h 127.0.0.1 -P 3306 -u root"]
+      test: ["CMD-SHELL", ". /opt/causalagent/secret-env.sh && MYSQL_PWD=\"$$(secret_value MYSQL_ROOT_PASSWORD)\" mysqladmin ping --protocol=tcp -h 127.0.0.1 -P 3306 -u root"]
       interval: 10s
       timeout: 5s
       retries: 10
 
   postgres-checkpoint:
-    image: postgres:16-alpine
+    group_add:
+      - "3000"
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
     environment:
       POSTGRES_DB: ${CHECKPOINT_POSTGRES_DATABASE:-rag_eval_staging_checkpoint}
       POSTGRES_USER: ${CHECKPOINT_POSTGRES_USER:?CHECKPOINT_POSTGRES_USER is required}
-      POSTGRES_PASSWORD: ${CHECKPOINT_POSTGRES_PASSWORD:?CHECKPOINT_POSTGRES_PASSWORD is required}
-    volumes: [rag_eval_staging_postgres_checkpoint:/var/lib/postgresql/data]
+    # 官方入口需要的密码由适配脚本从密钥文件导出，容器本身不认识项目自定义格式。
+    command:
+      - sh
+      - -c
+      - . /opt/causalagent/secret-env.sh && export_secret CHECKPOINT_POSTGRES_PASSWORD POSTGRES_PASSWORD && exec docker-entrypoint.sh postgres
+    volumes:
+      - rag_eval_staging_postgres_checkpoint:/var/lib/postgresql/data
+      - ./deploy/scripts/secret-env.sh:/opt/causalagent/secret-env.sh:ro
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     networks: [rag_eval_staging]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
@@ -65,21 +87,16 @@ services:
     command: ["sh", "-c", "python scripts/staging_environment_guard.py && exec python -m Database.bootstrap"]
     environment: &app_environment
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME is required}
-      STAGING_VOLUME_NAMES: rag_eval_staging_mysql_primary,rag_eval_staging_mysql_replica,rag_eval_staging_postgres_checkpoint,rag_eval_staging_runs,rag_eval_staging_sources,rag_eval_staging_datasets,rag_eval_staging_gateway_logs,rag_eval_staging_artifacts,rag_eval_staging_reports,rag_eval_staging_searxng_cache,rag_eval_staging_valkey,rag_eval_staging_loki,rag_eval_staging_alloy_positions,rag_eval_staging_grafana,kb_multimodal_indexes_staging
+      STAGING_VOLUME_NAMES: rag_eval_staging_mysql_primary,rag_eval_staging_mysql_replica,rag_eval_staging_postgres_checkpoint,rag_eval_staging_formal,rag_eval_staging_eval,rag_eval_staging_models,rag_eval_staging_cdfm_weights,rag_eval_staging_gateway_logs,rag_eval_staging_searxng_cache,rag_eval_staging_valkey,rag_eval_staging_loki,rag_eval_staging_alloy_positions,rag_eval_staging_grafana
       MYSQL_HOST: mysql-primary
       MYSQL_WRITE_HOST: mysql-primary
       MYSQL_READ_HOSTS: mysql-replica
       MYSQL_PORT: "3306"
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-rag_eval_staging}
       MYSQL_USER: ${MYSQL_USER:?MYSQL_USER is required}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
       MYSQL_WRITE_USER: ${MYSQL_WRITE_USER:?MYSQL_WRITE_USER is required}
-      MYSQL_WRITE_PASSWORD: ${MYSQL_WRITE_PASSWORD:?MYSQL_WRITE_PASSWORD is required}
       MYSQL_READ_USER: ${MYSQL_READ_USER:?MYSQL_READ_USER is required}
-      MYSQL_READ_PASSWORD: ${MYSQL_READ_PASSWORD:?MYSQL_READ_PASSWORD is required}
       MYSQL_REPLICA_STATUS_USER: ${MYSQL_REPLICA_STATUS_USER:?MYSQL_REPLICA_STATUS_USER is required}
-      MYSQL_REPLICA_STATUS_PASSWORD: ${MYSQL_REPLICA_STATUS_PASSWORD:?MYSQL_REPLICA_STATUS_PASSWORD is required}
       MYSQL_POOL_SIZE_WRITE: ${MYSQL_POOL_SIZE_WRITE:-5}
       MYSQL_POOL_SIZE_READ: ${MYSQL_POOL_SIZE_READ:-5}
       MYSQL_CONNECT_TIMEOUT_SECONDS: ${MYSQL_CONNECT_TIMEOUT_SECONDS:-5}
@@ -92,15 +109,12 @@ services:
       CHECKPOINT_POSTGRES_PORT: "5432"
       CHECKPOINT_POSTGRES_DATABASE: ${CHECKPOINT_POSTGRES_DATABASE:-rag_eval_staging_checkpoint}
       CHECKPOINT_POSTGRES_USER: ${CHECKPOINT_POSTGRES_USER:?CHECKPOINT_POSTGRES_USER is required}
-      CHECKPOINT_POSTGRES_PASSWORD: ${CHECKPOINT_POSTGRES_PASSWORD:?CHECKPOINT_POSTGRES_PASSWORD is required}
       CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS: ${CHECKPOINT_POSTGRES_CONNECT_TIMEOUT_SECONDS:-5}
       CHECKPOINT_POSTGRES_POOL_MIN_SIZE: ${CHECKPOINT_POSTGRES_POOL_MIN_SIZE:-1}
       CHECKPOINT_POSTGRES_POOL_MAX_SIZE: ${CHECKPOINT_POSTGRES_POOL_MAX_SIZE:-5}
       AGENT_PERSISTENCE_CLEANUP_POLL_INTERVAL_SECONDS: ${AGENT_PERSISTENCE_CLEANUP_POLL_INTERVAL_SECONDS:-1}
       AGENT_PERSISTENCE_CLEANUP_HEARTBEAT_INTERVAL_SECONDS: ${AGENT_PERSISTENCE_CLEANUP_HEARTBEAT_INTERVAL_SECONDS:-10}
       AGENT_PERSISTENCE_CLEANUP_LEASE_SECONDS: ${AGENT_PERSISTENCE_CLEANUP_LEASE_SECONDS:-300}
-      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
-      API_KEY: ${API_KEY:?API_KEY is required}
       BASE_URL: ${BASE_URL:?BASE_URL is required}
       MODEL: ${MODEL:?MODEL is required}
       FLASK_ENV: staging
@@ -119,11 +133,9 @@ services:
       DB_MONITOR_SLOW_QUERY_WARNING_DELTA: ${DB_MONITOR_SLOW_QUERY_WARNING_DELTA:-1}
       DB_MONITOR_INTEGRITY_ENABLED: ${DB_MONITOR_INTEGRITY_ENABLED:-false}
       DB_MONITOR_INTEGRITY_INTERVAL_SECONDS: ${DB_MONITOR_INTEGRITY_INTERVAL_SECONDS:-86400}
-      LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-CausalAgent-Default-Project}
       WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-searxng}
       SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
-      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3.7-text-embedding}
       CHAT_FRONTEND_DIST_DIR: ${CHAT_FRONTEND_DIST_DIR:-/opt/causalagent-chat}
@@ -144,7 +156,6 @@ services:
       JOB_CHAT_HISTORY_LIMIT: ${JOB_CHAT_HISTORY_LIMIT:-50}
       MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-20}
       VISION_ALLOW_REMOTE_DATA: "true"
-      VISION_API_KEY: ${VISION_API_KEY:?VISION_API_KEY is required for staging remote VLM}
       VISION_BASE_URL: ${VISION_BASE_URL:?VISION_BASE_URL is required for staging remote VLM}
       VISION_MODEL: ${VISION_MODEL:-qwen-vl-plus}
       RAG_EVAL_EVALUATION_WORKERS: "${RAG_EVAL_EVALUATION_WORKERS:-5}"
@@ -159,7 +170,14 @@ services:
       RAG_EVAL_EVALUATION_JOB_STALE_AFTER_SECONDS: ${RAG_EVAL_EVALUATION_JOB_STALE_AFTER_SECONDS:-120}
       RAG_EVAL_ROOT: /app/tmp/rag_eval
       RAG_EVAL_DATASET_ROOT: /app/tmp/rag_eval/datasets/registered
+      # 正式 RAG 索引与发布指针位于独立命名卷；评测产物位于评测卷，二者互不影响。
+      MULTIMODAL_INDEX_ROOT: /var/lib/causalagent/rag/formal/indexes
+      MULTIMODAL_ACTIVE_INDEX_CONFIG: /var/lib/causalagent/rag/formal/active_index.json
+      RAG_PRODUCTION_CONFIG_PATH: /var/lib/causalagent/rag/formal/production_rag_config.json
       JOB_DRAIN_TIMEOUT_SECONDS: ${JOB_DRAIN_TIMEOUT_SECONDS:-60}
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     networks: [rag_eval_staging]
     depends_on:
       mysql-primary: {condition: service_healthy}
@@ -179,14 +197,8 @@ services:
       MYSQL_PORT: "3306"
       MYSQL_DATABASE: ${MYSQL_DATABASE:-rag_eval_staging}
       MYSQL_USER: ${MYSQL_USER:?MYSQL_USER is required}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
       MYSQL_WRITE_USER: ${MYSQL_WRITE_USER:?MYSQL_WRITE_USER is required}
-      MYSQL_WRITE_PASSWORD: ${MYSQL_WRITE_PASSWORD:?MYSQL_WRITE_PASSWORD is required}
       MYSQL_READ_USER: ${MYSQL_READ_USER:?MYSQL_READ_USER is required}
-      MYSQL_READ_PASSWORD: ${MYSQL_READ_PASSWORD:?MYSQL_READ_PASSWORD is required}
-      CAUSAL_MCP_SERVICE_TOKEN: ${CAUSAL_MCP_SERVICE_TOKEN:?CAUSAL_MCP_SERVICE_TOKEN is required}
-      CAUSAL_MCP_SIGNING_KEY_CURRENT: ${CAUSAL_MCP_SIGNING_KEY_CURRENT:?CAUSAL_MCP_SIGNING_KEY_CURRENT is required}
-      CAUSAL_MCP_SIGNING_KEY_PREVIOUS: ${CAUSAL_MCP_SIGNING_KEY_PREVIOUS:-}
       CAUSAL_MCP_SIGNING_KEY_ID: ${CAUSAL_MCP_SIGNING_KEY_ID:-current}
       ENVIRONMENT: staging
       CAUSAL_MCP_PROCESS_WORKERS: ${CAUSAL_MCP_PROCESS_WORKERS:-2}
@@ -194,20 +206,46 @@ services:
       CAUSAL_MCP_ENQUEUE_TIMEOUT_SECONDS: ${CAUSAL_MCP_ENQUEUE_TIMEOUT_SECONDS:-5}
       CAUSAL_MCP_ALGORITHM_DEADLINE_SECONDS: ${CAUSAL_MCP_ALGORITHM_DEADLINE_SECONDS:-600}
       CAUSAL_MCP_SLOW_LOG_SECONDS: ${CAUSAL_MCP_SLOW_LOG_SECONDS:-60}
-      CDFM_MODEL_PATH: ${CDFM_MODEL_PATH:-DMIRLAB/CDFM}
+      CDFM_MODEL_PATH: ${CDFM_MODEL_PATH:-/opt/cdfm-weights}
+      HF_HUB_OFFLINE: "1"
       OMP_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
       MKL_NUM_THREADS: "1"
+    volumes:
+      - rag_eval_staging_cdfm_weights:/opt/cdfm-weights:ro
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     networks: [rag_eval_staging]
     depends_on:
       mysql-primary: {condition: service_healthy}
       db-bootstrap: {condition: service_completed_successfully}
+      cdfm-weights-seed: {condition: service_completed_successfully}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=2)"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 15s
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+  # 一次性入卷服务：把镜像内已校验的 CDFM 权重同步进命名卷；
+  # version.json 与镜像一致时直接退出，不做重复拷贝。
+  cdfm-weights-seed:
+    image: ${STAGING_MCP_IMAGE:?STAGING_MCP_IMAGE must be an immutable image digest}
+    labels:
+      causalagent_observability: "true"
+      causalagent_service: maintenance
+      causalagent_environment: staging
+    command: ["sh", "-c", "python scripts/staging_environment_guard.py && exec python -m Agent.CausalAgentMCP.cdfm_weights seed --source /opt/cdfm-weights-image --target /opt/cdfm-weights"]
+    environment:
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME is required}
+      STAGING_VOLUME_NAMES: rag_eval_staging_mysql_primary,rag_eval_staging_mysql_replica,rag_eval_staging_postgres_checkpoint,rag_eval_staging_formal,rag_eval_staging_eval,rag_eval_staging_models,rag_eval_staging_cdfm_weights,rag_eval_staging_gateway_logs,rag_eval_staging_searxng_cache,rag_eval_staging_valkey,rag_eval_staging_loki,rag_eval_staging_alloy_positions,rag_eval_staging_grafana
+    volumes:
+      - rag_eval_staging_cdfm_weights:/opt/cdfm-weights
+    networks: [rag_eval_staging]
     logging:
       driver: json-file
       options: {max-size: 10m, max-file: "3"}
@@ -221,22 +259,18 @@ services:
     command: ["sh", "-c", "python scripts/staging_environment_guard.py && exec gunicorn --bind 0.0.0.0:5001 --workers 1 --threads 12 --timeout 120 CausalAgent:app"]
     environment: *app_environment
     volumes:
-      - rag_eval_staging_runs:/app/tmp/rag_eval/runs
-      - rag_eval_staging_sources:/app/tmp/rag_eval/sources
-      - rag_eval_staging_datasets:/app/tmp/rag_eval/datasets/registered
-      - rag_eval_staging_artifacts:/app/tmp/rag_eval/artifacts
-      - rag_eval_staging_reports:/app/tmp/rag_eval/reports
-      - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
-      - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
-      - kb_multimodal_indexes_staging:/app/Agent/knowledge_base/multimodal_indexes
-      - ./Agent/knowledge_base/multimodal_runtime:/app/Agent/knowledge_base/multimodal_runtime:ro
-      - ./Agent/knowledge_base/multimodal_assets:/app/Agent/knowledge_base/multimodal_assets:ro
-      - ./Agent/knowledge_base/rag/runtime:/app/Agent/knowledge_base/rag/runtime:ro
+      - rag_eval_staging_eval:/app/tmp/rag_eval
+      - rag_eval_staging_models:/app/Agent/knowledge_base/models
+      - ${CAUSALAGENT_KB_DB_DIR:-/var/lib/causalagent/kb/db}:/app/Agent/knowledge_base/db
+      - rag_eval_staging_formal:/var/lib/causalagent/rag/formal
+      - ${CAUSALAGENT_KB_ASSETS_DIR:-/var/lib/causalagent/kb/assets}:/app/Agent/knowledge_base/multimodal_assets:ro
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     networks: [rag_eval_staging]
     depends_on:
       mysql-replica: {condition: service_healthy}
       db-bootstrap: {condition: service_completed_successfully}
-      kb-indexes-sync: {condition: service_completed_successfully}
     logging: &bounded_logging
       driver: json-file
       options: {max-size: 10m, max-file: "3"}
@@ -251,8 +285,6 @@ services:
     environment:
       <<: *app_environment
       CAUSAL_MCP_URL: http://causal-mcp:8080/mcp
-      CAUSAL_MCP_SERVICE_TOKEN: ${CAUSAL_MCP_SERVICE_TOKEN:?CAUSAL_MCP_SERVICE_TOKEN is required}
-      CAUSAL_MCP_SIGNING_KEY_CURRENT: ${CAUSAL_MCP_SIGNING_KEY_CURRENT:?CAUSAL_MCP_SIGNING_KEY_CURRENT is required}
       CAUSAL_MCP_SIGNING_KEY_ID: ${CAUSAL_MCP_SIGNING_KEY_ID:-current}
       CAUSAL_MCP_CLIENT_POOL_SIZE: ${CAUSAL_MCP_CLIENT_POOL_SIZE:-2}
       CAUSAL_MCP_MAX_IN_FLIGHT_PER_CLIENT: ${CAUSAL_MCP_MAX_IN_FLIGHT_PER_CLIENT:-1}
@@ -266,20 +298,19 @@ services:
       CAUSAL_MCP_HTTP_READ_TIMEOUT_SECONDS: ${CAUSAL_MCP_HTTP_READ_TIMEOUT_SECONDS:-660}
       DEEP_AGENT_MODEL: ${DEEP_AGENT_MODEL:?DEEP_AGENT_MODEL is required}
       DEEP_AGENT_BASE_URL: ${DEEP_AGENT_BASE_URL:?DEEP_AGENT_BASE_URL is required}
-      DEEP_AGENT_API_KEY: ${DEEP_AGENT_API_KEY:?DEEP_AGENT_API_KEY is required}
       DEEP_AGENT_CONTEXT_WINDOW_TOKENS: ${DEEP_AGENT_CONTEXT_WINDOW_TOKENS:?DEEP_AGENT_CONTEXT_WINDOW_TOKENS is required}
     volumes:
-      - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
-      - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
-      - kb_multimodal_indexes_staging:/app/Agent/knowledge_base/multimodal_indexes
-      - ./Agent/knowledge_base/multimodal_runtime:/app/Agent/knowledge_base/multimodal_runtime:ro
-      - ./Agent/knowledge_base/multimodal_assets:/app/Agent/knowledge_base/multimodal_assets:ro
-      - ./Agent/knowledge_base/rag/runtime:/app/Agent/knowledge_base/rag/runtime:ro
+      - rag_eval_staging_models:/app/Agent/knowledge_base/models
+      - ${CAUSALAGENT_KB_DB_DIR:-/var/lib/causalagent/kb/db}:/app/Agent/knowledge_base/db
+      - rag_eval_staging_formal:/var/lib/causalagent/rag/formal
+      - ${CAUSALAGENT_KB_ASSETS_DIR:-/var/lib/causalagent/kb/assets}:/app/Agent/knowledge_base/multimodal_assets:ro
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     networks: [rag_eval_staging]
     depends_on:
       db-bootstrap: {condition: service_completed_successfully}
       causal-mcp: {condition: service_healthy}
-      kb-indexes-sync: {condition: service_completed_successfully}
     stop_grace_period: 75s
     logging: *bounded_logging
 
@@ -291,6 +322,9 @@ services:
       causalagent_environment: staging
     command: ["sh", "-c", "python scripts/staging_environment_guard.py && exec python -m Database.monitor_worker"]
     environment: *app_environment
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     networks: [rag_eval_staging]
     depends_on:
       db-bootstrap: {condition: service_completed_successfully}
@@ -304,6 +338,9 @@ services:
       causalagent_environment: staging
     command: ["sh", "-c", "python scripts/staging_environment_guard.py && exec python -m Database.agent_persistence_cleanup_worker"]
     environment: *app_environment
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     networks: [rag_eval_staging]
     depends_on:
       db-bootstrap: {condition: service_completed_successfully}
@@ -318,20 +355,20 @@ services:
     command: ["sh", "-c", "python scripts/staging_environment_guard.py && exec python -m app.rag_eval.worker"]
     environment: *app_environment
     volumes:
-      - rag_eval_staging_runs:/app/tmp/rag_eval/runs
-      - rag_eval_staging_sources:/app/tmp/rag_eval/sources
-      - rag_eval_staging_datasets:/app/tmp/rag_eval/datasets/registered
-      - rag_eval_staging_artifacts:/app/tmp/rag_eval/artifacts
-      - rag_eval_staging_reports:/app/tmp/rag_eval/reports
-      - ./Agent/knowledge_base/models:/app/Agent/knowledge_base/models:ro
-      - ./Agent/knowledge_base/db:/app/Agent/knowledge_base/db
+      - rag_eval_staging_eval:/app/tmp/rag_eval
+      - rag_eval_staging_models:/app/Agent/knowledge_base/models
+      - ${CAUSALAGENT_KB_DB_DIR:-/var/lib/causalagent/kb/db}:/app/Agent/knowledge_base/db
+      - rag_eval_staging_formal:/var/lib/causalagent/rag/formal
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     networks: [rag_eval_staging]
     depends_on:
       db-bootstrap: {condition: service_completed_successfully}
     logging: *bounded_logging
 
   gateway:
-    image: nginx:1.27-alpine
+    image: ${NGINX_IMAGE:-nginx:1.27-alpine}
     # nginx:alpine 无 logrotate/cron，轮转由容器内脚本执行（缺陷2修复）。
     command: ["sh", "/usr/local/bin/rotate_gateway_logs.sh"]
     ports: ["${STAGING_GATEWAY_PORT:-8088}:8080"]
@@ -348,14 +385,24 @@ services:
     logging: *bounded_logging
 
   searxng:
-    image: searxng/searxng:2026.8.21-bbb3c7d82
+    group_add:
+      - "3000"
+    image: ${SEARXNG_IMAGE:-searxng/searxng:2026.8.21-bbb3c7d82}
     restart: unless-stopped
     environment:
       SEARXNG_BASE_URL: http://searxng:8080/
-      SEARXNG_SECRET: ${SEARXNG_SECRET:?SEARXNG_SECRET is required}
+    # SearXNG 官方镜像读取 SEARXNG_SECRET 环境变量；由适配脚本从密钥文件导出。
+    entrypoint:
+      - /bin/sh
+      - -c
+      - . /opt/causalagent/secret-env.sh && require_secret_file_permissions && export_secret SEARXNG_SECRET SEARXNG_SECRET && exec /usr/local/searxng/entrypoint.sh
     volumes:
       - ./deploy/staging/searxng/config:/etc/searxng:ro
       - rag_eval_staging_searxng_cache:/var/cache/searxng
+      - ./deploy/scripts/secret-env.sh:/opt/causalagent/secret-env.sh:ro
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     depends_on:
       valkey: {condition: service_healthy}
     healthcheck:
@@ -374,7 +421,7 @@ services:
     logging: *bounded_logging
 
   valkey:
-    image: valkey/valkey:9-alpine
+    image: ${VALKEY_IMAGE:-valkey/valkey:9-alpine}
     command: valkey-server --save 30 1 --loglevel warning
     restart: unless-stopped
     volumes: [rag_eval_staging_valkey:/data]
@@ -387,7 +434,7 @@ services:
     logging: *bounded_logging
 
   loki:
-    image: grafana/loki:3.7.4
+    image: ${LOKI_IMAGE:-grafana/loki:3.7.4}
     command: -config.file=/etc/loki/config.yml
     volumes:
       - ./observability/loki/loki-config.yml:/etc/loki/config.yml:ro
@@ -399,7 +446,7 @@ services:
     logging: *bounded_logging
 
   alloy:
-    image: grafana/alloy:v1.18.0
+    image: ${ALLOY_IMAGE:-grafana/alloy:v1.18.0}
     command:
       - run
       - --server.http.listen-addr=0.0.0.0:12345
@@ -419,18 +466,28 @@ services:
     logging: *bounded_logging
 
   grafana:
-    image: grafana/grafana:13.1.1
+    group_add:
+      - "3000"
+    image: ${GRAFANA_IMAGE:-grafana/grafana:13.1.1}
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_USERS_DEFAULT_LANGUAGE: zh-Hans
       GF_SERVER_ROOT_URL: /grafana/
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    # Grafana 官方入口只读取环境变量；由适配脚本从同一个密钥文件导出密码。
+    entrypoint:
+      - sh
+      - -c
+      - . /opt/causalagent/secret-env.sh && require_secret_file_permissions && export_secret GRAFANA_ADMIN_PASSWORD GF_SECURITY_ADMIN_PASSWORD && exec /run.sh
     volumes:
       - rag_eval_staging_grafana:/var/lib/grafana
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./deploy/scripts/secret-env.sh:/opt/causalagent/secret-env.sh:ro
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     networks: [rag_eval_staging_observability]
     depends_on:
       loki: {condition: service_started}
@@ -439,33 +496,22 @@ services:
     restart: unless-stopped
     logging: *bounded_logging
 
-  kb-indexes-sync:
-    image: python:3.11-slim
-    container_name: causalagent_kb_indexes_sync_staging
-    volumes:
-      - ./Agent/knowledge_base/multimodal_indexes:/src:ro
-      - kb_multimodal_indexes_staging:/app/Agent/knowledge_base/multimodal_indexes
-    command:
-      - sh
-      - -c
-      - cp -a /src/. /app/Agent/knowledge_base/multimodal_indexes/
-    networks: [rag_eval_staging]
-    logging: *bounded_logging
-
 networks:
   rag_eval_staging: {driver: bridge}
   rag_eval_staging_observability: {driver: bridge, internal: true}
 
 volumes:
-  kb_multimodal_indexes_staging: {driver: local}
+  # 正式 RAG 数据（索引、active pointer、生产配置、隔离区、回滚审计）
+  rag_eval_staging_formal: {driver: local}
+  # 评测数据（runs、sources、datasets、artifacts、reports）
+  rag_eval_staging_eval: {driver: local}
+  # 模型缓存或模型文件
+  rag_eval_staging_models: {driver: local}
+  # CDFM 权重（由一次性 seed 服务从镜像只读副本同步）
+  rag_eval_staging_cdfm_weights: {driver: local}
   rag_eval_staging_mysql_primary: {driver: local}
   rag_eval_staging_mysql_replica: {driver: local}
   rag_eval_staging_postgres_checkpoint: {driver: local}
-  rag_eval_staging_runs: {driver: local}
-  rag_eval_staging_sources: {driver: local}
-  rag_eval_staging_datasets: {driver: local}
-  rag_eval_staging_artifacts: {driver: local}
-  rag_eval_staging_reports: {driver: local}
   rag_eval_staging_gateway_logs: {driver: local}
   rag_eval_staging_searxng_cache: {driver: local}
   rag_eval_staging_valkey: {driver: local}
