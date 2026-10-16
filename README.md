@@ -36,6 +36,19 @@ CausalAgent
 
 > [!IMPORTANT]
 > CausalAgent 仍然在开发当中，欢迎Stars催更
+>
+
+### 用户端展示
+<p align="center">
+  <img src="./README/website-home-2026-10.png" alt="CausalAgent 官网首页" width="850">
+</p>
+<p align="center">
+  <img src="./README/user-workspace-home-2026-10.png" alt="普通用户工作区首页" width="850">
+</p>
+<p align="center">
+  <img src="./README/user-analysis-report-2026-10.png" alt="工作区中的分析报告与图表" width="850">
+</p>
+
 
 ## 目录
 
@@ -44,7 +57,6 @@ CausalAgent
 - [WHY CausalAgent](#why-causalagent)
 - [技术栈](#技术栈)
 - [用户功能](#用户功能)
-  - [用户端展示](#用户端展示)
   - [核心功能](#核心功能)
   - [Agent 运行流程](#agent-运行流程)
   - [深度分析 Agent](#深度分析-agent)
@@ -70,6 +82,7 @@ CausalAgent
   - [windows部署](#windows部署)
 - [技术文档](#技术文档)
 - [贡献](#贡献)
+- [许可证与项目名称](#许可证与项目名称)
 - [Star History](#star-history)
 - [项目结构](#项目结构)
 
@@ -106,17 +119,6 @@ CausalAgent
 
 ## 用户功能
 
-### 用户端展示
-官网提供产品介绍、文档和更新日志；普通用户工作区用于发起分析、查看会话与报告。
-<p align="center">
-  <img src="./README/website-home-2026-10.png" alt="CausalAgent 官网首页" width="850">
-</p>
-<p align="center">
-  <img src="./README/user-workspace-home-2026-10.png" alt="普通用户工作区首页" width="850">
-</p>
-<p align="center">
-  <img src="./README/user-analysis-report-2026-10.png" alt="工作区中的分析报告与图表" width="850">
-</p>
 
 ### 核心功能
 
@@ -497,6 +499,10 @@ Release 包在构建时嵌入正式 HTTPS origin，强制关闭 debug 和开发�
 5. 等待 `Python syntax`、`Light tests` 和 `Pull request policy` 检查通过后再合并
 
 新建 Issue 时请使用仓库提供的 [`Issue Form`](.github/ISSUE_TEMPLATE/issue.yml)，按模板填写背景、问题描述、预期结果、复现步骤、验收标准和环境信息。除附件外的字段为 GitHub 原生必填项，但不限制填写内容；普通贡献者不能选择空白 Issue。
+
+## 许可证与项目名称
+
+CausalAgent 自有代码自本版本起按 GNU Affero General Public License v3.0（AGPL-3.0）许可，完整条款见 [`LICENSE`](LICENSE)。
 
 ## Star History
 <a href="https://www.star-history.com/?repos=ArcheCausal%2FCausalAgent&type=date&legend=top-left">

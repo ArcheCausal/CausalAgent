@@ -1,8 +1,8 @@
 # 构建与部署
 
-文档职责：记录 CausalAgent Docker 镜像构建、开发/生产 Compose 拓扑、初始化顺序和管理员静态产物的发布边界。
+文档职责：记录 CausalAgent Docker 镜像构建、开发/预发/生产 Compose 拓扑、测试预发操作流程、初始化顺序和管理员静态产物的发布边界。
 
-适用范围：修改 Dockerfile、Compose 服务、镜像启动命令、生产环境变量或发布流程时使用；数据库内部迁移和 checkpoint 细节见 [`../database/migrations-checkpoints.md`](../database/migrations-checkpoints.md)。
+适用范围：测试服务器首次部署和已有 staging 服务更新，以及修改 Dockerfile、Compose 服务、镜像启动命令、环境配置或发布流程时使用；数据库内部迁移和 checkpoint 细节见 [`../database/migrations-checkpoints.md`](../database/migrations-checkpoints.md)。
 
 ## 镜像构建
 
@@ -82,22 +82,139 @@ GitHub 当前的公开 Linux x64 标准 runner 配置为 4 核、16 GB 内存和
 
 不要在服务器以外复制密钥文件，也不要把它提交到 Git；`.gitignore` 会排除 `causalagent.env` 与 `deploy/secrets/*.env`，`.dockerignore` 也会排除环境文件与本地数据，避免本地构建时把它们放进镜像上下文。
 
-部署前先下载 Actions 制品并解压其中的 `.tar.gz`。`deploy.sh` 接收已经解压的目录，复制到 `/opt/causalagent/releases/<release_id>`，从清单生成 `images.env`，更新 `current`，再执行 Compose `pull` 和 `up -d`。下面以预发为例；生产使用 `docker-compose.prod.yml` 和相应服务器配置。两种环境必须使用不同的 Compose project、配置和数据卷。
+部署前先下载 Actions 制品并解压其中的 `.tar.gz`。`deploy.sh` 接收已经解压的目录，复制到调用者指定的 `<releases_dir>/<release_id>`，从清单生成 `images.env`，更新 `current`，再执行 Compose `pull` 和 `up -d`。测试服务器的完整命令见下方[测试预发操作流程](#测试预发操作流程)；生产使用 `docker-compose.prod.yml` 和相应服务器配置。两种环境必须使用不同的 Compose project、配置和数据卷。
+
+脚本不负责下载和解压制品、创建服务器配置、镜像仓库登录、旧 RAG 数据迁移或最终验收。它在 `pull/up` 前切换 `current`，失败时不会自动恢复链接。部署完成后按 [`release-acceptance.md`](release-acceptance.md) 选择明确的 Compose 文件执行检查。
+
+需要验证 Compose 合并后的部署契约时，使用 `docker compose config`；不要运行 `docker compose down -v`，它会删除预发数据库、checkpoint、搜索、观测和正式 RAG 数据卷。首次启动后还需在云安全组与主机防火墙核实只有 gateway 端口对公网开放。
+
+### 测试预发操作流程
+
+本节用于 Ubuntu 测试服务器首次部署或更新已有 staging 服务。镜像发布与制品生成沿用[部署包与发布清单](#部署包与发布清单)，密钥格式与读取机制沿用[服务器密钥文件](#服务器密钥文件)，详细验收沿用 [`release-acceptance.md`](release-acceptance.md)。以下命令在服务器同一个 root Bash 会话中按顺序执行；普通账号先执行 `sudo -i`，再设置本节变量。每一步成功后再继续，重新登录后需要重新设置变量。
+
+```mermaid
+flowchart LR
+    A[发布镜像并下载制品] --> B[上传并解压部署包]
+    B --> C[确认项目名并准备配置]
+    C --> D[核对原有数据与备份]
+    D --> E[deploy.sh 拉取并更新]
+    E --> F[检查状态并执行验收]
+```
+
+#### 1. 确认现有项目
+
+```bash
+docker compose ls
+```
+
+更新已有服务时，使用 `NAME` 列中的项目名，不能仅根据宿主文件夹名推断。例如现有输出为 `causalagent-staging running(15)`、配置文件为 `/opt/causalagent-staging/docker-compose.staging.yml`，后续继续使用 `causalagent-staging`。首次部署没有对应项目时，才自行确定一个独立的测试项目名。
+
+```bash
+export COMPOSE_PROJECT_NAME=causalagent-staging
+export RELEASES_DIR=/opt/causalagent-staging/releases
+```
+
+更新其他项目时替换上面两项。发布目录和 Compose 项目名是两个独立参数；脚本会创建版本子目录，不需要把部署包手工覆盖到旧目录。当前命名卷没有显式 `name`，实际卷名带项目名前缀；保持项目名还需保持对应卷定义，才能继续使用原卷。
+
+#### 2. 上传并解压制品
+
+在 Actions 中运行 `Publish staging images` 并等待自动打包成功，下载对应制品。外层 ZIP 包含内层 `tar.gz`、`images.lock.json` 与 `release.manifest.json`；镜像层由 Docker 从仓库拉取，不在部署包中。将 ZIP 上传到服务器 `/tmp`，以下发布标识仅作示例，更新时替换为本次制品名中的标识：
+
+```bash
+RELEASE_ID=2026.10.16-0b79676-38870125961-1
+ARCHIVE_DIR="/tmp/causalagent-artifact-$RELEASE_ID"
+export BUNDLE_DIR="/tmp/causalagent-$RELEASE_ID/bundle"
+mkdir -p "$ARCHIVE_DIR" "$BUNDLE_DIR"
+unzip "/tmp/causalagent-release-$RELEASE_ID.zip" -d "$ARCHIVE_DIR"
+tar -xzf "$ARCHIVE_DIR/causalagent-release-$RELEASE_ID.tar.gz" -C "$BUNDLE_DIR"
+test -f "$BUNDLE_DIR/release.manifest.json" && echo "manifest OK"
+test -f "$BUNDLE_DIR/scripts/deploy.sh" && echo "deploy.sh OK"
+test -f "$BUNDLE_DIR/docker-compose.staging.yml" && echo "staging compose OK"
+```
+
+服务器需已安装 Docker Engine、Compose 插件、Python 3、tar 和 unzip，并能访问镜像仓库。若本机已解开 ZIP，只需上传内层 `tar.gz` 并执行 `tar`；若部署包已经解压，直接将 `BUNDLE_DIR` 设置为包含上述三个文件的绝对目录，跳过解压。不要把 `verify.sh` 当作此时的预检入口，它依赖部署时才生成的 `images.env`。私有镜像需先在同一个 root 用户下执行 `docker login ghcr.io`，公开可匿名拉取的镜像无需登录。
+
+#### 3. 准备服务器配置
+
+| 文件 | 来源与用途 | 本节使用的服务器路径 |
+| --- | --- | --- |
+| 普通配置 | `deploy/config/production.env.example`；项目名、模型名、地址、数据库账号名和运行参数 | `/etc/causalagent/config/production.env` |
+| 密钥文件 | `deploy/secrets/causalagent.env.example`；密码、API key、令牌和签名密钥 | `/etc/causalagent/secrets/causalagent.env` |
+
+首次准备时从部署包的两个模板创建配置并填写真实值；已有文件时编辑现有文件，不用模板覆盖。普通配置中的 `COMPOSE_PROJECT_NAME` 必须与第 1 步一致，不能直接沿用模板的 `causalagent`。`production.env` 可以作为本次测试配置的文件名，环境由项目名、数据库、数据卷和所选 Compose 文件确定；若同一服务器还有生产服务，必须为两套服务配置不同的配置文件与密钥文件路径。
+
+从旧环境变量机制迁移时，只将密钥键及其现有值转入密钥文件；普通参数留在普通配置。沿用数据库现有密码及账户、数据库名，不能按新装模板重新随机生成；修改文件不会自动修改已初始化数据库的账户密码。新增键按模板补齐，已有应用签名和服务认证材料也应保留，轮换另行安排。
+
+文件管理器通常以 SSH 普通账号上传，具有 sudo 权限不代表上传进程拥有 root 权限。优先在服务器编辑真实密钥；若配置已准备好且已上传到 `/tmp/upload`，先保留现有目标文件的受限备份，再在 root 终端安装：
+
+```bash
+mkdir -p /etc/causalagent/config /etc/causalagent/secrets "$RELEASES_DIR"
+install -D -o root -g root -m 0640 \
+  /tmp/upload/production.env /etc/causalagent/config/production.env
+install -D -o root -g 3000 -m 0640 \
+  /tmp/upload/causalagent.env /etc/causalagent/secrets/causalagent.env
+chmod 0600 /tmp/upload/production.env /tmp/upload/causalagent.env
+```
+
+`install` 会覆盖同名目标，因此只在确认本次上传内容和备份后执行；已在目标路径编辑完成则跳过。源路径必须以 `/` 开头，`tmp/upload` 在 root 家目录下会被解释为 `/root/tmp/upload`。上传目录应仅允许上传者访问；部署后由操作者清理临时密钥副本，不要保留可被其他用户读取的副本。
+
+#### 4. 部署前核对
 
 ```bash
 export CAUSALAGENT_CONFIG_FILE=/etc/causalagent/config/production.env
 export CAUSALAGENT_SECRET_FILE=/etc/causalagent/secrets/causalagent.env
 export CAUSALAGENT_COMPOSE_FILE=docker-compose.staging.yml
-archive=/tmp/causalagent-release.tar.gz
-bundle_dir=/tmp/causalagent-release
-mkdir -p "$bundle_dir"
-tar -xzf "$archive" -C "$bundle_dir"
-bash "$bundle_dir/scripts/deploy.sh" "$bundle_dir" /opt/causalagent/releases
+test -r "$CAUSALAGENT_CONFIG_FILE" && echo "config readable"
+test -r "$CAUSALAGENT_SECRET_FILE" && echo "secret readable"
+grep -Fqx "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME" "$CAUSALAGENT_CONFIG_FILE" \
+  && echo "project matches"
+stat -c '%a:%u:%g' "$CAUSALAGENT_SECRET_FILE"
 ```
 
-脚本不负责下载和解压制品、创建服务器配置、镜像仓库登录、旧 RAG 数据迁移或最终验收。它在 `pull/up` 前切换 `current`，失败时不会自动恢复链接。部署完成后按 [`release-acceptance.md`](release-acceptance.md) 选择明确的 Compose 文件执行检查。
+项目名检查必须通过，密钥权限必须输出 `640:0:3000`。这些 export 传递路径或环境选择，不包含密钥值；应用仍从容器内 `/run/secrets/causalagent.env` 读取密钥。
 
-需要验证 Compose 合并后的部署契约时，使用 `docker compose config`；不要运行 `docker compose down -v`，它会删除预发数据库、checkpoint、搜索、观测和正式 RAG 数据卷。首次启动后还需在云安全组与主机防火墙核实只有 gateway 端口对公网开放。
+清除当前 shell 中旧的镜像变量，避免覆盖清单生成的 `images.env`：
+
+```bash
+unset APP_IMAGE CAUSAL_MCP_IMAGE MYSQL_IMAGE MYSQL_REPLICA_IMAGE POSTGRES_IMAGE
+unset NGINX_IMAGE SEARXNG_IMAGE VALKEY_IMAGE LOKI_IMAGE ALLOY_IMAGE GRAFANA_IMAGE
+unset STAGING_APP_IMAGE STAGING_MCP_IMAGE STAGING_MYSQL_PRIMARY_IMAGE STAGING_MYSQL_REPLICA_IMAGE
+```
+
+更新已有服务前，保留旧 Compose、旧配置及已验证的镜像引用，确认 MySQL、checkpoint 和正式 RAG 数据备份可用。使用以下只读命令检查现有卷和宿主目录，再与新部署包的挂载声明比较；宿主数据路径和迁移范围见[服务器数据目录](#服务器数据目录)与[多模态索引目录与挂载](#多模态索引目录与挂载)，不要用新建空目录代替原数据迁移。
+
+```bash
+for container_id in $(docker ps -aq --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME"); do
+  docker inspect --format '{{.Name}} {{.Config.Image}} {{json .Mounts}}' "$container_id"
+done
+```
+
+#### 5. 拉取并更新服务
+
+```bash
+bash "$BUNDLE_DIR/scripts/deploy.sh" "$BUNDLE_DIR" "$RELEASES_DIR"
+```
+
+脚本把版本放入 `$RELEASES_DIR/<release_id>`，生成 `images.env` 并切换 `current`，随后执行 `pull`、`up -d`。拉取阶段旧容器继续运行；更新阶段按需停止并重建镜像或配置有变化的容器，可能短暂中断。项目名与卷定义一致时继续使用原卷，但 bootstrap 可能执行数据库迁移，卷保留不代表数据内容不变，也不保证进行中的任务无中断。项目名不同会尝试创建另一套资源，可能出现端口占用或新建空卷；不要为更新先执行 `down`，更不要执行 `down -v`。
+
+#### 6. 检查结果与失败处理
+
+```bash
+export RELEASE_DIR="$(readlink -f "$RELEASES_DIR/current")"
+export COMPOSE_FILE="$RELEASE_DIR/$CAUSALAGENT_COMPOSE_FILE"
+cd "$RELEASE_DIR"
+bash "$RELEASE_DIR/scripts/verify.sh" "$RELEASE_DIR"
+staging_compose() {
+  docker compose --env-file "$CAUSALAGENT_CONFIG_FILE" \
+    --env-file "$RELEASE_DIR/images.env" \
+    -f "$COMPOSE_FILE" "$@"
+}
+staging_compose ps --all
+```
+
+确认 `db-bootstrap` 和 `cdfm-weights-seed` 成功退出，长期服务正常运行，有健康检查的服务应达到健康状态。`verify.sh` 成功只代表部分静态条件通过；继续按[发布验收清单](release-acceptance.md)检查实际镜像、密钥读取、数据库、MCP、真实任务、SSE 和 RAG。该清单的通用示例默认生产路径，使用时改为本节的项目名、staging Compose 与 `RELEASE_DIR`，不要直接覆盖为 `/opt/causalagent/releases/current`。
+
+部署失败时保留首次错误和本次版本目录。如果本次发布目录及 `images.env` 已生成，先执行本步的路径设置与函数定义，再使用 `staging_compose ps --all` 及 `staging_compose logs --tail 100 <服务名>` 在服务器本地排查；若尚未生成，则使用第 4 步按 Docker 项目标签查询的命令查看原容器。只分享脱敏后的诊断信息。`current` 在拉取前已经改变，不能用它判断发布成功，也不会自动回到旧版本；如果失败发生在 `up -d` 阶段，可能已有部分服务更新。回退前确认目标版本与当前数据库 schema、配置和密钥兼容；`rollback.sh` 按目录修改时间选择非当前目录，不等于上一成功版本，也不恢复数据。首次从旧目录迁入发布目录时，旧服务不会自动成为脚本可选的历史版本。
 
 ### 服务器数据目录
 

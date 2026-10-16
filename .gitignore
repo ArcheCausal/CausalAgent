@@ -255,6 +255,7 @@ app/rag_eval/frontend_dist/
 causalagent.env
 deploy/secrets/*.env
 !deploy/secrets/*.env.example
+deploy/config/*.env
 
 # docs
 docs/

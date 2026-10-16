@@ -45,6 +45,12 @@ CausalAgent
   - [Agent Runtime](#agent-runtime)
   - [Deep Agent](#deep-agent)
   - [Core Capabilities](#core-capabilities)
+    - [Pre-processing](#pre-processing)
+    - [Causal Analysis (MCP)](#causal-analysis-mcp)
+    - [Knowledge Base (RAG)](#knowledge-base-rag)
+    - [Web Search](#web-search)
+    - [Post-processing](#post-processing)
+    - [Report Generation](#report-generation)
 - [Quick Start](#quick-start)
   - [Service URLs](#service-urls)
   - [Minimum Configuration](#minimum-configuration)
@@ -53,11 +59,12 @@ CausalAgent
   - [Administrator Console](#administrator-console)
   - [RAG Workbench](#rag-workbench)
   - [Observability](#observability)
-  - [User Frontend (Vue)](#user-frontend-vue)
+  - [Frontends (Vue)](#frontends-vue)
   - [Backend Tests](#backend-tests)
   - [Windows Deployment](#windows-deployment)
 - [Technical Documentation](#technical-documentation)
 - [Contributing](#contributing)
+- [License and Trademarks](#license-and-trademarks)
 - [Project Structure](#project-structure)
 - [Star History](#star-history)
 
@@ -366,6 +373,10 @@ Contributions via Issues and Pull Requests are welcome.
 5. Wait for the Python syntax, light-test, and pull-request-policy checks before merging.
 
 Supported keywords include `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `build`, `perf`, and `revert`.
+
+## License and Trademarks
+
+CausalAgent's original code is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0) starting with this revision; see [`LICENSE`](LICENSE) for the full terms. 
 
 ## Project Structure
 
