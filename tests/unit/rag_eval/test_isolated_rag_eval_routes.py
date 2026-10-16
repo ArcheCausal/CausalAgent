@@ -561,7 +561,7 @@ class IsolatedRagEvalRouteTests(unittest.TestCase):
             source_id = "upload_" + hashlib.sha256(content).hexdigest()[:24]
             (root / f"{source_id}__fixture.txt").write_bytes(content)
             with patch.object(isolated_runs, "RAG_EVAL_SOURCE_ROOT", root), patch.object(
-                isolated_runs, "production_source_paths", return_value=[]
+                isolated_runs, "resolve_production_source_metadata", return_value=[]
             ):
                 before = isolated_runs.list_source_catalog()[0]
                 self.assertEqual(before["display_name"], "fixture.txt")

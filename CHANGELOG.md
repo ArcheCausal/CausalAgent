@@ -1824,3 +1824,6 @@
   - 【文件名一致】：`production_defaults.json` 两条来源的 `path` 去掉 `(1)` 后缀，`remote_samples.json` 的远程视觉白名单键同步改名，保持远程 VLM 授权与配置文件名一致；旧文件名兼容逻辑保留，历史运行的 source ID 仍可解析。
 - 【压测待修复项】
   - 【P2 记录】：把“取消后阶段列表仍显示进行中”登记到 `loadtest/evidence/index.md` 的待修复项，现象为 Job 终态已是“任务已取消”，阶段列表仍保留“执行 Deep Agent 分析 进行中”字样。
+- 【CI 修复】
+  - 【测试路径】：`tests/test_staging_environment_guard.py` 在 #88 归位后已移动到 `tests/integration/deployment/`，工作流与路径过滤器仍指向旧位置，导致 Compose 契约任务以“file or directory not found”失败；两处引用同步更新，并移除不再匹配任何文件的 `tests/test_staging_*.py` glob。
+  - 【来源目录测试】：`test_source_display_name_persists_in_local_metadata` 改为 patch 新的 `resolve_production_source_metadata`，与来源目录实现保持一致。

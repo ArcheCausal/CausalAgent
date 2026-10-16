@@ -43,6 +43,5 @@ contracts:
   - 'tests/unit/config/**'
   - 'tests/unit/deployment/**'
   - 'tests/integration/test_observability_compose.py'
-  - 'tests/test_staging_*.py'
   - '.env.example'
   - '.env.staging.example'
