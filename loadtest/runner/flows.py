@@ -1,4 +1,15 @@
-"""虚拟用户的业务场景：完整流程、混合操作与结果校验。"""
+"""虚拟用户的业务场景：多会话准备、提交与观察分离、账号级额度与结果校验。
+
+模型结构（每个 account 一行，Session 与 Job 逐层展开）：
+
+    UserAccount
+    ├── Session A ── Job A ── SSE observer
+    └── Session B ── Job B ── SSE observer
+
+同一账号的不同会话允许同时运行任务，由服务端接口决定；同一会话仍然遵守应用现有的活动
+Job 约束，因此每个会话最多一个正在运行或等待的 Job。账号级 create_budget 由线程安全计数器
+控制，只有“成功返回一个唯一新 Job”的创建结果才占用额度。
+"""
 
 from __future__ import annotations
 
@@ -66,66 +77,123 @@ class StopController:
 
 
 @dataclass
+class SessionSlot:
+    """一个账号下的一条真实会话；同一会话最多承载一个未完成 Job。"""
+
+    index: int
+    session_id: str
+    file_id: int | None = None
+    current_job_id: str | None = None
+    ready: threading.Event = field(default_factory=threading.Event)
+
+
+@dataclass
 class UserContext:
-    """一个虚拟用户在运行期间持有的状态。"""
+    """一个虚拟账号在运行期间持有的状态与预算。"""
 
     index: int
     username: str
     password: str
     client: UserClient
-    file_id: int | None = None
-    session_id: str | None = None
+    sessions: list[SessionSlot] = field(default_factory=list)
     job_ids: list[str] = field(default_factory=list)
+    budget: int | None = None
+    budget_lock: threading.Lock = field(default_factory=threading.Lock)
+    budget_used: int = 0
+    observers: list[threading.Thread] = field(default_factory=list)
+    peak_active_jobs: int = 0
+    active_jobs_now: int = 0
+    active_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def occupy_budget(self) -> bool:
+        """占用一个账号级创建额度；额度用尽时返回 False。"""
+        with self.budget_lock:
+            if self.budget is not None and self.budget_used >= self.budget:
+                return False
+            self.budget_used += 1
+            return True
+
+    def release_budget(self) -> None:
+        """创建最终没有拿到唯一新 Job 时退还额度。"""
+        with self.budget_lock:
+            self.budget_used = max(0, self.budget_used - 1)
+
+    def enter_job(self) -> None:
+        with self.active_lock:
+            self.active_jobs_now += 1
+            self.peak_active_jobs = max(self.peak_active_jobs, self.active_jobs_now)
+
+    def leave_job(self) -> None:
+        with self.active_lock:
+            self.active_jobs_now = max(0, self.active_jobs_now - 1)
 
 
 class VirtualUser:
-    """执行单一账号的完整流程或混合操作。"""
+    """执行单一账号的完整流程或混合操作，创建 Job 后交给后台观察器。"""
 
     def __init__(
         self,
         context: UserContext,
         recorder: Recorder,
-        job_gate: threading.Semaphore,
+        job_gate,
         stop: StopController,
         rng: random.Random,
+        sessions_per_user: int = 1,
     ) -> None:
         self.ctx = context
         self.recorder = recorder
         self.job_gate = job_gate
         self.stop = stop
         self.rng = rng
+        self.sessions_per_user = max(1, int(sessions_per_user))
         self.csv = build_csv(context.index)
-        # 创建 Job 必须先占用 Job 并发额度，再占用 SSE 额度。
         self.sse_gate = context.client.sse_gate
-        self.job_slot = job_gate
+        self._session_lock = threading.Lock()
 
     # --- 组合流程 ---
 
     def prepare(self) -> None:
-        """登录、建立会话并上传测试文件。"""
+        """登录、建立全部真实会话并各自上传测试文件。"""
         self.ctx.client.login(self.ctx.password)
-        self.ctx.session_id = self.ctx.client.new_chat()
-        self.ctx.file_id = self.ctx.client.upload_csv(
-            f"loadtest_{self.ctx.index:02d}.csv", self.csv
+        for index in range(self.sessions_per_user):
+            session_id = self.ctx.client.new_chat()
+            slot = SessionSlot(index=index, session_id=session_id)
+            slot.file_id = self.ctx.client.upload_csv(
+                f"loadtest_{self.ctx.index:02d}_{index:02d}.csv", self.csv
+            )
+            # 新会话没有活动 Job，初始状态就是可提交。
+            slot.ready.set()
+            self.ctx.sessions.append(slot)
+        self.recorder.note(
+            f"账号 {self.ctx.username} 建立 {len(self.ctx.sessions)} 个真实会话"
         )
 
     def run_full_flow(self, rounds: int) -> None:
-        """单用户基线：重复完整流程。"""
+        """单用户基线：重复完整流程，每轮创建 Job 后同步等待终态。"""
         self.prepare()
         for round_index in range(rounds):
             if self.stop.triggered:
                 return
             if round_index > 0:
-                self.ctx.session_id = self.ctx.client.new_chat()
-            self._run_job_cycle()
+                session_id = self.ctx.client.new_chat()
+                slot = SessionSlot(index=0, session_id=session_id)
+                slot.file_id = self.ctx.client.upload_csv(
+                    f"loadtest_{self.ctx.index:02d}.csv", self.csv
+                )
+                slot.ready.set()
+                self.ctx.sessions[0] = slot
+            self._run_blocking_job_cycle()
             self._read_queries()
             self._think()
 
     def run_mixed(self, duration_seconds: float) -> None:
-        """混合负载：按权重挑选操作，直到到达持续时间。"""
+        """混合负载：按权重挑选操作，创建 Job 后由后台观察器继续等待。"""
         self.prepare()
         deadline = time.monotonic() + duration_seconds
         while time.monotonic() < deadline and not self.stop.triggered:
+            if not self._has_budget():
+                self._think()
+                continue
             operation = self._pick_operation()
             try:
                 if operation == "read":
@@ -133,14 +201,23 @@ class VirtualUser:
                 elif operation == "page":
                     self._page_requests()
                 elif operation == "upload":
-                    self.ctx.client.upload_csv(
-                        f"loadtest_{self.ctx.index:02d}.csv", self.csv
-                    )
+                    slot = self._pick_session()
+                    if slot is not None:
+                        self.ctx.client.upload_csv(
+                            f"loadtest_{self.ctx.index:02d}_{slot.index:02d}.csv", self.csv
+                        )
                 else:
-                    self._run_job_cycle()
+                    self._submit_job()
             except ApiError as exc:
                 self.recorder.note(f"虚拟用户 {self.ctx.username} 操作失败: {exc}")
             self._think()
+
+    def wait_observers(self, deadline_seconds: float) -> None:
+        """等待本账号全部后台观察器结束；用于停止提交后的排空阶段。"""
+        deadline = time.monotonic() + deadline_seconds
+        for thread in list(self.ctx.observers):
+            remaining = max(0.0, deadline - time.monotonic())
+            thread.join(timeout=remaining)
 
     # --- 单项操作 ---
 
@@ -153,12 +230,27 @@ class VirtualUser:
                 return name
         return "read"
 
+    def _has_budget(self) -> bool:
+        """检查账号级额度是否还有余额，不占用额度。"""
+        with self.ctx.budget_lock:
+            return self.ctx.budget is None or self.ctx.budget_used < self.ctx.budget
+
+    def _pick_session(self) -> SessionSlot | None:
+        """挑一条可用会话；全部忙时等待，等待超时返回 None。"""
+        deadline = time.monotonic() + config.SESSION_SLOT_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            for slot in self.ctx.sessions:
+                if slot.ready.is_set():
+                    return slot
+            time.sleep(0.1)
+        return None
+
     def _read_queries(self) -> None:
         """会话、历史、文件与活动 Job 查询。"""
         client = self.ctx.client
         client.sessions()
-        if self.ctx.session_id:
-            client.load_session(self.ctx.session_id)
+        for slot in self.ctx.sessions:
+            client.load_session(slot.session_id)
         client.list_files()
         client.active_jobs()
 
@@ -169,86 +261,179 @@ class VirtualUser:
         client.dashboard_page()
         client.check_auth()
 
-    def _run_job_cycle(self) -> str | None:
-        """创建 Job、订阅 SSE、校验历史，最后释放 Job 并发额度。"""
-        client = self.ctx.client
-        if not self.job_slot.acquire(timeout=config.JOB_SLOT_WAIT_SECONDS):
-            self.recorder.note("等待 Job 并发额度超时，仍未提交本次创建")
+    def _submit_job(self) -> str | None:
+        """占用账号额度、某个会话和 Job 并发额度后提交，再交给后台观察器。"""
+        if not self.ctx.occupy_budget():
+            self.recorder.bump("job_submissions_over_budget")
             return None
+        submitted = False
         try:
-            if self.stop.triggered:
-                return None
-            session_id = self.ctx.session_id or client.new_chat()
-            self.ctx.session_id = session_id
-            key = new_idempotency_key()
-            created_at = time.monotonic()
-            status, payload = client.create_job(
-                session_id=session_id,
-                message=MESSAGE,
-                file_id=self.ctx.file_id,
-                idempotency_key=key,
-            )
-            if status not in (200, 202):
+            slot = self._pick_session()
+            if slot is None:
+                self.recorder.bump("job_submissions_session_busy")
                 self.recorder.note(
-                    f"创建 Job 返回 {status}: {payload.get('error')}"
+                    f"账号 {self.ctx.username} 会话在 "
+                    f"{config.SESSION_SLOT_WAIT_SECONDS} 秒内全部忙碌，本次不提交"
                 )
                 return None
-            job_id = str(payload.get("job_id"))
-            self.ctx.job_ids.append(job_id)
-            if payload.get("existing"):
-                self.recorder.bump("job_idempotent_replays")
-            else:
-                self.recorder.bump("job_created")
-            queue_seconds = self._observe_queue(session_id, job_id, created_at)
-            outcome = client.subscribe_job_events(job_id)
-            run_finished_at = time.monotonic()
+            if self.stop.triggered:
+                return None
+            if not self._acquire_job_slot():
+                self.recorder.note("等待 Job 并发额度超时，仍未提交本次创建")
+                return None
+            try:
+                job_id = self._create_job(slot)
+                submitted = job_id is not None
+                return job_id
+            finally:
+                if not submitted:
+                    self._release_job_slot()
+        finally:
+            if not submitted:
+                self.ctx.release_budget()
+
+    def _acquire_job_slot(self) -> bool:
+        """占用 Job 并发额度；额度为 None 表示客户端不设上限。"""
+        if self.job_gate is None:
+            return True
+        return bool(self.job_gate.acquire(timeout=config.JOB_SLOT_WAIT_SECONDS))
+
+    def _release_job_slot(self) -> None:
+        if self.job_gate is not None:
+            self.job_gate.release()
+
+    def _create_job(self, slot: SessionSlot) -> str | None:
+        """创建 Job；只有返回唯一新 Job 才计入成功创建。"""
+        client = self.ctx.client
+        self.recorder.bump("job_create_attempts")
+        key = new_idempotency_key()
+        created_at = time.monotonic()
+        try:
+            status, payload = client.create_job(
+                session_id=slot.session_id,
+                message=MESSAGE,
+                file_id=slot.file_id,
+                idempotency_key=key,
+            )
+        except ApiError as exc:
+            self.recorder.note(f"创建 Job 传输失败 {self.ctx.username}: {exc}")
+            return None
+        if status not in (200, 202):
+            self.recorder.note(f"创建 Job 返回 {status}: {payload.get('error')}")
+            return None
+        job_id = str(payload.get("job_id"))
+        if payload.get("existing"):
+            # 幂等重放不占用账号创建额度，也不作为成功提交计数。
+            self.recorder.bump("job_idempotent_replays")
+            return None
+        self.ctx.job_ids.append(job_id)
+        self.recorder.bump("job_created")
+        self.recorder.bump_user("job_created_by_user", self.ctx.index)
+        slot.current_job_id = job_id
+        slot.ready.clear()
+        self.ctx.enter_job()
+        self.recorder.peak_active_jobs_per_user = max(
+            self.recorder.peak_active_jobs_per_user or 0, self.ctx.active_jobs_now
+        )
+        thread = threading.Thread(
+            target=self._observe,
+            name=f"obs-{self.ctx.index}-{slot.index}-{job_id[:8]}",
+            args=(slot, job_id, created_at),
+            daemon=True,
+        )
+        self.ctx.observers.append(thread)
+        thread.start()
+        return job_id
+
+    def _observe(self, slot: SessionSlot, job_id: str, created_at: float) -> None:
+        """后台观察器：订阅 SSE、必要时重连，收到终态或到达观察期限后释放会话。"""
+        try:
+            queue_seconds, queue_timeout = self._observe_queue(job_id, created_at)
+            outcome = self.ctx.client.subscribe_job_events(job_id)
             sample = outcome.sample
             duplicates = _duplicates(sample.received_ids)
             out_of_order = _out_of_order(sample.received_ids)
-            missing = self.recorder.sse_missing_events
+            missing = 0
             unique_received = len(set(sample.received_ids))
             if sample.terminal_event is not None and (
                 sample.error
                 or sample.reconnects
-                or sample.disconnects
                 or missing
                 or duplicates
                 or out_of_order
             ):
                 # 只在已到达终态且出现异常信号时读取全量事件，保证比对不会阻塞。
-                total_events = client.count_job_events(job_id)
+                total_events = self.ctx.client.count_job_events(job_id)
                 if total_events >= 0:
                     missing = max(0, total_events - unique_received)
                     self.recorder.sse_missing_events += missing
             self.stop.check_sse(missing, duplicates, out_of_order)
-            history_ok = self._verify_history(session_id, job_id)
-            final_status = _final_status(outcome.terminal_event, sample.error)
-            if outcome.terminal_event == "interrupt":
+            terminal = sample.terminal_event
+            if terminal == "interrupt":
                 final_status = self._answer_interrupt(
-                    job_id, outcome.interrupt_payload, session_id
+                    job_id, outcome.interrupt_payload, slot.session_id
                 )
-            execution_seconds = (
-                round(run_finished_at - created_at - queue_seconds, 2)
-                if queue_seconds is not None
+            else:
+                final_status = _final_status(terminal, sample.error)
+            observation = (
+                "terminal"
+                if terminal in ("final_result", "error", "canceled") or final_status == "succeeded"
+                else "observation_timeout"
+            )
+            if observation == "observation_timeout":
+                self.recorder.bump("job_observation_timeouts")
+            history_ok = (
+                self._verify_history(slot.session_id, job_id)
+                if observation == "terminal"
                 else None
+            )
+            elapsed = time.monotonic() - created_at
+            execution_seconds = (
+                None
+                if queue_seconds is None
+                else round(max(0.0, elapsed - queue_seconds), 2)
             )
             self.recorder.record_job(
                 JobSample(
                     job_id=job_id,
-                    created_status=status,
+                    created_status=202,
                     final_status=final_status,
                     queue_seconds=queue_seconds,
                     execution_seconds=execution_seconds,
-                    total_seconds=time.monotonic() - created_at,
+                    total_seconds=elapsed,
                     history_consistent=history_ok,
+                    user_index=self.ctx.index,
+                    session_index=slot.index,
+                    queue_timeout=queue_timeout,
+                    observation=observation,
+                    queue_seconds_lower_bound=(
+                        None if queue_seconds is not None else round(elapsed, 2)
+                    ),
                 )
             )
-            return job_id
         except ApiError as exc:
-            self.recorder.note(f"Job 周期失败 {self.ctx.username}: {exc}")
-            return None
+            self.recorder.note(f"后台观察失败 {self.ctx.username}/{job_id}: {exc}")
         finally:
-            self.job_slot.release()
+            slot.current_job_id = None
+            slot.ready.set()
+            self.ctx.leave_job()
+            self._release_job_slot()
+
+    def _run_blocking_job_cycle(self) -> str | None:
+        """基线档的同步周期：提交后立即在调用线程内等待终态。"""
+        slot = self.ctx.sessions[0]
+        if not self.ctx.occupy_budget():
+            return None
+        if not self._acquire_job_slot():
+            self.ctx.release_budget()
+            return None
+        job_id = self._create_job(slot)
+        if job_id is None:
+            self._release_job_slot()
+            self.ctx.release_budget()
+            return None
+        self.wait_observers(config.JOB_OBSERVE_DEADLINE_SECONDS)
+        return job_id
 
     def _answer_interrupt(
         self, job_id: str, payload: dict | None, session_id: str
@@ -271,24 +456,27 @@ class VirtualUser:
         self._verify_history(session_id, job_id)
         return _final_status(outcome.terminal_event, outcome.sample.error)
 
-    def _observe_queue(
-        self, session_id: str, job_id: str, created_at: float
-    ) -> float | None:
-        """轮询活动 Job，记录从创建到首次观察到 running 的排队耗时。"""
-        deadline = time.monotonic() + 120
+    def _observe_queue(self, job_id: str, created_at: float) -> tuple[float | None, bool]:
+        """轮询会话活动 Job，记录从创建到首次观察到 running 的排队耗时。
+
+        返回 (排队秒数或 None, 是否超过排队观测窗口)。超过窗口时不再阻塞观察，
+        由 SSE 继续等待终态；排队时间按“未取得”处理，另记等待时间下界。
+        """
+        deadline = created_at + config.QUEUE_OBSERVE_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             try:
-                for job in self.ctx.client.active_jobs(session_id):
+                for job in self.ctx.client.active_jobs():
                     if str(job.get("job_id")) != job_id:
                         continue
-                    if str(job.get("status")) == "running":
-                        return round(time.monotonic() - created_at, 2)
-                    if str(job.get("status")) in ("succeeded", "failed", "canceled"):
-                        return None
+                    status = str(job.get("status"))
+                    if status == "running":
+                        return round(time.monotonic() - created_at, 2), False
+                    if status in ("succeeded", "failed", "canceled"):
+                        return None, False
             except ApiError:
-                return None
+                return None, False
             time.sleep(0.5)
-        return None
+        return None, True
 
     def _verify_history(self, session_id: str, job_id: str) -> bool:
         """核对会话历史是否包含该 Job 的终态结果。"""

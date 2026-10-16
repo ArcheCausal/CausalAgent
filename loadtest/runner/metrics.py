@@ -54,7 +54,12 @@ class SseSample:
 
 @dataclass
 class JobSample:
-    """一个分析 Job 的生命周期结果。"""
+    """一个分析 Job 的生命周期结果。
+
+    排队、执行和总耗时都以“创建 Job 请求发出”为起点；终点是 SSE 收到终态事件。
+    observation 说明这次观察是否在观察期限内拿到终态，未到达终态的 Job 不进
+    已完成样本的百分位统计，而是单独计入超时数量与等待下界。
+    """
 
     job_id: str
     created_status: int
@@ -63,6 +68,11 @@ class JobSample:
     execution_seconds: float | None
     total_seconds: float | None
     history_consistent: bool | None
+    user_index: int = 0
+    session_index: int = 0
+    queue_timeout: bool = False
+    observation: str = "terminal"
+    queue_seconds_lower_bound: float | None = None
     note: str = ""
 
 
@@ -77,6 +87,18 @@ class Recorder:
         self.jobs: list[JobSample] = []
         self.job_created = 0
         self.job_idempotent_replays = 0
+        # 提交侧计数：尝试创建、因额度用尽而跳过的创建、因会话忙而放弃的创建。
+        self.job_create_attempts = 0
+        self.job_submissions_over_budget = 0
+        self.job_submissions_session_busy = 0
+        # 观察侧计数：观察期限到达仍未终结的 Job。
+        self.job_observation_timeouts = 0
+        # 每账号成功创建的唯一新 Job 数量；键是虚拟用户序号。
+        self.job_created_by_user: dict[int, int] = {}
+        # 每个账号实际同时打开的会话数与同时运行的活动 Job 数峰值。
+        self.peak_sessions_per_user: int | None = None
+        self.peak_active_jobs_per_user: int | None = None
+        self.peak_active_jobs_per_account: int | None = None
         self.notes: list[str] = []
         self.started_at = 0.0
         self.finished_at = 0.0
@@ -93,6 +115,12 @@ class Recorder:
         # 服务器侧只读采集结果；没有采集入口时保持 None。
         self.server_baseline: dict | None = None
         self.server_after: dict | None = None
+
+    def bump_user(self, field_name: str, user_index: int, amount: int = 1) -> None:
+        """按账号累加一个计数；用于每账号成功创建 Job 这类分账号口径。"""
+        with self._lock:
+            mapping = getattr(self, field_name)
+            mapping[user_index] = mapping.get(user_index, 0) + amount
 
     def record_http(self, sample: HttpSample) -> None:
         with self._lock:
@@ -150,11 +178,19 @@ class Recorder:
         }
 
         terminal_counts = Counter(j.final_status or "unfinished" for j in jobs)
-        queue_times = [j.queue_seconds for j in jobs if j.queue_seconds is not None]
+        completed = [j for j in jobs if j.observation == "terminal"]
+        timed_out = [j for j in jobs if j.observation == "observation_timeout"]
+        # 长排队 Job 不能从 p95 中删除：已完成的进百分位，超时的单独报数量与等待下界。
+        queue_times = [j.queue_seconds for j in completed if j.queue_seconds is not None]
         execution_times = [
-            j.execution_seconds for j in jobs if j.execution_seconds is not None
+            j.execution_seconds for j in completed if j.execution_seconds is not None
         ]
-        total_times = [j.total_seconds for j in jobs if j.total_seconds is not None]
+        total_times = [j.total_seconds for j in completed if j.total_seconds is not None]
+        timeout_lower_bounds = [
+            j.queue_seconds_lower_bound
+            for j in timed_out
+            if j.queue_seconds_lower_bound is not None
+        ]
         history_checked = [j.history_consistent for j in jobs if j.history_consistent is not None]
 
         first_event = [s.first_event_ms for s in sse if s.first_event_ms is not None]
@@ -180,6 +216,9 @@ class Recorder:
             "users": self.users,
             "peak_active_jobs": self.peak_active_jobs,
             "peak_sse": self.peak_sse,
+            "peak_sessions_per_user": self.peak_sessions_per_user,
+            "peak_active_jobs_per_user": self.peak_active_jobs_per_user,
+            "peak_active_jobs_per_account": self.peak_active_jobs_per_account,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "elapsed_seconds": round(elapsed, 2),
@@ -199,6 +238,16 @@ class Recorder:
                 "created": self.job_created,
                 "idempotent_replays": self.job_idempotent_replays,
                 "recorded": len(jobs),
+                "create_attempts": self.job_create_attempts,
+                "submissions_over_budget": self.job_submissions_over_budget,
+                "submissions_session_busy": self.job_submissions_session_busy,
+                "observation_timeouts": len(timed_out),
+                "queue_observe_timeouts": sum(1 for j in jobs if j.queue_timeout),
+                "completed": len(completed),
+                "created_by_user": {
+                    str(key): value for key, value in sorted(self.job_created_by_user.items())
+                },
+                "budget_used_max": max(self.job_created_by_user.values(), default=0),
                 "terminal_status_counts": dict(terminal_counts),
                 "queue_p50_seconds": percentile(queue_times, 0.5),
                 "queue_p95_seconds": percentile(queue_times, 0.95),
@@ -206,6 +255,12 @@ class Recorder:
                 "execution_p95_seconds": percentile(execution_times, 0.95),
                 "total_p50_seconds": percentile(total_times, 0.5),
                 "total_p95_seconds": percentile(total_times, 0.95),
+                "queue_timeout_wait_lower_bound_min_seconds": (
+                    min(timeout_lower_bounds) if timeout_lower_bounds else None
+                ),
+                "queue_timeout_wait_lower_bound_max_seconds": (
+                    max(timeout_lower_bounds) if timeout_lower_bounds else None
+                ),
                 "history_checked": len(history_checked),
                 "history_consistent": sum(1 for value in history_checked if value),
             },

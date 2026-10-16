@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from runner.config import HTTP_TIMEOUT_SECONDS, SSE_MAX_WAIT_SECONDS
+from runner.config import HTTP_TIMEOUT_SECONDS, SSE_IDLE_READ_TIMEOUT_SECONDS
 from runner.metrics import HttpSample, Recorder, SseSample
 
 TERMINAL_EVENTS = {"final_result", "error", "canceled"}
@@ -51,7 +51,10 @@ class UserClient:
         self.username = username
         self.client = httpx.Client(
             base_url=base_url,
-            timeout=httpx.Timeout(HTTP_TIMEOUT_SECONDS, read=SSE_MAX_WAIT_SECONDS),
+            # 读取超时按 SSE 空闲等待设置：一次读取允许等待多久，长排队 Job 不会被误判为断线。
+            timeout=httpx.Timeout(
+                HTTP_TIMEOUT_SECONDS, read=SSE_IDLE_READ_TIMEOUT_SECONDS
+            ),
             follow_redirects=False,
             headers={"User-Agent": "causalagent-loadtest/1.0"},
         )

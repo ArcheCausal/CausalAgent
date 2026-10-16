@@ -1,4 +1,4 @@
-"""分级负载的执行器：虚拟用户线程、健康探测与运行产物落盘。"""
+"""分级负载的执行器：虚拟账号线程、后台 SSE 观察器、健康探测与运行产物落盘。"""
 
 from __future__ import annotations
 
@@ -22,38 +22,42 @@ def make_run_id(stage: str) -> str:
 
 
 class CountingGate:
-    """带并发峰值统计的信号量，用于记录实际活动 Job / SSE 峰值。"""
+    """带并发峰值统计的信号量，用于记录实际活动 Job / SSE / 会话峰值。
 
-    def __init__(self, capacity: int) -> None:
-        self._semaphore = threading.Semaphore(capacity)
+    capacity 为 None 时表示客户端不设上限：acquire 直接成功，只统计当前数与峰值，
+    让服务器自己形成排队。这时 release 必须与 acquire 严格配对，否则 current 会漂移。
+    """
+
+    def __init__(self, capacity: int | None) -> None:
+        self.capacity = capacity
+        self._semaphore = threading.Semaphore(capacity) if capacity is not None else None
         self._lock = threading.Lock()
         self.current = 0
         self.peak = 0
 
     def __enter__(self) -> "CountingGate":
-        self._semaphore.acquire()
-        with self._lock:
-            self.current += 1
-            self.peak = max(self.peak, self.current)
+        if not self.acquire():
+            raise RuntimeError("CountingGate 无上限时 acquire 不应失败")
         return self
 
     def __exit__(self, *exc_info) -> None:
-        with self._lock:
-            self.current -= 1
-        self._semaphore.release()
+        self.release()
 
     def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
-        acquired = self._semaphore.acquire(blocking, timeout)
-        if acquired:
-            with self._lock:
-                self.current += 1
-                self.peak = max(self.peak, self.current)
-        return acquired
+        if self._semaphore is not None:
+            acquired = self._semaphore.acquire(blocking, timeout)
+            if not acquired:
+                return False
+        with self._lock:
+            self.current += 1
+            self.peak = max(self.peak, self.current)
+        return True
 
     def release(self) -> None:
         with self._lock:
-            self.current -= 1
-        self._semaphore.release()
+            self.current = max(0, self.current - 1)
+        if self._semaphore is not None:
+            self._semaphore.release()
 
 
 def run_stage(
@@ -65,15 +69,22 @@ def run_stage(
     """执行一个档位的负载并返回聚合结果。"""
     spec = config.STAGES[stage]
     users = min(int(spec["users"]), len(accounts))
+    sessions_per_user = max(1, int(spec.get("sessions_per_user", 1)))
     recorder = Recorder(run_id=make_run_id(stage))
     recorder.stage = stage
     recorder.users = users
     recorder.server_baseline = server_baseline
     stop = StopController()
-    job_gate = CountingGate(int(spec["active_jobs"]))
+    capacity = spec.get("active_jobs")
+    job_gate = CountingGate(None if capacity is None else int(capacity))
     sse_gate = CountingGate(int(spec["sse"]))
     recorder.note(f"档位规格: {json.dumps(spec, ensure_ascii=False)}")
     recorder.note(f"客户端清单: {json.dumps(collect_client_manifest(), ensure_ascii=False)}")
+    recorder.note(
+        f"并发模型：{users} 个逻辑账号 × {sessions_per_user} 个真实会话；"
+        f"每个会话最多一个活动 Job，账号级创建额度 "
+        f"{spec.get('create_budget', '不限')}"
+    )
 
     contexts = [
         UserContext(
@@ -81,6 +92,11 @@ def run_stage(
             username=item.username,
             password=item.password,
             client=UserClient(base_url, recorder, item.username),
+            budget=(
+                None
+                if spec.get("create_budget") is None
+                else int(spec["create_budget"])
+            ),
         )
         for index, item in enumerate(accounts[:users])
     ]
@@ -93,7 +109,7 @@ def run_stage(
         threading.Thread(
             target=_run_user,
             name=f"user-{context.index}",
-            args=(context, recorder, job_gate, sse_gate, stop, spec),
+            args=(context, recorder, job_gate, sse_gate, stop, spec, sessions_per_user),
             daemon=True,
         )
         for context in contexts
@@ -113,9 +129,13 @@ def run_stage(
     stop.trip("负载结束")
     recorder.peak_active_jobs = job_gate.peak
     recorder.peak_sse = sse_gate.peak
+    recorder.peak_sessions_per_user = sessions_per_user
+    recorder.peak_active_jobs_per_account = max(
+        (context.peak_active_jobs for context in contexts), default=0
+    )
     recorder.note(
-        f"配置上限：活动 Job {spec['active_jobs']}，SSE {spec['sse']}；"
-        f"实际峰值：活动 Job {job_gate.peak}，SSE {sse_gate.peak}"
+        f"配置上限：活动 Job {capacity if capacity is not None else '不限'}，"
+        f"SSE {spec['sse']}；实际峰值：活动 Job {job_gate.peak}，SSE {sse_gate.peak}"
     )
 
     _drain_and_release(contexts, recorder, stop)
@@ -130,21 +150,24 @@ def run_stage(
 def _run_user(
     context: UserContext,
     recorder: Recorder,
-    job_gate: threading.Semaphore,
-    sse_gate: threading.Semaphore,
+    job_gate: CountingGate,
+    sse_gate: CountingGate,
     stop: StopController,
     spec: dict,
+    sessions_per_user: int,
 ) -> None:
-    """单个虚拟用户线程的主体。"""
+    """单个虚拟账号线程的主体；创建 Job 后由后台观察器继续等待 SSE。"""
     rng = random.Random(context.index * 7919)
-    user = VirtualUser(context, recorder, job_gate, stop, rng)
+    user = VirtualUser(
+        context, recorder, job_gate, stop, rng, sessions_per_user=sessions_per_user
+    )
     try:
         if spec["mode"] == "full_flow":
             user.run_full_flow(int(spec["flows"]))
         else:
             user.run_mixed(float(spec["duration"]))
-    except Exception as exc:  # 单个用户失败不应中断整档负载
-        recorder.note(f"虚拟用户 {context.username} 异常退出: {type(exc).__name__}: {exc}")
+    except Exception as exc:  # 单个账号失败不应中断整档负载
+        recorder.note(f"虚拟账号 {context.username} 异常退出: {type(exc).__name__}: {exc}")
 
 
 def _monitor(probe: UserContext, recorder: Recorder, stop: StopController) -> None:
@@ -177,9 +200,23 @@ def _monitor(probe: UserContext, recorder: Recorder, stop: StopController) -> No
 def _drain_and_release(
     contexts: list[UserContext], recorder: Recorder, stop: StopController
 ) -> None:
-    """停止提交后等待活动 Job 清空，并记录队列恢复时间。"""
+    """停止提交后等待后台观察器与活动 Job 清空，并记录队列恢复时间。"""
     started = time.monotonic()
-    deadline = started + 300
+    budget = config.DRAIN_DEADLINE_SECONDS
+    for context in contexts:
+        context_remaining = max(0.0, budget - (time.monotonic() - started))
+        for thread in list(context.observers):
+            thread.join(timeout=context_remaining)
+    observers_alive = sum(
+        1 for context in contexts for thread in context.observers if thread.is_alive()
+    )
+    if observers_alive:
+        recorder.note(
+            f"排空期限 {budget:.0f} 秒到达时仍有 {observers_alive} 个后台观察器在等待终态"
+        )
+        stop.trip(f"停止提交后 {budget:.0f} 秒仍有 Job 未到达终态")
+
+    deadline = started + budget
     while time.monotonic() < deadline:
         pending = 0
         for context in contexts:
@@ -194,8 +231,8 @@ def _drain_and_release(
             recorder.server_after = {"drain_seconds": round(time.monotonic() - started, 1)}
             return
         time.sleep(5.0)
-    recorder.note("停止提交后 5 分钟内活动 Job 未清空")
-    stop.trip("停止提交后队列 5 分钟没有减少")
+    recorder.note(f"停止提交后 {budget:.0f} 秒内活动 Job 未清空")
+    stop.trip(f"停止提交后队列 {budget:.0f} 秒没有减少")
     recorder.server_after = {"drain_seconds": None}
 
 
@@ -220,7 +257,7 @@ def render_notes(summary: dict) -> str:
         f"# 运行记录 {summary['run_id']}",
         "",
         f"- 档位: {summary['stage']}",
-        f"- 虚拟用户: {summary['users']}",
+        f"- 虚拟账号: {summary['users']}",
         f"- 时长: {summary['elapsed_seconds']} 秒",
         "",
         "## HTTP",
@@ -233,8 +270,13 @@ def render_notes(summary: dict) -> str:
         "",
         "## Job",
         "",
-        f"- 创建: {job['created']}，幂等重放: {job['idempotent_replays']}",
+        f"- 创建尝试: {job.get('create_attempts', 0)}，成功创建唯一新 Job: {job['created']}",
+        f"- 幂等重放: {job['idempotent_replays']}，超额跳过: {job.get('submissions_over_budget', 0)}，"
+        f"会话忙跳过: {job.get('submissions_session_busy', 0)}",
+        f"- 每账号成功创建上限使用最多: {job.get('budget_used_max', 0)}",
         f"- 终态分布: {json.dumps(job['terminal_status_counts'], ensure_ascii=False)}",
+        f"- 观察超时 Job: {job.get('observation_timeouts', 0)}，"
+        f"排队观测超时: {job.get('queue_observe_timeouts', 0)}",
         f"- 排队 p50/p95: {_seconds(job.get('queue_p50_seconds'))} / "
         f"{_seconds(job.get('queue_p95_seconds'))}",
         f"- 执行 p50/p95: {_seconds(job.get('execution_p50_seconds'))} / "

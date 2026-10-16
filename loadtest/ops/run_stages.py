@@ -2,7 +2,8 @@
 
 用法：python ops/run_stages.py [档位 ...]
 
-不传档位时按既定顺序跑完剩下全部档位。逐档日志写入 local/runs/_driver.log。
+不传档位时按既定顺序跑完全部档位。任何一档失败就停止后续档位，避免上一档未排空或
+核对失败时污染下一档；逐档日志写入 local/runs/_driver.log。
 """
 from __future__ import annotations
 
@@ -13,7 +14,18 @@ import time
 
 BASE = pathlib.Path(__file__).resolve().parent.parent
 DRIVER_LOG = BASE / "local" / "runs" / "_driver.log"
-DEFAULT_STAGES = ["low", "mid_low", "mid", "stability", "recovery", "burst"]
+DEFAULT_STAGES = [
+    "low",
+    "mid_low",
+    "mid",
+    "stability",
+    "recovery",
+    "burst",
+    "burst_ungated",
+    "queue_pressure",
+    "multi_session_smoke",
+    "multi_session_pressure",
+]
 
 
 def log(message: str) -> None:
@@ -41,6 +53,8 @@ def main(stages: list[str]) -> int:
             log("    err " + line[:200])
         if process.returncode:
             exit_code = 1
+            log(f"[driver] {stage} 失败，停止后续档位")
+            break
     log("=== driver done")
     return exit_code
 
