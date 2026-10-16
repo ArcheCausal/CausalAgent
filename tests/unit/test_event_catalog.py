@@ -60,6 +60,7 @@ EXPECTED_CODES = {
     "mcp.tool.failed",
     "mcp.tool.canceled",
     "mcp.tool.slow",
+    "mcp.runner.failed",
     "mcp.request.received",
     "mcp.request.rejected",
     "mcp.request.accepted",
@@ -112,6 +113,8 @@ def _sample_value(field: str, rule):
         return ["writer_abort"]
     if field == "reason_code":
         return "unavailable"
+    if field == "error_type":
+        return "AlgorithmExecutionError"
     if field == "violation":
         return "unknown_event"
     if field in {

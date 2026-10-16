@@ -24,14 +24,39 @@ class _CdfmResultError(ValueError):
     """CDFM 返回结构无法满足 runner 契约。"""
 
 
-def _failure(error_type: str, message: str) -> dict[str, Any]:
-    return {
+def _failure(
+    error_type: str,
+    message: str,
+    *,
+    diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
         "schema_version": "causal_discovery_v1",
         "success": False,
         "algorithm": CDFM_ALGORITHM,
         "runner_version": CDFM_RUNNER_VERSION,
         "error_type": error_type,
         "message": message,
+    }
+    if diagnostics:
+        payload["diagnostics"] = diagnostics
+    return payload
+
+
+_MAX_DIAGNOSTIC_MESSAGE_CHARS = 500
+
+
+def _failure_diagnostics(
+    exc: BaseException,
+    model_path: str,
+) -> dict[str, Any]:
+    """收集失败现场的受控诊断字段，不写入 CSV、堆栈或来源正文。"""
+    message = str(exc).strip().replace("\n", " ")[:_MAX_DIAGNOSTIC_MESSAGE_CHARS]
+    return {
+        "error_type": type(exc).__name__,
+        "error_message": message or type(exc).__name__,
+        "model_path": model_path,
+        "model_source": "local_dir" if os.path.isdir(model_path) else "hub",
     }
 
 
@@ -174,8 +199,12 @@ def run_cdfm_analysis(
     model_path = os.getenv("CDFM_MODEL_PATH", "DMIRLAB/CDFM").strip() or "DMIRLAB/CDFM"
     try:
         model = CDFM.from_pretrained(model_path, device="cpu")
-    except Exception:
-        return _failure("AlgorithmExecutionError", "CDFM 模型加载失败。")
+    except Exception as exc:
+        return _failure(
+            "AlgorithmExecutionError",
+            "CDFM 模型加载失败。",
+            diagnostics=_failure_diagnostics(exc, model_path),
+        )
 
     try:
         result = model.predict(
@@ -190,8 +219,12 @@ def run_cdfm_analysis(
         edges = adjacency_to_edges(adjacency, column_names)
     except _CdfmResultError as exc:
         return _failure("ResultValidationError", str(exc))
-    except Exception:
-        return _failure("AlgorithmExecutionError", "CDFM 推理失败。")
+    except Exception as exc:
+        return _failure(
+            "AlgorithmExecutionError",
+            "CDFM 推理失败。",
+            diagnostics=_failure_diagnostics(exc, model_path),
+        )
 
     return {
         "schema_version": "causal_discovery_v1",

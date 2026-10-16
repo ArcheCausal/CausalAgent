@@ -208,6 +208,11 @@ RESULT_KIND = DetailRule(
     choices=frozenset({"structured_result", "other_result"}),
     max_bytes=32,
 )
+ERROR_TYPE = DetailRule(
+    (str,),
+    pattern=re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$"),
+    max_bytes=64,
+)
 ERROR_CATEGORY = DetailRule(
     (str,),
     choices=frozenset(
@@ -570,6 +575,17 @@ _events: dict[str, EventSpec] = {
         capability=TOKEN,
         duration_ms=DURATION,
         timeout_seconds=COUNT,
+    ),
+    "mcp.runner.failed": _spec(
+        logging.ERROR,
+        "dependency",
+        "MCP 算法 runner 返回失败",
+        capability=TOKEN,
+        error_type=ERROR_TYPE,
+        reason_code=REASON,
+        model_source=DetailRule(
+            (str,), choices=frozenset({"local_dir", "hub", "unknown"}), max_bytes=16
+        ),
     ),
     "mcp.request.received": _spec(
         logging.INFO,

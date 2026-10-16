@@ -198,6 +198,7 @@ Grafana 继续使用独立账号：开发入口为 `http://127.0.0.1:3000/grafan
 | `mcp.tool.failed` | `error/dependency` | MCP 工具调用失败 | `capability`, `retry_ordinal`, `duration_ms`, `input_bytes`, `reason_code` |
 | `mcp.tool.canceled` | `info/dependency` | MCP 工具调用已取消 | `capability`, `retry_ordinal`, `duration_ms`, `reason_code` |
 | `mcp.tool.slow` | `warning/dependency` | MCP 工具调用持续时间过长 | `capability`, `duration_ms`, `timeout_seconds` |
+| `mcp.runner.failed` | `error/dependency` | MCP 算法 runner 返回失败 | `capability`, `error_type`, `reason_code`, `model_source` |
 | `mcp.request.received` | `info/dependency` | MCP 请求已收到 | `capability`, `retry_ordinal` |
 | `mcp.request.rejected` | `warning/dependency` | MCP 请求已拒绝 | `capability`, `reason_code` |
 | `mcp.request.accepted` | `info/dependency` | MCP 请求已接受 | `capability`, `retry_ordinal`, `queue_wait_ms`, `timeout_seconds` |

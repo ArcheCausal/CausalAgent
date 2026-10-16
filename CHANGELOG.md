@@ -1813,3 +1813,7 @@
 - 【CDFM 权重入卷】
   - 【构建期下载】：新增 `Agent/CausalAgentMCP/cdfm_weights.py`，把 `DMIRLAB/CDFM` 的 revision 与逐文件 SHA-256、字节数写死；`Agent/CausalAgentMCP/Dockerfile` 在构建末尾下载到镜像内只读目录 `/opt/cdfm-weights-image` 并逐文件校验，不合格直接构建失败，下载端点由构建参数 `HF_ENDPOINT` 控制。
   - 【预发入卷】：新增一次性服务 `cdfm-weights-seed` 与命名卷 `rag_eval_staging_cdfm_weights`，按 `version.json` 幂等同步；`causal-mcp` 只读挂载 `/opt/cdfm-weights`、设置 `CDFM_MODEL_PATH=/opt/cdfm-weights` 与 `HF_HUB_OFFLINE=1`，并等待 seed 成功退出。
+- 【CDFM 失败诊断】
+  - 【runner 诊断字段】：`Agent/causal/cdfm_runner.py` 的模型加载与推理失败改为绑定异常对象，`diagnostics` 新增 `error_type`、`error_message`（截断 500 字符）、`model_path` 与 `model_source`（`local_dir` 或 `hub`）；`_failure()` 增加可选 `diagnostics` 参数。
+  - 【跨进程异常类名】：`Agent/CausalAgentMCP/executor_pool.py` 在 runner 抛异常时只把异常类名随 `RunnerExecutionError` 带回父进程，子进程输出仍被丢弃，不进入协议或日志流。
+  - 【受控事件】：`Agent/CausalAgentMCP/service.py` 新增 `mcp.runner.failed` 事件，只写 `capability`、`error_type`、`reason_code` 与 `model_source` 等稳定字段，不写异常自由文本；事件目录与 `Document/development/observability.md` 同步登记。
