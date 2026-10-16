@@ -9,7 +9,13 @@ from pathlib import Path
 
 from runner import config
 from runner.accounts import ensure_accounts, load_accounts, verify_accounts
-from runner.evidence import attach_server_baseline, build_evidence, latest_runs
+from runner.evidence import (
+    attach_job_db_check,
+    attach_server_baseline,
+    build_evidence,
+    export_job_id_lists,
+    latest_runs,
+)
 from runner import resource
 from runner.preflight import render_preflight, run_preflight
 from runner.recovery import run_recovery_suite
@@ -57,6 +63,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="把负载结束后的服务器只读采集结果写入各档运行摘要的收尾快照",
     )
     after.add_argument("--from", dest="after_from", required=True)
+    export = sub.add_parser(
+        "export-job-ids",
+        help="把各档本轮创建的 job_id 导出为清单文件，供服务器上逐 Job 主库核对",
+    )
+    export.add_argument("--out", default="", help="输出目录；默认为 local/runs/job-ids")
+    job_db = sub.add_parser(
+        "attach-job-db",
+        help="把 job_db_check.sh 的逐 Job 主库核对结果写入各档运行摘要",
+    )
+    job_db.add_argument("--from", dest="job_db_from", required=True)
     sub.add_parser("verify-packet", help="生成日志与管理员端核查定位清单")
     logs = sub.add_parser("logs", help="通过 Grafana/Loki 核对日志侧（需要可用凭据）")
     logs.add_argument("--stage", default="", help="限定到某档运行的时间窗口")
@@ -84,6 +100,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "attach-after":
         return _cmd_attach_after(args.after_from)
+    if args.command == "export-job-ids":
+        return _cmd_export_job_ids(args.out)
+    if args.command == "attach-job-db":
+        return _cmd_attach_job_db(args.job_db_from)
     if args.command == "attach-server":
         return _cmd_attach_server(args.server_from)
     if args.command == "attach-sample":
@@ -260,6 +280,36 @@ def _cmd_evidence() -> int:
     for path in written:
         print(f"已写入 {path}")
     print(f"合并报告: {combined}")
+    return 0
+
+
+def _cmd_export_job_ids(out: str) -> int:
+    """导出各档本轮 job_id 清单，供服务器上的逐 Job 主库核对使用。"""
+    target_dir = Path(out) if out else config.RUNS_DIR / "job-ids"
+    written = export_job_id_lists(config.RUNS_DIR, target_dir)
+    total = 0
+    for path in written:
+        count = len([line for line in path.read_text(encoding="utf-8").splitlines() if line])
+        total += count
+        print(f"已写入 {path}（{count} 个 job_id）")
+    print(f"共导出 {total} 个 job_id 到 {target_dir}")
+    print(
+        "下一步：把清单上传到服务器后执行 "
+        "sudo bash loadtest/job_db_check.sh <run_id> <job_ids.txt>"
+    )
+    return 0
+
+
+def _cmd_attach_job_db(path: str) -> int:
+    """把逐 Job 主库核对结果写入各档运行摘要。"""
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        print("主库核对文件必须是 JSON 对象。")
+        return 1
+    updated = attach_job_db_check(config.RUNS_DIR, payload)
+    for item in updated:
+        print(f"已写入逐 Job 主库核对: {item}")
+    print(f"共更新 {len(updated)} 个档位运行摘要")
     return 0
 
 

@@ -5,7 +5,21 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from runner import resource
+from runner import config, resource
+
+
+
+def _server_spec(summary: dict) -> str:
+    """从服务器侧采集读取主机规格；没有采集时如实写明未采集。"""
+    baseline = summary.get("server_baseline") or {}
+    spec = baseline.get("host_spec")
+    if spec:
+        return str(spec)
+    cpu = baseline.get("cpu_count")
+    memory = baseline.get("memory_mb")
+    if cpu or memory:
+        return f"CPU 核数 {cpu or '未采集'}；内存 {memory or '未采集'}"
+    return "未采集（缺少服务器只读采集）"
 
 
 def _fmt(value, unit: str = "") -> str:
@@ -22,10 +36,25 @@ def _value(value) -> str:
     return "未采集" if value is None else str(value)
 
 
+def _field(value) -> str:
+    """采集字段缺失或为空时显示为未采集，避免报告出现 None 或空字符串。"""
+    if value is None or value == "":
+        return "未采集"
+    return str(value)
+
+
 def _json_or_absent(value) -> str:
     if value is None:
         return "未采集（缺少服务器只读采集入口）"
     return json.dumps(value, ensure_ascii=False)
+
+
+def _listed(value) -> str:
+    """把采集脚本用分号连接的列表渲染成可读文本；空值表示没有命中项。"""
+    if value is None:
+        return "未采集"
+    items = [item.strip() for item in str(value).split(";") if item.strip()]
+    return "、".join(items) if items else "无"
 
 
 def _parse_job_queue(raw) -> dict:
@@ -35,6 +64,8 @@ def _parse_job_queue(raw) -> dict:
     否则旧快照会渲染成空值。
     """
     if not raw:
+        return {}
+    if isinstance(raw, dict) and raw.get("status") in ("missing", "error"):
         return {}
     if isinstance(raw, dict) and "counts" not in raw:
         return raw
@@ -79,17 +110,19 @@ def _server_section(
 def _server_fields(payload: dict, label_prefix: str) -> list[str]:
     """把一份服务器采集渲染成条目；label_prefix 说明它是负载前还是停止后。"""
     lines = [
-        f"- 采集时刻：{payload.get('collected_at')}（{payload.get('collected_at_note')}）",
-        f"- 采集方式：{payload.get('source')}",
-        f"- 主机：{payload.get('hostname')}，{payload.get('host_spec')}",
-        f"- 运行时长：{payload.get('uptime')}",
-        f"- 负载均值 / CPU 核数：{payload.get('load_average')} / {payload.get('cpu_count')}",
-        f"- 内存（MB）：{payload.get('memory_mb')}",
-        f"- swap（MB）：{payload.get('swap_mb')}",
-        f"- 磁盘：{payload.get('disk')}",
-        f"- inode：{payload.get('disk_inodes')}",
-        f"- 容器：运行 {payload.get('containers_up')} 个；OOM：{payload.get('oom_killed')}；"
-        f"重启计数：{payload.get('restart_counts')}",
+        f"- 采集时刻：{_field(payload.get('collected_at'))}"
+        f"（{_field(payload.get('phase'))}；{_field(payload.get('schema_version'))}）",
+        f"- 采集方式：{_field(payload.get('source'))}",
+        f"- 主机：{_field(payload.get('hostname'))}，{_field(payload.get('host_spec'))}",
+        f"- 运行时长：{_field(payload.get('uptime'))}",
+        f"- 负载均值 / CPU 核数：{_field(payload.get('load_average'))} / {_field(payload.get('cpu_count'))}",
+        f"- 内存（MB）：{_field(payload.get('memory_mb'))}",
+        f"- swap（MB）：{_field(payload.get('swap_mb'))}",
+        f"- 磁盘：{_field(payload.get('disk'))}",
+        f"- inode：{_field(payload.get('disk_inodes'))}",
+        f"- 容器：运行 {_field(payload.get('containers_up'))} 个；"
+        f"OOM 容器：{_listed(payload.get('oom_killed'))}；"
+        f"重启计数：{_listed(payload.get('restart_counts'))}",
     ]
     images = payload.get("images") or {}
     if images:
@@ -97,9 +130,16 @@ def _server_fields(payload: dict, label_prefix: str) -> list[str]:
         for name, value in images.items():
             lines.append(f"  - {name}：{value}")
     exited = payload.get("containers_exited") or []
-    if exited:
-        lines.append(f"- 已退出容器：{'；'.join(exited)}")
+    if isinstance(exited, str):
+        items = [item.strip() for item in exited.split(";") if item.strip()]
+    else:
+        items = list(exited)
+    if items:
+        lines.append(f"- 已退出容器：{'；'.join(items)}")
     mysql = payload.get("mysql") or {}
+    if mysql.get("status") in ("missing", "error"):
+        lines.append(f"- MySQL：{_field(mysql.get('status'))}（{_field(mysql.get('reason'))}）")
+        mysql = {}
     if mysql:
         lines.append(
             "- MySQL：连接数 "
@@ -197,11 +237,13 @@ def render_stage_report(summary: dict, logcheck: dict | None = None) -> str:
         f"- run_id：{summary['run_id']}",
         f"- 测试时间：{started}",
         f"- 服务版本或镜像 digest：{_image_note(summary)}",
-        f"- 服务器规格：4 核 8 GB（腾讯云，按计划给定）",
+        f"- 服务器规格：{_server_spec(summary)}",
         f"- 压测客户端规格和网络位置：{json.dumps(client, ensure_ascii=False)}",
-        f"- 虚拟用户数：{summary['users']}",
+        f"- 虚拟账号数：{summary['users']}，每账号真实会话数："
+        f"{_value(summary.get('peak_sessions_per_user'))}",
         f"- 实际 RPS：{http['rps']}",
         f"- 实际活动 Job 峰值：{_value(summary.get('peak_active_jobs'))}",
+        f"- 单账号活动 Job 峰值：{_value(summary.get('peak_active_jobs_per_account'))}",
         f"- 实际 SSE 峰值：{_value(summary.get('peak_sse'))}",
         "",
         "## HTTP",
@@ -215,8 +257,19 @@ def render_stage_report(summary: dict, logcheck: dict | None = None) -> str:
         "",
         "## Job",
         "",
-        f"- 接受（创建）：{job.get('created', 0)}，幂等重放：{job.get('idempotent_replays', 0)}",
+        f"- 创建尝试：{job.get('create_attempts', 0)}",
+        f"- 成功创建唯一新 Job：{job.get('created', 0)}",
+        f"- 幂等重放（不占用额度）：{job.get('idempotent_replays', 0)}",
+        f"- 超额跳过（每账号额度用尽）：{job.get('submissions_over_budget', 0)}",
+        f"- 会话忙跳过：{job.get('submissions_session_busy', 0)}",
+        f"- 每账号成功创建上限使用最多：{job.get('budget_used_max', 0)}",
         f"- 终态分布：{json.dumps(job.get('terminal_status_counts', {}), ensure_ascii=False)}",
+        f"- 观察期限内未到终态的 Job：{job.get('observation_timeouts', 0)}",
+        f"- 排队观测到达 {config.QUEUE_OBSERVE_TIMEOUT_SECONDS:.0f} 秒仍未进入 running 的 Job："
+        f"{job.get('queue_observe_timeouts', 0)}",
+        f"- 等待时间下界（未完成 Job）："
+        f"{_fmt(job.get('queue_timeout_wait_lower_bound_min_seconds'), ' s')} ~ "
+        f"{_fmt(job.get('queue_timeout_wait_lower_bound_max_seconds'), ' s')}",
         f"- 排队 p50 / p95：{_fmt(job.get('queue_p50_seconds'), ' s')} / "
         f"{_fmt(job.get('queue_p95_seconds'), ' s')}",
         f"- 执行 p50 / p95：{_fmt(job.get('execution_p50_seconds'), ' s')} / "

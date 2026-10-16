@@ -20,6 +20,10 @@ STAGE_ORDER = [
     "recovery",
     "stability",
     "burst",
+    "burst_ungated",
+    "queue_pressure",
+    "multi_session_smoke",
+    "multi_session_pressure",
 ]
 
 
@@ -57,6 +61,53 @@ def attach_server_baseline(runs_dir: Path, payload: dict) -> list[str]:
         )
         updated.append(f"{stage}:{path.name}")
     return updated
+
+
+def export_job_id_lists(runs_dir: Path, out_dir: Path) -> list[Path]:
+    """把各档本轮创建的唯一 job_id 按档位导出为清单文件。
+
+    清单文件上传到服务器后作为 job_db_check.sh 的输入，用于逐 Job 核对主库终态。
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for stage, path in sorted(latest_runs(runs_dir).items()):
+        summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
+        job_ids = _job_ids(summary)
+        target = out_dir / f"job-ids-{stage}.txt"
+        target.write_text(
+            ("\n".join(job_ids) + "\n") if job_ids else "",
+            encoding="utf-8",
+        )
+        written.append(target)
+    return written
+
+
+def attach_job_db_check(runs_dir: Path, payload: dict) -> list[str]:
+    """把逐 Job 主库核对结果写入每个档位最近一次运行的摘要。"""
+    updated: list[str] = []
+    for stage, path in sorted(latest_runs(runs_dir).items()):
+        target = path / "summary.json"
+        summary = json.loads(target.read_text(encoding="utf-8"))
+        summary["job_db_check"] = payload
+        target.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        updated.append(f"{stage}:{path.name}")
+    return updated
+
+
+def _job_ids(summary: dict) -> list[str]:
+    """从一份运行摘要里取出本轮创建过的唯一 job_id。"""
+    ids: list[str] = []
+    for sample in summary.get("sse", {}).get("samples", []):
+        job_id = str(sample.get("job_id") or "")
+        if job_id:
+            ids.append(job_id)
+    for sample in summary.get("job", {}).get("samples", []):
+        job_id = str(sample.get("job_id") or "")
+        if job_id:
+            ids.append(job_id)
+    return list(dict.fromkeys(ids))
 
 def _load_logchecks(evidence_dir: Path) -> dict:
     """按档位读取日志核查结果，供逐档报告补齐模型与 MCP 错误一节。"""
@@ -221,9 +272,10 @@ def _summary_table(selected: dict[str, Path]) -> list[str]:
         "recovery 是专项流程，创建数只统计真正进入执行的 Job，终态分布不适用；"
         "其检查项见该档报告的“专项检查”一节。",
         "排队、执行、总耗时按 Job 逐个统计，起点是创建 Job 请求发出，终点是 SSE 收到终态事件；"
-        "执行时间为总耗时减去排队时间。",
-        "SSE 峰值受活动 Job 数制约：这一轮 Job 创建受活动 Job 上限节流，SSE 订阅数没有超过活动 Job 数，"
-        "因此各档 SSE 峰值为 1 至 4，计划中的 4 至 8 上限未被打满。",
+        "执行时间为总耗时减去排队时间。观察期限内未收到终态的 Job 不进这两个百分位，"
+        "而是计入观察超时数量与排队等待下界。",
+        "活动 Job 上限和 SSE 上限是本轮的客户端配置值，实际峰值由本节数值给出；"
+        "上限为“不限”表示客户端不限制创建，运行中的并发数量由服务器默认 worker 能力形成。",
         "",
     ])
     return rows
@@ -253,8 +305,8 @@ def build_evidence(runs_dir: Path, evidence_dir: Path) -> tuple[Path, list[Path]
         "",
         f"- 生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"- 入口：{config.base_url()}",
-        "- 服务器侧指标：已通过 loadtest/server_side_collect.sh 只读采集并写入各档摘要，"
-        "逐档的“服务器侧”一节给出实测值",
+        "- 数据来源：本报告只使用 local/runs/ 下本轮各档运行摘要、"
+        "local/evidence/ 的日志核查与本轮服务器只读采集；没有采集的项按未采集写明。",
         "",
     ]
     sections.extend(_summary_table(selected))
@@ -300,11 +352,20 @@ def _render_job_db(path: Path) -> list[str]:
     if not path.exists():
         return []
     payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("status") == "missing":
+        return [
+            "## 主库 Job 终态核对",
+            "",
+            f"- 核对状态：未取得数据（{payload.get('reason')}）；不得据此判定通过。",
+            "",
+        ]
     all_time = payload.get("by_status_all_time") or {}
     window = payload.get("by_status_last_3h") or {}
     lines = [
-        "## 第六阶段：主库 Job 终态核对",
+        "## 主库 Job 终态核对",
         "",
+        f"- schema_version：{payload.get('schema_version')}",
+        f"- run_id：{payload.get('run_id')}",
         f"- 核对时刻：{payload.get('collected_at')}",
         f"- 来源：{payload.get('source')}",
         f"- 表：{payload.get('table')}",
@@ -313,6 +374,7 @@ def _render_job_db(path: Path) -> list[str]:
         f"- 最近三小时涉及账号数：{payload.get('distinct_users_last_3h')}",
         "",
     ]
+    lines.extend(_job_comparison(payload))
     failed = payload.get("failed_jobs") or []
     if failed:
         lines.extend(
@@ -329,39 +391,148 @@ def _render_job_db(path: Path) -> list[str]:
             )
         lines.append("")
     lines.append(
-        "主库终态与客户端逐档汇总的创建数、终态分布一致；取消数包含专项中主动取消的 Job。"
+        "逐 Job 比对只覆盖清单文件里列出的 job_id；清单之外的 Job 不参与本次判定。"
     )
     lines.append("")
     return lines
 
 
+def _job_comparison(payload: dict) -> list[str]:
+    """把清单内每个 Job 的客户端结果与主库结果逐条比对。"""
+    rows = payload.get("jobs") or []
+    if rows and rows[0].get("job_id") is None:
+        reason = rows[0].get("reason") or "未提供 job_id 清单文件"
+        return [f"逐 Job 比对未执行：{reason}；本轮只有全库分布可用。", ""]
+    if not rows:
+        return [
+            "逐 Job 比对未执行：本轮没有提供 job_id 清单文件，只有全库分布可用。",
+            "",
+        ]
+    selected = latest_runs(config.RUNS_DIR)
+    client_results = _client_job_results(selected)
+    lines = [
+        "### 逐 Job 比对",
+        "",
+        "| job_id | 客户端终态 | 主库终态 | 会话归属 | 执行释放 | 结论 |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    consistent = 0
+    mismatched = 0
+    for row in rows:
+        job_id = str(row.get("job_id"))
+        client = client_results.get(job_id, {})
+        client_status = client.get("final_status") or "未记录"
+        db_status = row.get("status")
+        session_note = (
+            f"{row.get('session_id')}（账号 {row.get('user_id')}）"
+            if row.get("session_id")
+            else "未取得"
+        )
+        release = row.get("execution_release_reason") or row.get("execution_state") or "未取得"
+        if row.get("missing"):
+            verdict = "主库无该 Job"
+            mismatched += 1
+        elif client_status in ("未记录",):
+            verdict = "客户端清单缺该 Job"
+            mismatched += 1
+        elif _status_equivalent(client_status, db_status):
+            verdict = "一致"
+            consistent += 1
+        else:
+            verdict = "不一致"
+            mismatched += 1
+        lines.append(
+            f"| {job_id} | {client_status} | {db_status} | {session_note} | {release} | {verdict} |"
+        )
+    lines.extend(
+        [
+            "",
+            f"- 逐 Job 比对结果：一致 {consistent} 条，不一致或缺失 {mismatched} 条。",
+            "",
+        ]
+    )
+    return lines
+
+
+def _client_job_results(selected: dict[str, Path]) -> dict[str, dict]:
+    """汇总本轮各档客户端记录的 Job 终态，供逐 Job 比对使用。"""
+    results: dict[str, dict] = {}
+    for path in selected.values():
+        summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
+        for sample in summary.get("sse", {}).get("samples", []):
+            job_id = str(sample.get("job_id") or "")
+            if not job_id:
+                continue
+            terminal = sample.get("terminal_event")
+            results[job_id] = {
+                "stage": summary.get("stage"),
+                "terminal_event": terminal,
+                "final_status": _event_to_status(terminal, sample.get("error")),
+            }
+        for job in summary.get("job", {}).get("samples", []):
+            job_id = str(job.get("job_id") or "")
+            if not job_id:
+                continue
+            results.setdefault(
+                job_id,
+                {
+                    "stage": summary.get("stage"),
+                    "terminal_event": None,
+                    "final_status": job.get("final_status"),
+                },
+            )
+    return results
+
+
+def _event_to_status(terminal_event, error) -> str | None:
+    """把 SSE 终态事件映射为主库终态口径。"""
+    if terminal_event == "final_result":
+        return "succeeded"
+    if terminal_event == "canceled":
+        return "canceled"
+    if terminal_event == "error":
+        return "failed"
+    if terminal_event == "interrupt":
+        return "waiting_input"
+    if error:
+        return "unfinished"
+    return None
+
+
+def _status_equivalent(client_status: str, db_status) -> bool:
+    """比较客户端终态与主库终态；等待输入和未完成不算一致。"""
+    return client_status == db_status
+
+
 def _limitations(selected: dict[str, Path]) -> list[str]:
     """列出未执行项与原因，避免把部分结果当成完整验收。"""
-    lines = [
-        "## 未执行项与原因",
-        "",
-        "以下项目属于计划范围，但本轮没有取得证据；原因写在对应条目里。",
-        "",
-        "- 服务器侧指标（CPU、内存、磁盘、swap、OOM、容器重启、MySQL 连接数与"
-        "复制状态）：已通过 SSH 在服务器上执行只读采集，采集时刻与取值见各档“服务器侧”"
-        "一节；采样是单次快照，未覆盖整个负载窗口的每一秒。",
-        "- causal.cdfm 的算法失败：日志侧已确认该能力在本轮全部档位完成数为 0，"
-        "根因是 staging 出网不可达 huggingface.co，定位与候选修复见 "
-        "evidence/cdfm-failure-analysis.md；本轮只做定位，未修改服务代码或配置。",
-        "- 管理员端网页界面核对：管理员端页面需要管理员登录凭据，本轮未在浏览器登录；"
-        "Job 终态改用主库只读查询核对，结果见上一节。",
-        "- 网关级 5xx 的来源定位：本轮 mid 档 1 次、stability 档 3 次 5xx，分别落在 GET /health/probe"
-        "与 GET /api/agent/jobs/active。应用的 web error 日志为 0 条，说明它们没有进入应用异常日志。"
-        "复核时单独重放 300 次请求未复现，且 /health/probe 在当前入口返回 404，表明它是网关自身的"
-        "路由而不是 Flask 应用接口；日志采集只覆盖 web、worker、mcp 三个服务，不含网关自身日志，"
-        "所以这几次 502 由网关到上游之间的瞬时失败造成，具体成因本轮未能确认。",
-        "- waiting_input 恢复分支：专项里三次点名引用文件的请求都直接返回 final_result，"
-        "没有进入 interrupt，恢复分支未触发；该分支需要 Job 执行期间冻结文件不可用，"
-        "普通用户接口无法制造，因此本轮只把它记为未触发，不记为通过。",
-        "",
-        "客户端侧可复现的检查均已执行并留下逐档证据；上述项目不因此被表述为已通过。",
-        "",
-    ]
+    lines = ["## 本轮的采集边界与未覆盖项", ""]
+    for stage, path in sorted(selected.items()):
+        summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
+        baseline = summary.get("server_baseline")
+        curve = summary.get("resource_curve")
+        job_db = summary.get("job_db_check")
+        gaps: list[str] = []
+        if not baseline:
+            gaps.append("服务器侧单次快照未采集")
+        if not curve:
+            gaps.append("负载窗口资源采样未采集")
+        if not job_db:
+            gaps.append("逐 Job 主库核对未执行")
+        if gaps:
+            lines.append(f"- {stage}：暂无证据的项目为{'、'.join(gaps)}。")
+    lines.extend(
+        [
+            "",
+            "客户端侧可复现的检查均已执行并留下逐档证据；上面列出的项目不在本轮证据范围内，"
+            "不因本报告其余部分通过而被视为通过。",
+            "服务器侧指标只有通过 loadtest/server_side_collect.sh 与 "
+            "loadtest/stage_resource_sample.sh 的只读采集才写入报告；缺少采集时逐档写明未采集。",
+            "逐 Job 终态比对需要先导出本轮 job_id 清单并上传到服务器，再运行 "
+            "loadtest/job_db_check.sh；没有该清单时脚本只输出全库分布，报告写明该状态。",
+            "",
+        ]
+    )
     return lines
 
 

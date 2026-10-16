@@ -12,19 +12,37 @@
 loadtest/
 ├── runner/            # 压测程序：HTTP/SSE 客户端、账号、场景、指标、日志核查、报告与证据合并
 ├── ops/               # 一档或多档的编排脚本：服务器采样 + 跑负载 + 回写摘要
-├── *.sh               # 在服务器上执行的只读采集脚本（主机资源采样、主库 Job 核对）
+ ├── selftest.py        # 本地桩服务上的真实 HTTP 自检，不接触 staging
+├── verify_report.py   # 用已有产物验证报告与逐 Job 比对能消费服务器采集格式
+ ├── *.sh               # 在服务器上执行的只读脚本：单次采集、窗口采样、逐 Job 主库核对
 ├── evidence/
 │   └── index.md       # 唯一入库的压测证据链索引
 ├── local/             # 全部本地产物，整体加入 .gitignore
 │   ├── runs/          # 每次运行的原始产物：逐档 summary.json、控制台输出、编排日志
+ │   ├── runs/job-ids/  # 按档位导出的本轮 job_id 清单，供服务器逐 Job 核对
 │   ├── data/          # 运行时生成的测试 CSV
 │   ├── evidence/      # 整理后的报告、逐档 logcheck、缺陷分析与服务器侧采集结果
 │   ├── accounts.local.json      # 测试账号与密码
-│   ├── server-side-<date>.json  # 服务器侧只读采集结果
-│   └── job-db-<date>.json       # 主库 Job 终态只读核对结果
+ │   ├── server-side-<run_id>-before.json  # 负载前的服务器只读采集结果
+ │   ├── server-side-<run_id>-after.json   # 停止提交后的服务器只读采集结果
+ │   └── job-db-<run_id>.json              # 逐 Job 主库终态只读核对结果
 ├── README.md          # 使用说明
 └── requirements.txt   # 本地压测客户端依赖，不进入服务器镜像
 ```
+
+## 服务器只读脚本
+
+三个脚本都在服务器上执行，只读、按 run_id 分轮保存，并输出带 schema_version 的 JSON。缺失数据必须写成 missing/error 状态，禁止用 0 冒充采集成功，也不输出密钥、Prompt、模型正文或用户文件内容。
+
+| 脚本 | 采集内容 |
+| --- | --- |
+| server_side_collect.sh | 单次快照：主机 CPU、内存、swap、磁盘与 inode、容器重启/OOM、镜像版本、MySQL 状态与复制、Job 分布、出网探测 |
+| stage_resource_sample.sh | 覆盖负载与排空阶段的定时采样：主机负载与内存、容器资源、数据库连接数、queued/running/draining 数量 |
+| job_db_check.sh | 按本轮 job_id 清单逐 Job 核对主库终态、会话归属、创建/开始/结束时间、attempt 与执行释放状态 |
+
+三个脚本的认证信息都从受控凭据文件读取，默认 /opt/causalagent-staging/.env.staging，可用 CAUSALAGENT_ENV_FILE 覆盖；容器名默认按 COMPOSE_PROJECT_NAME 推导，默认 causalagent-staging。没有采集或核对成功时，报告必须把对应项写成未采集，不得标记为通过。
+
+stage_resource_sample.sh 的 samples 数组每一项包含 host、containers、queue、connections 四层；runner/resource.py 同时兼容早期的扁平采样格式。为避免拖长采样间隔，采样循环不逐容器调用 docker inspect，OOMKilled 结论由 server_side_collect.sh 的单次快照给出。
 
 ## 凭据与产物
 
