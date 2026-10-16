@@ -1840,10 +1840,7 @@
   - 【资源采样格式】：窗口采样由扁平格式改为 host / containers / queue / connections 四层结构，同时兼容旧格式；`runner/resource.py` 新增队列深度、主库连接数与容器状态汇总，缺失值写成未采集而不写成 0。
   - 【上传与自检】：`runner` 新增 `export-job-ids` 与 `attach-job-db` 子命令；新增 `loadtest/selftest.py`，用本地桩服务验证同一账号两会话并发、会话级活动 Job 约束、账号级额度、`active_jobs=None` 不阻塞创建，以及排队超过观测窗口不算 SSE 断线。
   - 【文档同步】：`loadtest/README.md` 新增档位表与自检说明，并更新三个脚本的调用方式；`loadtest/AGENTS.md` 记录脚本职责、JSON 格式与凭据来源。
-<<<<<<< HEAD
 
----
-2026.10.16
 - 【许可证：将当前版本切换为 GNU AGPL-3.0】：更新根目录 LICENSE，并在中英文 README 中说明商业与竞争性服务、网络交互源码义务、第三方组件各自授权，以及项目名称和图形标识不由代码许可证授权。
 
 - 【部署文档：补充测试预发操作流程】
