@@ -69,6 +69,34 @@ jobs:
           app Agent Database config tests
           CausalAgent.py Run_causal.py
 
+  light-tests:
+    name: Light tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-base.txt
+
+      - name: Install test runner
+        run: >-
+          python -m pip install --disable-pip-version-check
+          "pytest>=8,<9"
+          "pydantic==2.13.5"
+
+      - name: Run dependency-free tests
+        run: >-
+          python -m pytest --quiet
+          tests/unit/agent/test_llm_structured_output_usage.py
+          tests/unit/agent/test_llm_structured_output_config.py
+
   backend-unit-tests:
     name: Backend unit tests
     runs-on: ubuntu-latest
