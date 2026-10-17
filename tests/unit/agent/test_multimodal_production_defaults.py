@@ -68,6 +68,13 @@ class MultimodalProductionDefaultsTests(unittest.TestCase):
         )
         self.assertEqual(len(config["sources"]), 2)
         self.assertTrue(all(source["required"] for source in config["sources"]))
+
+    def test_production_sources_resolve_to_controlled_local_files(self) -> None:
+        """受控源 PDF 不入库，仅在本地具备资产时校验哈希与路径。"""
+        config = load_production_defaults()
+        source_root = Path(__file__).parents[3] / "Agent" / "knowledge_base" / "source"
+        if not source_root.is_dir():
+            self.skipTest("受控源目录 Agent/knowledge_base/source 未入库，跳过哈希校验")
         self.assertTrue(all(path.is_file() for path in production_source_paths(config)))
 
     def test_manual_evaluation_set_has_24_complete_reviewed_cases(self) -> None:

@@ -24,6 +24,10 @@ class MultimodalReleaseTests(unittest.TestCase):
             version_dir.mkdir(parents=True)
             (version_dir / "manifest.json").write_text(json.dumps({"index_version": "mm_release_test"}), encoding="utf-8")
             (version_dir / "units.jsonl").write_text("unit\n", encoding="utf-8")
+            (version_dir / "build_state.json").write_text(json.dumps({"index_version": "mm_release_test"}), encoding="utf-8")
+            chroma_dir = version_dir / "chroma"
+            chroma_dir.mkdir()
+            (chroma_dir / "chroma.sqlite3").write_bytes(b"index")
             asset = staged_asset_root / "doc" / "images" / "page.png"
             asset.parent.mkdir(parents=True)
             asset.write_bytes(b"asset")
