@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { copyTextToClipboard, reportToMarkdown } from '../renderers/report-clipboard'
 import {
   collectEvidenceUsage,
   evidencePage,
@@ -13,10 +14,56 @@ const props = defineProps<{ document: unknown }>()
 const parsed = computed(() => parseReportDocument(props.document))
 const expandedSourceIds = ref<Set<string>>(new Set())
 
-// 每次生成/切换报告都从收起状态开始，避免沿用上一份报告的展开状态。
+type CopyState = 'idle' | 'copying' | 'copied' | 'failed'
+
+const copyState = ref<CopyState>('idle')
+const copyFailureReason = ref('')
+const COPY_FEEDBACK_MS = 2000
+let copyResetTimer: number | undefined
+
+const copyLabel = computed(() => {
+  if (copyState.value === 'copying') return '复制中…'
+  if (copyState.value === 'copied') return '已复制'
+  if (copyState.value === 'failed') return '复制失败，请重试'
+  return '复制报告'
+})
+
+function scheduleCopyReset(): void {
+  window.clearTimeout(copyResetTimer)
+  copyResetTimer = window.setTimeout(() => {
+    copyState.value = 'idle'
+  }, COPY_FEEDBACK_MS)
+}
+
+/*
+ * 一键复制：把当前报告投影成 Markdown 后写入剪贴板。
+ * 复制期间忽略重复点击；成功与失败都在按钮上就地反馈，2 秒后回到初始文案。
+ */
+async function copyReport(): Promise<void> {
+  const report = parsed.value
+  if (!report || copyState.value === 'copying') return
+  copyState.value = 'copying'
+  try {
+    await copyTextToClipboard(reportToMarkdown(report))
+    copyState.value = 'copied'
+    copyFailureReason.value = ''
+  } catch (error) {
+    copyState.value = 'failed'
+    // 失败原因挂在按钮 title 上，浏览器权限策略差异导致时可以就地定位。
+    copyFailureReason.value = error instanceof Error ? error.message : String(error)
+  }
+  scheduleCopyReset()
+}
+
+// 每次生成/切换报告都从收起状态开始，避免沿用上一份报告的展开状态和复制反馈。
 watch(() => props.document, () => {
   expandedSourceIds.value = new Set()
+  window.clearTimeout(copyResetTimer)
+  copyState.value = 'idle'
+  copyFailureReason.value = ''
 })
+
+onBeforeUnmount(() => window.clearTimeout(copyResetTimer))
 
 /*
  * 来源导航：正文只保留文字，知识库与联网证据统一收进页脚，按来源分组；
@@ -71,7 +118,23 @@ function focusEvidence(blockIds: string[]) {
 
 <template>
   <section v-if="parsed" class="report-document">
-    <h1 class="report-title">{{ parsed.title }}</h1>
+    <header class="report-header">
+      <h1 class="report-title">{{ parsed.title }}</h1>
+      <button
+        type="button"
+        class="report-copy"
+        :class="`report-copy-${copyState}`"
+        :disabled="copyState === 'copying'"
+        :title="copyState === 'failed' ? copyFailureReason : undefined"
+        @click="copyReport"
+      >
+        <svg class="report-copy-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <rect x="5.6" y="5.6" width="8.6" height="8.6" rx="1.8" />
+          <path d="M10.4 5.4V3.6a1.8 1.8 0 0 0-1.8-1.8H3.6a1.8 1.8 0 0 0-1.8 1.8v5a1.8 1.8 0 0 0 1.8 1.8h1.9" />
+        </svg>
+        <span class="report-copy-label" role="status" aria-live="polite">{{ copyLabel }}</span>
+      </button>
+    </header>
     <ReportBlockView
       v-for="block in parsed.blocks"
       :key="block.id"
@@ -139,11 +202,77 @@ function focusEvidence(blockIds: string[]) {
   color: var(--color-text-muted, #6b7280);
 }
 
+.report-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
 .report-title {
+  flex: 1;
+  min-width: 0;
   margin: 0;
   font-size: var(--report-title-size, 22px);
   font-weight: 400;
   line-height: 1.35;
+}
+
+.report-copy {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 4px 9px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-text-muted, #6b7280);
+  white-space: nowrap;
+  background: transparent;
+  border: 1px solid var(--report-border, #e2e5e9);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease, background-color 160ms ease;
+}
+
+.report-copy-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.report-copy:hover:not(:disabled) {
+  color: var(--report-accent, #0067c0);
+  border-color: currentColor;
+  background: var(--report-muted-background, #eef1f4);
+}
+
+.report-copy:focus-visible {
+  outline: 2px solid var(--report-accent, #0067c0);
+  outline-offset: 2px;
+}
+
+.report-copy:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.report-copy-copied {
+  color: var(--report-accent, #0067c0);
+  border-color: currentColor;
+}
+
+.report-copy-failed {
+  color: #b42318;
+  border-color: currentColor;
 }
 
 .report-sources {
