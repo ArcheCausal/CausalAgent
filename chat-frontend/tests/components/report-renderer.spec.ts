@@ -1,5 +1,5 @@
 import { mount } from '@vue/test-utils'
-import { beforeAll, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import ReportRenderer from '../../src/components/ReportRenderer.vue'
 import markedSource from '../../public/vendor/marked.min.js?raw'
 
@@ -9,6 +9,11 @@ import markedSource from '../../public/vendor/marked.min.js?raw'
  */
 beforeAll(() => {
   new Function(markedSource).call(window)
+})
+
+afterEach(() => {
+  vi.useRealTimers()
+  Reflect.deleteProperty(navigator, 'clipboard')
 })
 
 function histogramAsset() {
@@ -183,5 +188,78 @@ describe('ReportRenderer', () => {
     const wrapper = mount(ReportRenderer, { props: { document: { type: 'text', summary: '正文' } } })
 
     expect(wrapper.get('.report-document-error').text()).toContain('报告内容不可用')
+  })
+
+  it('copies the whole report as markdown from the toolbar button', async () => {
+    const writeText = vi.fn<(text: string) => Promise<void>>(() => Promise.resolve())
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+
+    const wrapper = mount(ReportRenderer, { props: { document: documentPayload() } })
+    const button = wrapper.get('.report-copy')
+    expect(button.text()).toBe('复制报告')
+
+    await button.trigger('click')
+    await Promise.resolve()
+
+    expect(writeText).toHaveBeenCalledTimes(1)
+    const copied = writeText.mock.calls[0]?.[0]
+    expect(copied).toBeDefined()
+    expect(copied).toContain('# 因果分析报告')
+    expect(copied).toContain('## 结论摘要')
+    expect(copied).toContain('变量 X 与变量 Y 呈正相关')
+    expect(copied).toContain('[图表：年龄分布]')
+    expect(copied).toContain('## 来源\n- data.csv')
+    expect(wrapper.get('.report-copy').text()).toBe('已复制')
+    expect(wrapper.get('.report-copy').classes()).toContain('report-copy-copied')
+  })
+
+  it('offers a retry when the clipboard write fails', async () => {
+    const writeText = vi.fn(() => Promise.reject(new Error('denied')))
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+
+    const wrapper = mount(ReportRenderer, { props: { document: documentPayload() } })
+
+    await wrapper.get('.report-copy').trigger('click')
+    await Promise.resolve()
+
+    expect(wrapper.get('.report-copy').text()).toBe('复制失败，请重试')
+    expect(wrapper.get('.report-copy').classes()).toContain('report-copy-failed')
+    expect(wrapper.get('.report-copy').attributes('disabled')).toBeUndefined()
+  })
+
+  it('drops the copy feedback after the two second window', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn(() => Promise.resolve())
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+
+    const wrapper = mount(ReportRenderer, { props: { document: documentPayload() } })
+
+    await wrapper.get('.report-copy').trigger('click')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(wrapper.get('.report-copy').text()).toBe('已复制')
+
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(wrapper.get('.report-copy').text()).toBe('复制报告')
+  })
+
+  it('resets the copy feedback when another report replaces the current one', async () => {
+    const writeText = vi.fn(() => Promise.resolve())
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+
+    const wrapper = mount(ReportRenderer, { props: { document: documentPayload() } })
+    await wrapper.get('.report-copy').trigger('click')
+    await Promise.resolve()
+    expect(wrapper.get('.report-copy').text()).toBe('已复制')
+
+    await wrapper.setProps({ document: documentPayload({ report_id: 'report_next', title: '第二份报告' }) })
+
+    expect(wrapper.get('.report-title').text()).toBe('第二份报告')
+    expect(wrapper.get('.report-copy').text()).toBe('复制报告')
+  })
+
+  it('keeps the copy button out of the unusable report state', () => {
+    const wrapper = mount(ReportRenderer, { props: { document: { type: 'text', summary: '正文' } } })
+
+    expect(wrapper.find('.report-copy').exists()).toBe(false)
   })
 })

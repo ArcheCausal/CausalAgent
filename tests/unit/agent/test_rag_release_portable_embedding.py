@@ -235,6 +235,7 @@ class PortableReleaseTests(unittest.TestCase):
 
     def test_explicit_api_embedding_config_reports_missing_environment(self) -> None:
         from Agent.knowledge_base.embedding_runtime import create_embedding_function, validate_embedding_env_references
+        from config.secret_file import REQUIRED_SECRET_KEYS, reset_secret_cache
 
         config = EmbeddingConfiguration(
             mode="api",
@@ -245,14 +246,28 @@ class PortableReleaseTests(unittest.TestCase):
             base_url_env="RAG_EVAL_EMBEDDING_BASE_URL",
             endpoint_identity="https://embedding.example/v1",
         )
-        with patch.dict(os.environ, {}, clear=True):
-            resolved = validate_embedding_env_references(config)
-            self.assertEqual(resolved.status, "missing")
-            with patch("Agent.knowledge_base.embedding_runtime.log_event") as log_event:
-                with self.assertRaises(EmbeddingApiError) as error:
-                    create_embedding_function(config, scope="evaluation")
-            self.assertEqual(error.exception.category, "unavailable")
-            self.assertEqual(log_event.call_args.args[1], "rag.enrichment.degraded")
+        # 密钥文件是进程的必备输入（Compose 只读挂载）。这里只去掉 embedding 相关的
+        # 环境变量与密钥项来模拟“接口未配置”，而不是让整个进程失去密钥文件。
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = Path(directory) / "causalagent.env"
+            secret_path.write_text(
+                "".join(f"{name}=unit-test-value\n" for name in REQUIRED_SECRET_KEYS),
+                encoding="utf-8",
+            )
+            if os.name != "nt":
+                secret_path.chmod(0o600)
+            reset_secret_cache()
+            try:
+                with patch.dict(os.environ, {"CAUSALAGENT_SECRET_FILE": str(secret_path)}, clear=True):
+                    resolved = validate_embedding_env_references(config)
+                    self.assertEqual(resolved.status, "missing")
+                    with patch("Agent.knowledge_base.embedding_runtime.log_event") as log_event:
+                        with self.assertRaises(EmbeddingApiError) as error:
+                            create_embedding_function(config, scope="evaluation")
+                    self.assertEqual(error.exception.category, "unavailable")
+                    self.assertEqual(log_event.call_args.args[1], "rag.enrichment.degraded")
+            finally:
+                reset_secret_cache()
 
     def test_publish_keeps_only_active_and_fallback_and_uses_atomic_pointer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
