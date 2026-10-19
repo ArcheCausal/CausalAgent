@@ -7,7 +7,7 @@ P2-U 测试不要求真实 deepagents/langgraph 包已安装。只有显式调�
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 import importlib
 import inspect
@@ -16,6 +16,10 @@ from typing import Any
 from Agent.deep_agent_tools.identity import new_message_execution_id
 from Agent.deep_agent_tools.models import FinalAnalysisDecision
 from Agent.deep_agent_tools.registry import AlgorithmRegistry
+from Agent.deep_agent_tools.interaction import (
+    DATA_PROCESSING_TOOL_NAME,
+    DataProcessingTool,
+)
 from Agent.deep_agent_tools.dependency_dispatch import (
     build_algorithm_dependency_middleware,
 )
@@ -301,6 +305,69 @@ def build_deep_agent(
         *build_budget_middlewares(profile),
         _build_message_identity_middleware(),
     ]
+    try:
+        from langchain.agents.middleware import AgentMiddleware
+    except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover - 真实版本门禁
+        raise DeepAgentDependencyError("LangChain AgentMiddleware is not installed") from exc
+
+    interaction_tool = DataProcessingTool(registry=registry) if registry is not None else None
+
+    class InteractionTurnGuardMiddleware(AgentMiddleware):
+        """确认工具必须独占一个工具调用轮次。"""
+
+        @staticmethod
+        def _interaction_calls(state: Any) -> list[Any]:
+            messages = getattr(state, "get", lambda *_: None)("messages") or []
+            latest = next(
+                (message for message in reversed(messages) if getattr(message, "tool_calls", None)),
+                None,
+            )
+            return [
+                call
+                for call in (getattr(latest, "tool_calls", None) or [])
+                if isinstance(call, Mapping)
+                and call.get("name") == DATA_PROCESSING_TOOL_NAME
+            ]
+
+        async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
+            state = getattr(request, "state", None)
+            messages = state.get("messages") if isinstance(state, Mapping) else None
+            latest = next(
+                (
+                    message
+                    for message in reversed(messages or [])
+                    if getattr(message, "tool_calls", None)
+                ),
+                None,
+            )
+            all_calls = list(getattr(latest, "tool_calls", None) or [])
+            calls = [
+                call
+                for call in all_calls
+                if isinstance(call, Mapping)
+                and call.get("name") == DATA_PROCESSING_TOOL_NAME
+            ]
+            if calls and len(all_calls) > 1:
+                from langchain_core.messages import ToolMessage
+                import json
+
+                call_id = str(request.tool_call.get("id") or "")
+                return ToolMessage(
+                    content=json.dumps(
+                        {
+                            "status": "rejected",
+                            "message": (
+                                "request_data_processing 必须独占一个工具调用轮次；"
+                                "不要在同一次响应中同时请求确认和执行算法。"
+                            ),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    tool_call_id=call_id,
+                    name=str(request.tool_call.get("name") or DATA_PROCESSING_TOOL_NAME),
+                    status="error",
+                )
+            return await handler(request)
     if registry is not None:
         middleware.append(
             build_algorithm_dependency_middleware(
@@ -309,9 +376,13 @@ def build_deep_agent(
                 timeout_seconds=profile.budget.tool_node_timeout_seconds,
             )
         )
+        middleware.append(InteractionTurnGuardMiddleware())
     kwargs: dict[str, Any] = {
         "model": configured_model,
-        "tools": _materialize_domain_tools(domain_tools),
+        "tools": [
+            *_materialize_domain_tools(domain_tools),
+            *([interaction_tool.to_langchain_tool()] if interaction_tool is not None else []),
+        ],
         "subagents": [],
         "memory": list(MEMORY_PATHS),
         "system_prompt": active_config.system_prompt,

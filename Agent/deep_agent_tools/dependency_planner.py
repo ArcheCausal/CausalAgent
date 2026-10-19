@@ -327,6 +327,14 @@ def _classify_execution_result(
     if isinstance(value, AlgorithmResult):
         if value.status == "valid":
             return "succeeded", None, frozenset(call.produces)
+        if value.status in {"not_applicable", "skipped"}:
+            # 这类结束状态保留在 Ledger 与结果中，但没有发布下游算法所需的
+            # artifact；不能把尚未生成的数据登记为已存在。
+            return (
+                _outcome_status(value.status),
+                value.diagnostics.safe_error_code or _default_error_code(value.status),
+                frozenset(),
+            )
         return (
             _outcome_status(value.status),
             value.diagnostics.safe_error_code or _default_error_code(value.status),
@@ -408,6 +416,10 @@ def _outcome_status(status: str) -> str:
         return "timed_out"
     if status == "not_ready":
         return "not_ready"
+    if status == "not_applicable":
+        return "not_applicable"
+    if status == "skipped":
+        return "skipped"
     return "failed"
 
 
@@ -416,4 +428,6 @@ def _default_error_code(status: str) -> SafeErrorCode:
         return SafeErrorCode.ALGORITHM_TIMED_OUT
     if status == "not_ready":
         return SafeErrorCode.ALGORITHM_NOT_READY
+    if status in {"not_applicable", "skipped"}:
+        return SafeErrorCode.ALGORITHM_NOT_APPLICABLE
     return SafeErrorCode.ALGORITHM_EXECUTION_FAILED

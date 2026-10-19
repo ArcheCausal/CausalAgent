@@ -3,13 +3,22 @@ import { computed, watch } from 'vue'
 import { isPresentationActive } from '../runtime/chat/presentation'
 import { useChatScrollFollow } from '../runtime/chat/scroll-follow'
 import { stepDetailText, textDetail } from '../runtime/jobs/step-details'
+import { waitingInputFromInteraction } from '../runtime/jobs/event-reducer'
 import { useJobsStore } from '../stores/jobs.store'
 import type { ChatMessage, ExecutionPhase, StepDetail, ThinkingProjection } from '../types/domain'
 import MessageBody from './MessageBody.vue'
+import ProcessingOptions from './ProcessingOptions.vue'
 import StreamingDraft from './StreamingDraft.vue'
 import ThinkingTimeline from './ThinkingTimeline.vue'
 
-const props = defineProps<{ messages: ChatMessage[] }>()
+const props = defineProps<{
+  messages: ChatMessage[]
+  submittingOptionId?: string | null
+}>()
+const emit = defineEmits<{
+  'choose-processing-option': [optionId: string]
+  'use-other-requirement': []
+}>()
 const jobs = useJobsStore()
 const scrollFollow = useChatScrollFollow()
 
@@ -24,6 +33,16 @@ function fileExtension(filename: string): string {
 }
 
 /** 只有已持久化的历史阶段事件会走到这里；公开决策在历史中本来就是完整文本。 */
+function waitingForPhase(phase: ExecutionPhase): ThinkingProjection['waitingInput'] {
+  const interrupt = [...phase.events].reverse().find((event) => event.type === 'interrupt')
+  if (!interrupt) return null
+  return waitingInputFromInteraction(
+    interrupt,
+    typeof interrupt.question_id === 'string' ? interrupt.question_id : '',
+    typeof interrupt.message === 'string' ? interrupt.message : '',
+  )
+}
+
 function phaseThinking(phase: ExecutionPhase): ThinkingProjection {
   const steps: ThinkingProjection['steps'] = {}
   const order: string[] = []
@@ -74,7 +93,7 @@ function phaseThinking(phase: ExecutionPhase): ThinkingProjection {
     draftText: '',
     finalResult: null,
     errorMessage: null,
-    waitingInput: null,
+    waitingInput: waitingForPhase(phase),
   }
 }
 
@@ -152,6 +171,13 @@ watch(() => props.messages.length, () => scrollFollow.keepLatest())
     </article>
     <article v-if="row.thinking?.waitingInput" class="message ai-message">
       <MessageBody :text="{ type: 'human_input_required', summary: row.thinking.waitingInput.prompt }" />
+      <ProcessingOptions
+        v-if="row.thinking.waitingInput.options.length"
+        :waiting="row.thinking.waitingInput"
+        :submitting="Boolean(props.submittingOptionId)"
+        @choose="(optionId) => emit('choose-processing-option', optionId)"
+        @other="emit('use-other-requirement')"
+      />
     </article>
     <article v-if="row.thinking?.errorMessage" class="message ai-message">
       <MessageBody :text="{ type: 'text', summary: `错误：${row.thinking.errorMessage}` }" />

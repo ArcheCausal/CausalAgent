@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any, AsyncIterator
 
 from langchain_core.messages import HumanMessage
@@ -350,14 +351,23 @@ async def ai_call_stream(
                 if hasattr(interrupt_obj, "value")
                 else str(interrupt_obj)
             )
+            interaction = None
+            if isinstance(question, Mapping):
+                interaction = dict(question)
+                message = str(interaction.get("message") or interaction.get("prompt") or "")
+            else:
+                message = str(question) if question is not None else ""
             if execution_guard is not None:
                 await execution_guard.check_after_call()
-            yield {
+            payload = {
                 "type": "interrupt",
-                "message": question,
+                "message": message,
                 "question_id": _interrupt_id(interrupt_obj),
                 "attempt": job_attempt,
             }
+            if interaction is not None:
+                payload["interaction"] = interaction
+            yield payload
             return
 
         if execution_guard is not None:

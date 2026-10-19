@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import asyncio
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,10 +21,14 @@ from .models import (
     ActionAttempt,
     AlgorithmResult,
     DataProfile,
+    PreprocessingPlan,
     InvocationRecord,
     McpInvocationContext,
 )
 from .identity import build_invocation_id, current_input_identity
+from .interaction import find_approved_plan
+from .interaction import find_approved_plan
+from .models import PreprocessingPlan
 from .registry import AlgorithmRegistry, RegistryEntry
 from .runtime_updates import (
     build_terminal_invocation,
@@ -103,12 +108,23 @@ class AlgorithmTool:
         if not isinstance(state, Mapping):
             raise RuntimeError("ToolRuntime.state must be a mapping")
         dataset_csv = state.get("dataset_csv")
+        from .interaction import find_approved_plan
+
+        resolved = find_approved_plan(
+            state=state,
+            capability_id=self.entry.spec.capability_id,
+            plan=None,
+        )
+        approval = resolved[0] if resolved is not None else None
+        plan = resolved[1] if resolved is not None else None
         return AdapterInput(
             data_profile=self._data_profile_from_state(state),
             input_identity=current_input_identity(identity),
             dataset_csv=dataset_csv if isinstance(dataset_csv, str) else None,
             missing_values_present=bool(state.get("missing_values_present")),
             dataset_authority_available=True,
+            preprocessing=plan,
+            approval=approval,
         )
 
     def _record(
@@ -153,6 +169,10 @@ class AlgorithmTool:
                 if status == "timed_out"
                 else "not_ready"
                 if status == "not_ready"
+                else "not_applicable"
+                if status == "not_applicable"
+                else "skipped"
+                if status == "skipped"
                 else "failed"
             ),
             result_ref=result_ref,
@@ -292,7 +312,7 @@ class AlgorithmTool:
             "valid": "succeeded",
             "timed_out": "timed_out",
             "not_ready": "not_ready",
-            "not_applicable": "failed",
+            "not_applicable": "not_applicable",
             "invalid_input": "failed",
             "execution_failed": "failed",
         }[result.status]
@@ -334,11 +354,51 @@ class AlgorithmTool:
                 runtime,
                 expected_context=self.runtime_context,
             )
+            # 模型可以在同一次 Tool Call 中声明 preprocessing；运行时只在它与
+            # State 中获批方案完全一致时使用，否则返回结构化“需要确认”。
+            model_parameter_plan = kwargs.get("preprocessing")
+            if model_parameter_plan is not None:
+                state = getattr(runtime, "state", None)
+                if not isinstance(state, Mapping):
+                    raise RuntimeError("ToolRuntime.state must be a mapping")
+                proposed = PreprocessingPlan.model_validate(model_parameter_plan)
+                approvals = state.get("data_processing_approvals")
+                approved = (
+                    find_approved_plan(
+                        state=state,
+                        capability_id=self.entry.spec.capability_id,
+                        plan=proposed,
+                    )
+                    if isinstance(approvals, Mapping)
+                    else None
+                )
+                if approved is None:
+                    return ToolMessage(
+                        content=json.dumps(
+                            {
+                                "status": "needs_confirmation",
+                                "reason": (
+                                    "当前处理方案没有对应的用户确认。请先调用 "
+                                    "request_data_processing 取得确认，再携带同一方案重试。"
+                                ),
+                                "unmet_requirements": ["processing_not_approved"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                        tool_call_id=identity.provider_call_id,
+                        name=self.name,
+                        status="error",
+                    )
+            # envelope 默认值 None 会进入 StructuredTool 参数；执行器 schema
+            # 不接受该字段，必须在任何路径上剥离。
+            kwargs.pop("preprocessing", None)
             started_at = datetime.now(timezone.utc)
             active_adapter_input = self.adapter_input or self._adapter_input_from_runtime(
                 runtime
             )
             public_decision = kwargs.pop("public_decision", None)
+            # preprocessing 由运行时按获批方案注入；模型以同名字段自行填写时
+            # 只用于与 State 中的确认内容核对，不能直接成为执行参数。
             if public_decision is not None:
                 await emit_public_decision_event(
                     runtime,
@@ -384,7 +444,7 @@ class AlgorithmTool:
                 "valid": "succeeded",
                 "timed_out": "timed_out",
                 "not_ready": "not_ready",
-                "not_applicable": "failed",
+                "not_applicable": "not_applicable",
                 "invalid_input": "failed",
                 "execution_failed": "failed",
             }[result.status]
@@ -396,7 +456,11 @@ class AlgorithmTool:
                 event_type="tool_call_result",
                 identity=identity,
                 tool_name=self.name,
-                status=("succeeded" if result.status == "valid" else "failed"),
+                status=(
+                    result.status
+                    if result.status in {"valid", "not_applicable", "skipped"}
+                    else "failed"
+                ),
                 safe_error_code=safe_error_code,
             )
             terminal = build_terminal_invocation(
@@ -421,7 +485,10 @@ class AlgorithmTool:
         # 仍只暴露 AlgorithmSpec 中的科学参数，不让模型填写内部身份。
         call.__annotations__["runtime"] = ToolRuntime
         runtime_args_schema = with_tool_runtime_schema(
-            build_model_tool_input_schema(self.args_schema),
+            build_model_tool_input_schema(
+                self.args_schema,
+                include_preprocessing=True,
+            ),
             tool_name=self.name,
             tool_runtime_type=ToolRuntime,
         )

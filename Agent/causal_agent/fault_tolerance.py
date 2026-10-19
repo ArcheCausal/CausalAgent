@@ -16,6 +16,7 @@ from langgraph.errors import NodeError
 from langgraph.types import Command, RetryPolicy, TimeoutPolicy, default_retry_on
 
 from Agent.Report.document import build_degraded_report_document
+from Agent.deep_agent_tools.models import DataProfile
 from .state import CausalAgentState, RagSubgraphState
 from app.agent.worker.execution_guard import (
     JobExecutionRevoked,
@@ -367,8 +368,26 @@ def recover_report(state: CausalAgentState, error: NodeError) -> dict:
     message = f"报告生成失败：{_error_message(error)}"
     return {
         "messages": [AIMessage(content="决策：因果分析报告生成失败。", name=error.node)],
-        "report_document": build_degraded_report_document(message),
+        "report_document": build_degraded_report_document(
+            message,
+            degradation_code=_report_degradation_code(error),
+        ),
+        "finalization_status": "degraded",
     }
+
+
+def _report_degradation_code(error: NodeError) -> str:
+    """把报告结构化失败区分为无调用、解析失败和长度截断。"""
+
+    underlying = getattr(error, "error", error)
+    cause = getattr(underlying, "safe_cause_code", None)
+    if cause == "tool_call_invalid":
+        return "no_tool_call"
+    if cause == "truncated":
+        return "response_truncated"
+    if cause in {"json_invalid", "schema_invalid", "output_parser_error"}:
+        return "response_unparseable"
+    return "report_failure"
 
 
 NodeErrorHandler = Callable[[CausalAgentState, NodeError], Command | dict]

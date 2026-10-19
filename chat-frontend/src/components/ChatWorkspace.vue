@@ -51,6 +51,7 @@ const canOpenRagEval = computed(() => auth.hasPermission('rag_eval.access'))
 const selectedComposerFile = computed(
   () => files.items.find((file) => file.userFileId === composer.selectedFileId) ?? null,
 )
+const pendingOptionId = ref<string | null>(null)
 
 watch(pendingConfirmation, async (confirmation) => {
   if (confirmation) {
@@ -184,6 +185,42 @@ async function send(): Promise<void> {
   } finally {
     composer.setSending(false)
   }
+}
+
+async function chooseProcessingOption(optionId: string): Promise<void> {
+  const job = activeJob.value
+  const waiting = job?.thinking.waitingInput
+  if (!job || !waiting || job.uiState !== 'waiting_input' || pendingOptionId.value) return
+  pendingOptionId.value = optionId
+  jobs.chooseProcessingOption(job.jobId, optionId)
+  const key = createIdempotencyKey()
+  try {
+    const response = await retryIdempotent(
+      () => api.resumeJob(job.jobId, waiting.questionId, JSON.stringify({ option_id: optionId }), key),
+    )
+    if (!response.success || !response.job_id || !response.status) {
+      throw new Error(response.error || '方案确认未被接受。')
+    }
+    const next = jobs.startFromResponse(response.job_id, job.sessionId, response.status, job.resumeEventId)
+    const frozen = jobs.startResume(next.jobId)
+    if (frozen) sessions.freezeThinking(next.jobId, frozen)
+    const selected = waiting.options.find((option) => option.optionId === optionId)
+    sessions.appendUserMessage(selected ? `已确认处理方案：${selected.label}` : '已确认处理方案', response.job_id)
+    void props.controller.subscribe(response.job_id).catch((error: unknown) => report(error, '任务事件订阅失败。'))
+  } catch (error) {
+    report(error, '提交处理方案失败。')
+  } finally {
+    pendingOptionId.value = null
+  }
+}
+
+async function useOtherRequirement(): Promise<void> {
+  const job = activeJob.value
+  const waiting = job?.thinking.waitingInput
+  if (!job || !waiting) return
+  await nextTick()
+  const input = document.querySelector<HTMLTextAreaElement>('.composer textarea')
+  input?.focus()
 }
 
 async function cancel(): Promise<void> {
@@ -402,7 +439,12 @@ function closeSettings(): void {
     <main class="main-container" :class="sessions.messages.length ? 'is-conversation' : 'is-new-chat'">
       <NetworkBackground class="network-background" />
       <section ref="conversationArea" class="conversation-area" @scroll.passive="scrollFollow.handleScroll()">
-        <MessageTimeline :messages="sessions.messages" />
+        <MessageTimeline
+          :messages="sessions.messages"
+          :submitting-option-id="pendingOptionId"
+          @choose-processing-option="chooseProcessingOption"
+          @use-other-requirement="useOtherRequirement"
+        />
       </section>
       <div class="new-chat-stage">
         <div class="welcome-panel">

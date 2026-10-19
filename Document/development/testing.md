@@ -213,7 +213,7 @@ production 层不会摄取资料、调用外部 VLM/模型、运行完整评测�
 
 ## 迁移链验证
 
-空库升级和 migration graph 检查必须确认唯一 head 为 `d0e1f2a3b4c5`：
+空库升级和 migration graph 检查必须确认唯一 head 为 `e1f2a3b4c5d6`：
 
 ```bash
 python -m alembic heads

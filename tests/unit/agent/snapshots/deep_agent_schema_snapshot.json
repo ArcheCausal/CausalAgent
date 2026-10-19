@@ -14,16 +14,18 @@
         "revision",
         "status"
       ],
-      "sha256": "ca1b54d755d4272899e3f971ab5aec93cc9a183ce0f8209ac0cd1af834593e75",
+      "sha256": "033a181214e143b228faaf2870d165b8144da9895cbc8b28b02c64a2816e3c5f",
       "title": "ActionAttempt"
     },
     "AlgorithmExecutionCommand": {
       "properties": [
+        "approval",
         "capability_id",
         "capability_version",
         "input_identity",
         "invocation_id",
         "parameters",
+        "preprocessing",
         "provider_call_id",
         "result_index",
         "spec_digest",
@@ -37,13 +39,14 @@
         "provider_call_id",
         "input_identity"
       ],
-      "sha256": "e3ac2d8d6ccce1010fb406e0a87fd3b545114f2ae9b2db4fe55e7ad29b07f366",
+      "sha256": "1a7deb809bce55513a54699948e2400f643c9137b1ad36b4cfc56e2a1558ab5d",
       "title": "AlgorithmExecutionCommand"
     },
     "AlgorithmResult": {
       "properties": [
         "capability_id",
         "capability_version",
+        "data_view",
         "diagnostics",
         "graph_semantics",
         "input_identity",
@@ -69,7 +72,7 @@
         "status",
         "provenance"
       ],
-      "sha256": "ad83178522ddc5e54aaa50bf9433e75144898d99be5eba3c824fcaf26d7f63d1",
+      "sha256": "4b26c29d8798e42d6854e53f9ba71a5f6fd8e3171c0869ebe9efb4fb761f002c",
       "title": "AlgorithmResult"
     },
     "AlgorithmResultProvenance": {
@@ -82,6 +85,7 @@
         "invocation_id",
         "job_id",
         "lease_epoch",
+        "preprocessing_plan_digest",
         "preprocessing_recipe_digest",
         "spec_digest"
       ],
@@ -92,23 +96,61 @@
         "input_identity",
         "spec_digest"
       ],
-      "sha256": "922fd25e8c50ca3ce1b7333f02a1bcb1b33b926510f692f0bd3de16d6d5f3dd3",
+      "sha256": "a95c390a3413302af9fa3d70a44d4c90ec389a7776b4d3b1726fb9da84ea8c73",
       "title": "AlgorithmResultProvenance"
+    },
+    "DataIssue": {
+      "properties": [
+        "blocking",
+        "code",
+        "columns",
+        "message"
+      ],
+      "required": [
+        "code",
+        "message"
+      ],
+      "sha256": "28864def7db321fa12577febbcd4111f2346b6f6e63bc030b535fc1f4c90aa3d",
+      "title": "DataIssue"
     },
     "DataProfile": {
       "properties": [
         "categorical_columns",
         "column_count",
         "column_names",
+        "constant_columns",
+        "empty_columns",
+        "issues",
+        "missing_columns",
+        "non_finite_columns",
         "numeric_columns",
+        "row_count",
+        "suspected_id_columns"
+      ],
+      "required": [
+        "row_count",
+        "column_count"
+      ],
+      "sha256": "a11e80b09ba357658cb147d744a69a635f3e4c197ae44e917cb13e5c3e8631af",
+      "title": "DataProfile"
+    },
+    "DataViewSummary": {
+      "properties": [
+        "column_count",
+        "columns",
+        "dropped_row_count",
+        "encoded_columns",
+        "imputed_columns",
+        "operations",
+        "plan_digest",
         "row_count"
       ],
       "required": [
         "row_count",
         "column_count"
       ],
-      "sha256": "a0be9d853c86ce2045031d29b8a7a70d2d5fc338f359f0a41d07024910aa9a57",
-      "title": "DataProfile"
+      "sha256": "b1aaa906130e02cb5de4ecfbc7554bfa0674965de9a77251263a6f53f1258032",
+      "title": "DataViewSummary"
     },
     "Diagnostics": {
       "properties": [
@@ -120,7 +162,7 @@
         "variable_count"
       ],
       "required": [],
-      "sha256": "255efc66b0d713f12b59bd37f08be7f1c59553ab576b4b959a08d7839faf11bc",
+      "sha256": "c380d5a9a0335a3ea2d02615d2312e6f5691be3c5f12052cd67e3a9b0c4bc2b1",
       "title": "Diagnostics"
     },
     "EvidenceResult": {
@@ -208,7 +250,7 @@
         "tool_name",
         "final_status"
       ],
-      "sha256": "6e875d0ac71965656d7c6c3ad62567c7683038e66c9324fb9e35002c148226fc",
+      "sha256": "52860be0bb47525762bd597d0834fd1faf39f4023802ae13c8ba284067d59c20",
       "title": "InvocationRecord"
     },
     "McpInvocationContext": {
@@ -240,6 +282,42 @@
       ],
       "sha256": "d07f8d4b713ce44abb36454327ba09e8c91896551350922a55a541d96721246f",
       "title": "McpInvocationContext"
+    },
+    "PreprocessingApproval": {
+      "properties": [
+        "option_id",
+        "plan_digest",
+        "question_id"
+      ],
+      "required": [
+        "option_id",
+        "question_id",
+        "plan_digest"
+      ],
+      "sha256": "0b01a490548671a45600cf63dc9ab66ca91c4ee15d2a703be8e87d5a82aeabb5",
+      "title": "PreprocessingApproval"
+    },
+    "PreprocessingPlan": {
+      "properties": [
+        "protected_columns",
+        "steps",
+        "version"
+      ],
+      "required": [],
+      "sha256": "45d7d0535f9f394dc3911034b5c682f88db43b1b81020d1d2f0e52cb4164226d",
+      "title": "PreprocessingPlan"
+    },
+    "PreprocessingStep": {
+      "properties": [
+        "columns",
+        "method",
+        "operation"
+      ],
+      "required": [
+        "operation"
+      ],
+      "sha256": "d61d1e00b77da63eafd1a3d055d7a2ffe322ac901af9b98f40d625dab96e4799",
+      "title": "PreprocessingStep"
     },
     "PublicDecision": {
       "properties": [
@@ -305,7 +383,7 @@
         "code",
         "message"
       ],
-      "sha256": "f7eb121fdd4fa2bd6a26bf5c70ae39c0792e9259864a7c70cebc1e186279cf35",
+      "sha256": "6f8f11fa9aa9b4f57e19b747e50b1b81004af6a3cb73bb8c645e84c6db215881",
       "title": "SafeWarning"
     },
     "ScientificConflict": {
@@ -367,20 +445,20 @@
   "tools": [
     {
       "capability_id": "causal.cdfm",
-      "schema_sha256": "751074663c761fd14ce1d755a2e8ec3a0f3fcb8820649f936ecd0c4a9ec3d583",
-      "spec_digest": "8fdd047d486462685aa0f7c94ffbc851e74a5d41dd06575f1b6ab1281f90fbec",
+      "schema_sha256": "719d706ca75fcfd6d18b7c64bb204c07fee0472904e61f6f85fbb62310959fd4",
+      "spec_digest": "485482d984b06ecdad26259ae810d60884da14ebbc98189eae998c80a7ef5201",
       "tool_name": "causal_cdfm"
     },
     {
       "capability_id": "causal.direct_lingam",
-      "schema_sha256": "723945a1c464701111fa0c2b5399ef06264230e540a19f3ecde58e50c07ea59c",
-      "spec_digest": "718ac64c3efe7790b5bda8a2b700e850cfa554500ad11a095d8fba9450898915",
+      "schema_sha256": "37b96552e90850e50e3dc20ba22cfee64da965e65e60fb6b5490d83e46120035",
+      "spec_digest": "ca8d3878f5ac98d9fc7a4cec6378eabf7ca606f23fb72526f7f3f636a8d3d734",
       "tool_name": "causal_direct_lingam"
     },
     {
       "capability_id": "causal.pc",
-      "schema_sha256": "1ae6f556853dc118755e124cee3f282572a3a6dc267a63e9d1ea5cc3e0dde118",
-      "spec_digest": "2be84a02ec63d244fbc0533f130fdf5c3f7ea1f43364414d9a3bb8d4c56036db",
+      "schema_sha256": "a4cea47df4f937ebd2b0effb107f534bce97a2604cce9ef3b57bcc29b96e532f",
+      "spec_digest": "e4b07d2c0ee175c9cd96c2b7a7e1a08381f616df54eab3ae8367ef8566d7996c",
       "tool_name": "causal_pc"
     }
   ]

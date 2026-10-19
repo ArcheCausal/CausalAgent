@@ -291,6 +291,11 @@ class ReportDocument(ReportModel):
     schema_version: int = REPORT_SCHEMA_VERSION
     report_id: str
     title: str
+    # 报告完整性独立于分析结论：方向、置信度和算法取舍另行公开。
+    analysis_outcome: str | None = None
+    finalization_status: str | None = None
+    report_mode: Literal["analysis", "diagnostic"] = "analysis"
+    execution_summary: dict[str, Any] = Field(default_factory=dict)
     blocks: list[ReportBlock] = Field(default_factory=list)
     assets: dict[str, ChartAsset | CausalGraphModel] = Field(default_factory=dict)
     sources: list[ReportSource] = Field(default_factory=list)
@@ -348,6 +353,10 @@ def build_report_document(
     assets: dict[str, ChartAsset | CausalGraphModel] | None = None,
     sources: list[ReportSource] | None = None,
     evidence_refs: list[ReportEvidence] | None = None,
+    analysis_outcome: str | None = None,
+    finalization_status: str | None = None,
+    report_mode: str = "analysis",
+    execution_summary: dict[str, Any] | None = None,
 ) -> ReportDocument:
     """校验报告草稿和资源引用，装配出完整的 ``ReportDocument``。
 
@@ -395,6 +404,10 @@ def build_report_document(
     return ReportDocument(
         report_id=new_report_id(),
         title=validated_draft.title,
+        analysis_outcome=analysis_outcome,
+        finalization_status=finalization_status,
+        report_mode=report_mode,
+        execution_summary=dict(execution_summary or {}),
         blocks=normalized_blocks,
         assets=available_assets,
         sources=available_sources,
@@ -432,12 +445,17 @@ def build_degraded_report_document(
     message: str,
     *,
     title: str = "因果分析报告",
+    degradation_code: str | None = None,
 ) -> ReportDocument:
     """构造只含失败说明的降级报告文档，供报告节点错误路径使用。"""
 
     return ReportDocument(
         report_id=new_report_id(),
         title=title,
+        report_mode="diagnostic",
+        execution_summary=(
+            {"degradation_code": degradation_code} if degradation_code else {}
+        ),
         blocks=[MarkdownBlock(id="markdown_degraded", content=message)],
         assets={},
         sources=[],

@@ -166,6 +166,40 @@ async def _run_slots_until_shutdown(
             await asyncio.gather(*pending_slots, return_exceptions=True)
 
 
+async def expire_waiting_inputs_until_stopped(
+    stop_event: asyncio.Event,
+    *,
+    interval_seconds: float = 5.0,
+) -> None:
+    """独立于执行槽位扫描过期的等待确认。
+
+    该任务不占 worker slot，也不持有算法子进程；只做数据库事务收敛。
+    """
+
+    if interval_seconds <= 0:
+        raise ValueError("expire interval must be positive")
+    while not stop_event.is_set():
+        try:
+            expired = await asyncio.to_thread(job_service.expire_waiting_jobs)
+            if expired:
+                log_event(
+                    LOGGER,
+                    "job.input_wait.expired",
+                    details={"expired_count": len(expired)},
+                )
+        except Exception:
+            log_event(
+                LOGGER,
+                "job.input_wait.expire_failed",
+                details={"reason_code": "database_error"},
+                exc_info=True,
+            )
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            continue
+
+
 async def main_async() -> None:
     """执行数据库、checkpoint、LLM/RAG 检查并启动固定数量的 slots。"""
     stop_event = asyncio.Event()
@@ -203,7 +237,14 @@ async def main_async() -> None:
                     )
                     for index in range(slot_count)
                 ]
-                await _run_slots_until_shutdown(slot_tasks, stop_event)
+                sweeper = asyncio.create_task(
+                    expire_waiting_inputs_until_stopped(stop_event)
+                )
+                try:
+                    await _run_slots_until_shutdown(slot_tasks, stop_event)
+                finally:
+                    stop_event.set()
+                    await asyncio.gather(sweeper, return_exceptions=True)
     except asyncio.CancelledError:
         raise
     except Exception:

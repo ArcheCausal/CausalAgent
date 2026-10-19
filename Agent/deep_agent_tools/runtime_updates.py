@@ -26,6 +26,10 @@ def _tool_result_summary(status: str | None, safe_error_code: str | None) -> str
     normalized_code = str(safe_error_code or "").upper()
     if normalized_status == "succeeded":
         return "调用完成"
+    if normalized_status == "not_applicable":
+        return "不适用"
+    if normalized_status == "skipped":
+        return "未执行"
     if normalized_status in {"canceled", "cancelled"}:
         return "调用已取消"
     if normalized_status in {"timed_out", "timeout"}:

@@ -151,7 +151,8 @@ class FinalizationGate:
             "not_ready": "not_ready",
             "timed_out": "timed_out",
             "invalid_input": "failed",
-            "not_applicable": "failed",
+            "not_applicable": "not_applicable",
+            "skipped": "skipped",
             "execution_failed": "failed",
         }[status]
 
@@ -312,6 +313,8 @@ class FinalizationGate:
             "succeeded": "succeeded",
             "not_ready": "not_ready",
             "timed_out": "timed_out",
+            "not_applicable": "not_applicable",
+            "skipped": "skipped",
             "failed": "failed",
         }[expected_status]
         if latest_attempt.status != expected_attempt_status:
@@ -403,6 +406,13 @@ class FinalizationGate:
             for result in eligible.values()
             if result.status == "valid"
         }
+        # 预检查拒绝、上下文变化或用户选择诊断都可以是有依据的“不适用”；
+        # 这类结果视为已结束，不再要求模型制造一次必然失败的算法执行。
+        non_viable_refs = {
+            result.result_ref
+            for result in eligible.values()
+            if result.status in {"not_applicable", "skipped"}
+        }
         assessment_by_ref = {
             assessment.result_ref: assessment
             for assessment in normalized_decision.result_assessments
@@ -414,10 +424,21 @@ class FinalizationGate:
             )
         for assessment in normalized_decision.result_assessments:
             result = eligible[assessment.result_ref]
-            if result.status != "valid" and assessment.disposition != "discarded":
+            if (
+                result.status not in {"valid", "not_applicable", "skipped"}
+                and assessment.disposition != "discarded"
+            ):
                 raise StructuredResponseError(
                     "non-valid results may only be discarded",
                     rule="non_valid_result_not_discarded",
+                )
+            if (
+                result.status in {"not_applicable", "skipped"}
+                and assessment.disposition == "primary"
+            ):
+                raise StructuredResponseError(
+                    "a non-viable result cannot be the primary result",
+                    rule="primary_result_not_valid",
                 )
 
         if normalized_decision.outcome == "algorithm_supported":
@@ -442,7 +463,7 @@ class FinalizationGate:
                     "no_valid_algorithm has an eligible valid result",
                     rule="no_valid_algorithm_with_valid_result",
                 )
-            if not current_ledger:
+            if not current_ledger and not non_viable_refs:
                 raise StructuredResponseError(
                     "no_valid_algorithm requires a real algorithm invocation",
                     rule="no_valid_algorithm_without_invocation",
@@ -453,6 +474,7 @@ class FinalizationGate:
         if (
             route_decision == ANALYSIS_ROUTE
             and not results
+            and not non_viable_refs
             and normalized_decision.outcome
             in {"evidence_only", "no_valid_algorithm"}
         ):

@@ -1,5 +1,24 @@
+from typing import Any
+
+from langgraph.types import Command
+
 from langgraph.graph import StateGraph, END
 from .state import CausalAgentState
+
+
+def _snapshot_interrupts(snapshot: Any) -> list[Any]:
+    """读取父/子图 StateSnapshot 中尚待恢复的 interrupt。"""
+
+    if snapshot is None:
+        return []
+    public_interrupts = getattr(snapshot, "interrupts", None)
+    if public_interrupts:
+        return list(public_interrupts)
+    return [
+        item
+        for task in (getattr(snapshot, "tasks", None) or ())
+        for item in (getattr(task, "interrupts", None) or ())
+    ]
 from . import nodes, edges
 from .graph_utils import (
     bind_node,
@@ -47,6 +66,7 @@ from Agent.deep_agent.state import (
 )
 from Agent.deep_agent_tools.identity import (
     build_deep_agent_execution_scope,
+    build_deep_agent_analysis_scope,
     build_deep_agent_run_id,
     build_deep_agent_step_id,
 )
@@ -556,6 +576,36 @@ async def _stream_deep_agent(
     return result
 
 
+def _publish_child_interrupt(interrupts: list[Any]) -> Any:
+    """把子图暂停值投影为公开载荷，并把用户答复交回父图中断位置。"""
+
+    from langgraph.types import interrupt
+
+    from Agent.deep_agent_tools.interaction import (
+        DATA_PROCESSING_INTERACTION_TYPE,
+        DataProcessingRequest,
+    )
+
+    first = interrupts[0]
+    raw_value = first.value if hasattr(first, "value") else first
+    if isinstance(raw_value, str):
+        try:
+            decoded = json.loads(raw_value)
+        except (TypeError, ValueError):
+            decoded = None
+        if isinstance(decoded, Mapping):
+            raw_value = decoded
+    public_payload: Any = raw_value
+    if (
+        isinstance(raw_value, Mapping)
+        and raw_value.get("type") == DATA_PROCESSING_INTERACTION_TYPE
+    ):
+        request = DataProcessingRequest.model_validate(raw_value)
+        public_payload = request.model_dump(mode="json")
+    return interrupt(public_payload)
+
+
+
 async def _deep_agent_parent_node(
     state,
     *,
@@ -564,6 +614,7 @@ async def _deep_agent_parent_node(
     deep_agent,
     store,
     memory_init_lock,
+    registry=None,
 ):
     """显式投影父 State 到 Deep Agent，并只接收白名单输出。"""
 
@@ -604,13 +655,18 @@ async def _deep_agent_parent_node(
             ),
         )
 
+    # 分析身份只由稳定事实构成；attempt/lease 变化只代表新的执行权限，
+    # 不能在恢复时让整个子图 checkpoint 失配。
     current_scope = None
     if trusted_identity is not None:
-        current_scope = build_deep_agent_execution_scope(
+        current_scope = build_deep_agent_analysis_scope(
             job_id=trusted_identity.job_id,
-            attempt_count=int(trusted_identity.attempt_count),
-            lease_epoch=int(trusted_identity.lease_epoch),
             input_identity=trusted_identity.current_input_identity(),
+            spec_digests=(
+                registry.spec_digests()
+                if registry is not None and hasattr(registry, "spec_digests")
+                else getattr(registry, "spec_digests", lambda: {})()
+            ),
         )
 
     # 子图 checkpoint 是内部 messages/官方 State 的真相源。父图重跑这个
@@ -655,6 +711,13 @@ async def _deep_agent_parent_node(
             },
             reset_execution_artifacts=True,
         )
+    # 子图暂停时，父图必须以同一公开载荷暂停，而不是把子图当成完成。
+    # 恢复时再次进入本节点，interrupt() 返回用户答复，再把它传给子图原位置。
+    child_interrupts = _snapshot_interrupts(child_snapshot)
+    if child_interrupts:
+        resume_answer = _publish_child_interrupt(child_interrupts)
+        child_input = Command(resume=resume_answer)
+
     if isinstance(child_input, Mapping) and current_scope:
         child_input["execution_scope"] = current_scope
     if child_input is not None and context is not None and hasattr(context, "assert_state_safe"):
@@ -666,6 +729,21 @@ async def _deep_agent_parent_node(
         child_context=child_context,
         runtime=runtime,
     )
+    # 内层可能在本轮中途暂停；接口返回的 values 不是完成信号。
+    if callable(get_child_state):
+        child_snapshot = await get_child_state(child_config)
+        pending = _snapshot_interrupts(child_snapshot)
+        if pending:
+
+            resume_answer = _publish_child_interrupt(pending)
+            child_state = await _stream_deep_agent(
+                deep_agent,
+                Command(resume=resume_answer),
+                child_config=child_config,
+                child_context=child_context,
+                runtime=runtime,
+            )
+
     if context is not None and hasattr(context, "check_after_call"):
         await context.check_after_call()
     elif context is not None and hasattr(context, "ensure_active"):
@@ -1024,6 +1102,7 @@ def build_deep_agent_parent_graph(
             deep_agent=deep_agent,
             store=store,
             memory_init_lock=memory_init_lock,
+            registry=registry,
         ),
     )
     workflow.add_node(

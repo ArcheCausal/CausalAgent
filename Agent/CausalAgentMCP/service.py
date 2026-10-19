@@ -18,12 +18,18 @@ from Agent.deep_agent_tools.models import (
     AlgorithmExecutionCommand,
     AlgorithmResult,
     AlgorithmResultProvenance,
+    DataViewSummary,
     Diagnostics,
     GraphEdge,
     McpInvocationContext,
     StandardizedGraph,
     build_diagnostics_from_runner_payload,
     canonical_json_bytes,
+)
+from Agent.deep_agent_tools.preprocessing import (
+    PreprocessingError,
+    apply_preprocessing,
+    build_data_profile_from_csv,
 )
 
 from .auth import McpAuthError, verify_invocation
@@ -178,7 +184,13 @@ def _standardized_graph(raw_result: Mapping[str, Any], capability_id: str) -> St
 
 
 def _failure_status(code: SafeErrorCode) -> str:
-    if code == SafeErrorCode.ALGORITHM_INPUT_INVALID:
+    if code in {
+        SafeErrorCode.ALGORITHM_INPUT_INVALID,
+        SafeErrorCode.PREPROCESSING_REQUIRED,
+        SafeErrorCode.PREPROCESSING_APPROVAL_REQUIRED,
+        SafeErrorCode.PREPROCESSING_PLAN_INVALID,
+        SafeErrorCode.PREPROCESSING_RESULT_REJECTED,
+    }:
         return "invalid_input"
     if code == SafeErrorCode.ALGORITHM_NOT_READY:
         return "not_ready"
@@ -196,6 +208,13 @@ def _rejection_reason(code: SafeErrorCode) -> str:
         return "transport_error"
     if code == SafeErrorCode.MCP_CAPACITY_EXHAUSTED:
         return "pool_exhausted"
+    if code in {
+        SafeErrorCode.PREPROCESSING_REQUIRED,
+        SafeErrorCode.PREPROCESSING_APPROVAL_REQUIRED,
+        SafeErrorCode.PREPROCESSING_PLAN_INVALID,
+        SafeErrorCode.PREPROCESSING_RESULT_REJECTED,
+    }:
+        return "preprocessing_rejected"
     return "invalid_schema"
 
 
@@ -453,6 +472,50 @@ class CausalMcpService:
             parameters = spec.model_input_schema.model_validate(command.parameters).model_dump(
                 mode="json"
             )
+            data_view: DataViewSummary | None = None
+            if command.preprocessing is not None:
+                approval = command.approval
+                if approval is None:
+                    raise McpServiceError(
+                        SafeErrorCode.PREPROCESSING_APPROVAL_REQUIRED
+                    )
+                if approval.plan_digest != command.preprocessing.digest:
+                    raise McpServiceError(
+                        SafeErrorCode.PREPROCESSING_PLAN_INVALID
+                    )
+                try:
+                    csv_data, view_summary = apply_preprocessing(
+                        csv_data,
+                        command.preprocessing,
+                        protected_columns=command.preprocessing.protected_columns,
+                    )
+                except PreprocessingError as exc:
+                    raise McpServiceError(
+                        SafeErrorCode.PREPROCESSING_PLAN_INVALID
+                    ) from exc
+                processed_profile = build_data_profile_from_csv(csv_data)
+                data_view = DataViewSummary(
+                    row_count=processed_profile.row_count,
+                    column_count=processed_profile.column_count,
+                    columns=processed_profile.column_names,
+                    operations=tuple(view_summary["operations"]),
+                    plan_digest=str(view_summary["plan_digest"]),
+                    dropped_row_count=int(view_summary["dropped_row_count"]),
+                    imputed_columns=tuple(view_summary["imputed_columns"]),
+                    encoded_columns=tuple(view_summary["encoded_mappings"]),
+                )
+            else:
+                processed_profile = build_data_profile_from_csv(csv_data)
+            unmet = spec.required_processing_reason(
+                profile=processed_profile,
+                preprocessing=command.preprocessing,
+            )
+            if unmet is not None:
+                raise McpServiceError(
+                    SafeErrorCode.PREPROCESSING_REQUIRED
+                    if command.preprocessing is None
+                    else SafeErrorCode.PREPROCESSING_RESULT_REJECTED
+                )
         except McpServiceError as exc:
             log_event(
                 LOGGER,
@@ -466,6 +529,22 @@ class CausalMcpService:
                 command,
                 context,
                 code=exc.safe_error_code,
+                capability_version=entry.version,
+            )
+            return {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
+        except PreprocessingError:
+            log_event(
+                LOGGER,
+                "mcp.request.rejected",
+                details={
+                    "capability": entry.capability_id,
+                    "reason_code": "preprocessing_rejected",
+                },
+            )
+            result = _error_result(
+                command,
+                context,
+                code=SafeErrorCode.PREPROCESSING_PLAN_INVALID,
                 capability_version=entry.version,
             )
             return {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
@@ -736,6 +815,7 @@ class CausalMcpService:
                     status="valid",
                     standardized_graph=graph,
                     summary="算法调用完成。",
+                    data_view=data_view,
                     diagnostics=build_diagnostics_from_runner_payload(raw_result),
                     input_identity=command.input_identity,
                     provenance=AlgorithmResultProvenance(
@@ -747,6 +827,11 @@ class CausalMcpService:
                         invocation_id=command.invocation_id,
                         capability_id=command.capability_id,
                         capability_version=entry.version,
+                        preprocessing_plan_digest=(
+                            command.preprocessing.digest
+                            if command.preprocessing is not None
+                            else None
+                        ),
                         algorithm_runner_version=str(
                             raw_result.get("runner_version") or "causalachieve-v1"
                         ),

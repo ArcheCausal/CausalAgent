@@ -21,6 +21,7 @@ from Agent.deep_agent.finalization import StructuredResponseError
 from Agent.deep_agent.prompts import MANDATORY_WEB_INSTRUCTION
 from Agent.deep_agent_tools.identity import (
     build_deep_agent_execution_scope,
+    build_deep_agent_analysis_scope,
     build_deep_agent_run_id,
     build_deep_agent_step_id,
 )
@@ -195,10 +196,8 @@ def test_parent_node_reads_matching_child_checkpoint_instead_of_projecting_messa
         "web_evidence": {},
         "structured_response": None,
         "deep_agent_run_id": build_deep_agent_run_id(job_id=identity.job_id),
-        "execution_scope": build_deep_agent_execution_scope(
+        "execution_scope": build_deep_agent_analysis_scope(
             job_id=identity.job_id,
-            attempt_count=identity.attempt_count,
-            lease_epoch=identity.lease_epoch,
             input_identity=identity.input_identity,
         ),
     }
@@ -244,10 +243,8 @@ def test_parent_node_consumes_child_message_stream_before_projecting_state() -> 
         worker_id="worker-1",
         input_identity="input-sha",
     )
-    current_scope = build_deep_agent_execution_scope(
+    current_scope = build_deep_agent_analysis_scope(
         job_id=identity.job_id,
-        attempt_count=identity.attempt_count,
-        lease_epoch=identity.lease_epoch,
         input_identity=identity.input_identity,
     )
     child_values = {
@@ -383,10 +380,8 @@ def test_retry_path_emits_public_progress_notices() -> None:
         "web_evidence": {},
         "structured_response": None,
         "deep_agent_run_id": build_deep_agent_run_id(job_id=identity.job_id),
-        "execution_scope": build_deep_agent_execution_scope(
+        "execution_scope": build_deep_agent_analysis_scope(
             job_id=identity.job_id,
-            attempt_count=identity.attempt_count,
-            lease_epoch=identity.lease_epoch,
             input_identity=identity.input_identity,
         ),
     }

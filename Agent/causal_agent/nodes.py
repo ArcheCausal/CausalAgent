@@ -993,6 +993,12 @@ async def fold_node(
         return {"messages": [new_message], "fold_decision": "agent"}
 
     state['analysis_parameters'] = data_summary
+    # 预检测画像由真实表格生成，后续 Deep Agent 依据它选择算法和处理方案。
+    from Agent.deep_agent_tools.preprocessing import build_data_profile
+
+    state['analysis_parameters']['data_profile'] = build_data_profile(df).model_dump(
+        mode="json"
+    )
     # 刻意放在上面的 try 块之外：那块抛异常会走 interrupt() 挂起等用户输入。
     # measure_nonlinearity 内部全兜、绝不抛异常，但仍不放进那条路径。
     state['analysis_parameters']['nonlinearity'] = measure_nonlinearity(
@@ -1022,12 +1028,18 @@ async def fold_node(
 
         # 收集需要返回的新消息
         new_messages = []
-        recommend_message = AIMessage(content = "决策：信息完备，进入预处理节点。", name="fold")
+        recommend_message = AIMessage(content = "决策：输入确定，进入预检测与说明节点。", name="fold")
         new_messages.append(recommend_message)
 
         # 针对建议，生成提示
         if recommends:
-            recommend_message = AIMessage(content=f"决策：信息完备，进入预处理节点。提示：\n- {recommends}")
+            recommend_message = AIMessage(
+                content=(
+                    "决策：输入确定，进入预检测与说明节点。"
+                    "数据检查结果会作为后续算法选择和处理确认的依据：\n- "
+                    + "\n- ".join(recommends)
+                )
+            )
             new_messages.append(recommend_message)
         
         update = {"messages": new_messages,
@@ -1049,15 +1061,9 @@ async def fold_node(
         return update
     
     else:
-        # 对于issue中有存在变量缺失的情况的，进行修正询问，对于数据有问题，进行数据补充询问
-        has_param_issue = any("目标变量" in issue or "处理变量" in issue for issue in issues)
-        has_data_quality_issue = any("缺失" in issue or "样本量" in issue or "常数列" in issue or "高基数" in issue or "ID列" in issue for issue in issues)
-
-        call_to_action = "请您根据上述问题进行调整。" # 通用备用方案
-        if has_param_issue:
-            call_to_action = "请您根据上述问题，明确或修正'目标变量'和'处理变量'的指定。"
-        elif has_data_quality_issue:
-            call_to_action = "您的数据似乎存在一些质量问题。请您考虑对数据进行清洗，或上传一份新的文件。"
+        # 只有目标/处理变量本身的事实错误需要在这里澄清；数据质量问题交给
+        # Deep Agent 在算法选择后生成受控处理方案。
+        call_to_action = "请您根据上述问题，明确或修正'目标变量'和'处理变量'的指定。"
         
         columns_list = data_summary.get('columns', [])
         question = (
@@ -2102,6 +2108,42 @@ def _report_document_from_state(state: CausalAgentState):
     return document if isinstance(document, ReportDocument) else None
 
 
+def _report_execution_summary(state: CausalAgentState) -> dict[str, Any]:
+    """按真实结果公开数据视图差异、算法状态和报告完整性事实。"""
+
+    from Agent.deep_agent_tools.models import AlgorithmResult
+
+    raw_results = state.get("deep_agent_algorithm_results")
+    results = raw_results.values() if isinstance(raw_results, dict) else ()
+    algorithms: list[dict[str, Any]] = []
+    views: set[tuple[str, ...]] = set()
+    for raw in results:
+        try:
+            result = AlgorithmResult.model_validate(raw)
+        except Exception:
+            continue
+        view = result.data_view
+        if view is not None:
+            views.add(view.columns)
+        algorithms.append(
+            {
+                "capability_id": result.capability_id,
+                "status": result.status,
+                "sample_count": view.row_count if view is not None else None,
+                "variable_count": view.column_count if view is not None else None,
+                "operations": list(view.operations) if view is not None else [],
+            }
+        )
+    decision = state.get("deep_agent_decision")
+    return {
+        "analysis_outcome": getattr(decision, "outcome", None),
+        "report_completeness": "complete",
+        "finalization_status": state.get("finalization_status"),
+        "algorithms": algorithms,
+        "data_views_differ": len(views) > 1,
+    }
+
+
 def _report_followup_context(state: CausalAgentState) -> dict[str, str]:
     """报告追问只使用摘要、资源和证据说明，不把图表数据和图模型塞进提示词。"""
     document = _report_document_from_state(state)
@@ -2278,6 +2320,19 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         assets=assets,
         sources=resources.sources,
         evidence_refs=resources.evidence_refs,
+        analysis_outcome=getattr(
+            state.get("deep_agent_decision"),
+            "outcome",
+            None,
+        ),
+        finalization_status=state.get("finalization_status"),
+        report_mode=(
+            "diagnostic"
+            if getattr(state.get("deep_agent_decision"), "outcome", None)
+            == "no_valid_algorithm"
+            else "analysis"
+        ),
+        execution_summary=_report_execution_summary(state),
     )
 
     return {
