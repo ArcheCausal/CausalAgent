@@ -141,7 +141,10 @@ def test_algorithm_public_decision_is_emitted_and_removed_before_execution() -> 
     ]
     assert events[0]["decision_kind"] == "algorithm"
     assert events[0]["tool_name"] == "causal_pc"
-    assert executor.calls[0].command.parameters == {"alpha": 0.05}
+    assert executor.calls[0].command.parameters == {
+        "alpha": 0.05,
+        "test": "auto",
+    }
 
 
 def test_invalid_public_decision_does_not_block_algorithm_execution() -> None:

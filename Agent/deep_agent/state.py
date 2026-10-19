@@ -50,6 +50,10 @@ class DeepAgentState(_OfficialDeepAgentState, total=False):
     finalization_retry_count: int
     model_call_count: int
     tool_call_count: int
+    data_processing_approvals: Annotated[
+        dict[str, Any],
+        merge_processing_approvals,
+    ]
     deep_agent_run_id: str
     execution_scope: str
 
@@ -73,6 +77,7 @@ class ParentStateUpdate(TypedDict, total=False):
     deep_agent_structured_response: FinalAnalysisDecision | None
     deep_agent_run_id: str
     deep_agent_status: str
+    deep_agent_data_processing_approvals: dict[str, Any]
 
 
 def _as_data_profile(value: object, parent_state: Mapping[str, Any]) -> DataProfile:
@@ -133,6 +138,7 @@ def initial_deep_agent_state(
     messages: list[Any] | None = None,
     message_execution_id: str | None = None,
     missing_values_present: bool = False,
+    data_processing_approvals: Mapping[str, Any] | None = None,
     algorithm_results: Mapping[str, Any] | None = None,
     action_ledger: Mapping[str, Any] | None = None,
     rag_evidence: Mapping[str, Any] | None = None,
@@ -149,6 +155,7 @@ def initial_deep_agent_state(
         analysis_parameters=dict(analysis_parameters or {}),
         file_summary=dict(file_summary or {}),
         missing_values_present=missing_values_present,
+        data_processing_approvals=dict(data_processing_approvals or {}),
         **({"message_execution_id": message_execution_id} if message_execution_id else {}),
         algorithm_results=dict(algorithm_results or {}),
         action_ledger=dict(action_ledger or {}),
@@ -183,6 +190,28 @@ def _missing_values_from_parent(parent_state: Mapping[str, Any]) -> bool:
         isinstance(profile, Mapping) and int(profile.get("missing_count") or 0) > 0
         for profile in profiles.values()
     )
+
+
+def merge_processing_approvals(
+    left: Mapping[str, Any] | None,
+    right: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """按选项标识合并已确认方案；同一标识的内容必须完全一致。"""
+
+    merged: dict[str, Any] = {}
+    for source in (left or {}, right or {}):
+        if not isinstance(source, Mapping):
+            raise ValueError("data processing approvals must be a mapping")
+        for option_id, value in source.items():
+            if not isinstance(option_id, str) or not option_id:
+                raise ValueError("approval key must be a non-blank option id")
+            if not isinstance(value, Mapping):
+                raise ValueError("approval value must be a mapping")
+            normalized = dict(value)
+            if option_id in merged and merged[option_id] != normalized:
+                raise ValueError("approval content changed for the same option")
+            merged[option_id] = normalized
+    return {key: merged[key] for key in sorted(merged)}
 
 
 def to_deep_agent_input(
@@ -270,6 +299,11 @@ def to_deep_agent_input(
             else None
         ),
         missing_values_present=_missing_values_from_parent(parent_state),
+        data_processing_approvals=(
+            None
+            if reset_execution_artifacts
+            else parent_state.get("deep_agent_data_processing_approvals")
+        ),
         algorithm_results=(
             None
             if reset_execution_artifacts
@@ -312,6 +346,9 @@ def from_deep_agent_output(state: Mapping[str, Any]) -> ParentStateUpdate:
         "deep_agent_decision": state.get("structured_response"),
         "deep_agent_structured_response": state.get("structured_response"),
         "deep_agent_status": "completed",
+        "deep_agent_data_processing_approvals": dict(
+            state.get("data_processing_approvals") or {}
+        ),
     }
     if state.get("deep_agent_run_id"):
         result["deep_agent_run_id"] = str(state["deep_agent_run_id"])

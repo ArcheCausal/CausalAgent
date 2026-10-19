@@ -22,6 +22,7 @@ from .dependency_planner import (
     execute_dependency_plan,
 )
 from .runtime_updates import emit_public_decision_event, resolve_runtime_invocation
+from .interaction import DATA_PROCESSING_TOOL_NAME
 from .models import DataProfile
 from .registry import AlgorithmRegistry
 
@@ -137,6 +138,58 @@ def _safe_tool_message(
     )
 
 
+def _require_processing_message(
+    *,
+    name: str,
+    call_id: str,
+    reason: str,
+    unmet_requirements: list[str] | None = None,
+) -> Any:
+    """返回结构化的“需要确认处理”，模型不能把它当作可原样重试的失败。"""
+
+    from langchain_core.messages import ToolMessage
+
+    return ToolMessage(
+        content=json.dumps(
+            {
+                "status": "needs_confirmation",
+                "reason": reason,
+                "next_action": (
+                    "调用 request_data_processing 提交受控选项并等待用户确认，"
+                    "不要使用相同参数重复调用算法。"
+                ),
+                "unmet_requirements": unmet_requirements or ["data_processing"],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+        name=name,
+        tool_call_id=call_id,
+        status="error",
+    )
+
+
+def _tool_message_for_processing_result(value: Any) -> Any | None:
+    """把 Adapter 的“需要处理/不适用”结果转成结构化确认请求。"""
+
+    if not isinstance(value, Mapping):
+        return None
+    status = getattr(value.get("status"), "value", value.get("status"))
+    if status not in {"invalid_input", "not_applicable", "skipped"}:
+        return None
+    diagnostics = value.get("diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    code = str(diagnostics.get("safe_error_code") or value.get("safe_error_code") or "")
+    from .error_codes import is_processing_error
+
+    if not is_processing_error(code):
+        return None
+    return {
+        "reason": str(diagnostics.get("summary") or value.get("summary") or ""),
+        "code": code,
+    }
+
+
 class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
     """强制算法 Tool 经过 ``DependencyPlan`` 后才进入真实 handler。"""
 
@@ -192,6 +245,23 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
         handler: Callable[[Any], Awaitable[Any]],
     ) -> Any:
         call = request.tool_call
+        if (
+            isinstance(call, Mapping)
+            and call.get("name") == DATA_PROCESSING_TOOL_NAME
+        ):
+            # 处理确认必须独占工具轮次；不能与算法调用一起进入调度计划。
+            calls = _tool_calls_from_state(
+                _as_mapping(request.state),
+                self._tool_names,
+            )
+            if calls:
+                return _safe_tool_message(
+                    name=DATA_PROCESSING_TOOL_NAME,
+                    call_id=str(call.get("id") or ""),
+                    status="rejected",
+                    safe_error_code="INTERACTION_MUST_BE_EXCLUSIVE",
+                )
+            return await handler(request)
         if not isinstance(call, Mapping) or call.get("name") not in self._tool_names:
             return await handler(request)
 
@@ -314,6 +384,15 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                 call_id = outcome.request.call_id
                 if outcome.value is not None and outcome.status == "succeeded":
                     outputs[call_id] = outcome.value
+                    continue
+                processing = _tool_message_for_processing_result(outcome.value)
+                if processing is not None:
+                    outputs[call_id] = _require_processing_message(
+                        name=outcome.request.tool_name,
+                        call_id=call_id,
+                        reason=processing["reason"],
+                        unmet_requirements=[processing["code"]],
+                    )
                     continue
                 outputs[call_id] = _safe_tool_message(
                     name=outcome.request.tool_name,
