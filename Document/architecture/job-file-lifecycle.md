@@ -47,6 +47,8 @@
 
 领取时 worker 写入 `worker_id`、`attempt_count`、`lease_epoch`、锁定时间和心跳，并把 `execution_state` 置为 `leased`。运行中的业务取消会立即提交 `status=canceled`、取消事件和聊天投影，同时保留执行身份并转为 `execution_state=draining`；heartbeat 随后标记 invocation guard 撤销。LLM/RAG 继续合作式取消，MCP 算法调用额外通过签名控制面请求按 invocation 终止独立算法进程；取消失败或回执未知时仍保持 fencing，绝不接受迟到结果。worker cleanup 完成后以 `worker_confirmed` 释放，失联 lease 由 420 秒阈值以 `lease_expired` 回收。终态写入、事件写入和 assistant 消息提交前必须确认 worker、attempt、lease epoch 和 leased 状态仍匹配，旧 worker 不能覆盖新尝试。stale recovery 只在确认 PostgreSQL checkpoint 可读且未恢复的 interrupt 后进行；canceled Job 永不 resume 或 stale recovery，无法可靠读取恢复状态时禁止冒险重放。
 
+等待确认同时保存公开交互 JSON 与数据库截止时间（300 秒）。worker 进程内有独立于执行槽位的过期扫描任务，每 5 秒把已过期的 waiting_input 收敛为 failed/human_input_timeout，写入错误事件、assistant 消息并释放活动会话锁；创建、恢复等入口也会在同一事务内检查期限，不依赖后台扫描。resume 只清理等待字段，不延长既有截止时间；有效期内已接受的确认不会因为之后排队超过五分钟而失效。
+
 ## 等待输入、恢复与取消
 
 Agent 产生 interrupt 后，Job 进入 `waiting_input`，保留 `active_session_key` 以阻止同一会话创建第二个 Job，但释放 worker lease并记录 `worker_confirmed`。服务端将问题 ID、公开提示和稳定 interrupt 事件写入 MySQL；恢复请求把输入追加为 `resume` 记录，随后重新排队同一个 Job，继续同一个 checkpoint。`queued`、`running`、`waiting_input` 都可以被即时逻辑取消；取消后的业务终态不可逆，旧 worker 的迟到结果会被 fencing 拒绝。

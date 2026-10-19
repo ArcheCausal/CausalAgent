@@ -36,7 +36,11 @@ agent → fold → preprocess → deep_agent → finalization_gate → report
 
 父图直接表达的其余路径为 `agent → report`（按当前分析上下文重新生成报告）、`agent → context_switch` 与 `context_switch → fold / report / inquiry_answer / normal_chat`（解析并切换分析上下文后再继续）；普通聊天和报告追问仍由 `normal_chat`、`inquiry_answer` 路径结束。父图只把问题、数据画像、分析参数和必要输入消息投影到 Deep Agent；子图返回时只接收算法结果、Action Ledger、RAG/Web evidence、结构化决策和 Gate/report 所需摘要。完整消息、Deep Agents 内部字段和中间计划不会回投影到父 State。
 
-父图 checkpoint 使用 `thread_id=analysis_jobs.job_id` 和空 namespace。Deep Agent 子图使用同一个 PostgreSQL saver，但使用稳定的 `thread_id=deep-agent:<uuid5(job_id)>` 与 `checkpoint_ns=deep_agent_v1`。子图 State 另外保存由 Job、attempt、lease 和当前冻结输入身份构成的 execution scope；scope 不匹配时从父图的最小输入重新开始，不复用旧执行产物。输入身份读取的是 invocation 级可刷新引用，因此服务端按用户表述重新冻结输入或切换分析上下文后，scope 随之变化，旧执行产物不会被复用。Gate 要求修正时，从同一子图 checkpoint 追加受控指令。
+父图 checkpoint 使用 `thread_id=analysis_jobs.job_id` 和空 namespace。Deep Agent 子图使用同一个 PostgreSQL saver，但使用稳定的 `thread_id=deep-agent:<uuid5(job_id)>` 与 `checkpoint_ns=deep_agent_v1`。子图 State 保存的分析身份由 Job、当前冻结输入和算法 Spec 摘要构成；worker、attempt 和 lease 只代表本次执行权限，恢复时不会因此重建整个子图。输入身份读取的是 invocation 级可刷新引用，服务端重新冻结输入或切换分析上下文后，旧执行产物不会被复用。Gate 要求修正时，从同一子图 checkpoint 追加受控指令。
+
+提交处理确认时，子图在内层 `interrupt` 暂停；父图节点识别子图 pending interrupt，以同一公开载荷在父图暂停并发布 `interrupt` 事件，不把子图标记为完成。用户答复重新进入父图节点后，通过 `Command(resume=...)` 传回子图原中断位置；子图在等待期间结束本轮执行并释放 MCP 请求、算法子进程和 worker 执行槽位。
+
+从可信 checkpoint 恢复时，系统校验同一 Job、冻结输入、Spec 与处理方案；已完成结果以原始 provenance 进入 Gate 认可的恢复结果集合，不因新 attempt/lease 被重复执行。旧 worker 的迟到写入继续被 fencing 拒绝；checkpoint 不可可靠读取时阻止恢复。人工恢复只增加 `resume_count`，不消耗故障恢复次数。
 
 长期记忆由 `AsyncPostgresStore` 单独保存，不属于 Job checkpoint。模型只注册 `read_file` 和 `edit_file`，并且只允许写 `/memories/preferences.md` 与 `/memories/research_background.md`；其他写入由兜底 deny 拒绝。namespace 从可信 `AgentRunContext` 的 `user_id` 生成，首次使用时仅做 create-if-absent 初始化。Deep Agent 不启用 subagent、`task`、代码执行或宿主文件系统。
 
@@ -59,6 +63,8 @@ agent → fold → preprocess → deep_agent → finalization_gate → report
 模型看到的是由本地 `AlgorithmSpec` 生成的 LangChain function tools。当前默认 allowlist 包含 PC、DirectLiNGAM 和 CDFM；OLC 的 Spec、Adapter、runner 和算法代码仍保留，但不进入 worker Registry、MCP runner registry 或旧兼容 MCP 工具面。运行时不会调用远端 `list_tools()` 来动态扩展模型工具。CDFM 工具只公开可选 `threshold`，模型路径、CPU device、标准化和缺失值处理策略由 causal-mcp 固定。
 
 `AlgorithmDependencyDispatchMiddleware` 在 ToolNode 边界收集同一模型响应中的算法调用，按 `requires/produces` 分层：无依赖调用可并行，有依赖调用按层执行，并受单 Job 并发和工具总预算约束。Adapter 负责模型参数校验、确定性预处理、标准结果、raw result 完整性和 Ledger 更新；`McpAlgorithmExecutor` 只负责签名传输、远端执行结果校验和安全错误映射。CDFM 的 logits/probabilities 通过仅供 Executor 与 Adapter 使用的私有 envelope 保存到 raw artifact，不进入 `AlgorithmResult`、ToolMessage、SSE 或公共日志。可信 Job、文件、lease、HMAC 与数据库身份不会进入模型参数。
+
+`AlgorithmSpec` 还声明输入要求、原生处理能力、允许的额外处理操作和最小行列数，模型可见工具描述由这些字段生成。预检测画像区分阻断问题与非阻断提示，保留变量类型、缺失列、非有限值、空列、常数列和疑似标识符列。Deep Agent 根据画像生成 1 到 3 个受控处理选项，由本地 `request_data_processing` 工具校验后触发用户确认；确认工具必须独占一次工具调用轮次。
 
 `causal-mcp` 是私网 Streamable HTTP/HTTP/1.1 服务。服务端以 MySQL primary strong read 校验 Job、attempt、lease 和 worker 身份，再使用有界队列及独立算法子进程运行 capability。MCP session 不保存 Job、checkpoint 或 Action Ledger。
 
