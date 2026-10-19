@@ -2108,6 +2108,42 @@ def _report_document_from_state(state: CausalAgentState):
     return document if isinstance(document, ReportDocument) else None
 
 
+def _report_execution_summary(state: CausalAgentState) -> dict[str, Any]:
+    """按真实结果公开数据视图差异、算法状态和报告完整性事实。"""
+
+    from Agent.deep_agent_tools.models import AlgorithmResult
+
+    raw_results = state.get("deep_agent_algorithm_results")
+    results = raw_results.values() if isinstance(raw_results, dict) else ()
+    algorithms: list[dict[str, Any]] = []
+    views: set[tuple[str, ...]] = set()
+    for raw in results:
+        try:
+            result = AlgorithmResult.model_validate(raw)
+        except Exception:
+            continue
+        view = result.data_view
+        if view is not None:
+            views.add(view.columns)
+        algorithms.append(
+            {
+                "capability_id": result.capability_id,
+                "status": result.status,
+                "sample_count": view.row_count if view is not None else None,
+                "variable_count": view.column_count if view is not None else None,
+                "operations": list(view.operations) if view is not None else [],
+            }
+        )
+    decision = state.get("deep_agent_decision")
+    return {
+        "analysis_outcome": getattr(decision, "outcome", None),
+        "report_completeness": "complete",
+        "finalization_status": state.get("finalization_status"),
+        "algorithms": algorithms,
+        "data_views_differ": len(views) > 1,
+    }
+
+
 def _report_followup_context(state: CausalAgentState) -> dict[str, str]:
     """报告追问只使用摘要、资源和证据说明，不把图表数据和图模型塞进提示词。"""
     document = _report_document_from_state(state)
@@ -2275,6 +2311,19 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         assets=assets,
         sources=resources.sources,
         evidence_refs=resources.evidence_refs,
+        analysis_outcome=getattr(
+            state.get("deep_agent_decision"),
+            "outcome",
+            None,
+        ),
+        finalization_status=state.get("finalization_status"),
+        report_mode=(
+            "diagnostic"
+            if getattr(state.get("deep_agent_decision"), "outcome", None)
+            == "no_valid_algorithm"
+            else "analysis"
+        ),
+        execution_summary=_report_execution_summary(state),
     )
 
     return {
