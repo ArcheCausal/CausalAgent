@@ -60,6 +60,8 @@ _DECISION_TOOL_KINDS = {
     "causal_pc": "algorithm",
     "causal_olc": "algorithm",
     "causal_direct_lingam": "algorithm",
+    "causal_cdfm": "algorithm",
+    "request_data_processing": "interaction",
     "rag_evidence_search": "evidence",
     "web_evidence_search": "evidence",
 }
