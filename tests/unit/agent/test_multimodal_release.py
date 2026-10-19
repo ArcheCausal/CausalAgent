@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from chromadb import PersistentClient
+
 from Agent.knowledge_base.multimodal.assets import AssetStore
 from Agent.knowledge_base.multimodal.contracts import KnowledgeUnit, UnitStatus
 from Agent.knowledge_base.multimodal.index import embedding_fingerprint
@@ -23,12 +25,14 @@ class MultimodalReleaseTests(unittest.TestCase):
             version_dir = staged_index_root / "mm_release_test"
             version_dir.mkdir(parents=True)
             (version_dir / "manifest.json").write_text(json.dumps({"index_version": "mm_release_test"}), encoding="utf-8")
-            (version_dir / "units.jsonl").write_text("unit\n", encoding="utf-8")
+            (version_dir / "units.jsonl").write_text("", encoding="utf-8")
             (version_dir / "build_state.json").write_text(
-                json.dumps({"status": "staged_complete", "unit_count": 1, "vector_count": 1}),
+                json.dumps({"index_version": "mm_release_test", "status": "staged_complete", "unit_count": 0, "vector_count": 0}),
                 encoding="utf-8",
             )
-            (version_dir / "chroma").mkdir()
+            chroma_dir = version_dir / "chroma"
+            client = PersistentClient(path=str(chroma_dir))
+            client.create_collection("release_copy_test", embedding_function=None)
             asset = staged_asset_root / "doc" / "images" / "page.png"
             asset.parent.mkdir(parents=True)
             asset.write_bytes(b"asset")
@@ -48,6 +52,14 @@ class MultimodalReleaseTests(unittest.TestCase):
             self.assertTrue((formal_index_root / "mm_release_test" / "manifest.json").is_file())
             self.assertTrue((formal_index_root / "mm_release_test" / "build_state.json").is_file())
             self.assertTrue((formal_index_root / "mm_release_test" / "chroma").is_dir())
+            self.assertEqual(
+                (formal_index_root / "mm_release_test" / "chroma" / "chroma.sqlite3").read_bytes(),
+                (chroma_dir / "chroma.sqlite3").read_bytes(),
+            )
+            self.assertEqual(
+                (formal_index_root / "mm_release_test" / "build_state.json").read_bytes(),
+                (version_dir / "build_state.json").read_bytes(),
+            )
             self.assertFalse((formal_asset_root / "doc" / "images" / "page.png").exists())
             self.assertEqual(asset.read_bytes(), b"asset")
             self.assertIsNone(maintenance.registry.read())

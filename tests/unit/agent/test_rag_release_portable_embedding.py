@@ -6,7 +6,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -235,7 +238,7 @@ class PortableReleaseTests(unittest.TestCase):
             self.assertTrue(rollback.call_args.kwargs["enforce_production_policy"])
 
     def test_explicit_api_embedding_config_reports_missing_environment(self) -> None:
-        from Agent.knowledge_base.embedding_runtime import create_embedding_function, validate_embedding_env_references
+        from config.secret_file import load_secrets
 
         config = EmbeddingConfiguration(
             mode="api",
@@ -246,17 +249,58 @@ class PortableReleaseTests(unittest.TestCase):
             base_url_env="RAG_EVAL_EMBEDDING_BASE_URL",
             endpoint_identity="https://embedding.example/v1",
         )
-        # API 凭据只从密钥文件读取，不再回退到环境变量；清空环境时必须保留密钥文件指针，
-        # 否则触发的是“密钥文件不存在”，而不是“embedding endpoint 未配置”。
-        with patch.dict(os.environ, {SECRET_FILE_ENV_VAR: os.environ[SECRET_FILE_ENV_VAR]}, clear=True):
+        # 子进程读取实际密钥文件并执行真实配置检查，不改写父进程环境或密钥缓存。
+        check = textwrap.dedent("""
+            import json
+            import logging
+            import sys
+            from Agent.knowledge_base.embedding_runtime import (
+                EmbeddingApiError, create_embedding_function, validate_embedding_env_references,
+            )
+
+            logging.basicConfig(level=logging.INFO, format="%(event_code)s")
+            config = json.loads(sys.argv[1])
             resolved = validate_embedding_env_references(config)
-            self.assertEqual(resolved.status, "missing")
-            self.assertEqual(resolved.missing, ("RAG_EVAL_EMBEDDING_BASE_URL",))
-            with patch("Agent.knowledge_base.embedding_runtime.log_event") as log_event:
-                with self.assertRaises(EmbeddingApiError) as error:
-                    create_embedding_function(config, scope="evaluation")
-            self.assertEqual(error.exception.category, "unavailable")
-            self.assertEqual(log_event.call_args.args[1], "rag.enrichment.degraded")
+            try:
+                create_embedding_function(config, scope="evaluation")
+            except EmbeddingApiError as error:
+                print(json.dumps({"status": resolved.status, "missing": resolved.missing, "category": error.category}))
+            else:
+                raise AssertionError("missing embedding configuration must fail")
+        """)
+        secrets = load_secrets()
+        self.assertTrue(secrets.get("EMBEDDING_API_KEY"))
+        for include_credential in (True, False):
+            expected_missing = [config.base_url_env] if include_credential else [config.api_key_env, config.base_url_env]
+            with self.subTest(include_credential=include_credential), tempfile.TemporaryDirectory() as directory:
+                secret_path = Path(directory) / "causalagent.env"
+                secret_path.write_text(
+                    "".join(
+                        f"{name}={value}\n" for name, value in secrets.items()
+                        if include_credential or name != "EMBEDDING_API_KEY"
+                    ),
+                    encoding="utf-8",
+                )
+                if os.name != "nt":
+                    secret_path.chmod(0o600)
+                environment = os.environ.copy()
+                environment[SECRET_FILE_ENV_VAR] = str(secret_path)
+                environment.pop(config.base_url_env, None)
+                result = subprocess.run(
+                    [sys.executable, "-c", check, json.dumps(config.to_manifest())],
+                    cwd=Path(__file__).resolve().parents[3],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=60,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    json.loads(result.stdout),
+                    {"status": "missing", "missing": expected_missing, "category": "unavailable"},
+                )
+                self.assertIn("rag.enrichment.degraded", result.stderr)
 
     def test_publish_keeps_only_active_and_fallback_and_uses_atomic_pointer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

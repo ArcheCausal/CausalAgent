@@ -70,7 +70,7 @@ class MultimodalProductionDefaultsTests(unittest.TestCase):
         self.assertTrue(all(source["required"] for source in config["sources"]))
 
     def test_frozen_sources_report_metadata_and_hash_verify_when_installed(self) -> None:
-        """受控目录没有正式 PDF 时只给元数据；安装后必须唯一命中并通过哈希与签名校验。"""
+        """核对冻结来源元数据，正式文件已安装时再校验哈希与格式。"""
         config = load_production_defaults()
         metadata = defaults_module.resolve_production_source_metadata(config)
 
@@ -83,7 +83,7 @@ class MultimodalProductionDefaultsTests(unittest.TestCase):
             [source["sha256"] for source in config["sources"]],
         )
         if not all(entry["available"] for entry in metadata):
-            self.skipTest("正式来源未安装")
+            self.skipTest("正式来源未安装，未执行文件哈希与格式校验")
         self.assertTrue(all(path.is_file() for path in production_source_paths(config)))
 
     def test_manual_evaluation_set_has_24_complete_reviewed_cases(self) -> None:
