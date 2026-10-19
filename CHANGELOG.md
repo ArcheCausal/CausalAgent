@@ -1846,3 +1846,24 @@
 - 【部署文档：补充测试预发操作流程】
   - 【服务器操作】：在现有构建与部署文档内补充首次部署和旧 staging 服务更新的连续步骤，覆盖项目名确认、ZIP 与 tar.gz 解压、配置迁移、上传权限、镜像拉取、容器更新、验收与失败处理。
   - 【文档导航】：合并原预发命令示例，共用密钥机制、数据迁移与验收说明通过链接引用，技术文档入口增加章节链接。
+
+- 【CI 修复：后端单元测试三条既有失败】
+  - 【正式来源契约】：`tests/unit/agent/test_multimodal_production_defaults.py` 不再假定受控目录必然存在正式 PDF。默认只校验来源元数据的配置路径与内容哈希同冻结配置一致，仅当来源文件真实安装时才继续校验严格解析得到的路径存在。
+  - 【发布产物夹具】：`tests/unit/agent/test_multimodal_release.py` 的 staged 夹具补齐 `build_state.json` 与 `chroma`，与 `ReleaseManager` 只物化正式 release 必备产物的契约保持一致，并断言两者都被复制到正式候选目录。
+  - 【密钥文件边界】：`tests/unit/agent/test_rag_release_portable_embedding.py` 的 API embedding 缺配置用例在清空进程环境时保留 `CAUSALAGENT_SECRET_FILE` 指向，避免把密钥文件缺失误判为 embedding 端点未配置，并断言缺失项恰为 base URL 环境变量。
+
+- 【压测第二轮：全档位执行与报告】
+  - 【编排修复】：`loadtest/ops/stage_sampling.py` 的采样进程守卫原来用 `pgrep -f 'stage_resource_sample.sh' | grep -v pgrep` 判定，会匹配到执行该命令的 bash 自身，导致每一档都被误判为“已有采样在运行”；改为方括号写法。采样启动与取回改为按 run_id 命名的唯一文件，并先判断文件是否已存在再启动，避免一次 SSH 超时重试产生两个采样进程写同一个文件。等待收尾改为读取结果文件里的 `finished_at` 字段，等待期限改为覆盖该档采样预算；SSH 调用增加最多三次重试与保活参数。
+  - 【编码修复】：`ops/stage_sampling.py` 与 `ops/run_stages.py` 的 subprocess 调用统一显式使用 UTF-8 解码。本机默认编码为 GBK 时，远端脚本与 runner 报告的中文输出会让子进程返回值退化为 `None`，进而以 `AttributeError` 中断整档。
+  - 【run_id 固定】：`runner/stages.py`、`runner/recovery.py` 与 `runner/cli.py` 支持 `--run-id` 参数；编排脚本在负载开始前就固定 run_id，使负载前的服务器采集、负载与逐 Job 核对共用同一标识。
+  - 【分段写入】：`runner/evidence.py` 与 `runner/cli.py` 的 `attach-server`、`attach-after`、`attach-job-db` 支持 `--stage`，只写指定档位；编排脚本改为把负载前与停止后的采集分别登记到该档运行摘要。
+  - 【报告命名】：合并报告文件名不再写死为上一轮的 `loadtest-report-20261010.md`，改为按最新一次运行的日期生成。
+  - 【日志结论】：日志侧结论改为由本轮 logcheck 数据逐条推导，去掉写死的上一轮判断；主库 Job 终态核对改为逐档渲染，不再只显示最后一档。
+  - 【观测记录】：`runner/flows.py` 在历史核对遇到瞬时读取失败时按“未核对”处理，不再丢掉整个 Job 记录；`runner/metrics.py` 新增 `job_created_ids`，`runner/evidence.py` 与 `ops/stage_sampling.py` 的 job_id 清单优先使用创建时登记的 ID，使超出排空期限、没有客户端终态的 Job 也能进入主库核对。
+  - 【补充核对】：报告新增“客户端未观测到终态 Job 的补充核对”一节，汇总 `evidence/job-db-*-extras.json` 的只读核对结果，避免创建数与终态数的差额被误当成失败。
+  - 【报告与索引】：新增 11 个档位的合并报告 `local/evidence/loadtest-report-20261016.md` 与逐档报告；`loadtest/evidence/index.md` 按轮次登记全部档位的 run_id、时间、镜像 digest 与结论，并记录第二轮对第一轮缺陷的复核结果。
+  - 【文档同步】：`loadtest/README.md` 补充三个 attach 命令的 `--stage` 用法、编排脚本的 run_id 固定与 SSH 重试说明，以及“创建数多于清单数”时从主库补齐 job_id 的补充核对步骤。
+  - 【档位补齐】：`ops/stage_sampling.py` 的 SPECS 补上 `smoke` 档（单用户单流程、不覆盖持续时间），使档位表里登记的全部档位都能被编排脚本执行。
+  - 【报告归档】：合并报告的文件名日期改为取全部档位里最早一次的运行开始时间，避免一轮压测跨过午夜或在收尾补跑个别档位时分裂成两份报告。
+  - 【报告口径修正】：`runner/report.py` 的主机一行改为在缺少 `host_spec` 时使用采集脚本实际给出的主机名、CPU 核数与内存；观察期限外未到终态 Job 的等待时间下界在没有此类 Job 时写成“无”，不再写成“未采集”。专项流程（`recovery`）不运行分级负载模型，逐档报告与跨档摘要里对并发峰值、排队与耗时分位统一写“不适用”，与“应当采集却缺失”的未采集区分开。
+  - 【档位语义修正】：`baseline` 在档位表里是 full_flow 4 轮，编排脚本原先传入 `--duration` 会把它改成 mixed 模式，实际执行与档位定义不符；改为按档位定义运行并重跑该档，报告与索引同步更新。

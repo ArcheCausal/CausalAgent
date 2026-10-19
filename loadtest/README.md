@@ -97,13 +97,14 @@ bash -n 与 JSON 解析校验后，把结果写入各档运行摘要，再由 ev
 “服务器侧”一节：
 
 ~~~
-.venv\Scripts\python.exe -m runner attach-server --from loadtest/local/server-side-<run_id>-before.json
-.venv\Scripts\python.exe -m runner attach-after --from loadtest/local/server-side-<run_id>-after.json
+.venv\Scripts\python.exe -m runner attach-server --from loadtest/local/server-side-<run_id>-before.json --stage <档位>
+.venv\Scripts\python.exe -m runner attach-after  --from loadtest/local/server-side-<run_id>-after.json  --stage <档位>
 .venv\Scripts\python.exe -m runner evidence
 ~~~
 
 采集结果带 schema_version 与 run_id，缺失数据写成 missing/error 状态而不写成 0。没有执行
-attach-server 时，报告把服务器侧各项如实写成“未采集”。
+attach-server 时，报告把服务器侧各项如实写成“未采集”。三个 attach 命令都支持 `--stage`：
+传入时只写该档运行摘要；同时在跑多个档位时应当传入，否则会把同一份采集写到每一档。
 
 ## 负载窗口资源采样
 
@@ -155,6 +156,12 @@ ops/ 下的两个脚本把“启动采样、跑负载、等采样收尾、取回
 服务器的采集或核对失败、负载进程失败都会让该档返回非零，driver 随即停止后续档位，
 因此上一档未排空或核对失败不会污染下一档。
 
+编排脚本在每档开始前先生成 run_id 并用 `--run-id` 传给负载命令，负载前的服务器采集、
+负载运行与逐 Job 核对因此共用同一个标识；采集与核对结果通过 `--stage` 只写入该档运行
+摘要。采样启动与结果取回使用按 run_id 命名的唯一远端文件，重复执行同一档不会产生两个
+采样进程写同一个文件。公网入口会持续收到扫描与口令尝试，因此 SSH 调用带重试与保活参数；
+单次超时不会直接把已经完成的负载判为失败。
+
 ## 主库 Job 终态核对
 
 客户端只记录自己发起的请求；为了独立确认 Job 的最终状态，另有只读脚本直接查询
@@ -169,12 +176,31 @@ staging 主库，按本轮真实 job_id 清单逐 Job 核对终态、会话归�
 sudo bash loadtest/job_db_check.sh <run_id> /tmp/_lt/job-ids-<stage>.txt > /tmp/job-db-<run_id>.json
 
 # 取回并写入各档运行摘要，再由 evidence 渲染进报告
-.venv\Scripts\python.exe -m runner attach-job-db --from loadtest/local/job-db-<run_id>.json
+.venv\Scripts\python.exe -m runner attach-job-db --from loadtest/local/job-db-<run_id>.json --stage <档位>
 ~~~
 
 脚本只执行 SELECT，凭据从受控凭据文件读取且不写入输出；清单里查不到的 job_id 写成
 not_found，不写成 0。核对结果由 evidence 命令渲染进合并报告的“主库 Job 终态核对”
 一节，并逐条比对客户端终态与主库终态。这是数据库层证据，与管理端网页界面核对相互独立。
+
+导出清单优先使用运行摘要里创建时登记的 job_id，因此停止提交后到达排空期限、客户端
+没有拿到终态的那些 Job 也会进入核对范围。这些 Job 的核对结果单独存放为
+`local/evidence/job-db-<run_id>-extras.json` 时，evidence 会渲染进“客户端未观测到
+终态 Job 的补充核对”一节，使创建数与终态数之间的差额不被误当成失败。
+
+当某一档出现“创建数多于清单数”（例如停止提交后排队超过排空期限），按该档运行窗口
+从主库补齐这批 job_id，再执行同一次核对并把结果放进 evidence 目录：
+
+~~~
+# 在服务器上按档位运行窗口列出本轮创建的 job_id，并排除已在清单里的 ID
+sudo bash loadtest/job_db_check.sh <run_id>-extras /tmp/_lt/extra-<档位>.txt > /tmp/job-db-<run_id>-extras.json
+
+# 取回后放进 local/evidence/，文件名保持 job-db-*-extras.json 形状
+~~~
+
+补充核对用的是同一条只读查询与同一份凭据来源，结论与逐档核对待遇相同；报告把补充
+核对单独成节，不把它混进逐档比对的一致条数。`ops/stage_sampling.py` 已经在导出清单时
+包含创建时登记的 job_id，正常走编排命令时不需要手工执行这一节。
 
 ## 日志侧核查
 

@@ -113,7 +113,7 @@ def _server_fields(payload: dict, label_prefix: str) -> list[str]:
         f"- 采集时刻：{_field(payload.get('collected_at'))}"
         f"（{_field(payload.get('phase'))}；{_field(payload.get('schema_version'))}）",
         f"- 采集方式：{_field(payload.get('source'))}",
-        f"- 主机：{_field(payload.get('hostname'))}，{_field(payload.get('host_spec'))}",
+        f"- 主机：{_host_line(payload)}",
         f"- 运行时长：{_field(payload.get('uptime'))}",
         f"- 负载均值 / CPU 核数：{_field(payload.get('load_average'))} / {_field(payload.get('cpu_count'))}",
         f"- 内存（MB）：{_field(payload.get('memory_mb'))}",
@@ -174,6 +174,34 @@ def _server_fields(payload: dict, label_prefix: str) -> list[str]:
     return lines
 
 
+def _host_line(payload: dict) -> str:
+    """渲染主机一行：有 host_spec 时用它，否则用采集脚本实际给出的主机名与规格字段。"""
+    hostname = _field(payload.get("hostname"))
+    spec = payload.get("host_spec")
+    if spec:
+        return f"{hostname}，{spec}"
+    cpu = payload.get("cpu_count")
+    memory = payload.get("memory_mb")
+    if cpu or memory:
+        return f"{hostname}，CPU 核数 {cpu or '未采集'}；内存（MB）{memory or '未采集'}"
+    return f"{hostname}，规格未采集"
+
+
+def _wait_lower_bound(job: dict) -> str:
+    """渲染观察期限外未到终态 Job 的等待时间下界。
+
+    本档没有这类 Job 时写明“无”，不要写成“未采集”：前者表示该项不适用，
+    后者表示应当采集却缺失，两者含义不能混用。
+    """
+    minimum = job.get("queue_timeout_wait_lower_bound_min_seconds")
+    maximum = job.get("queue_timeout_wait_lower_bound_max_seconds")
+    if minimum is None and maximum is None:
+        if job.get("observation_timeouts", 0) == 0:
+            return "无（本档没有观测期限外未到终态的 Job）"
+        return "未采集"
+    return f"{_fmt(minimum, ' s')} ~ {_fmt(maximum, ' s')}"
+
+
 def _mcp_section(logcheck: dict | None, summary: dict) -> list[str]:
     """渲染模型与 MCP 错误一节，缺少日志核查时如实说明。"""
     if not logcheck:
@@ -228,6 +256,22 @@ def render_stage_report(summary: dict, logcheck: dict | None = None) -> str:
     baseline = summary.get("server_baseline")
     after = summary.get("server_after")
     client = _client_from_notes(summary)
+    # 专项流程（recovery）逐项检查串联执行，不适用分级负载模型的并发与耗时分位口径；
+    # 这些字段应当写成“不适用”，与“应当采集却缺失”的未采集区分开。
+    special = bool(summary.get("checks"))
+
+    def load_value(value) -> str:
+        """渲染只在分级负载模型里有含义的字段。"""
+        if special and value is None:
+            return "不适用（专项流程不运行分级负载模型）"
+        return _value(value)
+
+    def load_fmt(value, unit: str = "") -> str:
+        """渲染只在分级负载模型里有含义的耗时字段。"""
+        if special and value is None:
+            return "不适用"
+        return _fmt(value, unit)
+
     started = datetime.fromtimestamp(summary["started_at"]).strftime("%Y-%m-%d %H:%M:%S")
     lines = [
         f"# 压测运行报告 {summary['run_id']}",
@@ -240,11 +284,11 @@ def render_stage_report(summary: dict, logcheck: dict | None = None) -> str:
         f"- 服务器规格：{_server_spec(summary)}",
         f"- 压测客户端规格和网络位置：{json.dumps(client, ensure_ascii=False)}",
         f"- 虚拟账号数：{summary['users']}，每账号真实会话数："
-        f"{_value(summary.get('peak_sessions_per_user'))}",
+        f"{load_value(summary.get('peak_sessions_per_user'))}",
         f"- 实际 RPS：{http['rps']}",
-        f"- 实际活动 Job 峰值：{_value(summary.get('peak_active_jobs'))}",
-        f"- 单账号活动 Job 峰值：{_value(summary.get('peak_active_jobs_per_account'))}",
-        f"- 实际 SSE 峰值：{_value(summary.get('peak_sse'))}",
+        f"- 实际活动 Job 峰值：{load_value(summary.get('peak_active_jobs'))}",
+        f"- 单账号活动 Job 峰值：{load_value(summary.get('peak_active_jobs_per_account'))}",
+        f"- 实际 SSE 峰值：{load_value(summary.get('peak_sse'))}",
         "",
         "## HTTP",
         "",
@@ -267,15 +311,13 @@ def render_stage_report(summary: dict, logcheck: dict | None = None) -> str:
         f"- 观察期限内未到终态的 Job：{job.get('observation_timeouts', 0)}",
         f"- 排队观测到达 {config.QUEUE_OBSERVE_TIMEOUT_SECONDS:.0f} 秒仍未进入 running 的 Job："
         f"{job.get('queue_observe_timeouts', 0)}",
-        f"- 等待时间下界（未完成 Job）："
-        f"{_fmt(job.get('queue_timeout_wait_lower_bound_min_seconds'), ' s')} ~ "
-        f"{_fmt(job.get('queue_timeout_wait_lower_bound_max_seconds'), ' s')}",
-        f"- 排队 p50 / p95：{_fmt(job.get('queue_p50_seconds'), ' s')} / "
-        f"{_fmt(job.get('queue_p95_seconds'), ' s')}",
-        f"- 执行 p50 / p95：{_fmt(job.get('execution_p50_seconds'), ' s')} / "
-        f"{_fmt(job.get('execution_p95_seconds'), ' s')}",
-        f"- 总耗时 p50 / p95：{_fmt(job.get('total_p50_seconds'), ' s')} / "
-        f"{_fmt(job.get('total_p95_seconds'), ' s')}",
+        "- 等待时间下界（未完成 Job）：" + _wait_lower_bound(job),
+        f"- 排队 p50 / p95：{load_fmt(job.get('queue_p50_seconds'), ' s')} / "
+        f"{load_fmt(job.get('queue_p95_seconds'), ' s')}",
+        f"- 执行 p50 / p95：{load_fmt(job.get('execution_p50_seconds'), ' s')} / "
+        f"{load_fmt(job.get('execution_p95_seconds'), ' s')}",
+        f"- 总耗时 p50 / p95：{load_fmt(job.get('total_p50_seconds'), ' s')} / "
+        f"{load_fmt(job.get('total_p95_seconds'), ' s')}",
         f"- 历史记录一致：{job.get('history_consistent', 0)}/{job.get('history_checked', 0)}",
         "",
         "## SSE",

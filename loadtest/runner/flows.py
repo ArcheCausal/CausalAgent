@@ -328,6 +328,7 @@ class VirtualUser:
             return None
         self.ctx.job_ids.append(job_id)
         self.recorder.bump("job_created")
+        self.recorder.record_created_job(job_id)
         self.recorder.bump_user("job_created_by_user", self.ctx.index)
         slot.current_job_id = job_id
         slot.ready.clear()
@@ -382,11 +383,14 @@ class VirtualUser:
             )
             if observation == "observation_timeout":
                 self.recorder.bump("job_observation_timeouts")
-            history_ok = (
-                self._verify_history(slot.session_id, job_id)
-                if observation == "terminal"
-                else None
-            )
+            # 历史核对是辅助证据：一次瞬时读取失败不应丢掉整个 Job 记录，
+            # 失败时按“未核对”处理，Job 终态仍照常计入统计。
+            history_ok = None
+            if observation == "terminal":
+                try:
+                    history_ok = self._verify_history(slot.session_id, job_id)
+                except ApiError as exc:
+                    self.recorder.note(f"历史核对失败 {job_id}: {exc}")
             elapsed = time.monotonic() - created_at
             execution_seconds = (
                 None
@@ -453,7 +457,10 @@ class VirtualUser:
             self.recorder.note(f"resume 返回 {status}: {body.get('error')}")
             return "waiting_input"
         outcome = self.ctx.client.subscribe_job_events(job_id)
-        self._verify_history(session_id, job_id)
+        try:
+            self._verify_history(session_id, job_id)
+        except ApiError as exc:
+            self.recorder.note(f"历史核对失败 {job_id}: {exc}")
         return _final_status(outcome.terminal_event, outcome.sample.error)
 
     def _observe_queue(self, job_id: str, created_at: float) -> tuple[float | None, bool]:

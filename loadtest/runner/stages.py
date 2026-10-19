@@ -65,12 +65,17 @@ def run_stage(
     accounts: list[Account],
     base_url: str,
     server_baseline: dict | None = None,
+    run_id: str | None = None,
 ) -> dict:
-    """执行一个档位的负载并返回聚合结果。"""
+    """执行一个档位的负载并返回聚合结果。
+
+    run_id 可由编排脚本预先固定，使负载前的服务器采集与本次运行使用同一个标识；
+    不传时按开始时间自行生成。
+    """
     spec = config.STAGES[stage]
     users = min(int(spec["users"]), len(accounts))
     sessions_per_user = max(1, int(spec.get("sessions_per_user", 1)))
-    recorder = Recorder(run_id=make_run_id(stage))
+    recorder = Recorder(run_id=run_id or make_run_id(stage))
     recorder.stage = stage
     recorder.users = users
     recorder.server_baseline = server_baseline

@@ -86,6 +86,9 @@ class Recorder:
         self.sse: list[SseSample] = []
         self.jobs: list[JobSample] = []
         self.job_created = 0
+        # 本轮成功创建过的唯一 job_id，按创建顺序记录；终态观测可能因排空期限
+        # 到达而没有结果，这些 Job 仍要能进入主库核对清单。
+        self.job_created_ids: list[str] = []
         self.job_idempotent_replays = 0
         # 提交侧计数：尝试创建、因额度用尽而跳过的创建、因会话忙而放弃的创建。
         self.job_create_attempts = 0
@@ -137,6 +140,11 @@ class Recorder:
     def bump(self, field_name: str, amount: int = 1) -> None:
         with self._lock:
             setattr(self, field_name, getattr(self, field_name) + amount)
+
+    def record_created_job(self, job_id: str) -> None:
+        """登记一个成功创建的唯一新 Job，用于导出主库核对清单。"""
+        with self._lock:
+            self.job_created_ids.append(job_id)
 
     def note(self, message: str) -> None:
         with self._lock:
@@ -236,6 +244,7 @@ class Recorder:
             },
             "job": {
                 "created": self.job_created,
+                "created_ids": list(self.job_created_ids),
                 "idempotent_replays": self.job_idempotent_replays,
                 "recorded": len(jobs),
                 "create_attempts": self.job_create_attempts,

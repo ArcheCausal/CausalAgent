@@ -45,6 +45,8 @@ def main(stages: list[str]) -> int:
             cwd=str(BASE),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         log(f"[driver] end {stage} exit={process.returncode} elapsed={round(time.time() - start)}s")
         for line in (process.stdout or "").strip().splitlines()[-6:]:

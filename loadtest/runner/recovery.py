@@ -337,11 +337,14 @@ def run_recovery_suite(
     base_url: str,
     accounts: list[Account],
     server_baseline: dict | None = None,
+    run_id: str | None = None,
 ) -> dict:
     """执行第五阶段全部专项检查。"""
     if len(accounts) < 2:
         raise RuntimeError("取消与恢复专项至少需要 2 个测试账号")
-    recorder = Recorder(run_id=time.strftime("%Y%m%dT%H%M%S") + "-recovery")
+    recorder = Recorder(
+        run_id=run_id or (time.strftime("%Y%m%dT%H%M%S") + "-recovery")
+    )
     recorder.stage = "recovery"
     recorder.users = 2
     recorder.server_baseline = server_baseline

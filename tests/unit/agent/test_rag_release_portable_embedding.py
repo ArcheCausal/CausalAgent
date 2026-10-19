@@ -29,6 +29,7 @@ from Agent.knowledge_base.multimodal.release import (
 )
 from Agent.knowledge_base.multimodal.pipeline import MultimodalKnowledgeBaseMaintenance
 from Agent.knowledge_base.rag_runtime import RagRuntimeConfig
+from config.secret_file import SECRET_FILE_ENV_VAR
 
 
 def _embedding(model: str = "portable-test") -> EmbeddingConfiguration:
@@ -245,9 +246,12 @@ class PortableReleaseTests(unittest.TestCase):
             base_url_env="RAG_EVAL_EMBEDDING_BASE_URL",
             endpoint_identity="https://embedding.example/v1",
         )
-        with patch.dict(os.environ, {}, clear=True):
+        # API 凭据只从密钥文件读取，不再回退到环境变量；清空环境时必须保留密钥文件指针，
+        # 否则触发的是“密钥文件不存在”，而不是“embedding endpoint 未配置”。
+        with patch.dict(os.environ, {SECRET_FILE_ENV_VAR: os.environ[SECRET_FILE_ENV_VAR]}, clear=True):
             resolved = validate_embedding_env_references(config)
             self.assertEqual(resolved.status, "missing")
+            self.assertEqual(resolved.missing, ("RAG_EVAL_EMBEDDING_BASE_URL",))
             with patch("Agent.knowledge_base.embedding_runtime.log_event") as log_event:
                 with self.assertRaises(EmbeddingApiError) as error:
                     create_embedding_function(config, scope="evaluation")

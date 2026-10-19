@@ -17,7 +17,30 @@
 | burst | 20261012T025527-burst | 2026-10-12 02:55 | app@sha256:00786479…61947a | 待归档 | 20 用户突发通过，活动 Job 峰值 4 |
 | recovery | 20261012T035937-recovery | 2026-10-12 03:59 | app@sha256:00786479…61947a | 待归档 | SSE 断线重连、取消与不反转通过 |
 
-缺陷单列：
+## 2026-10-16 第二轮（镜像 0b796765）
+
+入口 http://203.195.194.205:8088；全部档位被测版本一致。本节逐档结论如下。
+
+| 档位 | run_id | 测试时间 | 被测镜像 digest | 归档位置 | 结论 |
+| --- | --- | --- | --- | --- | --- |
+| smoke | 20261017T012210-smoke | 2026-10-17 01:22 | app@sha256:da62b3ce…45c72d | 待归档 | 补跑的单用户单流程检查通过，1/1 成功，无 4xx/5xx |
+| baseline | 20261017T015433-baseline | 2026-10-17 01:54 | app@sha256:da62b3ce…45c72d | 待归档 | 单用户基线按档位表的 full_flow 4 轮运行，4/4 成功，无 4xx/5xx |
+| low | 20261016T193952-low | 2026-10-16 19:40 | app@sha256:da62b3ce…45c72d | 待归档 | 通过，8/8 成功；p95 78 ms |
+| mid_low | 20261016T194654-mid_low | 2026-10-16 19:47 | app@sha256:da62b3ce…45c72d | 待归档 | 通过，44/44 成功；SSE 断线 1 次且重连后无漏事件 |
+| mid | 20261016T195902-mid | 2026-10-16 19:59 | app@sha256:da62b3ce…45c72d | 待归档 | 通过，39/39 成功；排队 p95 75.5 s |
+| stability | 20261016T201101-stability | 2026-10-16 20:11 | app@sha256:da62b3ce…45c72d | 待归档 | 30 分钟稳定性通过，206/206 成功，CPU 均值 31.2% 峰值 57.5% |
+| recovery | 20261016T221524-recovery | 2026-10-16 22:15 | app@sha256:da62b3ce…45c72d | 待归档 | 断线恢复、幂等、取消排队与运行中 Job、取消后不反转、跨账号隔离均通过；waiting_input 分支未触发 |
+| burst | 20261016T223059-burst | 2026-10-16 22:32 | app@sha256:da62b3ce…45c72d | 待归档 | 20 账号突发通过，35/35 成功；活动 Job 峰值 4 |
+| burst_ungated | 20261016T225147-burst_ungated | 2026-10-16 22:52 | app@sha256:da62b3ce…45c72d | 待归档 | 不限创建时活动 Job 峰值 20，服务端排队长度峰值 18；5 个 Job 超出 300 s 排空期限，补查主库全部成功 |
+| queue_pressure | 20261016T231739-queue_pressure | 2026-10-16 23:19 | app@sha256:da62b3ce…45c72d | 待归档 | 30 账号压力下网关出现 21 个 504 与 6 个 502；1 个 Job 因事件流 504 未收到终态，主库记为成功；4 个 Job 超出排空期限，补查全部成功 |
+| multi_session_smoke | 20261016T234326-multi_session_smoke | 2026-10-16 23:43 | app@sha256:da62b3ce…45c72d | 待归档 | 单账号两会话可同时运行 Job，通过 |
+| multi_session_pressure | 20261016T235120-multi_session_pressure | 2026-10-16 23:52 | app@sha256:da62b3ce…45c72d | 待归档 | 10 账号 × 2 会话通过，活动 Job 峰值 19；排空用时 184 s；出现 3 个 502，均由重试与主库核对确认不影响 Job 终态 |
+
+本轮各档共同结论：12 个档位全部执行完毕，无“未执行”项；MCP 三个算法能力 causal.cdfm、causal.pc、causal.direct_lingam 全部按调用成功完成，未再出现能力级失败；请求日志的 request_id 在 web 与 worker 之间沿用；逐 Job 主库核对 430 条记录，其中 429 条与客户端终态一致，1 条因客户端事件流收到 504 未观测到终态（主库记为成功）；另有 9 条创建后超出排空期限、客户端没有观测结果的 Job 由补充核对确认全部成功。smoke 与 baseline 为收尾按档位定义补跑，单独成档。
+
+## 2026-10-12 第一轮（镜像 94c6374c）
+
+缺陷单列（第一轮）：
 
 | 缺陷 | 现象 | 归档位置 |
 | --- | --- | --- |
@@ -30,4 +53,14 @@
 | --- | --- | --- |
 | 取消后阶段列表仍显示进行中 | Job 终态已是“任务已取消”，阶段列表仍保留“执行 Deep Agent 分析 进行中”字样，状态理解存在歧义 | P2 |
 
-被测版本的完整 digest 为 ghcr.io/archecausal/causalagent-app@sha256:00786479a432cf60a892b4a3a351b14f87b26d29c2fc18d0208789d86861947a（app_image_revision_label 94c6374ce70ef9f715a771b9ba21a22b78b9321b），各档一致。
+第一轮被测版本的完整 digest 为 ghcr.io/archecausal/causalagent-app@sha256:00786479a432cf60a892b4a3a351b14f87b26d29c2fc18d0208789d86861947a（app_image_revision_label 94c6374ce70ef9f715a771b9ba21a22b78b9321b）。
+
+第二轮被测版本的完整 digest 为 ghcr.io/archecausal/causalagent-app@sha256:da62b3cedc367704f4c45538d15f3b2cf5bf0b314dad891143ce36902945c72d（app_image_revision_label 0b796765bdf2992d4d597fd2f21a73ecd872dde6），causal-mcp 为 ghcr.io/archecausal/causalagent-mcp@sha256:1161cc93035c46db02e1425a8dcf376c62e4b9d8a913efe25bdb52d5bd0cb24c，各档一致。
+
+第二轮对第一轮两项缺陷的复核：causal.cdfm 已修复，连续 11 个档位均成功完成；source-catalog 对测试账号返回 403 权限不足，该接口要求 RAG 评测台访问权限，测试账号无此权限，因此本轮无法复现或排除原来的 500，仍需有管理员权限的人复核。
+
+第二轮复现的待修复项：
+
+| 缺陷 | 现象 | 优先级 |
+| --- | --- | --- |
+| 取消后阶段列表仍显示进行中 | 复测确认：Job 终态与 thinking_after.status 均为 canceled，但被取消时正在执行的阶段只有 node_start、没有 node_end，前端按“时长缺失即进行中”渲染，因此该阶段仍显示“进行中”。典型样本：阶段“预处理数据” | P2 |

@@ -55,7 +55,8 @@ stage_resource_sample.sh 的 samples 数组每一项包含 host、containers、q
 - 进入版本库的压测内容只有客户端程序、脚本、README、AGENTS.md、requirements.txt 与 `evidence/index.md`。
 - 本地产物已经集中到 `local/`，`.gitignore` 只需要一条 `/loadtest/local/` 规则即可整体排除，不再逐目录或逐文件名添加规则。
 - 新增本地产物时放进 `local/` 即已被覆盖，不需要改 `.gitignore`；只有当新增内容需要入库时，才在 `evidence/` 下登记并在本文件说明用途。
-- 产物文件名沿用如下命名：逐档报告 `<档位>-report.md`、日志核查 `logcheck-<档位>.json`、合并报告 `loadtest-report-<date>.md`、服务器侧采集 `server-side-<date>.json`、主库核对 `job-db-<date>.json`。
+- 产物文件名沿用如下命名：逐档报告 `<档位>-report.md`、日志核查 `logcheck-<档位>.json`、合并报告 `loadtest-report-<date>.md`、服务器侧采集 `server-side-<date>.json`、主库核对 `job-db-<date>.json`；客户端未观测到终态的那些 Job 的补充核对用 `job-db-<date>-extras.json`，由报告单独成节，不并入逐档比对的一致条数。
+- 编排脚本在负载开始前固定 run_id，三个 attach 命令都带 `--stage`；在跑多个档位时不要省略该参数，否则同一份采集会被写进每一档的运行摘要。
 
 ## 归档与清理
 

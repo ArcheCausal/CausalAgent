@@ -24,6 +24,11 @@ class MultimodalReleaseTests(unittest.TestCase):
             version_dir.mkdir(parents=True)
             (version_dir / "manifest.json").write_text(json.dumps({"index_version": "mm_release_test"}), encoding="utf-8")
             (version_dir / "units.jsonl").write_text("unit\n", encoding="utf-8")
+            (version_dir / "build_state.json").write_text(
+                json.dumps({"status": "staged_complete", "unit_count": 1, "vector_count": 1}),
+                encoding="utf-8",
+            )
+            (version_dir / "chroma").mkdir()
             asset = staged_asset_root / "doc" / "images" / "page.png"
             asset.parent.mkdir(parents=True)
             asset.write_bytes(b"asset")
@@ -41,6 +46,8 @@ class MultimodalReleaseTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "promoted")
             self.assertTrue((formal_index_root / "mm_release_test" / "manifest.json").is_file())
+            self.assertTrue((formal_index_root / "mm_release_test" / "build_state.json").is_file())
+            self.assertTrue((formal_index_root / "mm_release_test" / "chroma").is_dir())
             self.assertFalse((formal_asset_root / "doc" / "images" / "page.png").exists())
             self.assertEqual(asset.read_bytes(), b"asset")
             self.assertIsNone(maintenance.registry.read())

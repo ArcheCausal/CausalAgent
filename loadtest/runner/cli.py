@@ -44,14 +44,25 @@ def build_parser() -> argparse.ArgumentParser:
     stage.add_argument("--stage", required=True, choices=sorted(config.STAGES))
     stage.add_argument("--users", type=int, default=0, help="覆盖档位的虚拟用户数")
     stage.add_argument("--duration", type=float, default=0.0, help="覆盖档位的持续时间")
+    stage.add_argument(
+        "--run-id",
+        default="",
+        help="固定本次运行的 run_id；编排脚本在负载前采集服务器快照时需要预先确定",
+    )
 
-    sub.add_parser("recovery", help="第五阶段：取消与 SSE 恢复专项")
+    recovery = sub.add_parser("recovery", help="第五阶段：取消与 SSE 恢复专项")
+    recovery.add_argument(
+        "--run-id",
+        default="",
+        help="固定本次运行的 run_id；编排脚本在负载前采集服务器快照时需要预先确定",
+    )
     sub.add_parser("evidence", help="整理 local/runs/ 为归档到 local/evidence/ 的报告")
     attach = sub.add_parser(
         "attach-server",
         help="把服务器侧只读采集结果写入各档运行摘要，供报告引用",
     )
     attach.add_argument("--from", dest="server_from", required=True)
+    attach.add_argument("--stage", default="", help="只写入该档位；缺省时写入全部已有档位")
     sample = sub.add_parser(
         "attach-sample",
         help="把一次负载窗口的主机资源采样写入某个档位的运行摘要",
@@ -63,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="把负载结束后的服务器只读采集结果写入各档运行摘要的收尾快照",
     )
     after.add_argument("--from", dest="after_from", required=True)
+    after.add_argument("--stage", default="", help="只写入该档位；缺省时写入全部已有档位")
     export = sub.add_parser(
         "export-job-ids",
         help="把各档本轮创建的 job_id 导出为清单文件，供服务器上逐 Job 主库核对",
@@ -73,6 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="把 job_db_check.sh 的逐 Job 主库核对结果写入各档运行摘要",
     )
     job_db.add_argument("--from", dest="job_db_from", required=True)
+    job_db.add_argument("--stage", default="", help="只写入该档位；缺省时写入全部已有档位")
     sub.add_parser("verify-packet", help="生成日志与管理员端核查定位清单")
     logs = sub.add_parser("logs", help="通过 Grafana/Loki 核对日志侧（需要可用凭据）")
     logs.add_argument("--stage", default="", help="限定到某档运行的时间窗口")
@@ -91,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "stage":
         return _cmd_stage(args, server_baseline)
     if args.command == "recovery":
-        return _cmd_recovery(args.base_url, server_baseline)
+        return _cmd_recovery(args.base_url, server_baseline, args.run_id or None)
     if args.command == "evidence":
         return _cmd_evidence()
     if args.command == "verify-packet":
@@ -99,13 +112,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"已写入 {target}")
         return 0
     if args.command == "attach-after":
-        return _cmd_attach_after(args.after_from)
+        return _cmd_attach_after(args.after_from, args.stage)
     if args.command == "export-job-ids":
         return _cmd_export_job_ids(args.out)
     if args.command == "attach-job-db":
-        return _cmd_attach_job_db(args.job_db_from)
+        return _cmd_attach_job_db(args.job_db_from, args.stage)
     if args.command == "attach-server":
-        return _cmd_attach_server(args.server_from)
+        return _cmd_attach_server(args.server_from, args.stage)
     if args.command == "attach-sample":
         return _cmd_attach_sample(args.stage, args.sample_from)
     if args.command == "logs":
@@ -214,8 +227,11 @@ def render_logcheck(result: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _cmd_attach_after(path: str) -> int:
-    """把负载结束后的服务器采集写入各档运行摘要的 server_after。"""
+def _cmd_attach_after(path: str, stage: str = "") -> int:
+    """把负载结束后的服务器采集写入档位运行摘要的 server_after。
+
+    传入 stage 时只写该档，否则写入全部已有档位。
+    """
     payload = _load_server_json(path)
     if not payload:
         print(f"无法读取服务器采集文件：{path}")
@@ -223,7 +239,9 @@ def _cmd_attach_after(path: str) -> int:
     summary = dict(payload)
     summary.pop("collected_at", None)
     updated: list[str] = []
-    for stage, run in sorted(latest_runs(config.RUNS_DIR).items()):
+    for stage_name, run in sorted(latest_runs(config.RUNS_DIR).items()):
+        if stage and stage_name != stage:
+            continue
         target = run / "summary.json"
         data = json.loads(target.read_text(encoding="utf-8"))
         merged = dict(payload)
@@ -232,7 +250,7 @@ def _cmd_attach_after(path: str) -> int:
         target.write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        updated.append(f"{stage}:{run.name}")
+        updated.append(f"{stage_name}:{run.name}")
     for item in updated:
         print(f"已写入停止后快照: {item}")
     print(f"共更新 {len(updated)} 个档位运行摘要")
@@ -262,13 +280,13 @@ def _cmd_attach_sample(stage: str, path: str) -> int:
     return 0
 
 
-def _cmd_attach_server(path: str) -> int:
-    """把服务器侧采集 JSON 写入各档运行摘要。"""
+def _cmd_attach_server(path: str, stage: str = "") -> int:
+    """把服务器侧采集 JSON 写入档位运行摘要。"""
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         print("服务器侧采集文件必须是 JSON 对象。")
         return 1
-    updated = attach_server_baseline(config.RUNS_DIR, payload)
+    updated = attach_server_baseline(config.RUNS_DIR, payload, stage)
     for item in updated:
         print(f"已写入服务器侧基线: {item}")
     print(f"共更新 {len(updated)} 个档位运行摘要")
@@ -300,13 +318,13 @@ def _cmd_export_job_ids(out: str) -> int:
     return 0
 
 
-def _cmd_attach_job_db(path: str) -> int:
-    """把逐 Job 主库核对结果写入各档运行摘要。"""
+def _cmd_attach_job_db(path: str, stage: str = "") -> int:
+    """把逐 Job 主库核对结果写入档位运行摘要。"""
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         print("主库核对文件必须是 JSON 对象。")
         return 1
-    updated = attach_job_db_check(config.RUNS_DIR, payload)
+    updated = attach_job_db_check(config.RUNS_DIR, payload, stage)
     for item in updated:
         print(f"已写入逐 Job 主库核对: {item}")
     print(f"共更新 {len(updated)} 个档位运行摘要")
@@ -352,7 +370,9 @@ def _cmd_stage(args, server_baseline: dict | None) -> int:
             "先运行 accounts 命令。"
         )
         return 1
-    summary = run_stage(args.stage, accounts, args.base_url, server_baseline)
+    summary = run_stage(
+        args.stage, accounts, args.base_url, server_baseline, run_id=args.run_id or None
+    )
     run_dir = config.RUNS_DIR / summary["run_id"]
     write_run_outputs(summary, run_dir)
     print(render_stage_report(summary))
@@ -360,12 +380,14 @@ def _cmd_stage(args, server_baseline: dict | None) -> int:
     return 0
 
 
-def _cmd_recovery(base_url: str, server_baseline: dict | None) -> int:
+def _cmd_recovery(
+    base_url: str, server_baseline: dict | None, run_id: str | None = None
+) -> int:
     accounts = load_accounts()
     if len(accounts) < 2:
         print("专项检查至少需要 2 个测试账号，先运行 accounts 命令。")
         return 1
-    summary = run_recovery_suite(base_url, accounts, server_baseline)
+    summary = run_recovery_suite(base_url, accounts, server_baseline, run_id=run_id)
     run_dir = config.RUNS_DIR / summary["run_id"]
     write_run_outputs(summary, run_dir)
     print(render_stage_report(summary))
