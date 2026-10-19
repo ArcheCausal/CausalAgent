@@ -25,8 +25,9 @@ def validate_analysis(analysis_params: dict, target: str = None, treatment: str 
     
     # 缺少目标变量和处理变量不需要报错
     if not target or not treatment:
-        recommends.append("缺少目标变量(target)或处理变量(treatment)的指定")
-        return (1, issues, recommends)
+        # 因果发现不要求指定目标或处理变量；始终继续完成通用质量检查，
+        # 不在这里提前返回。
+        recommends.append("未指定目标变量(target)或处理变量(treatment)，仍可按因果发现继续")
 
     parameter_errors = []
     if target != None and target not in columns:
@@ -83,4 +84,7 @@ def validate_analysis(analysis_params: dict, target: str = None, treatment: str 
     if datetime_columns and len(datetime_columns) > 0:
         recommends.append(f"数据中包含时间变量: {', '.join(datetime_columns[:3])}{'等' if len(datetime_columns) > 3 else ''}，本次分析将作为普通变量处理。如需专门的时间序列因果分析，请告知。")
     
-    return (len(issues) == 0, issues, recommends)
+    # 数据质量事实由 DeepAgent 在算法选择后生成处理选项，fold 只保留为
+    # 非阻断说明；只有参数事实错误返回 2。返回值 1 表示“未指定目标或
+    # 处理变量但可继续分析”。
+    return (1 if issues else 0, issues, recommends)

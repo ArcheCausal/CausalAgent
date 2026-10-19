@@ -86,6 +86,7 @@ AlgorithmResultStatus: TypeAlias = Literal[
     "invalid_input",
     "not_applicable",
     "not_ready",
+    "skipped",
     "execution_failed",
     "timed_out",
 ]
@@ -95,6 +96,7 @@ ActionAttemptStatus: TypeAlias = Literal[
     "running",
     "succeeded",
     "failed",
+    "not_applicable",
     "timed_out",
     "not_ready",
     "canceled",
@@ -105,6 +107,7 @@ InvocationStatus: TypeAlias = Literal[
     "pending",
     "succeeded",
     "failed",
+    "not_applicable",
     "timed_out",
     "not_ready",
     "canceled",
@@ -117,6 +120,114 @@ ResponseIdentitySource: TypeAlias = Literal[
 ]
 
 FinalizationStatus: TypeAlias = Literal["valid", "degraded"]
+
+PreprocessingOperation: TypeAlias = Literal[
+    "select_columns",
+    "drop_rows",
+    "numeric_impute",
+    "categorical_encode",
+]
+
+PREPROCESSING_OPERATION_ORDER: tuple[PreprocessingOperation, ...] = (
+    "select_columns",
+    "drop_rows",
+    "numeric_impute",
+    "categorical_encode",
+)
+
+
+class PreprocessingStep(ContractModel):
+    """一个已确认的数据处理步骤；只表达模型可理解的列与参数。"""
+
+    operation: PreprocessingOperation
+    columns: tuple[str, ...] = ()
+    method: Literal["mean", "median", "ordinal"] | None = None
+
+    @field_validator("columns")
+    @classmethod
+    def validate_columns(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for column in value:
+            _non_blank(column, field_name="columns")
+        if len(value) != len(set(value)):
+            raise ValueError("columns must be unique within one step")
+        if not value:
+            raise ValueError("a preprocessing step must name at least one column")
+        return value
+
+    @model_validator(mode="after")
+    def validate_operation_parameters(self) -> "PreprocessingStep":
+        if self.operation == "numeric_impute":
+            if self.method not in {"mean", "median"}:
+                raise ValueError("numeric_impute requires method=mean or median")
+        elif self.operation == "categorical_encode":
+            if self.method != "ordinal":
+                raise ValueError("categorical_encode requires method=ordinal")
+        elif self.method is not None:
+            raise ValueError(f"{self.operation} does not accept a method")
+        return self
+
+
+class PreprocessingPlan(ContractModel):
+    """用户确认的确定性处理方案；顺序固定且不隐式补充操作。"""
+
+    version: Literal["data-preprocessing-v1"] = "data-preprocessing-v1"
+    steps: tuple[PreprocessingStep, ...] = ()
+    protected_columns: tuple[str, ...] = ()
+
+    @field_validator("protected_columns")
+    @classmethod
+    def validate_protected_columns(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for column in value:
+            _non_blank(column, field_name="protected_columns")
+        if len(value) != len(set(value)):
+            raise ValueError("protected_columns must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def validate_step_order(self) -> "PreprocessingPlan":
+        positions: list[int] = []
+        operations: set[str] = set()
+        for step in self.steps:
+            if step.operation in operations:
+                raise ValueError(f"preprocessing operation repeated: {step.operation}")
+            operations.add(step.operation)
+            positions.append(PREPROCESSING_OPERATION_ORDER.index(step.operation))
+        if positions != sorted(positions):
+            raise ValueError(
+                "preprocessing steps must follow select_columns, drop_rows, "
+                "numeric_impute, categorical_encode"
+            )
+        selected = {
+            column
+            for step in self.steps
+            if step.operation == "select_columns"
+            for column in step.columns
+        }
+        if selected and not set(self.protected_columns) <= selected:
+            raise ValueError("select_columns must keep every protected column")
+        return self
+
+    @property
+    def digest(self) -> str:
+        """返回方案内容的稳定摘要，用于确认凭证和结果 provenance。"""
+
+        return hashlib.sha256(canonical_json_bytes(self.model_dump(mode="json"))).hexdigest()
+
+    def operations(self) -> tuple[str, ...]:
+        return tuple(step.operation for step in self.steps)
+
+
+class PreprocessingApproval(ContractModel):
+    """运行时注入的确认凭证；模型不能自行构造或改写。"""
+
+    option_id: str
+    question_id: str
+    plan_digest: str
+
+    @field_validator("option_id", "question_id", "plan_digest")
+    @classmethod
+    def validate_approval_strings(cls, value: str, info: Any) -> str:
+        return _non_blank(value, field_name=info.field_name)
 
 
 class GraphEdge(ContractModel):
@@ -211,6 +322,7 @@ class AlgorithmResultProvenance(ContractModel):
     capability_id: str | None = None
     capability_version: str | None = None
     preprocessing_recipe_digest: str | None = None
+    preprocessing_plan_digest: str | None = None
     algorithm_runner_version: str | None = None
 
     @model_validator(mode="after")
@@ -223,12 +335,33 @@ class AlgorithmResultProvenance(ContractModel):
             "capability_id",
             "capability_version",
             "preprocessing_recipe_digest",
+            "preprocessing_plan_digest",
             "algorithm_runner_version",
         ):
             value = getattr(self, field_name)
             if value is not None:
                 _non_blank(value, field_name=field_name)
         return self
+
+
+class DataViewSummary(ContractModel):
+    """一次算法实际使用的数据视图；不同算法可以不同。"""
+
+    row_count: int = Field(ge=0)
+    column_count: int = Field(ge=0)
+    columns: tuple[str, ...] = ()
+    operations: tuple[str, ...] = ()
+    plan_digest: str | None = None
+    dropped_row_count: int = 0
+    imputed_columns: tuple[str, ...] = ()
+    encoded_columns: tuple[str, ...] = ()
+
+    @field_validator("columns", "operations", "imputed_columns", "encoded_columns")
+    @classmethod
+    def validate_view_lists(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for item in value:
+            _non_blank(item, field_name="data_view")
+        return value
 
 
 class AlgorithmResult(ContractModel):
@@ -250,6 +383,7 @@ class AlgorithmResult(ContractModel):
     raw_result_size_bytes: int | None = Field(default=None, ge=0)
     raw_result_serialization_version: str | None = None
     input_identity: str | None = None
+    data_view: DataViewSummary | None = None
     provenance: AlgorithmResultProvenance
 
     @field_validator(
@@ -273,6 +407,11 @@ class AlgorithmResult(ContractModel):
         validate_result_ref_for_invocation(self.result_ref, self.invocation_id)
         if self.status == "valid" and self.standardized_graph is None:
             raise ValueError("valid AlgorithmResult must include standardized_graph")
+        if self.status in {"skipped", "not_applicable"}:
+            if self.standardized_graph is not None:
+                raise ValueError(
+                    "a skipped or not-applicable result cannot carry a graph"
+                )
 
         raw_fields = (
             self.raw_result_ref,
@@ -450,14 +589,50 @@ class WebEvidenceResult(EvidenceResult):
         return _non_blank(value, field_name="provider_status")
 
 
+class DataIssue(ContractModel):
+    """预检测发现的一条事实；blocking 与 warning 分开表达。"""
+
+    code: str
+    message: str
+    columns: tuple[str, ...] = ()
+    blocking: bool = False
+
+    @field_validator("code", "message")
+    @classmethod
+    def validate_issue_strings(cls, value: str, info: Any) -> str:
+        return _non_blank(value, field_name=info.field_name)
+
+
 class DataProfile(ContractModel):
-    """外层准入阶段生成、供 Agent 选择算法使用的数据画像。"""
+    """外层预检测生成、供 Agent 选择算法和处理方案的数据画像。
+
+    列级事实来自冻结文件的真实内容。算法适用的最终判断仍由各算法
+    Spec 与 MCP 复检完成，这里只保留选择所需的确定性事实。
+    """
 
     row_count: int = Field(ge=0)
     column_count: int = Field(ge=0)
     column_names: tuple[str, ...] = ()
     numeric_columns: tuple[str, ...] = ()
     categorical_columns: tuple[str, ...] = ()
+    missing_columns: tuple[str, ...] = ()
+    non_finite_columns: tuple[str, ...] = ()
+    empty_columns: tuple[str, ...] = ()
+    constant_columns: tuple[str, ...] = ()
+    suspected_id_columns: tuple[str, ...] = ()
+    issues: tuple[DataIssue, ...] = ()
+
+    @property
+    def blocking_issues(self) -> tuple[DataIssue, ...]:
+        return tuple(issue for issue in self.issues if issue.blocking)
+
+    @property
+    def warnings(self) -> tuple[DataIssue, ...]:
+        return tuple(issue for issue in self.issues if not issue.blocking)
+
+    @property
+    def has_missing_values(self) -> bool:
+        return bool(self.missing_columns)
 
 
 class ScientificConflict(ContractModel):
@@ -634,6 +809,8 @@ class AlgorithmExecutionCommand(ContractModel):
     provider_call_id: str
     input_identity: str
     parameters: dict[str, Any] = Field(default_factory=dict)
+    preprocessing: "PreprocessingPlan | None" = None
+    approval: "PreprocessingApproval | None" = None
     result_index: int = Field(default=0, ge=0)
     timeout_seconds: int | None = Field(default=None, gt=0)
 
@@ -648,6 +825,15 @@ class AlgorithmExecutionCommand(ContractModel):
     @classmethod
     def validate_command_strings(cls, value: str, info: Any) -> str:
         return _non_blank(value, field_name=info.field_name)
+
+    @model_validator(mode="after")
+    def validate_preprocessing_binding(self) -> "AlgorithmExecutionCommand":
+        if (self.preprocessing is None) != (self.approval is None):
+            raise ValueError("preprocessing and approval must be present together")
+        if self.preprocessing is not None and self.approval is not None:
+            if self.preprocessing.digest != self.approval.plan_digest:
+                raise ValueError("approval does not match preprocessing plan")
+        return self
 
 
 class RawResultMetadata(ContractModel):
