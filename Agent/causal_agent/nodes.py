@@ -2275,8 +2275,17 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         state.get("web_search_result", {}),
     )
 
+    # 设置报告输出上限
+    report_llm = llm.model_copy(
+        update={
+            "extra_body": {
+                **(llm.extra_body or {}),
+                "max_tokens": 32768,
+            }
+        }
+    )
     draft = await ainvoke_structured(
-        llm=llm,
+        llm=report_llm,
         schema=ReportDraft,
         prompt=prompt,
         inputs={
