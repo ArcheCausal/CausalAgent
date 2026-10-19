@@ -473,13 +473,13 @@ def test_service_rechecks_lease_before_process_start_and_after_result() -> None:
 def test_pc_runner_forwards_spec_alpha(monkeypatch) -> None:
     observed = {}
 
-    def fake_runner(csv_data, *, alpha):
-        observed.update(csv_data=csv_data, alpha=alpha)
+    def fake_runner(csv_data, *, alpha, test="auto"):
+        observed.update(csv_data=csv_data, alpha=alpha, test=test)
         return {"success": True}
 
     monkeypatch.setattr("Agent.causal.causalachieve.run_pc_analysis", fake_runner)
-    assert _pc("A,B\n1,2\n", {"alpha": 0.2})["success"] is True
-    assert observed == {"csv_data": "A,B\n1,2\n", "alpha": 0.2}
+    assert _pc("A,B\n1,2\n", {"alpha": 0.2, "test": "chisq"})["success"] is True
+    assert observed == {"csv_data": "A,B\n1,2\n", "alpha": 0.2, "test": "chisq"}
 
 
 def test_service_exposes_algorithm_timeout_as_result_status() -> None:
