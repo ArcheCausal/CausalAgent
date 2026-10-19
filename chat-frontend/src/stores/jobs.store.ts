@@ -8,6 +8,7 @@ import {
   seedJobFromPhase,
   settleDecision as settleDecisionState,
   startResumePhase,
+  waitingInputFromInteraction,
 } from '../runtime/jobs/event-reducer'
 import { observeActiveEventId } from '../runtime/jobs/event-cursor'
 
@@ -82,13 +83,21 @@ export const useJobsStore = defineStore('jobs', {
     },
     observeActive(job: ActiveJobResponse): JobRecord {
       const status = isBackendStatus(job.status) ? job.status : 'queued'
+      const interaction = (job.current_interaction ?? {}) as Record<string, unknown>
+      const waitingInput = status === 'waiting_input' && job.current_question_id
+        ? waitingInputFromInteraction(
+            interaction,
+            job.current_question_id,
+            job.current_waiting_prompt ?? '',
+          )
+        : null
       const existing = this.records[job.job_id]
       if (!existing) {
         const record = createJobRecord(job.job_id, job.session_id, status, 0)
         record.observedLastEventId = job.last_event_id ?? null
-        if (status === 'waiting_input' && job.current_question_id) {
+        if (waitingInput) {
           record.thinking.status = 'waiting_input'
-          record.thinking.waitingInput = { questionId: job.current_question_id, prompt: job.current_waiting_prompt ?? '' }
+          record.thinking.waitingInput = waitingInput
         }
         this.records[job.job_id] = record
         return record
@@ -97,14 +106,19 @@ export const useJobsStore = defineStore('jobs', {
       existing.uiState = uiStateFor(status)
       const cursor = observeActiveEventId(existing, job.last_event_id)
       existing.observedLastEventId = cursor.observedLastEventId
-      if (status === 'waiting_input' && job.current_question_id) {
+      if (waitingInput) {
         existing.thinking = {
           ...existing.thinking,
           status: 'waiting_input',
-          waitingInput: { questionId: job.current_question_id, prompt: job.current_waiting_prompt ?? '' },
+          waitingInput,
         }
       }
       return existing
+    },
+    chooseProcessingOption(jobId: string, optionId: string): void {
+      const record = this.records[jobId]
+      if (!record?.thinking.waitingInput) return
+      record.thinking.waitingInput.selectedOptionId = optionId
     },
     applyEvent(jobId: string, event: DecodedSseEvent, generation: number): ReturnType<typeof reduceJobEvent> | null {
       const existing = this.records[jobId]

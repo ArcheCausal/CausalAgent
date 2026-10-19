@@ -81,10 +81,36 @@ export const finalResultEventSchema = z.object({
   data: z.unknown(),
 }).passthrough()
 
+export const processingOptionStepSchema = z.object({
+  operation: z.string().min(1),
+  columns: z.array(z.string()),
+  method: z.string().nullable().optional(),
+}).passthrough()
+
+export const processingOptionSchema = z.object({
+  option_id: z.string().min(1),
+  label: z.string().min(1),
+  capability_id: z.string().min(1),
+  steps: z.array(processingOptionStepSchema),
+  impact: z.array(z.string()).optional(),
+  risks: z.array(z.string()).optional(),
+}).passthrough()
+
+export const interactionPayloadSchema = z.object({
+  type: z.literal('interaction'),
+  interaction_type: z.string().min(1),
+  question_id: z.string().optional(),
+  message: z.string(),
+  expires_at: z.string().optional(),
+  allow_other: z.boolean().optional(),
+  options: z.array(processingOptionSchema).optional(),
+}).passthrough()
+
 export const interruptEventSchema = z.object({
   type: z.literal('interrupt'),
   message: z.string(),
   question_id: z.string().min(1),
+  interaction: interactionPayloadSchema.optional(),
 }).passthrough()
 
 export const errorEventSchema = z.object({

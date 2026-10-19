@@ -1199,6 +1199,96 @@
   }
 }
 
+/* 数据处理确认：复用消息卡片与按钮样式，只补充选择态和倒计时。 */
+.processing-options {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.processing-options-hint,
+.processing-options-expired {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted, #8a94a6);
+}
+
+.processing-options-expired {
+  color: var(--danger, #d9534f);
+}
+
+.processing-options-countdown {
+  margin-left: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.processing-option-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.processing-option {
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+.processing-option.selected {
+  border-color: var(--accent, #58a6ff);
+}
+
+.processing-option-button {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.processing-option-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.processing-option-algorithm {
+  font-size: 12px;
+  color: var(--text-muted, #8a94a6);
+}
+
+.processing-option-steps,
+.processing-option-notes,
+.processing-option-risks {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: var(--text-muted, #8a94a6);
+}
+
+.processing-option-risks {
+  color: var(--warning, #d9a441);
+}
+
+.processing-option-other {
+  align-self: flex-start;
+  padding: 6px 10px;
+  border: 1px dashed var(--border-subtle, rgba(255, 255, 255, 0.2));
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .welcome-panel,
   .sidebar,
