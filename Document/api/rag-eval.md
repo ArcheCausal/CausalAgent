@@ -139,7 +139,7 @@ Link: </api/rag_eval/isolated/runs/<run_id>>; rel="successor-version"
 | `PATCH` | `/isolated/sources/<source_id>` | `{ "display_name": "..." }` | 更新后的来源摘要 |
 | `DELETE` | `/isolated/sources/<source_id>` | 无 | 删除结果 |
 
-上传先按扩展名、非空、20 MiB 默认大小、内容可读性和 SHA-256 校验，再幂等保存到来源目录。上传接口只登记 source，不启动摄取；同内容重复上传返回已有 source 摘要。`PATCH` 只改显示名；`DELETE` 只接受 `upload_` source，活动摄取引用时为 `409`，固定来源或非法 ID 为 `400`。`upload_` 来源只具备隔离评测资格，不能直接作为正式 release 的受控来源。
+来源目录中的正式来源只读 `production_defaults.json` 元数据，不要求受控 PDF 在运行环境存在；文件缺失的条目标记 `available: false`，前端过滤不展示，用其 `source_id` 发起摄取时返回 400 与“该来源在当前环境不可用”。上传先按扩展名、非空、20 MiB 默认大小、内容可读性和 SHA-256 校验，再幂等保存到来源目录。上传接口只登记 source，不启动摄取；同内容重复上传返回已有 source 摘要。`PATCH` 只改显示名；`DELETE` 只接受 `upload_` source，活动摄取引用时为 `409`，固定来源或非法 ID 为 `400`。`upload_` 来源只具备隔离评测资格，不能直接作为正式 release 的受控来源。
 
 ### 3.2 摄取历史和创建
 

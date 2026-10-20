@@ -291,6 +291,11 @@ class ReportDocument(ReportModel):
     schema_version: int = REPORT_SCHEMA_VERSION
     report_id: str
     title: str
+    # 报告完整性独立于分析结论：方向、置信度和算法取舍另行公开。
+    analysis_outcome: str | None = None
+    finalization_status: str | None = None
+    report_mode: Literal["analysis", "diagnostic"] = "analysis"
+    execution_summary: dict[str, Any] = Field(default_factory=dict)
     blocks: list[ReportBlock] = Field(default_factory=list)
     assets: dict[str, ChartAsset | CausalGraphModel] = Field(default_factory=dict)
     sources: list[ReportSource] = Field(default_factory=list)
@@ -348,6 +353,10 @@ def build_report_document(
     assets: dict[str, ChartAsset | CausalGraphModel] | None = None,
     sources: list[ReportSource] | None = None,
     evidence_refs: list[ReportEvidence] | None = None,
+    analysis_outcome: str | None = None,
+    finalization_status: str | None = None,
+    report_mode: str = "analysis",
+    execution_summary: dict[str, Any] | None = None,
 ) -> ReportDocument:
     """校验报告草稿和资源引用，装配出完整的 ``ReportDocument``。
 
@@ -392,9 +401,33 @@ def build_report_document(
                     "报告块引用了不存在的证据: " + ", ".join(unknown_evidence)
                 )
 
+    # 超时是程序事实；即使模型正文省略限制，报告也必须保留这项说明。
+    public_names = {
+        "causal.pc": "PC", "causal.direct_lingam": "DirectLiNGAM",
+        "causal.cdfm": "CDFM", "causal.olc": "OLC",
+    }
+    timed_out_names = [
+        public_names.get(item.get("capability_id"), "算法")
+        for item in (execution_summary or {}).get("algorithms", [])
+        if isinstance(item, Mapping) and item.get("status") == "timed_out"
+    ]
+    if timed_out_names:
+        block_id = "algorithm_execution_limits"
+        while block_id in seen_block_ids:
+            block_id += "_"
+        normalized_blocks = [*normalized_blocks, MarkdownBlock(
+            id=block_id,
+            content="### 分析限制\n\n" + "、".join(timed_out_names)
+            + " 调用超时，未完成分析，未提供可用因果图。报告仅采用已完成且通过校验的结果。",
+        )]
+
     return ReportDocument(
         report_id=new_report_id(),
         title=validated_draft.title,
+        analysis_outcome=analysis_outcome,
+        finalization_status=finalization_status,
+        report_mode=report_mode,
+        execution_summary=dict(execution_summary or {}),
         blocks=normalized_blocks,
         assets=available_assets,
         sources=available_sources,
@@ -432,12 +465,17 @@ def build_degraded_report_document(
     message: str,
     *,
     title: str = "因果分析报告",
+    degradation_code: str | None = None,
 ) -> ReportDocument:
     """构造只含失败说明的降级报告文档，供报告节点错误路径使用。"""
 
     return ReportDocument(
         report_id=new_report_id(),
         title=title,
+        report_mode="diagnostic",
+        execution_summary=(
+            {"degradation_code": degradation_code} if degradation_code else {}
+        ),
         blocks=[MarkdownBlock(id="markdown_degraded", content=message)],
         assets={},
         sources=[],

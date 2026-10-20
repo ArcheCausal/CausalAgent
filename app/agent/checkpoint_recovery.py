@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import json
 from typing import Any
 
 
@@ -38,7 +39,7 @@ def _interrupts(value: Any) -> list[Any]:
     return [value]
 
 
-def _interrupt_snapshot(value: Any) -> dict[str, str] | None:
+def _interrupt_snapshot(value: Any) -> dict[str, Any] | None:
     """提取不含内部状态的稳定问题 ID 和公开提示。"""
     for item in _interrupts(value):
         if isinstance(item, dict):
@@ -47,16 +48,37 @@ def _interrupt_snapshot(value: Any) -> dict[str, str] | None:
         else:
             question_id = getattr(item, "id", None)
             prompt = getattr(item, "value", None)
+        if isinstance(prompt, str):
+            # 旧 checkpoint 的 interrupt 值是 JSON 文本；只在能解析出公开
+            # 交互结构时转换，普通问题文本保持原样。
+            try:
+                decoded = json.loads(prompt)
+            except (TypeError, ValueError):
+                decoded = None
+            if isinstance(decoded, dict):
+                prompt = decoded
         if not question_id:
             continue
-        if isinstance(prompt, str):
+        interaction = None
+        if isinstance(prompt, dict):
+            interaction = dict(prompt)
+            raw_message = prompt.get("message") or prompt.get("prompt")
+            message = (
+                raw_message
+                if isinstance(raw_message, str) and raw_message.strip()
+                else "请补充分析信息"
+            )
+        elif isinstance(prompt, str):
             message = prompt
         else:
             message = str(prompt) if prompt is not None else "请补充分析信息"
-        return {
+        snapshot: dict[str, Any] = {
             "question_id": str(question_id)[:255],
             "message": message[:20000],
         }
+        if interaction is not None:
+            snapshot["interaction"] = interaction
+        return snapshot
     return None
 
 
@@ -64,7 +86,7 @@ def get_pending_interrupt(
     *,
     job_id: str,
     timeout_ms: int,
-) -> dict[str, str] | None:
+) -> dict[str, Any] | None:
     """读取指定 Job 根 checkpoint 的未恢复 interrupt。
 
     只解码 checkpoint_writes 中的控制信号，不读取 checkpoint 正文或 BLOB，避免
@@ -132,7 +154,7 @@ def get_pending_interrupt(
             "无法读取 PostgreSQL checkpoint 的恢复状态"
         ) from exc
 
-    pending: dict[str, dict[str, str]] = {}
+    pending: dict[str, dict[str, Any]] = {}
     resumed_tasks: set[str] = set()
     try:
         for row in rows:

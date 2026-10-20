@@ -58,6 +58,14 @@ def process_final_result(final_state_data: dict[str, Any]) -> dict[str, Any]:
         finalization_status = final_state_data.get("finalization_status")
         if finalization_status in {"valid", "degraded"}:
             result["finalization_status"] = finalization_status
+        document = result.get("document") or {}
+        if isinstance(document, dict):
+            if document.get("report_mode") == "diagnostic":
+                result["report_mode"] = "diagnostic"
+            if document.get("analysis_outcome") is not None:
+                result["analysis_outcome"] = document["analysis_outcome"]
+            if document.get("execution_summary") is not None:
+                result["execution_summary"] = document["execution_summary"]
         references = _extract_references(final_state_data.get("web_search_result"))
         if references:
             result["references"] = references

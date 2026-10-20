@@ -149,9 +149,30 @@ export type BackendJobStatus = 'queued' | 'running' | 'waiting_input' | 'succeed
 export type JobConnectionState = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed'
 export type JobUiState = 'idle' | 'creating' | 'queued' | 'running' | 'waiting_input' | 'resuming' | 'canceling' | 'completed' | 'failed' | 'canceled'
 
+export interface ProcessingOptionStep {
+  operation: string
+  columns: string[]
+  method: string | null
+}
+
+export interface ProcessingOption {
+  optionId: string
+  label: string
+  capabilityId: string
+  steps: ProcessingOptionStep[]
+  impact: string[]
+  risks: string[]
+}
+
 export interface WaitingInput {
   questionId: string
   prompt: string
+  algorithmName: string
+  expiresAt: string | null
+  options: ProcessingOption[]
+  allowOther: boolean
+  selectedOptionId: string | null
+  expired: boolean
 }
 
 export type DetailTone = 'default' | 'error' | 'retry'

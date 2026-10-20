@@ -126,7 +126,7 @@ def _request() -> tuple[AlgorithmExecutionCommand, McpInvocationContext, str]:
         spec_digest=PC_SPEC.spec_digest,
         provider_call_id="p2-acceptance-call",
         input_identity=context.input_snapshot_digest,
-        parameters={"alpha": 0.05},
+        parameters={"alpha": 0.05, "test": "auto"},
         timeout_seconds=30,
     )
     return command, context, sign_invocation(context, command, SIGNING_KEY)

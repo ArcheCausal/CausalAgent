@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import inspect
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
+from langchain_core.tools import InjectedToolArg
 from pydantic import Field
 
 from .identity import (
@@ -19,13 +22,79 @@ from .identity import (
 from .models import ActionAttempt, InvocationRecord, PublicDecision, canonical_json_bytes
 
 
+_defer_algorithm_terminal = ContextVar("defer_algorithm_terminal", default=False)
+
+
+@contextmanager
+def defer_algorithm_terminal_events():
+    """调度器拥有 deadline 时，工具只准备 Command，不提前发布终态。"""
+
+    token = _defer_algorithm_terminal.set(True)
+    try:
+        yield
+    finally:
+        _defer_algorithm_terminal.reset(token)
+
+
+def normalize_tool_status(status: str | None) -> str:
+    """在公共事件与账本边界统一算法和工具状态。"""
+
+    value = str(getattr(status, "value", status) or "").strip().lower()
+    normalized = {
+        "valid": "succeeded",
+        "available": "succeeded",
+        "no_results": "succeeded",
+        "no_relevant_evidence": "succeeded",
+        "disabled": "not_ready",
+        "unavailable": "not_ready",
+        "protocol_error": "failed",
+        "invalid_input": "failed",
+        "execution_failed": "failed",
+        "cancelled": "canceled",
+        "timeout": "timed_out",
+    }.get(value, value)
+    return normalized if normalized in {
+        "succeeded", "failed", "timed_out", "canceled", "not_ready",
+        "not_applicable", "skipped", "discarded",
+    } else "failed"
+
+
+def tool_lifecycle_event_key(
+    *, invocation_id: str, attempt_count: int, retry_ordinal: int = 0,
+    event_type: str,
+) -> str:
+    """实时、custom 与恢复兜底共用同一次执行的稳定事件键。"""
+
+    digest = hashlib.sha256(canonical_json_bytes(
+        [invocation_id, attempt_count, retry_ordinal, event_type]
+    )).hexdigest()
+    return f"deep-agent-tool:{digest}"
+
+
+def tool_lifecycle_step_id(identity: RuntimeInvocationIdentity) -> str:
+    """保存事件原属阶段，恢复时不使用新阶段重写旧事件。"""
+
+    step_id = getattr(identity.runtime_context, "deep_agent_step_id", None)
+    if isinstance(step_id, str) and len(step_id) == 24:
+        return step_id
+    trusted = identity.runtime_context.trusted_identity
+    return build_deep_agent_step_id(
+        job_id=trusted.job_id, attempt_count=int(trusted.attempt_count),
+        task_id="deep_agent",
+    )
+
+
 def _tool_result_summary(status: str | None, safe_error_code: str | None) -> str:
     """把受控工具状态转换为用户可区分的简短文案。"""
 
-    normalized_status = str(status or "").lower()
+    normalized_status = normalize_tool_status(status)
     normalized_code = str(safe_error_code or "").upper()
     if normalized_status == "succeeded":
         return "调用完成"
+    if normalized_status == "not_applicable":
+        return "不适用"
+    if normalized_status == "skipped":
+        return "未执行"
     if normalized_status in {"canceled", "cancelled"}:
         return "调用已取消"
     if normalized_status in {"timed_out", "timeout"}:
@@ -84,6 +153,7 @@ async def emit_tool_lifecycle_event(
     tool_name: str,
     status: str | None = None,
     safe_error_code: str | None = None,
+    retry_ordinal: int = 0,
 ) -> None:
     """从真实 Tool 边界发出并先持久化安全公共事件。"""
 
@@ -93,17 +163,14 @@ async def emit_tool_lifecycle_event(
         response_identity=identity.response_identity,
         provider_call_id=identity.provider_call_id,
     )
-    event_key = hashlib.sha256(
-        f"{invocation_id}:{event_type}".encode("utf-8")
-    ).hexdigest()
-    step_id = getattr(identity.runtime_context, "deep_agent_step_id", None)
-    if not isinstance(step_id, str) or len(step_id) != 24:
-        step_id = build_deep_agent_step_id(
-            job_id=trusted_identity.job_id,
-            attempt_count=int(trusted_identity.attempt_count),
-            task_id="deep_agent",
-        )
-    normalized_status = status
+    event_key = tool_lifecycle_event_key(
+        invocation_id=invocation_id,
+        attempt_count=int(trusted_identity.attempt_count),
+        retry_ordinal=retry_ordinal,
+        event_type=event_type,
+    )
+    step_id = tool_lifecycle_step_id(identity)
+    normalized_status = normalize_tool_status(status) if status is not None else None
     payload: dict[str, Any] = {
         "type": event_type,
         "step_id": step_id,
@@ -111,7 +178,7 @@ async def emit_tool_lifecycle_event(
         "title": "执行 Deep Agent 分析",
         "attempt": int(trusted_identity.attempt_count),
         "tool_name": tool_name,
-        "_event_key": f"deep-agent-tool:{event_key}",
+        "_event_key": event_key,
     }
     if event_type == "tool_call_start":
         payload["argument_keys"] = []
@@ -207,13 +274,19 @@ def with_tool_runtime_schema(
     tool_name: str,
     tool_runtime_type: type,
 ) -> type:
-    """给内部校验 schema 增加 injected runtime，模型可见 schema 会过滤它。"""
+    """给内部校验 schema 增加 injected runtime，模型可见 schema 会过滤它。
+
+    参数校验仍会收到 ``runtime``，因此这里把它标注为 ``InjectedToolArg``。
+    否则 pydantic 无法为运行时对象生成 JSON Schema。
+    """
 
     return type(
         f"{tool_name.title().replace('_', '')}RuntimeInput",
         (base_schema,),
         {
-            "__annotations__": {"runtime": tool_runtime_type},
+            "__annotations__": {
+                "runtime": Annotated[tool_runtime_type, InjectedToolArg]
+            },
             "__module__": base_schema.__module__,
             "model_config": dict(base_schema.model_config)
             | {"arbitrary_types_allowed": True},
@@ -275,7 +348,8 @@ def build_terminal_invocation(
     identity: RuntimeInvocationIdentity,
     tool_name: str,
     attempt_status: Literal[
-        "succeeded", "failed", "timed_out", "not_ready", "canceled", "discarded"
+        "succeeded", "failed", "timed_out", "not_ready", "canceled", "discarded",
+        "not_applicable", "skipped",
     ],
     started_at: datetime,
     retry_ordinal: int = 0,
@@ -296,6 +370,8 @@ def build_terminal_invocation(
         "not_ready": "not_ready",
         "canceled": "canceled",
         "discarded": "discarded",
+        "not_applicable": "not_applicable",
+        "skipped": "skipped",
     }[attempt_status]
     return InvocationRecord(
         invocation_id=invocation_id,
@@ -311,6 +387,7 @@ def build_terminal_invocation(
         lease_epoch=int(identity.runtime_context.trusted_identity.lease_epoch),
         worker_id=identity.runtime_context.trusted_identity.worker_id,
         input_identity=current_input_identity(identity.runtime_context.trusted_identity),
+        event_step_id=tool_lifecycle_step_id(identity),
         attempts={
             retry_ordinal: ActionAttempt(
                 retry_ordinal=retry_ordinal,
@@ -324,6 +401,62 @@ def build_terminal_invocation(
     )
 
 
+def build_pending_invocation(
+    *, identity: RuntimeInvocationIdentity, tool_name: str,
+) -> InvocationRecord:
+    """模型响应节点之后、工具节点之前提交的调用登记。"""
+
+    trusted = identity.runtime_context.trusted_identity
+    invocation_id = build_invocation_id(
+        job_id=trusted.job_id,
+        response_identity=identity.response_identity,
+        provider_call_id=identity.provider_call_id,
+    )
+    return InvocationRecord(
+        invocation_id=invocation_id,
+        response_identity=identity.response_identity,
+        response_identity_source=identity.response_identity_source,
+        provider_response_id=identity.provider_response_id,
+        provider_call_id=identity.provider_call_id,
+        tool_name=tool_name,
+        final_status="pending",
+        job_id=str(trusted.job_id),
+        attempt_count=int(trusted.attempt_count),
+        lease_epoch=int(trusted.lease_epoch),
+        worker_id=trusted.worker_id,
+        input_identity=current_input_identity(trusted),
+        event_step_id=tool_lifecycle_step_id(identity),
+        attempts={0: ActionAttempt(retry_ordinal=0, revision=0, status="queued")},
+    )
+
+
+async def algorithm_terminal_command(
+    runtime: Any, *, identity: RuntimeInvocationIdentity, tool_name: str,
+    result: Any, started_at: datetime,
+) -> Any:
+    """所有普通算法终态共用 Command、账本和公共事件转换。"""
+
+    await identity.runtime_context.ensure_active()
+    status = normalize_tool_status(result.status)
+    code = result.diagnostics.safe_error_code
+    code = getattr(code, "value", code)
+    terminal = build_terminal_invocation(
+        identity=identity, tool_name=tool_name, attempt_status=status,
+        started_at=started_at, result_ref=result.result_ref, safe_error_code=code,
+    )
+    command = build_tool_command(
+        identity=identity, tool_name=tool_name,
+        payload=result.model_dump(mode="json"), ledger_record=terminal,
+        state_updates={"algorithm_results": {result.result_ref: result}},
+    )
+    if not _defer_algorithm_terminal.get():
+        await emit_tool_lifecycle_event(
+            runtime, event_type="tool_call_result", identity=identity,
+            tool_name=tool_name, status=status, safe_error_code=code,
+        )
+    return command
+
+
 def build_tool_command(
     *,
     identity: RuntimeInvocationIdentity,
@@ -334,11 +467,8 @@ def build_tool_command(
 ) -> Any:
     """将受控 Tool 输出、Ledger 和领域结果在同一 graph step 写回 State。"""
 
-    try:
-        from langchain_core.messages import ToolMessage
-        from langgraph.types import Command
-    except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover
-        raise RuntimeError("LangGraph runtime dependencies are not installed") from exc
+    from langchain_core.messages import ToolMessage
+    from langgraph.types import Command
 
     update = dict(state_updates or {})
     update["action_ledger"] = {ledger_record.invocation_id: ledger_record}
@@ -347,6 +477,7 @@ def build_tool_command(
             content=canonical_json_bytes(payload).decode("utf-8"),
             tool_call_id=identity.provider_call_id,
             name=tool_name,
+            status=("success" if ledger_record.final_status == "succeeded" else "error"),
         )
     ]
     return Command(update=update)

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 import json
 from typing import Any, Awaitable, Callable
 
@@ -21,17 +22,21 @@ from .dependency_planner import (
     build_dependency_plan,
     execute_dependency_plan,
 )
-from .runtime_updates import emit_public_decision_event, resolve_runtime_invocation
-from .models import DataProfile
+from .runtime_updates import (
+    algorithm_terminal_command, defer_algorithm_terminal_events,
+    emit_public_decision_event, emit_tool_lifecycle_event, resolve_runtime_invocation,
+)
+from .interaction import DATA_PROCESSING_TOOL_NAME
+from .models import (
+    ActionAttempt, AlgorithmResult, AlgorithmResultProvenance, DataProfile,
+    Diagnostics, InvocationRecord,
+)
+from .identity import build_invocation_id, build_result_ref, current_input_identity
 from .registry import AlgorithmRegistry
 
-try:  # pragma: no cover - 仅在协议测试无 LangChain 依赖时使用
-    from langchain.agents.middleware import AgentMiddleware
-except (ImportError, ModuleNotFoundError):  # pragma: no cover
-    class AgentMiddleware:  # type: ignore[no-redef]
-        """让协议层在缺少 LangChain 时仍可被导入；真实构造会 fail closed。"""
-
-        pass
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 
 
 @dataclass
@@ -41,6 +46,7 @@ class _DispatchRun:
     future: asyncio.Future[dict[str, Any]]
     call_ids: frozenset[str]
     served_call_ids: set[str]
+    task: asyncio.Task[None] | None = None
 
 
 def _as_mapping(value: Any) -> Mapping[str, Any]:
@@ -91,7 +97,7 @@ def _tool_calls_from_state(
 ) -> list[dict[str, Any]]:
     messages = state.get("messages") or []
     latest = next(
-        (message for message in reversed(messages) if getattr(message, "tool_calls", None)),
+        (message for message in reversed(messages) if hasattr(message, "tool_calls")),
         None,
     )
     calls = getattr(latest, "tool_calls", None) or []
@@ -137,6 +143,60 @@ def _safe_tool_message(
     )
 
 
+def _require_processing_message(
+    *,
+    name: str,
+    call_id: str,
+    reason: str,
+    unmet_requirements: list[str] | None = None,
+) -> Any:
+    """返回结构化的“需要确认处理”，模型不能把它当作可原样重试的失败。"""
+
+    from langchain_core.messages import ToolMessage
+
+    return ToolMessage(
+        content=json.dumps(
+            {
+                "status": "needs_confirmation",
+                "reason": reason,
+                "next_action": (
+                    "调用 request_data_processing 提交受控选项并等待用户确认，"
+                    "不要使用相同参数重复调用算法。"
+                ),
+                "unmet_requirements": unmet_requirements or ["data_processing"],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+        name=name,
+        tool_call_id=call_id,
+        status="error",
+    )
+
+
+def _tool_message_for_processing_result(value: Any) -> Any | None:
+    """把 Adapter 的“需要处理/不适用”结果转成结构化确认请求。"""
+
+    if isinstance(value, AlgorithmResult):
+        value = value.model_dump(mode="json")
+    if not isinstance(value, Mapping):
+        return None
+    status = getattr(value.get("status"), "value", value.get("status"))
+    if status not in {"invalid_input", "not_applicable", "skipped"}:
+        return None
+    diagnostics = value.get("diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    code = str(diagnostics.get("safe_error_code") or value.get("safe_error_code") or "")
+    from .error_codes import is_processing_error
+
+    if not is_processing_error(code):
+        return None
+    return {
+        "reason": str(diagnostics.get("summary") or value.get("summary") or ""),
+        "code": code,
+    }
+
+
 class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
     """强制算法 Tool 经过 ``DependencyPlan`` 后才进入真实 handler。"""
 
@@ -161,6 +221,26 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
     @property
     def name(self) -> str:
         return "AlgorithmDependencyDispatchMiddleware"
+
+    async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        """把已登记的调用推进到 running，先提交状态再进入 ToolNode。"""
+
+        await runtime.context.ensure_active()
+        records = {}
+        for call in _tool_calls_from_state(state, self._tool_names):
+            invocation_id = build_invocation_id(
+                job_id=runtime.context.trusted_identity.job_id,
+                response_identity=state.get("provider_response_id") or state["message_execution_id"],
+                provider_call_id=call["id"],
+            )
+            record = InvocationRecord.model_validate(state["action_ledger"][invocation_id])
+            if record.final_status != "pending":
+                continue
+            records[invocation_id] = record.model_copy(update={"attempts": {
+                0: ActionAttempt(retry_ordinal=0, revision=1, status="running",
+                                 started_at=datetime.now(timezone.utc)),
+            }})
+        return {"action_ledger": records} if records else None
 
     @staticmethod
     def _run_key(request: Any, state: Mapping[str, Any]) -> tuple[str, str]:
@@ -192,6 +272,23 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
         handler: Callable[[Any], Awaitable[Any]],
     ) -> Any:
         call = request.tool_call
+        if (
+            isinstance(call, Mapping)
+            and call.get("name") == DATA_PROCESSING_TOOL_NAME
+        ):
+            # 处理确认必须独占工具轮次；不能与算法调用一起进入调度计划。
+            calls = _tool_calls_from_state(
+                _as_mapping(request.state),
+                self._tool_names,
+            )
+            if calls:
+                return _safe_tool_message(
+                    name=DATA_PROCESSING_TOOL_NAME,
+                    call_id=str(call.get("id") or ""),
+                    status="rejected",
+                    safe_error_code="INTERACTION_MUST_BE_EXCLUSIVE",
+                )
+            return await handler(request)
         if not isinstance(call, Mapping) or call.get("name") not in self._tool_names:
             return await handler(request)
 
@@ -218,7 +315,7 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                 self._runs[key] = dispatch
 
         if first:
-            asyncio.create_task(
+            dispatch.task = asyncio.create_task(
                 self._execute_batch(
                     key=key,
                     dispatch=dispatch,
@@ -233,6 +330,14 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
             # dispatch future；batch task 仍需完成 sibling 的取消/等待收口。
             outputs = await asyncio.shield(dispatch.future)
             return outputs[current_call_id]
+        except asyncio.CancelledError:
+            if dispatch.task is not None and not dispatch.task.done():
+                dispatch.task.cancel()
+                await asyncio.gather(dispatch.task, return_exceptions=True)
+            # 取消整批后消费共享 future 的控制流异常，避免无人读取的异常日志。
+            if dispatch.future.done() and not dispatch.future.cancelled():
+                dispatch.future.exception()
+            raise
         finally:
             async with self._lock:
                 dispatch.served_call_ids.add(current_call_id)
@@ -271,6 +376,43 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
         call_by_id = {str(call["id"]): call for call in calls}
         tool_by_name = self._tool_map(request.runtime)
 
+        async def terminal_output(call_id: str, status: str, code: Any) -> Any:
+            """为未返回 Command 的普通终态补齐真实诊断结果与账本。"""
+
+            call = call_by_id[call_id]
+            tool_runtime = replace(request.runtime, tool_call_id=call_id)
+            identity = resolve_runtime_invocation(tool_runtime)
+            trusted = identity.runtime_context.trusted_identity
+            await identity.runtime_context.ensure_active()
+            spec = self.registry.get_by_tool_name(call["name"]).spec
+            invocation_id = build_invocation_id(
+                job_id=trusted.job_id, response_identity=identity.response_identity,
+                provider_call_id=call_id,
+            )
+            result = AlgorithmResult(
+                result_ref=build_result_ref(invocation_id=invocation_id, result_index=0),
+                invocation_id=invocation_id, provider_call_id=call_id,
+                capability_id=spec.capability_id, capability_version=spec.version,
+                status=status if status in {"timed_out", "not_ready", "not_applicable", "skipped"} else "execution_failed",
+                diagnostics=Diagnostics(safe_error_code=code),
+                provenance=AlgorithmResultProvenance(
+                    job_id=str(trusted.job_id), attempt_count=int(trusted.attempt_count),
+                    lease_epoch=int(trusted.lease_epoch),
+                    input_identity=current_input_identity(trusted),
+                    spec_digest=spec.spec_digest, invocation_id=invocation_id,
+                    capability_id=spec.capability_id, capability_version=spec.version,
+                ),
+            )
+            record = (state.get("action_ledger") or {}).get(invocation_id)
+            started_at = datetime.now(timezone.utc)
+            if record is not None:
+                record = InvocationRecord.model_validate(record)
+                started_at = record.attempts[0].started_at or started_at
+            return await algorithm_terminal_command(
+                tool_runtime, identity=identity, tool_name=call["name"],
+                result=result, started_at=started_at,
+            )
+
         async def execute_one(planned: ToolCallRequest) -> Any:
             tool = tool_by_name.get(planned.tool_name)
             if tool is None:
@@ -295,7 +437,8 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                 state=request.state,
                 runtime=tool_runtime,
             )
-            return await handler(tool_request)
+            with defer_algorithm_terminal_events():
+                return await handler(tool_request)
 
         try:
             plan = build_dependency_plan(
@@ -312,20 +455,71 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
             outputs: dict[str, Any] = {}
             for outcome in outcomes:
                 call_id = outcome.request.call_id
-                if outcome.value is not None and outcome.status == "succeeded":
+                if isinstance(outcome.value, Command):
+                    # 失败 Command 也包含不可丢弃的结果与终态 State 更新。
+                    update = outcome.value.update
+                    results = update.get("algorithm_results", {}) if isinstance(update, Mapping) else {}
+                    try:
+                        if not isinstance(results, Mapping) or len(results) != 1:
+                            raise ValueError("algorithm Command must contain one result")
+                        result = AlgorithmResult.model_validate(next(iter(results.values())))
+                        spec = self.registry.get_by_tool_name(outcome.request.tool_name).spec
+                        if result.provider_call_id != call_id or result.capability_id != spec.capability_id:
+                            raise ValueError("algorithm Command identity mismatch")
+                    except (TypeError, ValueError):
+                        outputs[call_id] = await terminal_output(
+                            call_id, "failed", "ALGORITHM_RESULT_CONTRACT_INVALID",
+                        )
+                        continue
+                    tool_runtime = replace(request.runtime, tool_call_id=call_id)
+                    identity = resolve_runtime_invocation(tool_runtime)
+                    await identity.runtime_context.ensure_active()
+                    # 此处已离开 execute_dependency_plan 的 deadline；持久化等待
+                    # 不能把已完成的算法改判为超时，也不能先发布与调度结果冲突的状态。
+                    await emit_tool_lifecycle_event(
+                        tool_runtime, event_type="tool_call_result", identity=identity,
+                        tool_name=outcome.request.tool_name, status=result.status,
+                        safe_error_code=getattr(result.diagnostics.safe_error_code, "value", result.diagnostics.safe_error_code),
+                    )
+                    processing = next((
+                        details for result in results.values()
+                        if (details := _tool_message_for_processing_result(result)) is not None
+                    ), None)
+                    if processing is not None:
+                        update["messages"] = [_require_processing_message(
+                            name=outcome.request.tool_name, call_id=call_id,
+                            reason=processing["reason"], unmet_requirements=[processing["code"]],
+                        )]
                     outputs[call_id] = outcome.value
                     continue
-                outputs[call_id] = _safe_tool_message(
-                    name=outcome.request.tool_name,
-                    call_id=call_id,
-                    status=outcome.status,
-                    safe_error_code=str(
-                        getattr(
-                            outcome.safe_error_code,
-                            "value",
-                            outcome.safe_error_code or "ALGORITHM_EXECUTION_FAILED",
-                        )
-                    ),
+                if isinstance(outcome.value, ToolMessage):
+                    # 参数/审批拒绝同样结束已登记调用，但保留工具给模型的处理指令。
+                    try:
+                        payload = json.loads(outcome.value.content)
+                    except (TypeError, ValueError):
+                        payload = {}
+                    needs_confirmation = isinstance(payload, Mapping) and payload.get("status") == "needs_confirmation"
+                    command = await terminal_output(
+                        call_id, "not_ready" if needs_confirmation else "failed",
+                        "PREPROCESSING_APPROVAL_REQUIRED" if needs_confirmation else "ALGORITHM_RESULT_CONTRACT_INVALID",
+                    )
+                    command.update["messages"] = [outcome.value]
+                    outputs[call_id] = command
+                    continue
+                processing = _tool_message_for_processing_result(outcome.value)
+                if processing is not None:
+                    command = await terminal_output(call_id, "not_ready", processing["code"])
+                    command.update["messages"] = [_require_processing_message(
+                        name=outcome.request.tool_name,
+                        call_id=call_id,
+                        reason=processing["reason"],
+                        unmet_requirements=[processing["code"]],
+                    )]
+                    outputs[call_id] = command
+                    continue
+                outputs[call_id] = await terminal_output(
+                    call_id, outcome.status,
+                    outcome.safe_error_code or "ALGORITHM_EXECUTION_FAILED",
                 )
             if not outputs:
                 raise RuntimeError("dependency planner returned no tool outputs")
@@ -333,17 +527,15 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                 dispatch.future.set_result(outputs)
         except DependencyPlanningError as exc:
             code = str(getattr(exc.safe_error_code, "value", exc.safe_error_code))
-            outputs = {
-                str(call["id"]): _safe_tool_message(
-                    name=str(call["name"]),
-                    call_id=str(call["id"]),
-                    status="not_ready",
-                    safe_error_code=code,
-                )
-                for call in calls
-            }
-            if not dispatch.future.done():
-                dispatch.future.set_result(outputs)
+            try:
+                outputs = {}
+                for call in calls:
+                    outputs[str(call["id"])] = await terminal_output(str(call["id"]), "not_ready", code)
+                if not dispatch.future.done():
+                    dispatch.future.set_result(outputs)
+            except BaseException as terminal_error:
+                if not dispatch.future.done():
+                    dispatch.future.set_exception(terminal_error)
         except BaseException as exc:
             if not dispatch.future.done():
                 dispatch.future.set_exception(exc)

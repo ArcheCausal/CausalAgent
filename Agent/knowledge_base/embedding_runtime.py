@@ -11,6 +11,7 @@ import time
 from typing import Any, Callable, Dict, Mapping
 from urllib.parse import urlsplit
 
+from config.secret_file import get_secret
 from observability.logging_runtime import log_event
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -28,6 +29,13 @@ ALLOWED_API_KEY_ENV_NAMES = frozenset({
     "RAG_EMBEDDING_API_KEY",
     "RAG_EVAL_EMBEDDING_API_KEY",
 })
+
+
+def _embedding_api_key(api_key_env: str) -> str | None:
+    """从统一密钥文件读取 embedding 密钥，配置名仅用于兼容索引元数据。"""
+    if api_key_env not in ALLOWED_API_KEY_ENV_NAMES:
+        return None
+    return get_secret("EMBEDDING_API_KEY")
 ALLOWED_BASE_URL_ENV_NAMES = frozenset({
     "EMBEDDING_BASE_URL",
     "RAG_EMBEDDING_BASE_URL",
@@ -137,7 +145,7 @@ class EmbeddingConfiguration:
                 missing_items = [
                     name
                     for name, configured in (
-                        (api_key_env, bool(os.environ.get(api_key_env))),
+                        (api_key_env, bool(_embedding_api_key(api_key_env))),
                         (base_url_env, bool(os.environ.get(base_url_env))),
                     )
                     if name and not configured
@@ -505,12 +513,13 @@ def create_embedding_function(
     if config.mode == "api":
         from langchain_openai import OpenAIEmbeddings
 
-        if not config.api_key_env or not os.environ.get(config.api_key_env):
+        api_key = _embedding_api_key(config.api_key_env)
+        if not config.api_key_env or not api_key:
             raise ValueError(f"missing embedding API credential: {config.api_key_env}")
         if not config.base_url_env or not os.environ.get(config.base_url_env):
             raise ValueError(f"missing embedding API endpoint: {config.base_url_env}")
         delegate = OpenAIEmbeddings(
-            api_key=os.environ[config.api_key_env],
+            api_key=api_key,
             base_url=os.environ[config.base_url_env],
             model=config.model,
             tiktoken_enabled=False,
@@ -538,7 +547,7 @@ def resolve_embedding_runtime_config() -> Dict[str, Any]:
 def _resolve_provider(raw_provider: str) -> str:
     """把环境变量 provider 解析成 api/local，auto 兼容旧行为。"""
     if raw_provider == "auto":
-        if os.environ.get("KNOWLEDGE_BUILD_PROFILE") == "medical" or os.environ.get(API_KEY_ENV):
+        if os.environ.get("KNOWLEDGE_BUILD_PROFILE") == "medical" or get_secret(API_KEY_ENV):
             return "api"
         return "local"
     if raw_provider in _API_PROVIDER_VALUES:
@@ -552,7 +561,7 @@ def _resolve_provider(raw_provider: str) -> str:
 
 def _api_embedding_config(raw_provider: str) -> Dict[str, Any]:
     """返回 OpenAI-compatible embedding 配置摘要，不暴露密钥。"""
-    api_key_configured = bool(os.environ.get(API_KEY_ENV))
+    api_key_configured = bool(get_secret(API_KEY_ENV))
     base_url = os.environ.get(API_BASE_URL_ENV, "")
     base_url_configured = bool(base_url)
     missing = []

@@ -912,8 +912,8 @@ docker compose -f docker-compose.test.yml run --rm unit-test
 ```text
 tests/unit/test_event_catalog.py
 tests/unit/test_request_context_contract.py
-tests/integration/test_logging_policy.py
-tests/integration/test_logging_entrypoints.py
+tests/contracts/observability/test_logging_policy.py
+tests/contracts/observability/test_logging_entrypoints.py
 ```
 
 单元测试只证明 schema、状态、路由、权限和协议，不证明真实 MCP、数据库、RAG、SearXNG 或 DeepSeek。

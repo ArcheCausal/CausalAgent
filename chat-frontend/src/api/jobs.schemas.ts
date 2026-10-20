@@ -25,6 +25,8 @@ export const activeJobSchema = z.object({
   max_attempts: z.number().int().positive().optional(),
   current_question_id: z.string().nullable().optional(),
   current_waiting_prompt: z.string().nullable().optional(),
+  current_interaction: z.record(z.string(), z.unknown()).nullable().optional(),
+  input_wait_expires_at: z.string().nullable().optional(),
   input_user_file_id: z.number().int().positive().nullable().optional(),
   input_filename: z.string().nullable().optional(),
   last_event_id: z.number().int().nonnegative().optional(),

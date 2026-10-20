@@ -1,9 +1,6 @@
 name: Windows Developer Preview Release
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       target_tag:

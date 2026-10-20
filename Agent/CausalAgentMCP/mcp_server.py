@@ -169,6 +169,8 @@ async def causal_pc(
     request_id: str | None = None,
     session_id: str | None = None,
     worker_slot: int | None = None,
+    alpha: float = 0.05,
+    test: str = "auto",
 ) -> dict:
     """
     使用PC算法对CSV数据执行因果发现分析。
@@ -201,7 +203,7 @@ async def causal_pc(
 
     return await _execute_tool(
         "causal_pc",
-        run_pc_analysis,
+        lambda csv_data: run_pc_analysis(csv_data, alpha=alpha, test=test),
         user_id=user_id,
         session_id=session_id,
         job_id=job_id,

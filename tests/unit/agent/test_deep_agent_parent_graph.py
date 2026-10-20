@@ -7,20 +7,24 @@ from types import SimpleNamespace
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessage
+from langgraph.runtime import Runtime
 
 from Agent.causal_agent.graph import (
     _deep_agent_parent_node,
     _finalization_gate_node,
+    _stream_deep_agent,
     build_deep_agent_parent_graph,
 )
 from Agent.causal_agent.graph_utils import bind_subgraph_node
 from Agent.causal_agent.state import CausalAgentState
 from Agent.deep_agent.context import AgentRunContext, TrustedJobIdentity
+from Agent.deep_agent.state import ProjectDeepAgentState
 from Agent.deep_agent.finalization import StructuredResponseError
 from Agent.deep_agent.prompts import MANDATORY_WEB_INSTRUCTION
 from Agent.deep_agent_tools.identity import (
     build_deep_agent_execution_scope,
+    build_deep_agent_analysis_scope,
     build_deep_agent_run_id,
     build_deep_agent_step_id,
 )
@@ -195,10 +199,8 @@ def test_parent_node_reads_matching_child_checkpoint_instead_of_projecting_messa
         "web_evidence": {},
         "structured_response": None,
         "deep_agent_run_id": build_deep_agent_run_id(job_id=identity.job_id),
-        "execution_scope": build_deep_agent_execution_scope(
+        "execution_scope": build_deep_agent_analysis_scope(
             job_id=identity.job_id,
-            attempt_count=identity.attempt_count,
-            lease_epoch=identity.lease_epoch,
             input_identity=identity.input_identity,
         ),
     }
@@ -244,10 +246,8 @@ def test_parent_node_consumes_child_message_stream_before_projecting_state() -> 
         worker_id="worker-1",
         input_identity="input-sha",
     )
-    current_scope = build_deep_agent_execution_scope(
+    current_scope = build_deep_agent_analysis_scope(
         job_id=identity.job_id,
-        attempt_count=identity.attempt_count,
-        lease_epoch=identity.lease_epoch,
         input_identity=identity.input_identity,
     )
     child_values = {
@@ -260,52 +260,31 @@ def test_parent_node_consumes_child_message_stream_before_projecting_state() -> 
         "deep_agent_run_id": build_deep_agent_run_id(job_id=identity.job_id),
         "execution_scope": current_scope,
     }
-    stream_calls = []
     forwarded = []
-    stream_chunk = {
-        "type": "messages",
-        "ns": (),
-        "data": (
-            AIMessageChunk(content="公开片段"),
-            {"langgraph_node": "model"},
-        ),
-    }
 
-    class Child:
-        async def aget_state(self, config):
-            return SimpleNamespace(values=child_values)
+    async def scenario():
+        async def message_node(state):
+            # 显式消息输入经真实 LangGraph messages 流传输，不调用或替代模型。
+            return {"messages": [AIMessage(content="公开片段")]}
 
-        async def astream(self, value, *, config, context, stream_mode, subgraphs, version):
-            stream_calls.append((value, config, context, stream_mode, subgraphs, version))
-            yield stream_chunk
-
-    asyncio.run(
-        _deep_agent_parent_node(
-            {
-                "job_id": identity.job_id,
-                "messages": [],
-                "analysis_parameters": {},
-                "file_summary": {},
-                "deep_agent_run_id": child_values["deep_agent_run_id"],
-            },
-            runtime=SimpleNamespace(
-                context=AgentRunContext(execution_guard=None, trusted_identity=identity),
-                stream_writer=forwarded.append,
-            ),
-            config={"configurable": {"thread_id": identity.job_id}},
-            deep_agent=Child(),
-            store=None,
-            memory_init_lock=asyncio.Lock(),
+        builder = StateGraph(ProjectDeepAgentState)
+        builder.add_node("message", message_node)
+        builder.add_edge(START, "message")
+        builder.add_edge("message", END)
+        child = builder.compile(checkpointer=MemorySaver())
+        context = AgentRunContext(execution_guard=None, trusted_identity=identity)
+        values = await _stream_deep_agent(
+            child, child_values,
+            child_config={"configurable": {"thread_id": identity.job_id, "checkpoint_ns": ""}},
+            child_context=context, runtime=Runtime(context=context, stream_writer=forwarded.append),
         )
-    )
+        assert values["messages"][-1].content == "公开片段"
 
-    assert len(stream_calls) == 1
-    assert stream_calls[0][3:] == (["messages", "values"], True, "v2")
-    assert forwarded == [{
-        "type": "message_chunk",
-        "ns": (),
-        "data": stream_chunk["data"],
-    }]
+    asyncio.run(scenario())
+    assert len(forwarded) == 1
+    assert forwarded[0]["type"] == "message_chunk"
+    assert forwarded[0]["ns"] == ()
+    assert forwarded[0]["data"][0].content == "公开片段"
 
 
 def test_retry_path_emits_public_progress_notices() -> None:
@@ -383,10 +362,8 @@ def test_retry_path_emits_public_progress_notices() -> None:
         "web_evidence": {},
         "structured_response": None,
         "deep_agent_run_id": build_deep_agent_run_id(job_id=identity.job_id),
-        "execution_scope": build_deep_agent_execution_scope(
+        "execution_scope": build_deep_agent_analysis_scope(
             job_id=identity.job_id,
-            attempt_count=identity.attempt_count,
-            lease_epoch=identity.lease_epoch,
             input_identity=identity.input_identity,
         ),
     }

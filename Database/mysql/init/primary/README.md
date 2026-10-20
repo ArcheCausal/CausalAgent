@@ -1,9 +1,14 @@
 # primary 初始化脚本
 
-`01-create-replication-user.sh` 会在 MySQL 数据目录第一次初始化时自动执行：
+文档职责：说明主库首次初始化时的账号、密码来源和授权范围。
 
-- 读取 `MYSQL_WRITE_USER` / `MYSQL_WRITE_PASSWORD`，缺失时回退到 `MYSQL_USER` / `MYSQL_PASSWORD`
-- 读取 `MYSQL_READ_USER` / `MYSQL_READ_PASSWORD`，缺失时回退到 `MYSQL_USER` / `MYSQL_PASSWORD`
+适用范围：使用项目 MySQL primary 镜像初始化全新数据目录；已有数据卷不会重新执行初始化脚本。
+
+`01-create-replication-user.sh` 会在 MySQL 数据目录第一次初始化时自动执行；账号名来自环境变量，密码由 `/opt/causalagent/secret-env.sh` 从 `/run/secrets/causalagent.env` 读取：
+
+- 写账号名使用 `MYSQL_WRITE_USER`，缺省时使用 `MYSQL_USER`；密码必须来自文件中的 `MYSQL_WRITE_PASSWORD`
+- 读账号名使用 `MYSQL_READ_USER`，缺省时使用 `MYSQL_USER`；密码必须来自文件中的 `MYSQL_READ_PASSWORD`
+- 专用写、读密码缺失或为空时脚本失败，均不回退到 `MYSQL_PASSWORD`
 - 读取 `MYSQL_REPLICA_STATUS_USER` / `MYSQL_REPLICA_STATUS_PASSWORD`
 - 读取 `MYSQL_REPLICATION_USER`
 - 读取 `MYSQL_REPLICATION_PASSWORD`

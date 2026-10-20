@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import io
 import inspect
 import logging
+import re
 import time
 from typing import Any, Callable, Mapping
 
@@ -17,12 +18,18 @@ from Agent.deep_agent_tools.models import (
     AlgorithmExecutionCommand,
     AlgorithmResult,
     AlgorithmResultProvenance,
+    DataViewSummary,
     Diagnostics,
     GraphEdge,
     McpInvocationContext,
     StandardizedGraph,
     build_diagnostics_from_runner_payload,
     canonical_json_bytes,
+)
+from Agent.deep_agent_tools.preprocessing import (
+    PreprocessingError,
+    apply_preprocessing,
+    build_data_profile_from_csv,
 )
 
 from .auth import McpAuthError, verify_invocation
@@ -177,7 +184,13 @@ def _standardized_graph(raw_result: Mapping[str, Any], capability_id: str) -> St
 
 
 def _failure_status(code: SafeErrorCode) -> str:
-    if code == SafeErrorCode.ALGORITHM_INPUT_INVALID:
+    if code in {
+        SafeErrorCode.ALGORITHM_INPUT_INVALID,
+        SafeErrorCode.PREPROCESSING_REQUIRED,
+        SafeErrorCode.PREPROCESSING_APPROVAL_REQUIRED,
+        SafeErrorCode.PREPROCESSING_PLAN_INVALID,
+        SafeErrorCode.PREPROCESSING_RESULT_REJECTED,
+    }:
         return "invalid_input"
     if code == SafeErrorCode.ALGORITHM_NOT_READY:
         return "not_ready"
@@ -195,7 +208,59 @@ def _rejection_reason(code: SafeErrorCode) -> str:
         return "transport_error"
     if code == SafeErrorCode.MCP_CAPACITY_EXHAUSTED:
         return "pool_exhausted"
+    if code in {
+        SafeErrorCode.PREPROCESSING_REQUIRED,
+        SafeErrorCode.PREPROCESSING_APPROVAL_REQUIRED,
+        SafeErrorCode.PREPROCESSING_PLAN_INVALID,
+        SafeErrorCode.PREPROCESSING_RESULT_REJECTED,
+    }:
+        return "preprocessing_rejected"
     return "invalid_schema"
+
+
+def _terminal_reason(code: SafeErrorCode) -> str:
+    """把终态错误码映射为事件目录登记的稳定原因码。"""
+    if code == SafeErrorCode.ALGORITHM_TIMED_OUT:
+        return "timeout"
+    if code == SafeErrorCode.MCP_LEASE_STALE:
+        return "fenced"
+    if code == SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID:
+        return "invalid_result"
+    return "tool_error"
+
+
+def _runner_failure_reason(code: SafeErrorCode) -> str:
+    """runner 自身返回失败时的稳定原因码；区分依赖缺失与其他执行失败。"""
+    if code == SafeErrorCode.ALGORITHM_NOT_READY:
+        return "readiness_failed"
+    if code == SafeErrorCode.ALGORITHM_INPUT_INVALID:
+        return "invalid_schema"
+    return _terminal_reason(code)
+
+
+def _runner_error_type(raw_result: Mapping[str, Any]) -> str:
+    """只接受受限格式的错误类型名，不回显 runner 的自由文本。"""
+
+    diagnostics = raw_result.get("diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    candidate = str(diagnostics.get("error_type") or raw_result.get("error_type") or "")
+    return _runner_exception_type(candidate)
+
+
+def _runner_exception_type(value: Any) -> str:
+    """只接受受限格式的异常类名，拒绝把自由文本写进事件详情。"""
+
+    candidate = str(value or "")
+    return candidate if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", candidate) else "UnknownError"
+
+
+def _runner_model_source(raw_result: Mapping[str, Any]) -> str:
+    """返回权重来源枚举，用于区分本地卷与远端 Hub 两种失败现场。"""
+
+    diagnostics = raw_result.get("diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    value = str(diagnostics.get("model_source") or "")
+    return value if value in {"local_dir", "hub"} else "unknown"
 
 
 def _error_result(
@@ -407,6 +472,60 @@ class CausalMcpService:
             parameters = spec.model_input_schema.model_validate(command.parameters).model_dump(
                 mode="json"
             )
+            data_view: DataViewSummary | None = None
+            if command.preprocessing is not None:
+                approval = command.approval
+                if approval is None:
+                    raise McpServiceError(
+                        SafeErrorCode.PREPROCESSING_APPROVAL_REQUIRED
+                    )
+                if approval.plan_digest != command.preprocessing.digest:
+                    raise McpServiceError(
+                        SafeErrorCode.PREPROCESSING_PLAN_INVALID
+                    )
+                try:
+                    spec.validate_preprocessing_plan(
+                        plan=command.preprocessing,
+                        profile=build_data_profile_from_csv(csv_data),
+                        protected_columns=command.preprocessing.protected_columns,
+                    )
+                except ValueError as exc:
+                    raise McpServiceError(
+                        SafeErrorCode.PREPROCESSING_PLAN_INVALID
+                    ) from exc
+                try:
+                    csv_data, view_summary = apply_preprocessing(
+                        csv_data,
+                        command.preprocessing,
+                        protected_columns=command.preprocessing.protected_columns,
+                    )
+                except PreprocessingError as exc:
+                    raise McpServiceError(
+                        SafeErrorCode.PREPROCESSING_PLAN_INVALID
+                    ) from exc
+                processed_profile = build_data_profile_from_csv(csv_data)
+                data_view = DataViewSummary(
+                    row_count=processed_profile.row_count,
+                    column_count=processed_profile.column_count,
+                    columns=processed_profile.column_names,
+                    operations=tuple(view_summary["operations"]),
+                    plan_digest=str(view_summary["plan_digest"]),
+                    dropped_row_count=int(view_summary["dropped_row_count"]),
+                    imputed_columns=tuple(view_summary["imputed_columns"]),
+                    encoded_columns=tuple(view_summary["encoded_mappings"]),
+                )
+            else:
+                processed_profile = build_data_profile_from_csv(csv_data)
+            unmet = spec.required_processing_reason(
+                profile=processed_profile,
+                preprocessing=command.preprocessing,
+            )
+            if unmet is not None:
+                raise McpServiceError(
+                    SafeErrorCode.PREPROCESSING_REQUIRED
+                    if command.preprocessing is None
+                    else SafeErrorCode.PREPROCESSING_RESULT_REJECTED
+                )
         except McpServiceError as exc:
             log_event(
                 LOGGER,
@@ -420,6 +539,22 @@ class CausalMcpService:
                 command,
                 context,
                 code=exc.safe_error_code,
+                capability_version=entry.version,
+            )
+            return {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
+        except PreprocessingError:
+            log_event(
+                LOGGER,
+                "mcp.request.rejected",
+                details={
+                    "capability": entry.capability_id,
+                    "reason_code": "preprocessing_rejected",
+                },
+            )
+            result = _error_result(
+                command,
+                context,
+                code=SafeErrorCode.PREPROCESSING_PLAN_INVALID,
                 capability_version=entry.version,
             )
             return {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
@@ -571,6 +706,17 @@ class CausalMcpService:
                         "input_bytes": len(csv_data.encode("utf-8")),
                     },
                 )
+                if exc.safe_error_code == SafeErrorCode.ALGORITHM_EXECUTION_FAILED:
+                    log_event(
+                        LOGGER,
+                        "mcp.runner.failed",
+                        details={
+                            "capability": entry.capability_id,
+                            "error_type": _runner_exception_type(exc.runner_error_type),
+                            "reason_code": _terminal_reason(exc.safe_error_code),
+                            "model_source": "unknown",
+                        },
+                    )
             trace["executor_slot_id"] = None
             if exc.safe_error_code in {
                 SafeErrorCode.ALGORITHM_TIMED_OUT,
@@ -648,6 +794,16 @@ class CausalMcpService:
                 if error_type == "ResultValidationError"
                 else SafeErrorCode.ALGORITHM_EXECUTION_FAILED
             )
+            log_event(
+                LOGGER,
+                "mcp.runner.failed",
+                details={
+                    "capability": entry.capability_id,
+                    "error_type": _runner_error_type(raw_result),
+                    "reason_code": _runner_failure_reason(code),
+                    "model_source": _runner_model_source(raw_result),
+                },
+            )
             result = _error_result(
                 command,
                 context,
@@ -669,6 +825,7 @@ class CausalMcpService:
                     status="valid",
                     standardized_graph=graph,
                     summary="算法调用完成。",
+                    data_view=data_view,
                     diagnostics=build_diagnostics_from_runner_payload(raw_result),
                     input_identity=command.input_identity,
                     provenance=AlgorithmResultProvenance(
@@ -680,6 +837,11 @@ class CausalMcpService:
                         invocation_id=command.invocation_id,
                         capability_id=command.capability_id,
                         capability_version=entry.version,
+                        preprocessing_plan_digest=(
+                            command.preprocessing.digest
+                            if command.preprocessing is not None
+                            else None
+                        ),
                         algorithm_runner_version=str(
                             raw_result.get("runner_version") or "causalachieve-v1"
                         ),
@@ -709,15 +871,7 @@ class CausalMcpService:
             )
         else:
             safe_code = result.diagnostics.safe_error_code
-            reason_code = (
-                "timeout"
-                if safe_code == SafeErrorCode.ALGORITHM_TIMED_OUT
-                else "fenced"
-                if safe_code == SafeErrorCode.MCP_LEASE_STALE
-                else "invalid_result"
-                if safe_code == SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID
-                else "tool_error"
-            )
+            reason_code = _terminal_reason(safe_code)
             log_event(
                 LOGGER,
                 "mcp.tool.failed",

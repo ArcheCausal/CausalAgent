@@ -19,14 +19,18 @@ from ..algorithm_executor import (
 from ..algorithm_specs import AlgorithmSpec
 from ..error_codes import SafeErrorCode
 from ..identity import build_invocation_id, build_result_ref
+from ..preprocessing import PreprocessingError, apply_preprocessing, build_data_profile_from_csv
 from .normalization import result_from_runner_payload
 from ..models import (
     AlgorithmExecutionCommand,
     AlgorithmResult,
     AlgorithmResultProvenance,
+    DataViewSummary,
     DataProfile,
     Diagnostics,
     McpInvocationContext,
+    PreprocessingApproval,
+    PreprocessingPlan,
     RAW_RESULT_SERIALIZATION_VERSION,
     RawResultMetadata,
     SafeWarning,
@@ -55,6 +59,9 @@ class AdapterInput:
     # 新 MCP 路径由服务端按可信 Job/文件快照强读 CSV；因此不把文件正文
     # 放进 Deep Agent State。协议测试仍可要求显式 dataset_csv。
     dataset_authority_available: bool = False
+    execution_columns: tuple[str, ...] | None = None
+    preprocessing: PreprocessingPlan | None = None
+    approval: PreprocessingApproval | None = None
 
     def __post_init__(self) -> None:
         if not self.input_identity or self.input_identity != self.input_identity.strip():
@@ -137,6 +144,7 @@ class BaseAlgorithmAdapter(ABC):
         safe_error_code: SafeErrorCode | str | None = None,
         summary: str | None = None,
         preprocessing_recipe_digest: str | None = None,
+        data_view: DataViewSummary | None = None,
     ) -> AlgorithmResult:
         return AlgorithmResult(
             result_ref=build_result_ref(
@@ -162,7 +170,57 @@ class BaseAlgorithmAdapter(ABC):
                 capability_id=command.capability_id,
                 capability_version=command.capability_version,
                 preprocessing_recipe_digest=preprocessing_recipe_digest,
+                preprocessing_plan_digest=(
+                    command.preprocessing.digest if command.preprocessing else None
+                ),
             ),
+            data_view=data_view,
+        )
+
+    def _materialize_input(
+        self,
+        adapter_input: AdapterInput,
+        *,
+        plan: PreprocessingPlan | None,
+    ) -> tuple[AdapterInput, DataViewSummary | None]:
+        """按已确认方案建立本次算法独立的 CSV 数据视图。"""
+
+        if plan is None:
+            return adapter_input, None
+        if not adapter_input.dataset_csv:
+            # 生产路径由 MCP 从冻结文件建立视图，本地 Adapter 不复制正文。
+            return adapter_input, None
+        try:
+            csv_data, summary = apply_preprocessing(
+                adapter_input.dataset_csv,
+                plan,
+                protected_columns=plan.protected_columns,
+            )
+            profile = build_data_profile_from_csv(csv_data)
+        except PreprocessingError:
+            raise
+        view = DataViewSummary(
+            row_count=profile.row_count,
+            column_count=profile.column_count,
+            columns=profile.column_names,
+            operations=tuple(summary["operations"]),
+            plan_digest=str(summary["plan_digest"]),
+            dropped_row_count=int(summary["dropped_row_count"]),
+            imputed_columns=tuple(summary["imputed_columns"]),
+            encoded_columns=tuple(summary["encoded_mappings"]),
+        )
+        return (
+            AdapterInput(
+                data_profile=profile,
+                input_identity=adapter_input.input_identity,
+                dataset_csv=csv_data,
+                missing_values_present=profile.has_missing_values,
+                dataset_authority_available=adapter_input.dataset_authority_available,
+                execution_columns=profile.column_names,
+                preprocessing=None,
+                approval=adapter_input.approval,
+            ),
+            view,
         )
 
     @staticmethod
@@ -344,6 +402,38 @@ class BaseAlgorithmAdapter(ABC):
                 preprocessing_recipe_digest=None,
             )
 
+        plan = adapter_input.preprocessing
+        approval = adapter_input.approval
+        if plan is not None and approval is None:
+            invocation_id = build_invocation_id(
+                job_id=(
+                    trusted_context.job_id
+                    if hasattr(trusted_context, "job_id")
+                    else "00000000-0000-0000-0000-000000000000"
+                ),
+                response_identity=response_identity,
+                provider_call_id=provider_call_id,
+            )
+            context = self._context(trusted_context, invocation_id=invocation_id)
+            command = AlgorithmExecutionCommand(
+                invocation_id=invocation_id,
+                capability_id=self.spec.capability_id,
+                capability_version=self.spec.version,
+                spec_digest=self.spec.spec_digest,
+                provider_call_id=provider_call_id,
+                input_identity=adapter_input.input_identity,
+                parameters=parsed_parameters.model_dump(mode="json"),
+                result_index=result_index,
+                timeout_seconds=self.spec.default_timeout_seconds,
+            )
+            return self._base_result(
+                command=command,
+                context=context,
+                status="invalid_input",
+                safe_error_code=SafeErrorCode.PREPROCESSING_APPROVAL_REQUIRED,
+                summary="处理方案尚未获得用户确认。",
+            )
+
         invocation_id = build_invocation_id(
             job_id=(
                 trusted_context.job_id
@@ -354,6 +444,115 @@ class BaseAlgorithmAdapter(ABC):
             provider_call_id=provider_call_id,
         )
         context = self._context(trusted_context, invocation_id=invocation_id)
+        if plan is not None:
+            try:
+                adapter_input, data_view = self._materialize_input(
+                    adapter_input,
+                    plan=plan,
+                )
+            except PreprocessingError as exc:
+                invocation_id = build_invocation_id(
+                    job_id=(
+                        trusted_context.job_id
+                        if hasattr(trusted_context, "job_id")
+                        else "00000000-0000-0000-0000-000000000000"
+                    ),
+                    response_identity=response_identity,
+                    provider_call_id=provider_call_id,
+                )
+                context = self._context(trusted_context, invocation_id=invocation_id)
+                command = AlgorithmExecutionCommand(
+                    invocation_id=invocation_id,
+                    capability_id=self.spec.capability_id,
+                    capability_version=self.spec.version,
+                    spec_digest=self.spec.spec_digest,
+                    provider_call_id=provider_call_id,
+                    input_identity=adapter_input.input_identity,
+                    parameters=parsed_parameters.model_dump(mode="json"),
+                    preprocessing=plan,
+                    approval=approval,
+                    result_index=result_index,
+                    timeout_seconds=self.spec.default_timeout_seconds,
+                )
+                return self._base_result(
+                    command=command,
+                    context=context,
+                    status="invalid_input",
+                    safe_error_code=SafeErrorCode.PREPROCESSING_PLAN_INVALID,
+                    summary=str(exc),
+                )
+        else:
+            data_view = None
+        applicability, reason = self.spec.assess_applicability(
+            profile=adapter_input.data_profile,
+            preprocessing=plan,
+            execution_columns=adapter_input.execution_columns,
+        )
+        if applicability == "not_applicable":
+            invocation_id = build_invocation_id(
+                job_id=(
+                    trusted_context.job_id
+                    if hasattr(trusted_context, "job_id")
+                    else "00000000-0000-0000-0000-000000000000"
+                ),
+                response_identity=response_identity,
+                provider_call_id=provider_call_id,
+            )
+            context = self._context(trusted_context, invocation_id=invocation_id)
+            command = AlgorithmExecutionCommand(
+                invocation_id=invocation_id,
+                capability_id=self.spec.capability_id,
+                capability_version=self.spec.version,
+                spec_digest=self.spec.spec_digest,
+                provider_call_id=provider_call_id,
+                input_identity=adapter_input.input_identity,
+                parameters=parsed_parameters.model_dump(mode="json"),
+                result_index=result_index,
+                timeout_seconds=self.spec.default_timeout_seconds,
+            )
+            # 各 Adapter 仍可给出比通用 Spec 更严格的既有诊断；二者都是
+            # 结构性不适用，但这里不掩盖 Adapter 自己的状态与错误码。
+            legacy = self.validate_input(adapter_input)
+            legacy_status, legacy_code = legacy if legacy is not None else (
+                "not_applicable",
+                SafeErrorCode.ALGORITHM_NOT_APPLICABLE,
+            )
+            return self._base_result(
+                command=command,
+                context=context,
+                status=legacy_status,
+                safe_error_code=legacy_code,
+                summary=reason,
+            )
+        if applicability == "needs_processing" and plan is None:
+            invocation_id = build_invocation_id(
+                job_id=(
+                    trusted_context.job_id
+                    if hasattr(trusted_context, "job_id")
+                    else "00000000-0000-0000-0000-000000000000"
+                ),
+                response_identity=response_identity,
+                provider_call_id=provider_call_id,
+            )
+            context = self._context(trusted_context, invocation_id=invocation_id)
+            command = AlgorithmExecutionCommand(
+                invocation_id=invocation_id,
+                capability_id=self.spec.capability_id,
+                capability_version=self.spec.version,
+                spec_digest=self.spec.spec_digest,
+                provider_call_id=provider_call_id,
+                input_identity=adapter_input.input_identity,
+                parameters=parsed_parameters.model_dump(mode="json"),
+                result_index=result_index,
+                timeout_seconds=self.spec.default_timeout_seconds,
+            )
+            return self._base_result(
+                command=command,
+                context=context,
+                status="invalid_input",
+                safe_error_code=SafeErrorCode.PREPROCESSING_REQUIRED,
+                summary=reason,
+            )
         recipe = self.preprocessing_recipe(adapter_input)
         command = AlgorithmExecutionCommand(
             invocation_id=invocation_id,
@@ -363,6 +562,8 @@ class BaseAlgorithmAdapter(ABC):
             provider_call_id=provider_call_id,
             input_identity=adapter_input.input_identity,
             parameters=parsed_parameters.model_dump(mode="json"),
+            preprocessing=plan,
+            approval=approval,
             result_index=result_index,
             timeout_seconds=self.spec.default_timeout_seconds,
         )
@@ -375,6 +576,7 @@ class BaseAlgorithmAdapter(ABC):
                 status=status,
                 safe_error_code=safe_error_code,
                 preprocessing_recipe_digest=recipe.digest,
+                data_view=data_view,
             )
 
         try:
@@ -410,10 +612,27 @@ class BaseAlgorithmAdapter(ABC):
                 deep=True,
                 update={
                     "provenance": result.provenance.model_copy(
-                        update={"preprocessing_recipe_digest": recipe.digest}
-                    )
+                        update={
+                            "preprocessing_recipe_digest": recipe.digest,
+                            "preprocessing_plan_digest": (
+                                plan.digest if plan is not None else None
+                            ),
+                        }
+                    ),
+                    "data_view": (
+                        data_view
+                        or result.data_view
+                        or DataViewSummary(
+                            row_count=adapter_input.data_profile.row_count,
+                            column_count=adapter_input.data_profile.column_count,
+                            columns=adapter_input.data_profile.column_names,
+                        )
+                    ),
                 },
             )
+            if result.status == "timed_out":
+                # deadline 已结束执行；没有成功算法产物，不能保存标准化快照冒充 raw。
+                return result
             # Fake executor 没有远端 raw payload，因此以标准化结果快照作为可复核
             # 的协议级 raw；真实 executor 若已提供 metadata 也必须从同一个 backend
             # 回读验证，不能仅凭引用和声明的 hash/size/version 放行。

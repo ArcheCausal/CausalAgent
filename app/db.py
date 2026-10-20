@@ -602,6 +602,7 @@ def check_database_readiness():
                     'recovery_count', 'resume_count', 'input_user_file_id',
                     'input_object_id', 'input_file_hash', 'input_filename',
                     'current_question_id', 'current_waiting_prompt',
+                    'current_interaction', 'input_wait_expires_at',
                     'cancel_idempotency_key', 'cancel_request_fingerprint',
                     'analysis_context_id'
                   )
@@ -625,6 +626,8 @@ def check_database_readiness():
                 "input_filename",
                 "current_question_id",
                 "current_waiting_prompt",
+                "current_interaction",
+                "input_wait_expires_at",
                 "cancel_idempotency_key",
                 "cancel_request_fingerprint",
                 "analysis_context_id",

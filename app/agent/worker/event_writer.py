@@ -22,6 +22,12 @@ async def _complete_terminal_event(
 ) -> bool:
     """在一个事务内完成终态事件、聊天保存和 job 成功更新。"""
     event_type = payload.get("type")
+    interaction_payload = payload.get("interaction")
+    expires_at = None
+    if isinstance(interaction_payload, dict):
+        expires_at = interaction_payload.get("expires_at")
+    if event_type == "interrupt" and isinstance(expires_at, str):
+        payload = {**payload, "expires_at": expires_at}
     if event_type == "final_result":
         response_data = payload.get("data", {})
     elif event_type == "interrupt":
@@ -29,6 +35,10 @@ async def _complete_terminal_event(
             "type": "human_input_required",
             "summary": payload.get("message", ""),
         }
+        if isinstance(payload.get("interaction"), dict):
+            response_data["interaction"] = payload["interaction"]
+        if isinstance(payload.get("expires_at"), str):
+            response_data["expires_at"] = payload["expires_at"]
     else:
         return False
 

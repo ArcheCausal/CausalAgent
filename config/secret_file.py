@@ -1,0 +1,186 @@
+"""统一的服务器密钥文件读取边界。
+
+文档职责：定义应用、worker、MCP 与数据库配置读取密码、令牌和签名密钥的唯一入口，
+以及发布包校验密钥文件时使用的键集合。
+
+适用范围：所有需要密钥的运行时进程、Compose 密钥挂载和发布校验脚本；非敏感配置继续
+使用环境变量或非密钥配置文件，不进入密钥文件。
+
+密钥只从服务器上的单个文件读取，默认路径为 /run/secrets/causalagent.env，可以用
+环境变量 CAUSALAGENT_SECRET_FILE 覆盖。应用容器通过 Compose secret 挂载该文件；
+MySQL、PostgreSQL 和 Grafana 等官方镜像由容器启动适配脚本读取同一个文件，再导出
+官方入口需要的环境变量。
+
+本模块不输出任何密钥值：错误信息只包含键名、行号、文件路径和权限位。
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import stat
+import threading
+from pathlib import Path
+
+
+SECRET_FILE_ENV_VAR = "CAUSALAGENT_SECRET_FILE"
+DEFAULT_SECRET_FILE_PATH = Path("/run/secrets/causalagent.env")
+
+# 密钥文件允许出现的键。未知键会被拒绝，避免把拼写错误或非密钥配置写进密钥文件。
+SECRET_KEYS: tuple[str, ...] = (
+    "MYSQL_ROOT_PASSWORD",
+    "MYSQL_PASSWORD",
+    "MYSQL_WRITE_PASSWORD",
+    "MYSQL_READ_PASSWORD",
+    "MYSQL_REPLICA_STATUS_PASSWORD",
+    "MYSQL_REPLICATION_PASSWORD",
+    "CHECKPOINT_POSTGRES_PASSWORD",
+    "SECRET_KEY",
+    "API_KEY",
+    "DEEP_AGENT_API_KEY",
+    "VISION_API_KEY",
+    "EMBEDDING_API_KEY",
+    "LANGCHAIN_API_KEY",
+    "SEARXNG_SECRET",
+    "GRAFANA_ADMIN_PASSWORD",
+    "CAUSAL_MCP_SERVICE_TOKEN",
+    "CAUSAL_MCP_SIGNING_KEY_CURRENT",
+    "CAUSAL_MCP_SIGNING_KEY_PREVIOUS",
+)
+
+# 发布清单 secrets.required_keys 使用的必需键；缺失时部署校验必须失败。
+REQUIRED_SECRET_KEYS: tuple[str, ...] = (
+    "MYSQL_ROOT_PASSWORD",
+    "MYSQL_PASSWORD",
+    "MYSQL_WRITE_PASSWORD",
+    "MYSQL_READ_PASSWORD",
+    "MYSQL_REPLICATION_PASSWORD",
+    "CHECKPOINT_POSTGRES_PASSWORD",
+    "SECRET_KEY",
+    "API_KEY",
+    "DEEP_AGENT_API_KEY",
+    "CAUSAL_MCP_SERVICE_TOKEN",
+    "CAUSAL_MCP_SIGNING_KEY_CURRENT",
+    "GRAFANA_ADMIN_PASSWORD",
+)
+
+SECRET_SCHEMA_VERSION = "v1"
+
+_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ALLOWED_FILE_MODES = (0o600, 0o400, 0o640)
+
+_lock = threading.RLock()
+_cached_path: Path | None = None
+_cached_values: dict[str, str] | None = None
+
+
+class SecretFileError(RuntimeError):
+    """密钥文件缺失、格式错误、权限不安全或缺少必需键。"""
+
+
+def resolve_secret_file_path() -> Path:
+    """返回密钥文件路径；未显式配置时使用容器内默认挂载点。"""
+    override = os.environ.get(SECRET_FILE_ENV_VAR, "").strip()
+    return Path(override) if override else DEFAULT_SECRET_FILE_PATH
+
+
+def _check_file_permissions(path: Path) -> None:
+    """限制 POSIX 权限模式；部署脚本会把 0640 限定给 root:3000。"""
+    if os.name == "nt":
+        return
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode not in _ALLOWED_FILE_MODES:
+        allowed = " 或 ".join(format(item, "04o") for item in _ALLOWED_FILE_MODES)
+        raise SecretFileError(
+            f"密钥文件权限不安全: {path} 当前为 {mode:04o}，必须是 {allowed}。"
+            "使用 0640 时，文件必须属于容器专用组 GID 3000。"
+        )
+
+
+def _parse_secret_file(text: str, *, path: Path) -> dict[str, str]:
+    """解析 KEY=VALUE 行并返回键值对；任何歧义都直接失败。"""
+    values: dict[str, str] = {}
+    for number, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise SecretFileError(f"密钥文件格式错误: {path} 第 {number} 行缺少等号。")
+        key, _, raw_value = line.partition("=")
+        key = key.strip()
+        if not _KEY_PATTERN.match(key):
+            raise SecretFileError(
+                f"密钥文件格式错误: {path} 第 {number} 行的键名不合法。"
+            )
+        if key in values:
+            raise SecretFileError(
+                f"密钥文件格式错误: {path} 第 {number} 行重复定义键 {key}。"
+            )
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if not value:
+            raise SecretFileError(
+                f"密钥文件格式错误: {path} 第 {number} 行的键 {key} 取值为空。"
+            )
+        values[key] = value
+
+    unknown = sorted(set(values) - set(SECRET_KEYS))
+    if unknown:
+        raise SecretFileError(
+            f"密钥文件包含未定义的键: {', '.join(unknown)}。"
+            "请只保留 config/secret_file.py 中 SECRET_KEYS 声明的键。"
+        )
+    return values
+
+
+def load_secrets(*, path: Path | None = None, reload: bool = False) -> dict[str, str]:
+    """读取并缓存密钥文件，不把密钥值写入进程环境变量。"""
+    global _cached_path, _cached_values
+
+    resolved = Path(path) if path is not None else resolve_secret_file_path()
+    with _lock:
+        if not reload and _cached_values is not None and _cached_path == resolved:
+            return dict(_cached_values)
+        for name in SECRET_KEYS:
+            os.environ.pop(name, None)
+        if not resolved.is_file():
+            raise SecretFileError(
+                f"密钥文件不存在: {resolved}。请确认 Compose secret 已挂载，"
+                f"或设置 {SECRET_FILE_ENV_VAR} 指向真实文件。"
+            )
+        _check_file_permissions(resolved)
+        try:
+            text = resolved.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise SecretFileError(f"密钥文件不可读: {resolved}") from exc
+        values = _parse_secret_file(text, path=resolved)
+        missing = [name for name in REQUIRED_SECRET_KEYS if name not in values]
+        if missing:
+            raise SecretFileError(f"密钥文件缺少必需键: {', '.join(missing)}。")
+        _cached_path = resolved
+        _cached_values = dict(values)
+        return dict(_cached_values)
+
+
+def get_secret(name: str, *, default: str | None = None) -> str | None:
+    """按键读取一个密钥；键不在 SECRET_KEYS 中时抛出配置错误。"""
+    if name not in SECRET_KEYS:
+        raise SecretFileError(f"{name} 不是已声明的密钥键。")
+    return load_secrets().get(name, default)
+
+
+def require_secret(name: str) -> str:
+    """按键读取一个必需密钥；缺失时抛出配置错误。"""
+    value = get_secret(name)
+    if not value:
+        raise SecretFileError(f"密钥文件缺少必需键: {name}。")
+    return value
+
+
+def reset_secret_cache() -> None:
+    """清空进程内缓存，供测试与显式重载使用。"""
+    global _cached_path, _cached_values
+    with _lock:
+        _cached_path = None
+        _cached_values = None

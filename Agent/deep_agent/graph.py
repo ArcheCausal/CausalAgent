@@ -7,7 +7,7 @@ P2-U 测试不要求真实 deepagents/langgraph 包已安装。只有显式调�
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 import importlib
 import inspect
@@ -16,7 +16,12 @@ from typing import Any
 from Agent.deep_agent_tools.identity import new_message_execution_id
 from Agent.deep_agent_tools.models import FinalAnalysisDecision
 from Agent.deep_agent_tools.registry import AlgorithmRegistry
+from Agent.deep_agent_tools.interaction import (
+    DATA_PROCESSING_TOOL_NAME,
+    DataProcessingTool,
+)
 from Agent.deep_agent_tools.dependency_dispatch import (
+    _tool_calls_from_state,
     build_algorithm_dependency_middleware,
 )
 
@@ -181,25 +186,48 @@ def _extract_verified_provider_response_id(
 
 
 def _build_message_identity_middleware(
-    *, provider_response_id_extractor: ProviderResponseIdExtractor | None = None
+    *, provider_response_id_extractor: ProviderResponseIdExtractor | None = None,
+    registry: AlgorithmRegistry | None = None,
 ) -> Any:
     """在每次模型响应后持久化 Tool 调用使用的 response fallback identity。"""
 
-    try:
-        from langchain.agents.middleware import AgentMiddleware
-    except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover
-        raise DeepAgentDependencyError("LangChain AgentMiddleware is not installed") from exc
+    from langchain.agents.middleware import AgentMiddleware
+    from Agent.deep_agent_tools.runtime_updates import (
+        RuntimeInvocationIdentity, build_pending_invocation,
+    )
 
     class MessageExecutionIdentityMiddleware(AgentMiddleware):
         def after_model(self, state: Any, runtime: Any) -> dict[str, Any]:
             # fallback 每轮都重新生成；provider ID 缺失时显式写 None，清除
             # 可能来自上一轮的旧值，而不是让 State reducer 沿用 stale identity。
-            return {
+            update = {
                 "message_execution_id": new_message_execution_id(),
                 "provider_response_id": _extract_verified_provider_response_id(
                     state, runtime, provider_response_id_extractor
                 ),
             }
+            if registry is not None:
+                tools = frozenset(entry.spec.tool_name for entry in registry.entries)
+                calls = _tool_calls_from_state(state, tools)
+                records = {}
+                provider_id = update["provider_response_id"]
+                for call in calls:
+                    if call.get("name") not in tools:
+                        continue
+                    identity = RuntimeInvocationIdentity(
+                        provider_call_id=call["id"],
+                        response_identity=provider_id or update["message_execution_id"],
+                        response_identity_source=(
+                            "provider_response_id" if provider_id else "message_execution_id"
+                        ),
+                        provider_response_id=provider_id,
+                        runtime_context=runtime.context,
+                    )
+                    record = build_pending_invocation(identity=identity, tool_name=call["name"])
+                    records[record.invocation_id] = record
+                if records:
+                    update["action_ledger"] = records
+            return update
 
     return MessageExecutionIdentityMiddleware()
 
@@ -299,8 +327,70 @@ def build_deep_agent(
         filesystem_middleware,
         _build_summarization_middleware(configured_model, profile),
         *build_budget_middlewares(profile),
-        _build_message_identity_middleware(),
     ]
+    try:
+        from langchain.agents.middleware import AgentMiddleware
+    except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover - 真实版本门禁
+        raise DeepAgentDependencyError("LangChain AgentMiddleware is not installed") from exc
+
+    interaction_tool = DataProcessingTool(registry=registry) if registry is not None else None
+
+    class InteractionTurnGuardMiddleware(AgentMiddleware):
+        """确认工具必须独占一个工具调用轮次。"""
+
+        @staticmethod
+        def _interaction_calls(state: Any) -> list[Any]:
+            messages = getattr(state, "get", lambda *_: None)("messages") or []
+            latest = next(
+                (message for message in reversed(messages) if getattr(message, "tool_calls", None)),
+                None,
+            )
+            return [
+                call
+                for call in (getattr(latest, "tool_calls", None) or [])
+                if isinstance(call, Mapping)
+                and call.get("name") == DATA_PROCESSING_TOOL_NAME
+            ]
+
+        async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
+            state = getattr(request, "state", None)
+            messages = state.get("messages") if isinstance(state, Mapping) else None
+            latest = next(
+                (
+                    message
+                    for message in reversed(messages or [])
+                    if getattr(message, "tool_calls", None)
+                ),
+                None,
+            )
+            all_calls = list(getattr(latest, "tool_calls", None) or [])
+            calls = [
+                call
+                for call in all_calls
+                if isinstance(call, Mapping)
+                and call.get("name") == DATA_PROCESSING_TOOL_NAME
+            ]
+            if calls and len(all_calls) > 1:
+                from langchain_core.messages import ToolMessage
+                import json
+
+                call_id = str(request.tool_call.get("id") or "")
+                return ToolMessage(
+                    content=json.dumps(
+                        {
+                            "status": "rejected",
+                            "message": (
+                                "request_data_processing 必须独占一个工具调用轮次；"
+                                "不要在同一次响应中同时请求确认和执行算法。"
+                            ),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    tool_call_id=call_id,
+                    name=str(request.tool_call.get("name") or DATA_PROCESSING_TOOL_NAME),
+                    status="error",
+                )
+            return await handler(request)
     if registry is not None:
         middleware.append(
             build_algorithm_dependency_middleware(
@@ -309,9 +399,16 @@ def build_deep_agent(
                 timeout_seconds=profile.budget.tool_node_timeout_seconds,
             )
         )
+        middleware.append(InteractionTurnGuardMiddleware())
+    # after_model 按注册的反序执行：先持久化 identity/queued，再写 running，
+    # 最后 ToolNode 才能开始外部调用。两个 hook 都有独立 checkpoint 边界。
+    middleware.append(_build_message_identity_middleware(registry=registry))
     kwargs: dict[str, Any] = {
         "model": configured_model,
-        "tools": _materialize_domain_tools(domain_tools),
+        "tools": [
+            *_materialize_domain_tools(domain_tools),
+            *([interaction_tool.to_langchain_tool()] if interaction_tool is not None else []),
+        ],
         "subagents": [],
         "memory": list(MEMORY_PATHS),
         "system_prompt": active_config.system_prompt,

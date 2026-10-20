@@ -1,7 +1,7 @@
 [English](README_EN.md) | [简体中文](README.md)
 
 <p align="center">
-  <img src="./README/CausalAgent.png" alt="CausalAgent Logo">
+  <img src="./README/causalagent-mark.png" alt="CausalAgent brand mark" width="160">
 </p>
 
 <h1 align="center">
@@ -29,11 +29,10 @@ CausalAgent
 
 <br>
 
-*Upload your dataset, and CausalAgent will automatically select suitable causal analysis algorithms for you, generate an interactive dialogue interface, and produce a professional analysis report.*
+*CausalAgent provides a workspace for causal analysis on tabular data. Upload data, follow the analysis, and review results through interactive charts and reports.*
 
 > [!IMPORTANT]
-> **Project in active development**
-> We are upgrading the core architecture of CausalAgent. Features are evolving quickly. **Please Star the repo to follow future updates.**
+> CausalAgent includes a public website, a user workspace, an administrator console, and an isolated RAG evaluation workbench. Analysis results depend on the input data and the assumptions of each method.
 
 ## Table of Contents
 
@@ -46,31 +45,41 @@ CausalAgent
   - [Agent Runtime](#agent-runtime)
   - [Deep Agent](#deep-agent)
   - [Core Capabilities](#core-capabilities)
+    - [Pre-processing](#pre-processing)
+    - [Causal Analysis (MCP)](#causal-analysis-mcp)
+    - [Knowledge Base (RAG)](#knowledge-base-rag)
+    - [Web Search](#web-search)
+    - [Post-processing](#post-processing)
+    - [Report Generation](#report-generation)
 - [Quick Start](#quick-start)
   - [Service URLs](#service-urls)
   - [Minimum Configuration](#minimum-configuration)
   - [Docker Deployment](#docker-deployment)
 - [Administration and Development](#administration-and-development)
   - [Administrator Console](#administrator-console)
+  - [RAG Workbench](#rag-workbench)
   - [Observability](#observability)
-  - [User Frontend (Vue)](#user-frontend-vue)
+  - [Frontends (Vue)](#frontends-vue)
   - [Backend Tests](#backend-tests)
   - [Windows Deployment](#windows-deployment)
 - [Technical Documentation](#technical-documentation)
 - [Contributing](#contributing)
+- [License and Trademarks](#license-and-trademarks)
 - [Project Structure](#project-structure)
 - [Star History](#star-history)
 
 ## What is CausalAgent
 
-**A new generation causal analysis agent.** CausalAgent uses a LangGraph parent graph to orchestrate analysis nodes, tool stages, and subgraphs for end-to-end causal analysis on tabular data.
+**A causal analysis application for tabular data.** A LangGraph parent graph coordinates preprocessing, the Deep Agent subgraph, tool calls, and report generation; an independent worker executes analysis jobs.
 
-You only need to upload your data. CausalAgent will:
+The workspace helps users explore causal structures in their data. Results depend on data quality and method assumptions, and do not replace research design, domain knowledge, or experimental validation.
 
-- Inspect and profile your dataset.
-- Discover causal structures.
-- Perform post-processing and quality checks.
-- Generate interactive causal graphs and a structured, human-readable report.
+CausalAgent can:
+
+- Inspect and profile datasets.
+- Run supported methods for causal structure discovery.
+- Apply post-processing and quality checks to available results.
+- Present results through interactive causal graphs and structured reports.
 
 ## Why CausalAgent
 
@@ -96,15 +105,16 @@ You only need to upload your data. CausalAgent will:
 ## User Features
 
 ### User Showcase
+The public website provides product information, documentation, and release notes. The user workspace is where users start analyses and review conversations and reports.
 
 <p align="center">
-  <img src="./README/causalagent展示页.png" alt="Main Application" width="850">
+  <img src="./README/website-home-2026-10.png" alt="CausalAgent public website home page" width="850">
 </p>
 <p align="center">
-  <img src="./README/因果图页.png" alt="Causal Graph" width="850">
+  <img src="./README/user-workspace-home-2026-10.png" alt="User workspace home page" width="850">
 </p>
 <p align="center">
-  <img src="./README/image2.png" alt="Causal Graph Detail" width="450">
+  <img src="./README/user-analysis-report-2026-10.png" alt="Analysis report and charts in the user workspace" width="850">
 </p>
 
 ### Agent Runtime
@@ -232,7 +242,7 @@ The multi-stage `Dockerfile` builds the ordinary-user Vue app and the administra
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/Heyflyingpig/CausalAgent
+   git clone https://github.com/ArcheCausal/CausalAgent
    cd CausalAgent
    ```
 
@@ -262,10 +272,18 @@ The preceding sections focus on end users and first-time setup. This section col
 ### Administrator Console
 
 <p align="center">
-  <img src="./README/管理员.png" alt="Administrator Console" width="850">
+  <img src="./README/admin-database-dashboard-2026-10.png" alt="Administrator database dashboard main panel" width="850">
 </p>
 
 The administrator console covers users, sessions, jobs, files, database status, collection settings, and audit workflows. Complete security, API, deployment, and test boundaries are indexed in [`Document/admin/`](Document/admin/README.md).
+
+### RAG Workbench
+
+<p align="center">
+  <img src="./README/rag-workbench-2026-10.png" alt="Isolated knowledge-source workbench" width="850">
+</p>
+
+The isolated workbench supports knowledge-source ingestion, staged index construction, retrieval and Ragas evaluation, and controlled release publishing. Access requires the rag_eval.access permission. See [Document/architecture/rag-evaluation.md](Document/architecture/rag-evaluation.md) for its workflow and release boundaries.
 
 ### Observability
 
@@ -356,6 +374,10 @@ Contributions via Issues and Pull Requests are welcome.
 
 Supported keywords include `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `build`, `perf`, and `revert`.
 
+## License and Trademarks
+
+CausalAgent's original code is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0) starting with this revision; see [`LICENSE`](LICENSE) for the full terms. 
+
 ## Project Structure
 
 ```text
@@ -389,5 +411,5 @@ Supported keywords include `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Heyflyingpig/CausalAgent&type=Date)](https://star-history.com/#Heyflyingpig/CausalAgent&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=ArcheCausal/CausalAgent&type=Date)](https://star-history.com/#ArcheCausal/CausalAgent&Date)
 

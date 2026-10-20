@@ -1,4 +1,4 @@
-"""Deep Agent P1 共享领域/传输契约。"""
+"""共享领域/传输契约；运行时调度器与工具须从对应子模块显式导入。"""
 
 from .algorithm_executor import (
     AlgorithmExecutor,
@@ -26,7 +26,6 @@ from .error_codes import (
     is_server_output_error,
     is_user_input_error,
 )
-from .fake_algorithm_executor import FakeAlgorithmExecutor
 from .identity import (
     CAUSAL_INVOCATION_NAMESPACE,
     ResponseIdentity,
@@ -35,6 +34,7 @@ from .identity import (
     build_result_ref,
     build_deep_agent_run_id,
     build_deep_agent_execution_scope,
+    build_deep_agent_analysis_scope,
     build_deep_agent_step_id,
     canonical_mcp_context_payload,
     new_message_execution_id,
@@ -76,26 +76,6 @@ from .registry import (
     UnknownCapabilityError,
     build_default_registry,
 )
-from .dependency_planner import (
-    DependencyPlan,
-    DependencyPlanningError,
-    PlannedToolCall,
-    ToolCallRequest,
-    ToolExecutionOutcome,
-    build_dependency_plan,
-    execute_dependency_plan,
-)
-from .algorithm_tools import AlgorithmTool, build_algorithm_tools
-from .rag_evidence_tool import (
-    RagEvidenceQuery,
-    RagEvidenceTool,
-    build_default_rag_evidence_tool,
-)
-from .web_evidence_tool import (
-    WebEvidenceQuery,
-    WebEvidenceTool,
-    build_default_web_evidence_tool,
-)
 
 __all__ = [
     "ActionAttempt",
@@ -103,7 +83,6 @@ __all__ = [
     "AlgorithmExecutor",
     "AlgorithmExecutionResponse",
     "AlgorithmExecutorError",
-    "AlgorithmTool",
     "AlgorithmRegistry",
     "AlgorithmResult",
     "AlgorithmResultProvenance",
@@ -117,12 +96,9 @@ __all__ = [
     "DataProfile",
     "DEFAULT_ALGORITHM_SPECS",
     "Diagnostics",
-    "DependencyPlan",
-    "DependencyPlanningError",
     "DIRECT_LINGAM_SPEC",
     "CDFM_SPEC",
     "EvidenceResult",
-    "FakeAlgorithmExecutor",
     "FinalAnalysisDecision",
     "GraphEdge",
     "InvocationRecord",
@@ -142,30 +118,19 @@ __all__ = [
     "SafeWarning",
     "ScientificConflict",
     "StandardizedGraph",
-    "PlannedToolCall",
-    "RagEvidenceQuery",
-    "RagEvidenceTool",
-    "ToolCallRequest",
-    "ToolExecutionOutcome",
-    "WebEvidenceQuery",
-    "WebEvidenceTool",
     "USER_INPUT_ERROR_CODES",
     "UnknownCapabilityError",
     "WebEvidenceResult",
     "build_default_registry",
-    "build_algorithm_tools",
-    "build_default_rag_evidence_tool",
-    "build_default_web_evidence_tool",
-    "build_dependency_plan",
     "build_invocation_id",
     "build_logical_call_key",
     "build_raw_result_metadata",
     "build_result_ref",
     "build_deep_agent_run_id",
     "build_deep_agent_execution_scope",
+    "build_deep_agent_analysis_scope",
     "build_deep_agent_step_id",
     "canonical_json_bytes",
-    "execute_dependency_plan",
     "canonical_mcp_context_payload",
     "is_server_output_error",
     "is_user_input_error",

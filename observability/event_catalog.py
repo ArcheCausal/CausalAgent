@@ -208,6 +208,11 @@ RESULT_KIND = DetailRule(
     choices=frozenset({"structured_result", "other_result"}),
     max_bytes=32,
 )
+ERROR_TYPE = DetailRule(
+    (str,),
+    pattern=re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$"),
+    max_bytes=64,
+)
 ERROR_CATEGORY = DetailRule(
     (str,),
     choices=frozenset(
@@ -302,6 +307,19 @@ _events: dict[str, EventSpec] = {
         logging.ERROR,
         "request",
         "分析任务创建失败",
+        reason_code=REASON,
+    ),
+    # 等待用户确认的独立扫描任务：每一轮收敛或失败都必须留下可检索的事件。
+    "job.input_wait.expired": _spec(
+        logging.INFO,
+        "lifecycle",
+        "等待用户确认的任务已超过期限",
+        expired_count=COUNT,
+    ),
+    "job.input_wait.expire_failed": _spec(
+        logging.ERROR,
+        "lifecycle",
+        "扫描等待用户确认的任务失败",
         reason_code=REASON,
     ),
     "admin.audit.write_failed": _spec(
@@ -570,6 +588,17 @@ _events: dict[str, EventSpec] = {
         capability=TOKEN,
         duration_ms=DURATION,
         timeout_seconds=COUNT,
+    ),
+    "mcp.runner.failed": _spec(
+        logging.ERROR,
+        "dependency",
+        "MCP 算法 runner 返回失败",
+        capability=TOKEN,
+        error_type=ERROR_TYPE,
+        reason_code=REASON,
+        model_source=DetailRule(
+            (str,), choices=frozenset({"local_dir", "hub", "unknown"}), max_bytes=16
+        ),
     ),
     "mcp.request.received": _spec(
         logging.INFO,

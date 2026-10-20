@@ -42,6 +42,9 @@ MAX_STRUCTURED_INPUT_DEPTH = 4
 MAX_STRUCTURED_INPUT_ITEMS = 64
 CHECKPOINT_RECOVERY_TIMEOUT_MS = 3000
 JOB_DRAINING_STALE_AFTER_SECONDS = 420
+INPUT_WAIT_TIMEOUT_SECONDS = 300
+INPUT_WAIT_TIMEOUT_CODE = "human_input_timeout"
+INPUT_WAIT_TIMEOUT_MESSAGE = "等待用户确认超过 5 分钟，任务已结束。"
 
 
 class FailJobResult(str, Enum):
@@ -252,7 +255,53 @@ def _row_to_job(row: dict[str, Any] | None) -> dict[str, Any] | None:
         return None
     if "result_json" in row:
         row["result_json"] = _json_loads(row["result_json"])
+    if "current_interaction" in row:
+        row["current_interaction"] = _json_loads(row["current_interaction"])
     return row
+
+
+def _as_public_interaction(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """从终态 payload 提取可持久化的公开交互结构。"""
+
+    if payload.get("type") != "interrupt":
+        return None
+    interaction = payload.get("interaction")
+    if isinstance(interaction, dict):
+        return interaction
+    return {
+        "type": "interaction",
+        "interaction_type": "text",
+        "message": payload.get("message", ""),
+        "allow_other": True,
+    }
+
+
+def _interaction_prompt(interaction: dict[str, Any] | None, fallback: str | None) -> str:
+    """优先使用结构化交互中的公开文字。"""
+
+    if isinstance(interaction, dict) and isinstance(interaction.get("message"), str):
+        return interaction["message"]
+    return fallback or ""
+
+
+def _with_db_expiry(
+    cursor,
+    interaction: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """以数据库时间给公开交互补充截止时间，事件与 Job 字段共用同一事实。"""
+
+    if not isinstance(interaction, dict):
+        return interaction
+    cursor.execute(
+        "SELECT DATE_FORMAT(UTC_TIMESTAMP(6) + INTERVAL %s SECOND,"
+        " '%Y-%m-%dT%H:%i:%s.%fZ') AS expires_at",
+        (INPUT_WAIT_TIMEOUT_SECONDS,),
+    )
+    row = cursor.fetchone() or {}
+    expires_at = row.get("expires_at")
+    if not isinstance(expires_at, str):
+        return interaction
+    return {**interaction, "expires_at": expires_at}
 
 
 def get_active_job(user_id: int, session_id: str) -> dict[str, Any] | None:
@@ -287,6 +336,7 @@ def get_active_jobs(user_id: int, session_id: str | None = None) -> list[dict[st
             SELECT job_id, user_id, session_id, status,
                    attempt_count, recovery_count, resume_count, max_attempts,
                    current_question_id, current_waiting_prompt, input_user_file_id,
+                   current_interaction, input_wait_expires_at,
                    input_filename, created_at
             FROM analysis_jobs
             WHERE {' AND '.join(clauses)}
@@ -294,7 +344,11 @@ def get_active_jobs(user_id: int, session_id: str | None = None) -> list[dict[st
             """,
             tuple(params),
         )
-        return cursor.fetchall()
+        rows = cursor.fetchall()
+        for row in rows:
+            if "current_interaction" in row:
+                row["current_interaction"] = _json_loads(row["current_interaction"])
+        return rows
 
 
 def get_latest_event_id(job_id: str) -> int:
@@ -437,7 +491,12 @@ def create_job(
             (user_id, session_id),
         )
         active = _row_to_job(cursor.fetchone())
-        if active:
+        if active and active.get("status") == "waiting_input" and not _is_wait_expired(active):
+            raise ActiveJobConflictError(active)
+        if active and active.get("status") == "waiting_input":
+            # 只有已到期的等待确认可以在同一事务内收敛，随后继续创建新 Job。
+            _expire_job_in_transaction(cursor, job_id=str(active["job_id"]), job=active)
+        elif active:
             raise ActiveJobConflictError(active)
 
         cursor.execute(
@@ -693,7 +752,183 @@ def _lock_job_then_session(
     return job
 
 
-def _get_pending_checkpoint_interrupt(job: dict[str, Any]) -> dict[str, str] | None:
+def _set_waiting_input_state(
+    cursor,
+    *,
+    job_id: str,
+    question_id: str,
+    prompt: str,
+    interaction: dict[str, Any] | None,
+) -> None:
+    """在调用方事务内写入等待状态；期限以数据库时间为准。"""
+
+    if isinstance(interaction, dict):
+        cursor.execute(
+            "SELECT DATE_FORMAT(UTC_TIMESTAMP(6) + INTERVAL %s SECOND,"
+            " '%Y-%m-%dT%H:%i:%s.%fZ') AS expires_at",
+            (INPUT_WAIT_TIMEOUT_SECONDS,),
+        )
+        row = cursor.fetchone() or {}
+        if isinstance(row.get("expires_at"), str):
+            interaction = {**interaction, "expires_at": row["expires_at"]}
+    cursor.execute(
+        """
+        UPDATE analysis_jobs
+        SET status = 'waiting_input', worker_id = NULL,
+            locked_at = NULL, heartbeat_at = NULL,
+            execution_state = NULL,
+            execution_released_at = UTC_TIMESTAMP(6),
+            execution_release_reason = 'worker_confirmed',
+            current_question_id = %s, current_waiting_prompt = %s,
+            current_interaction = %s,
+            input_wait_expires_at = UTC_TIMESTAMP(6) + INTERVAL %s SECOND,
+            finished_at = NULL
+        WHERE job_id = %s AND status = 'running'
+        """,
+        (
+            question_id,
+            prompt,
+            _json_dumps(interaction) if interaction is not None else None,
+            INPUT_WAIT_TIMEOUT_SECONDS,
+            job_id,
+        ),
+    )
+
+
+def _expire_job_in_transaction(
+    cursor,
+    *,
+    job_id: str,
+    job: dict[str, Any],
+) -> bool:
+    """在调用方事务内把过期的等待确认收敛为失败，返回是否已处理。
+
+    只处理 waiting_input 且截止时间已到的情况。事务锁由调用方持有，
+    因而与 resume/cancel 的竞争只允许一方生效。
+    """
+
+    if job.get("status") != "waiting_input":
+        return False
+    # 直接使用已锁定的 Job 行；截止时间来自数据库，避免在事务内再发一次
+    # 非锁定查询而误读其他连接的状态。
+    expires_at = job.get("input_wait_expires_at")
+    if expires_at is None:
+        # 旧 Job 没有期限字段：补一个完整窗口，本次不判定为过期。
+        cursor.execute(
+            f"""
+            UPDATE analysis_jobs
+            SET input_wait_expires_at = UTC_TIMESTAMP(6) + INTERVAL %s SECOND
+            WHERE job_id = %s AND status = 'waiting_input'
+              AND input_wait_expires_at IS NULL
+            """,
+            (INPUT_WAIT_TIMEOUT_SECONDS, job_id),
+        )
+        return False
+    expired = _is_wait_expired(job)
+    if not expired:
+        return False
+    payload = {
+        "type": "error",
+        "message": INPUT_WAIT_TIMEOUT_MESSAGE,
+        "reason_code": INPUT_WAIT_TIMEOUT_CODE,
+    }
+    event_id = _insert_event(
+        cursor,
+        job_id=job_id,
+        event_type="error",
+        payload=payload,
+        event_key=f"terminal:error:{INPUT_WAIT_TIMEOUT_CODE}",
+    )
+    save_assistant_for_job_in_transaction(
+        cursor,
+        job_id=job_id,
+        user_id=int(job["user_id"]),
+        session_id=job["session_id"],
+        ai_response={"type": "text", "summary": INPUT_WAIT_TIMEOUT_MESSAGE},
+        source_event_id=event_id,
+        analysis_job_input_id=_latest_input_id(cursor, job_id),
+    )
+    cursor.execute(
+        """
+        UPDATE analysis_jobs
+        SET status = 'failed', error_message = %s, last_error = %s,
+            active_session_key = NULL, worker_id = NULL,
+            locked_at = NULL, heartbeat_at = UTC_TIMESTAMP(6),
+            execution_state = NULL,
+            execution_released_at = UTC_TIMESTAMP(6),
+            execution_release_reason = 'input_timeout',
+            chat_saved_at = UTC_TIMESTAMP(6), finished_at = UTC_TIMESTAMP(6),
+            current_question_id = NULL, current_waiting_prompt = NULL,
+            current_interaction = NULL, input_wait_expires_at = NULL
+        WHERE job_id = %s AND status = 'waiting_input'
+          AND input_wait_expires_at IS NOT NULL
+          AND input_wait_expires_at <= UTC_TIMESTAMP(6)
+        """,
+        (INPUT_WAIT_TIMEOUT_MESSAGE, INPUT_WAIT_TIMEOUT_CODE, job_id),
+    )
+    if cursor.rowcount != 1:
+        raise RuntimeError("等待确认过期状态已被其他请求改变")
+    return True
+
+
+def _is_wait_expired(job: dict[str, Any]) -> bool:
+    """按数据库写入的 UTC 截止时间判断等待确认是否已过期。"""
+
+    expires_at = job.get("input_wait_expires_at")
+    if not isinstance(expires_at, datetime):
+        return False
+    deadline = (
+        expires_at
+        if expires_at.tzinfo is not None
+        else expires_at.replace(tzinfo=timezone.utc)
+    )
+    return datetime.now(timezone.utc) >= deadline
+
+
+def expire_waiting_jobs(*, job_id: str | None = None) -> list[str]:
+    """扫描并收敛已过期的等待确认，返回本次实际结束的 Job ID。
+
+    调用方可以是 worker 的独立清理任务，也可以是创建/恢复前的同步检查。
+    本函数不持有执行槽位，也不会取消正常等待中的 Job。
+    """
+
+    expired_jobs: list[str] = []
+    with get_write_connection() as connection:
+        try:
+            connection.start_transaction()
+            cursor = connection.cursor(dictionary=True)
+            if job_id is None:
+                cursor.execute(
+                    """
+                    SELECT job_id
+                    FROM analysis_jobs
+                    WHERE status = 'waiting_input'
+                      AND input_wait_expires_at IS NOT NULL
+                      AND input_wait_expires_at <= UTC_TIMESTAMP(6)
+                    ORDER BY input_wait_expires_at ASC
+                    LIMIT 100
+                    FOR UPDATE SKIP LOCKED
+                    """
+                )
+                candidates = [str(row["job_id"]) for row in cursor.fetchall()]
+            else:
+                candidates = [job_id]
+            for candidate in candidates:
+                cursor.execute(
+                    "SELECT * FROM analysis_jobs WHERE job_id = %s FOR UPDATE",
+                    (candidate,),
+                )
+                job = _row_to_job(cursor.fetchone())
+                if _expire_job_in_transaction(cursor, job_id=candidate, job=job or {}):
+                    expired_jobs.append(candidate)
+            connection.commit()
+            return expired_jobs
+        except Exception:
+            connection.rollback()
+            raise
+
+
+def _get_pending_checkpoint_interrupt(job: dict[str, Any]) -> dict[str, Any] | None:
     """读取 Job 根 checkpoint 的 pending interrupt；失败时不冒险重放 Agent。"""
     try:
         from app.agent.checkpoint_recovery import (
@@ -723,6 +958,8 @@ def _repair_pending_interrupt(cursor, job: dict[str, Any]) -> bool:
         "message": pending["message"],
         "question_id": question_id,
     }
+    if pending.get("interaction"):
+        payload["interaction"] = pending["interaction"]
     event_id = _insert_event(
         cursor,
         job_id=job["job_id"],
@@ -739,19 +976,12 @@ def _repair_pending_interrupt(cursor, job: dict[str, Any]) -> bool:
         source_event_id=event_id,
         analysis_job_input_id=_latest_input_id(cursor, job["job_id"]),
     )
-    cursor.execute(
-        """
-        UPDATE analysis_jobs
-        SET status = 'waiting_input', worker_id = NULL,
-            locked_at = NULL, heartbeat_at = NULL,
-            execution_state = NULL,
-            execution_released_at = UTC_TIMESTAMP(6),
-            execution_release_reason = 'worker_confirmed',
-            current_question_id = %s, current_waiting_prompt = %s,
-            finished_at = NULL
-        WHERE job_id = %s AND status = 'running'
-        """,
-        (question_id, pending["message"], job["job_id"]),
+    _set_waiting_input_state(
+        cursor,
+        job_id=job["job_id"],
+        question_id=question_id,
+        prompt=pending["message"],
+        interaction=pending.get("interaction"),
     )
     if cursor.rowcount != 1:
         raise RuntimeError("修复 pending interrupt 时 Job 状态已发生变化")
@@ -804,6 +1034,12 @@ def _complete_job_lifecycle(
                     connection.rollback()
                     return False
 
+            if status == "waiting_input":
+                # 先补齐数据库截止时间，再写入事件；事件与 Job 字段必须一致。
+                interaction = _as_public_interaction(payload)
+                interaction = _with_db_expiry(cursor, interaction)
+                if interaction is not None:
+                    payload = {**payload, "interaction": interaction}
             event_id = _insert_event(
                 cursor,
                 job_id=job_id,
@@ -824,23 +1060,12 @@ def _complete_job_lifecycle(
                 )
 
             if status == "waiting_input":
-                cursor.execute(
-                    """
-                    UPDATE analysis_jobs
-                    SET status = 'waiting_input', worker_id = NULL,
-                        locked_at = NULL, heartbeat_at = NULL,
-                        execution_state = NULL,
-                        execution_released_at = UTC_TIMESTAMP(6),
-                        execution_release_reason = 'worker_confirmed',
-                        current_question_id = %s, current_waiting_prompt = %s,
-                        finished_at = NULL
-                    WHERE job_id = %s AND status = 'running'
-                    """,
-                    (
-                        question_id,
-                        payload.get("message"),
-                        job_id,
-                    ),
+                _set_waiting_input_state(
+                    cursor,
+                    job_id=job_id,
+                    question_id=question_id or "",
+                    prompt=_interaction_prompt(interaction, payload.get("message")),
+                    interaction=interaction,
                 )
             elif status == "succeeded":
                 cursor.execute(
@@ -853,7 +1078,8 @@ def _complete_job_lifecycle(
                         execution_released_at = UTC_TIMESTAMP(6),
                         execution_release_reason = 'worker_confirmed',
                         chat_saved_at = UTC_TIMESTAMP(6), finished_at = UTC_TIMESTAMP(6),
-                        current_question_id = NULL, current_waiting_prompt = NULL
+                        current_question_id = NULL, current_waiting_prompt = NULL,
+                        current_interaction = NULL, input_wait_expires_at = NULL
                     WHERE job_id = %s AND status = 'running'
                     """,
                     (_json_dumps(result or {}), job_id),
@@ -869,7 +1095,8 @@ def _complete_job_lifecycle(
                         execution_released_at = UTC_TIMESTAMP(6),
                         execution_release_reason = 'worker_confirmed',
                         chat_saved_at = UTC_TIMESTAMP(6), finished_at = UTC_TIMESTAMP(6),
-                        current_question_id = NULL, current_waiting_prompt = NULL
+                        current_question_id = NULL, current_waiting_prompt = NULL,
+                        current_interaction = NULL, input_wait_expires_at = NULL
                     WHERE job_id = %s AND status = 'running'
                     """,
                     (payload.get("message", "任务执行失败"), payload.get("message", "任务执行失败"), job_id),
@@ -881,6 +1108,7 @@ def _complete_job_lifecycle(
                     SET status = 'canceled', active_session_key = NULL,
                         worker_id = NULL, locked_at = NULL, heartbeat_at = NULL,
                         current_question_id = NULL, current_waiting_prompt = NULL,
+                        current_interaction = NULL, input_wait_expires_at = NULL,
                         finished_at = UTC_TIMESTAMP(6)
                     WHERE job_id = %s AND status = 'waiting_input'
                     """,
@@ -1513,7 +1741,8 @@ def fail_job(
                     execution_release_reason = 'worker_confirmed',
                     chat_saved_at = UTC_TIMESTAMP(6),
                     finished_at = UTC_TIMESTAMP(6),
-                    current_question_id = NULL, current_waiting_prompt = NULL
+                    current_question_id = NULL, current_waiting_prompt = NULL,
+                    current_interaction = NULL, input_wait_expires_at = NULL
                 WHERE job_id = %s AND worker_id = %s AND attempt_count = %s
                   {lease_clause}
                   AND status = 'running' AND execution_state = 'leased'
@@ -1560,6 +1789,7 @@ def resume_job(
             )
             if not job:
                 raise PermissionError("任务不存在或无权访问")
+            expired = _expire_job_in_transaction(cursor, job_id=job_id, job=job)
             cursor.execute(
                 """
                 SELECT * FROM analysis_job_inputs
@@ -1574,6 +1804,12 @@ def resume_job(
                     raise IdempotencyConflictError("Idempotency-Key 已用于不同的恢复输入")
                 connection.commit()
                 return job, True
+            if expired:
+                connection.commit()
+                raise JobStateConflictError(
+                    "等待用户确认已超过 5 分钟，任务已结束",
+                    {**job, "status": "failed"},
+                )
             if job["status"] != "waiting_input":
                 raise JobStateConflictError("任务当前不在 waiting_input 状态", job)
             if job.get("current_question_id") != question_id:
@@ -1620,6 +1856,7 @@ def resume_job(
                 UPDATE analysis_jobs
                 SET status = 'queued', resume_count = resume_count + 1,
                     current_question_id = NULL, current_waiting_prompt = NULL,
+                    current_interaction = NULL, input_wait_expires_at = NULL,
                     finished_at = NULL
                 WHERE job_id = %s AND status = 'waiting_input'
                 """,
@@ -1698,6 +1935,7 @@ def cancel_job(
                 UPDATE analysis_jobs
                 SET status = 'canceled', active_session_key = NULL,
                     current_question_id = NULL, current_waiting_prompt = NULL,
+                    current_interaction = NULL, input_wait_expires_at = NULL,
                     cancel_idempotency_key = %s,
                     cancel_request_fingerprint = %s,
                     finished_at = UTC_TIMESTAMP(6),

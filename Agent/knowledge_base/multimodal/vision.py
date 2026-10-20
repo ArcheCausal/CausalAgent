@@ -19,6 +19,7 @@ from openai import OpenAI
 from PIL import Image, ImageOps
 from pydantic import ValidationError
 
+from config.secret_file import get_secret, require_secret
 from .contracts import OutboundImageRecord, VisionAnalysis, canonical_json, sha256_bytes
 from .remote_policy import RemoteSamplePolicy
 
@@ -90,7 +91,7 @@ class VisionAnalyzer:
 
     def configured(self) -> bool:
         """报告远程调用所需配置是否完整且非占位。"""
-        api_key = os.getenv("VISION_API_KEY", "")
+        api_key = get_secret("VISION_API_KEY") or ""
         base_url = os.getenv("VISION_BASE_URL", "")
         parsed = urlparse(base_url)
         hostname = (parsed.hostname or "").lower()
@@ -166,7 +167,7 @@ class VisionAnalyzer:
         payload = base64.b64encode(prepared.payload).decode("ascii")
         context = context[:2000]
         message = [{"type": "text", "text": _PROMPT + (f"\n邻近正文（仅用于消歧）：{context}" if context else "")}, {"type": "image_url", "image_url": {"url": f"data:{prepared.media_type};base64,{payload}"}}]
-        client = OpenAI(api_key=os.environ["VISION_API_KEY"], base_url=os.environ["VISION_BASE_URL"], timeout=self.timeout)
+        client = OpenAI(api_key=require_secret("VISION_API_KEY"), base_url=os.environ["VISION_BASE_URL"], timeout=self.timeout)
         last_error: Exception | None = None
         failure_category = "unknown"
         request_count = 0

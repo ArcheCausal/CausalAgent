@@ -6,6 +6,7 @@ on:
 permissions:
   contents: read
   packages: write
+  actions: read
 
 concurrency:
   group: staging-images-${{ github.ref }}
@@ -80,7 +81,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push commit-tagged image
+      # MCP Dockerfile 在复制源码后执行入口导入及运行时依赖边界检查，失败即阻止推送。
+      - name: Build, validate and push commit-tagged image
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -108,3 +110,10 @@ jobs:
             echo
           } >> "$GITHUB_STEP_SUMMARY"
           echo "$IMAGE_NAME:$IMAGE_TAG $IMAGE_DIGEST"
+
+  build-release-bundle:
+    name: Package the published images
+    needs: [prepare, build-and-push]
+    uses: ./.github/workflows/build-release-bundle.yml
+    with:
+      source_commit: ${{ github.sha }}

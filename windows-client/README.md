@@ -144,7 +144,7 @@ powershell -ExecutionPolicy Bypass -File .\windows-client\build.ps1 `
 
 ### `v0.1.0` GitHub Release
 
-`.github/workflows/release-windows.yml` 监听 `v*` tag，在 GitHub 托管的 `windows-latest` Windows runner 上创建 `.venv-desktop`、安装桌面依赖、运行桌面逻辑测试并构建 Developer Preview onefile；冻结通道标记和 EXE 桌面环境检查都通过后，才生成 `SHA256SUMS.txt`。workflow 自动创建 Draft Pre-release 并上传 EXE；GitHub 会按该 tag 自动提供 Source code 压缩包，workflow 不上传 Docker 镜像。维护者检查 Draft 的 tag、附件、校验值和说明后，再手动点击 Publish release。
+`.github/workflows/release-windows.yml` 不会因推送 `v*` tag 自动运行。先将 workflow 和目标版本代码合入 `main`，再推送严格 SemVer tag；随后在 Actions 页面手动运行 `Windows Developer Preview Release`，填写 `target_tag`，并保持 `upload_to_published_release` 关闭。workflow 在 GitHub 托管的 `windows-latest` runner 上创建 `.venv-desktop`、安装桌面依赖、运行桌面逻辑测试并构建 Developer Preview onefile；冻结通道标记和 EXE 桌面环境检查通过后，生成 `SHA256SUMS.txt`，并创建 Draft Pre-release、上传 EXE。GitHub 会按该 tag 自动提供 Source code 压缩包，workflow 不上传 Docker 镜像。维护者检查 Draft 的 tag、附件、校验值和说明后，再手动点击 Publish release。
 
 已发布 Release 因构建故障缺少附件时，不重新创建或移动 tag。先将 workflow 修复合并到默认分支，再从 Actions 页面手动运行 `Windows Developer Preview Release`，填写原 tag 并显式确认补齐模式。workflow 会从原 tag 重新构建，只向已发布且未锁定的 Release 上传缺失的 EXE 与校验文件；同名附件存在时拒绝覆盖，也不改变正式版或 Pre-release 属性。完整操作和发布边界见 [`Document/development/deployment.md`](../Document/development/deployment.md#源码-release-与-cd-流程)。
 

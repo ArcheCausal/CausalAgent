@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import inspect
 import asyncio
+import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -20,16 +20,18 @@ from .models import (
     ActionAttempt,
     AlgorithmResult,
     DataProfile,
+    PreprocessingApproval,
+    PreprocessingPlan,
     InvocationRecord,
-    McpInvocationContext,
 )
 from .identity import build_invocation_id, current_input_identity
+from .interaction import resolve_approved_plan
 from .registry import AlgorithmRegistry, RegistryEntry
 from .runtime_updates import (
-    build_terminal_invocation,
-    build_tool_command,
+    algorithm_terminal_command,
     emit_public_decision_event,
     emit_tool_lifecycle_event,
+    normalize_tool_status,
     resolve_runtime_invocation,
     with_tool_runtime_schema,
 )
@@ -64,7 +66,7 @@ class AlgorithmTool:
 
     @property
     def description(self) -> str:
-        return self.entry.spec.description
+        return self.entry.spec.model_description()
 
     @property
     def args_schema(self) -> type:
@@ -92,7 +94,12 @@ class AlgorithmTool:
             column_names=columns,
         )
 
-    def _adapter_input_from_runtime(self, runtime: Any) -> AdapterInput:
+    def _adapter_input_from_runtime(
+        self,
+        runtime: Any,
+        *,
+        resolved: tuple[PreprocessingApproval, PreprocessingPlan] | None = None,
+    ) -> AdapterInput:
         """从当前 ToolRuntime 生成输入快照；文件正文不进入 State。"""
 
         context = getattr(runtime, "context", None)
@@ -103,12 +110,16 @@ class AlgorithmTool:
         if not isinstance(state, Mapping):
             raise RuntimeError("ToolRuntime.state must be a mapping")
         dataset_csv = state.get("dataset_csv")
+        approval = resolved[0] if resolved is not None else None
+        plan = resolved[1] if resolved is not None else None
         return AdapterInput(
             data_profile=self._data_profile_from_state(state),
             input_identity=current_input_identity(identity),
             dataset_csv=dataset_csv if isinstance(dataset_csv, str) else None,
             missing_values_present=bool(state.get("missing_values_present")),
             dataset_authority_available=True,
+            preprocessing=plan,
+            approval=approval,
         )
 
     def _record(
@@ -153,6 +164,10 @@ class AlgorithmTool:
                 if status == "timed_out"
                 else "not_ready"
                 if status == "not_ready"
+                else "not_applicable"
+                if status == "not_applicable"
+                else "skipped"
+                if status == "skipped"
                 else "failed"
             ),
             result_ref=result_ref,
@@ -288,14 +303,7 @@ class AlgorithmTool:
             )
             raise
 
-        terminal_status = {
-            "valid": "succeeded",
-            "timed_out": "timed_out",
-            "not_ready": "not_ready",
-            "not_applicable": "failed",
-            "invalid_input": "failed",
-            "execution_failed": "failed",
-        }[result.status]
+        terminal_status = normalize_tool_status(result.status)
         terminal = self._record(
             provider_call_id=provider_call_id,
             response_identity=response_identity,
@@ -323,22 +331,85 @@ class AlgorithmTool:
     def to_langchain_tool(self) -> Any:
         """包装为使用 ToolRuntime/Command 原子回写结果和 Ledger 的 Tool。"""
 
-        try:
-            from langchain.tools import ToolRuntime
-            from langchain_core.tools import StructuredTool
-        except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover
-            raise RuntimeError("LangChain is not installed") from exc
+        from langchain.tools import ToolRuntime
+        from langchain_core.messages import ToolMessage
+        from langchain_core.tools import StructuredTool
 
         async def call(runtime: Any, **kwargs: Any) -> Any:
             identity = resolve_runtime_invocation(
                 runtime,
                 expected_context=self.runtime_context,
             )
-            started_at = datetime.now(timezone.utc)
-            active_adapter_input = self.adapter_input or self._adapter_input_from_runtime(
-                runtime
+            # 模型可以在同一次 Tool Call 中声明 preprocessing；运行时只在它与
+            # State 中获批方案完全一致时使用。这里解析出的 plan/approval 会直接
+            # 进入 AdapterInput，后续不再按 capability_id 宽泛查找。
+            state = getattr(runtime, "state", None)
+            if not isinstance(state, Mapping):
+                raise RuntimeError("ToolRuntime.state must be a mapping")
+            model_parameter_plan = kwargs.get("preprocessing")
+            proposed = (
+                PreprocessingPlan.model_validate(model_parameter_plan)
+                if model_parameter_plan is not None
+                else None
             )
+            resolution = resolve_approved_plan(
+                state=state,
+                capability_id=self.entry.spec.capability_id,
+                plan=proposed,
+            )
+            if resolution.status == "ambiguous":
+                return ToolMessage(
+                    content=json.dumps(
+                        {
+                            "status": "needs_confirmation",
+                            "reason": (
+                                "当前算法存在多个不同的已批准处理方案，请明确携带"
+                                "本次要执行的 preprocessing 方案。"
+                            ),
+                            "unmet_requirements": ["processing_plan_ambiguous"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    tool_call_id=identity.provider_call_id,
+                    name=self.name,
+                    status="error",
+                )
+            resolved = resolution.entry
+            if model_parameter_plan is not None and resolved is None:
+                return ToolMessage(
+                    content=json.dumps(
+                        {
+                            "status": "needs_confirmation",
+                            "reason": (
+                                "当前处理方案没有对应的用户确认。请先调用 "
+                                "request_data_processing 取得确认，再携带同一方案重试。"
+                            ),
+                            "unmet_requirements": ["processing_not_approved"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    tool_call_id=identity.provider_call_id,
+                    name=self.name,
+                    status="error",
+                )
+            # envelope 默认值 None 会进入 StructuredTool 参数；执行器 schema
+            # 不接受该字段，必须在任何路径上剥离。
+            kwargs.pop("preprocessing", None)
+            started_at = datetime.now(timezone.utc)
+            runtime_adapter_input = self._adapter_input_from_runtime(
+                runtime,
+                resolved=resolved,
+            )
+            active_adapter_input = self.adapter_input or runtime_adapter_input
+            if resolved is not None:
+                active_adapter_input = replace(
+                    active_adapter_input,
+                    preprocessing=resolved[1],
+                    approval=resolved[0],
+                )
             public_decision = kwargs.pop("public_decision", None)
+            # preprocessing 由运行时按获批方案注入；模型以同名字段自行填写时
+            # 只用于与 State 中的确认内容核对，不能直接成为执行参数。
             if public_decision is not None:
                 await emit_public_decision_event(
                     runtime,
@@ -352,76 +423,27 @@ class AlgorithmTool:
                 identity=identity,
                 tool_name=self.name,
             )
-            try:
-                result = await self.ainvoke(
-                    kwargs,
-                    provider_call_id=identity.provider_call_id,
-                    response_identity=identity.response_identity,
-                    runtime_context=identity.runtime_context,
-                    adapter_input=active_adapter_input,
-                )
-                await identity.runtime_context.ensure_active()
-            except (asyncio.CancelledError, JobExecutionRevoked):
-                await emit_tool_lifecycle_event(
-                    runtime,
-                    event_type="tool_call_result",
-                    identity=identity,
-                    tool_name=self.name,
-                    status="canceled",
-                )
-                raise
-            except Exception:
-                await emit_tool_lifecycle_event(
-                    runtime,
-                    event_type="tool_call_result",
-                    identity=identity,
-                    tool_name=self.name,
-                    status="failed",
-                    safe_error_code="ALGORITHM_RESULT_CONTRACT_INVALID",
-                )
-                raise
-            attempt_status = {
-                "valid": "succeeded",
-                "timed_out": "timed_out",
-                "not_ready": "not_ready",
-                "not_applicable": "failed",
-                "invalid_input": "failed",
-                "execution_failed": "failed",
-            }[result.status]
-            safe_error_code = result.diagnostics.safe_error_code
-            if hasattr(safe_error_code, "value"):
-                safe_error_code = safe_error_code.value
-            await emit_tool_lifecycle_event(
-                runtime,
-                event_type="tool_call_result",
-                identity=identity,
-                tool_name=self.name,
-                status=("succeeded" if result.status == "valid" else "failed"),
-                safe_error_code=safe_error_code,
+            # 取消只清理资源并传播；调度层区分 deadline 和外部撤销，统一收口终态。
+            result = await self.ainvoke(
+                kwargs,
+                provider_call_id=identity.provider_call_id,
+                response_identity=identity.response_identity,
+                runtime_context=identity.runtime_context,
+                adapter_input=active_adapter_input,
             )
-            terminal = build_terminal_invocation(
-                identity=identity,
-                tool_name=self.name,
-                attempt_status=attempt_status,
-                started_at=started_at,
-                result_ref=result.result_ref,
-                safe_error_code=safe_error_code,
-            )
-            return build_tool_command(
-                identity=identity,
-                tool_name=self.name,
-                payload=result.model_dump(mode="json"),
-                ledger_record=terminal,
-                state_updates={
-                    "algorithm_results": {result.result_ref: result},
-                },
+            return await algorithm_terminal_command(
+                runtime, identity=identity, tool_name=self.name,
+                result=result, started_at=started_at,
             )
 
         # StructuredTool 会把 ToolRuntime 识别为 injected arg；显式 args_schema
         # 仍只暴露 AlgorithmSpec 中的科学参数，不让模型填写内部身份。
         call.__annotations__["runtime"] = ToolRuntime
         runtime_args_schema = with_tool_runtime_schema(
-            build_model_tool_input_schema(self.args_schema),
+            build_model_tool_input_schema(
+                self.args_schema,
+                include_preprocessing=True,
+            ),
             tool_name=self.name,
             tool_runtime_type=ToolRuntime,
         )

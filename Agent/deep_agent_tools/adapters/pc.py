@@ -24,6 +24,10 @@ class PcAdapter(BaseAlgorithmAdapter):
         profile: DataProfile = adapter_input.data_profile
         if profile.row_count <= 0 or profile.column_count < 2:
             return "invalid_input", SafeErrorCode.ALGORITHM_INPUT_INVALID
+        if profile.empty_columns or profile.constant_columns:
+            return "invalid_input", SafeErrorCode.ALGORITHM_INPUT_INVALID
+        if profile.non_finite_columns:
+            return "invalid_input", SafeErrorCode.ALGORITHM_INPUT_INVALID
         if adapter_input.missing_values_present:
             return "invalid_input", SafeErrorCode.ALGORITHM_INPUT_INVALID
         return None

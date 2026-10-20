@@ -34,7 +34,11 @@ class RunnerSpec:
 def _pc(csv_data: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
     from Agent.causal.causalachieve import run_pc_analysis
 
-    return run_pc_analysis(csv_data, alpha=float(parameters.get("alpha", 0.05)))
+    return run_pc_analysis(
+        csv_data,
+        alpha=float(parameters.get("alpha", 0.05)),
+        test=str(parameters.get("test") or "auto"),
+    )
 
 
 def _olc(csv_data: str, parameters: Mapping[str, Any]) -> dict[str, Any]:

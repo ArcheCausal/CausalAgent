@@ -44,7 +44,7 @@
 
 ## 活动 Job
 
-`GET /api/agent/jobs/active` 返回当前用户的活动 Job 摘要，并附带当前公开事件最大 ID `last_event_id`。可传 `session_id` 只恢复指定会话。摘要包含状态、worker/lease 观测、尝试和恢复次数、冻结文件名以及等待输入的问题 ID/公开提示，但不返回内部 checkpoint 状态或文件正文。前端刷新时以会话历史实际回放到的 `rendered_event_id` 作为 SSE 游标，活动摘要中的最新 ID 不能覆盖它。
+`GET /api/agent/jobs/active` 返回当前用户的活动 Job 摘要，并附带当前公开事件最大 ID `last_event_id`。可传 `session_id` 只恢复指定会话。摘要包含状态、worker/lease 观测、尝试和恢复次数、冻结文件名，以及等待输入的问题 ID、公开提示、结构化 `current_interaction` 和数据库截止时间 `input_wait_expires_at`，但不返回内部 checkpoint 状态或文件正文。前端刷新时以会话历史实际回放到的 `rendered_event_id` 作为 SSE 游标，活动摘要中的最新 ID 不能覆盖它。
 
 ## SSE 订阅
 
@@ -56,13 +56,21 @@ Last-Event-ID: 42
 
 也兼容 `last_event_id=42` 查询参数。服务端从 `analysis_job_events.id > 42` 读取事件，返回标准 SSE 的 `id`、`event`、`data` 字段；没有新事件时按配置轮询并发送 heartbeat。事件 payload 按事件类型执行字段白名单清洗，worker 的 `attempt`、未知附加字段和内部对象不会对外可见。
 
-收到 `interrupt` 后，前端应展示公开问题并等待恢复；收到 `final_result`、`error` 或 `canceled` 后连接结束。若 Job 已经进入终态，即使数据库查询时没有新的事件，服务端也会结束连接。
+`interrupt` 事件可带 `interaction` 公开结构，用于数据处理确认：`interaction_type`、`question_id`、`message`、`algorithm_name`、`expires_at`、`allow_other` 和最多 3 个 `options`。每个选项包含稳定 `option_id`、算法 `capability_id`、处理步骤、影响说明和风险；`algorithm_name` 是用户可见的公开算法名称，前端用它替代内部标识。前端根据结构化步骤生成确定性的执行说明，模型生成的影响说明在确认前没有执行预览时标注“未计算”，不提供虚假精确值。
+
+收到 `interrupt` 后，前端应展示公开问题或方案并等待恢复；收到 `final_result`、`error` 或 `canceled` 后连接结束。若 Job 已经进入终态，即使数据库查询时没有新的事件，服务端也会结束连接。
 
 `decision` 事件除既有路由说明外，还可包含 `decision_kind=algorithm|evidence|final`。`algorithm` 表示模型在同一次算法 Tool Call 中显式提交的公开选择依据，`evidence` 表示同一位置的 `rag_evidence_search`/`web_evidence_search` 检索依据，两者都可同时带公开工具名；`final` 只在 FinalizationGate 验证成功后产生，可带 `low|medium|high` 置信度。模型工具参数流中的公开摘要会先以 `decision_delta` 增量事件发送，工具开始/结果仍分别由可信工具边界发布；完整 `decision` 仍作为历史回放和无增量回退。公开说明是展示文本而非隐藏思维链，不包含内部结果引用；缺失或格式无效的工具说明不会阻止工具执行。相关事件都持久化到 `analysis_job_events`，SSE 重连按原 Event ID 续传，历史回放直接展示完整 `decision` 文本。
 
-FinalizationGate 拒绝时额外发布 `progress` 阶段说明，只含 `summary` 文本：第一次失败挂在 `finalization_gate` 阶段，说明未通过校验并给出脱敏后的具体修正要求；若该次修正仍未通过，则在同一阶段说明本次降级为仅基于已验证输入的报告。第二次 Deep Agent 启动修正时，`progress` 说明挂在新创建的 `deep_agent` 阶段，指出该阶段沿用已有工具结果、不重复调用工具。这两类说明与 `decision` 一样按稳定 `event_key` 幂等落库，SSE 重连和会话刷新按原 Event ID 回放。
+FinalizationGate 对模型可修正的决策拒绝额外发布 `progress` 阶段说明，只含 `summary` 文本：第一次失败挂在 `finalization_gate` 阶段，说明未通过校验并给出脱敏后的具体修正要求；若该次修正仍未通过，则在同一阶段说明本次降级为仅基于已验证输入的报告。第二次 Deep Agent 启动修正时，`progress` 说明挂在新创建的 `deep_agent` 阶段，指出该阶段沿用已有工具结果、不重复调用工具。这两类说明与 `decision` 一样按稳定 `event_key` 幂等落库，SSE 重连和会话刷新按原 Event ID 回放。调用登记未结束、终态结果缺失或归属不一致时直接终止，不进入报告降级。
 
-新 Deep Agent 报告的 `final_result.data` 可包含程序生成的 `finalization_status`：`valid` 表示最终结构化决策已通过当前 Job/attempt/lease、AlgorithmResult 与 Action Ledger 校验；`degraded` 表示一次修正仍未通过，但系统生成了安全报告并将 Job 置为 `succeeded`。`degraded` 结果不展示未经 Gate 验证的主图，也不把内部校验错误、provider ID、raw result 或工具参数返回给用户。该字段是结果质量元数据，不是模型的 `outcome`，旧 Job 没有该字段时按兼容语义处理。
+算法结果 `valid` 对外统一为 `tool_call_result.status=succeeded` 和“调用完成”；`timed_out`、`canceled`、`not_applicable`、`skipped` 分别显示“调用超时”“调用已取消”“不适用”“未执行”。实时写入、子图转发与聚合恢复按同一调用及执行 attempt、retry、事件类型生成内部幂等键；相同事件重放复用原 Event ID，同一算法的第二次合法调用保留独立结果。内部身份和事件键不会进入公共 payload。
+
+恢复兜底从调用账本取回原始阶段和执行 attempt，保证同键事件的内容保持一致；缺少完整身份的旧记录不合成新的完成事件。用户取消与 lease 撤销会停止分析，不发布普通算法完成事件或继续生成报告。
+
+新 Deep Agent 报告的 `final_result.data` 可包含程序生成的 `finalization_status`：`valid` 表示最终结构化决策已通过当前 Job/attempt/lease、AlgorithmResult 与 Action Ledger 校验；`degraded` 表示一次修正仍未通过，但系统生成了安全报告并将 Job 置为 `succeeded`。报告文档新增 `analysis_outcome`、`finalization_status`、`report_mode` 和 `execution_summary`。`report_mode=diagnostic` 表示本次没有有效算法结果、报告是诊断说明；`execution_summary` 公开算法状态、实际样本量、变量范围和是否使用了不同数据视图。分析结果类别、报告完整性和最终校验状态分别公开，不能把诊断报告表述为算法失败结论。
+
+`degraded` 结果不展示未经 Gate 验证的主图，也不把内部校验错误、provider ID、raw result 或工具参数返回给用户。该字段是结果质量元数据，不是模型的 `outcome`，旧 Job 没有该字段时按兼容语义处理。算法超时若已完整记录，可以采用其他有效结果完成报告；报告正文固定保留超时算法未完成、未提供可用因果图的分析限制说明。
 
 新报告终态是结构化报告文档，`final_result.data` 的形状如下：
 
@@ -177,7 +185,7 @@ Agent 在每轮开始时判断用户意图，再由图路由执行；用户不�
 }
 ```
 
-`answer` 也兼容 `message` 字段，可以是文本或受限 JSON。恢复请求必须使用新的、可复用的 UUID v4 `Idempotency-Key`；服务端追加 `analysis_job_inputs.input_type='resume'`，然后重新排队同一个 Job。相同键重放返回原结果，不同问题或答案返回冲突。
+`answer` 也兼容 `message` 字段，可以是文本或受限 JSON；选择已有处理方案时提交 `{"option_id": "opt_..."}`，其他文本作为重新规划说明。服务端只核对当前问题和方案版本，不接受浏览器传入任意可执行操作。等待问题从发布时刻起有效 300 秒，以数据库时间为准；期限届满后 Job 转为 `failed`，错误原因为 `human_input_timeout`，旧选项不能继续恢复。刷新、重放和重复修复不延长该期限，只有发布新的确认问题才重新计时。恢复请求必须使用新的、可复用的 UUID v4 `Idempotency-Key`；服务端追加 `analysis_job_inputs.input_type='resume'`，然后重新排队同一个 Job。相同键重放返回原结果，不同问题或答案返回冲突。
 
 取消请求支持 `queued`、`running` 和 `waiting_input`。事务提交后业务状态立即成为不可逆 `canceled`，同时写入稳定取消事件、assistant 投影并释放 Session 活动锁；`running` Job 的执行占用会暂时显示为内部 `draining`，普通用户不会看到该字段。请求同样需要 UUID v4 幂等键：首次取消返回 `202`，相同键重放返回 `200`，已由另一幂等键取消、或已经 `succeeded/failed` 时返回 `409 job_state_conflict`。取消不承诺终止已发出的远端调用；其结果不会进入 parser、router、error handler、重试或后续节点。
 

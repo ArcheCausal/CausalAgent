@@ -167,6 +167,28 @@ def build_deep_agent_execution_scope(
     return f"deep-agent-scope:{digest}"
 
 
+def build_deep_agent_analysis_scope(
+    *,
+    job_id: str | UUID,
+    input_identity: str,
+    spec_digests: Mapping[str, str] | None = None,
+) -> str:
+    """生成跨 worker/attempt 稳定的分析身份。
+
+    恢复时 attempt、lease 和 worker 会变化，但它们只代表本次执行权限；
+    同一 Job、同一冻结输入和同一算法 Spec 组合必须命中同一子图 checkpoint。
+    """
+
+    canonical_job_id = str(UUID(str(job_id)))
+    payload = {
+        "job_id": canonical_job_id,
+        "input_identity": _non_blank(input_identity, field_name="input_identity"),
+        "spec_digests": dict(sorted((spec_digests or {}).items())),
+    }
+    digest = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+    return f"deep-agent-analysis-scope:{digest}"
+
+
 def build_result_ref(*, invocation_id: str | UUID, result_index: int = 0) -> str:
     """生成不暴露裸 Job ID 或供应商 response ID 的结果引用。"""
 

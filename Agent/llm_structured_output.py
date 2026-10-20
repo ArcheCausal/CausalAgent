@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Mapping, TypeVar
+from typing import TYPE_CHECKING, Any, Mapping, TypeVar
 
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ValidationError
+
+if TYPE_CHECKING:
+    # ChatOpenAI 只用于参数类型标注；延迟到类型检查期导入，避免本模块在
+    # 未安装 LangChain 的轻量测试环境里无法导入。
+    from langchain_openai import ChatOpenAI
 
 from Agent.execution_control import JobExecutionRevoked
 

@@ -1,6 +1,7 @@
 import type {
   BackendJobStatus,
   JobRecord,
+  ProcessingOption,
   PublicEvent,
   StepDecisionDetail,
   StepDetail,
@@ -104,6 +105,56 @@ export function createJobRecord(
     errorCode: null,
     cancelKey: null,
     cancelInFlight: false,
+  }
+}
+
+function parseOptions(value: unknown): ProcessingOption[] {
+  if (!Array.isArray(value)) return []
+  const options: ProcessingOption[] = []
+  for (const raw of value.slice(0, 3)) {
+    if (typeof raw !== 'object' || raw === null) continue
+    const item = raw as Record<string, unknown>
+    if (typeof item.option_id !== 'string' || typeof item.label !== 'string') continue
+    const capabilityId = typeof item.capability_id === 'string' ? item.capability_id : ''
+    const steps = Array.isArray(item.steps)
+      ? item.steps
+          .filter((step): step is Record<string, unknown> => typeof step === 'object' && step !== null)
+          .map((step) => ({
+            operation: typeof step.operation === 'string' ? step.operation : '',
+            columns: Array.isArray(step.columns) ? step.columns.filter((column): column is string => typeof column === 'string') : [],
+            method: typeof step.method === 'string' ? step.method : null,
+          }))
+      : []
+    options.push({
+      optionId: item.option_id,
+      label: item.label,
+      capabilityId,
+      steps,
+      impact: Array.isArray(item.impact) ? item.impact.filter((entry): entry is string => typeof entry === 'string') : [],
+      risks: Array.isArray(item.risks) ? item.risks.filter((entry): entry is string => typeof entry === 'string') : [],
+    })
+  }
+  return options
+}
+
+export function waitingInputFromInteraction(
+  data: Record<string, unknown>,
+  questionId: string,
+  prompt: string,
+): ThinkingProjection['waitingInput'] {
+  const interaction = typeof data.interaction === 'object' && data.interaction !== null
+    ? data.interaction as Record<string, unknown>
+    : null
+  const options = parseOptions(interaction?.options)
+  return {
+    questionId,
+    prompt,
+    algorithmName: typeof interaction?.algorithm_name === 'string' ? interaction.algorithm_name : '',
+    expiresAt: typeof interaction?.expires_at === 'string' ? interaction.expires_at : null,
+    options,
+    allowOther: interaction?.allow_other !== false,
+    selectedOptionId: null,
+    expired: false,
   }
 }
 
@@ -341,7 +392,11 @@ function applyKnownEvent(state: JobRecord, event: DecodedSseEvent): { state: Job
     }
     case 'interrupt':
       thinking.status = 'waiting_input'
-      thinking.waitingInput = { questionId: stringField(data, 'question_id'), prompt: stringField(data, 'message') }
+      thinking.waitingInput = waitingInputFromInteraction(
+        data,
+        stringField(data, 'question_id'),
+        stringField(data, 'message'),
+      )
       next.backendStatus = 'waiting_input'
       next.uiState = 'waiting_input'
       terminal = true

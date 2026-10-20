@@ -28,6 +28,8 @@ EXPECTED_CODES = {
     "job.create.accepted",
     "job.create.replayed",
     "job.create.failed",
+    "job.input_wait.expired",
+    "job.input_wait.expire_failed",
     "admin.audit.write_failed",
     "security.login.disabled_account",
     "auth.login.last_login_update_failed",
@@ -60,6 +62,7 @@ EXPECTED_CODES = {
     "mcp.tool.failed",
     "mcp.tool.canceled",
     "mcp.tool.slow",
+    "mcp.runner.failed",
     "mcp.request.received",
     "mcp.request.rejected",
     "mcp.request.accepted",
@@ -112,6 +115,8 @@ def _sample_value(field: str, rule):
         return ["writer_abort"]
     if field == "reason_code":
         return "unavailable"
+    if field == "error_type":
+        return "AlgorithmExecutionError"
     if field == "violation":
         return "unknown_event"
     if field in {
