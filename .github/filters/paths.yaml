@@ -1,24 +1,38 @@
-# lightweight-ci 路径过滤器，按模块划分 PR 需要执行的检查范围。
+# lightweight-ci 路径过滤器，按执行组划分 PR 需要运行的检查范围。
 #
-# 维护规则：重命名或移动顶层目录时，必须同步更新这里的 glob。旧 glob 匹配不到
-# 任何文件时对应 job 会静默跳过，该模块不再被 CI 覆盖，而 CI 仍然显示全绿。
-# 每个过滤器对应的 job 与覆盖范围见 Document/development/testing.md 的
-# 「GitHub Actions CI」一节。
+# 维护规则：新增顶层目录、移动测试文件或改变测试读取的生产文件时，必须同步
+# 更新这里的 glob。旧 glob 匹配不到任何文件时对应 job 会静默跳过，该模块不再
+# 被 CI 覆盖，而 CI 仍然显示通过。路径与 job 的对应关系见
+# Document/development/testing.md 的「GitHub Actions CI」一节。
+#
+# 共享的 CI、路径规则和公共测试配置会重复写入各执行组，因为 paths-filter
+# 的过滤器之间不能共享定义。影响范围无法可靠缩小时，宁可执行全部常规组。
 
-# 后端、Agent、数据库、配置、脚本与后端测试。
+# 后端、Agent、数据库、配置、入口脚本与后端测试。
 backend:
   - '.github/workflows/lightweight-ci.yml'
-  - 'app/**'
+  - '.github/filters/paths.yaml'
+  - 'pytest.ini'
+  - 'tests/conftest.py'
+  - 'tests/support/**'
+  - 'tests/unit/**'
+  - 'tests/integration/agent/**'
+  - 'tests/integration/admin/**'
+  - 'tests/integration/deployment/test_frontend_entries.py'
+  - 'tests/acceptance/run_rag_eval_production_acceptance.py'
+  - 'app/**/*.py'
+  - 'app/*.py'
   - 'Agent/**'
   - 'Database/**'
   - 'config/**'
-  - 'scripts/**'
-  - 'tests/**'
   - 'CausalAgent.py'
   - 'Run_causal.py'
   - 'requirements.txt'
   - 'requirements-base.txt'
   - 'requirements-test.txt'
+  - 'tests/smoke/requirements-deep-agent-py311-linux.lock'
+  - 'tests/unit-test-env'
+  - 'tests/unit-test-secrets.env'
   - 'Dockerfile'
   - 'docker-compose.test.yml'
 
@@ -28,20 +42,65 @@ frontends:
   - 'admin-frontend/**'
   - 'website-frontend/**'
   - 'app/rag_eval/frontend/**'
+  - 'app/rag_eval/frontend_dist/**'
   - 'packages/design-system/**'
+  - 'Dockerfile'
+  - '.dockerignore'
 
-# Compose、可观测、搜索、部署与对应的静态契约检查。
+# 部署、发布、迁移、可观测和对应静态契约检查。
 contracts:
+  - '.github/workflows/lightweight-ci.yml'
+  - '.github/filters/paths.yaml'
   - '.github/workflows/publish-staging-images.yml'
   - '.github/workflows/build-release-bundle.yml'
+  - '.github/workflows/release-windows.yml'
+  - 'pytest.ini'
+  - 'tests/conftest.py'
+  - 'tests/contracts/**'
+  - 'tests/unit/config/test_secret_file.py'
+  - 'tests/unit/deployment/**'
+  - 'tests/unit/rag_eval/test_rag_eval_production_acceptance.py'
+  - 'tests/integration/deployment/test_frontend_entries.py'
   - 'docker-compose*.yml'
+  - 'Dockerfile'
+  - 'Agent/CausalAgentMCP/Dockerfile'
+  - 'Database/mysql/Dockerfile.*'
+  - '.dockerignore'
+  - '.gitignore'
   - 'observability/**'
   - 'searxng/**'
   - 'deploy/**'
   - 'scripts/**'
-  - 'tests/integration/deployment/**'
-  - 'tests/unit/config/**'
-  - 'tests/unit/deployment/**'
-  - 'tests/integration/test_observability_compose.py'
+  - 'alembic.ini'
+  - 'Database/migrations/**'
+  - 'Database/monitoring.py'
+  - 'Database/inspection.py'
+  - 'Database/checkpoint_inspection.py'
+  - 'app/db.py'
+  - 'app/request_context.py'
+  - 'app/main/routes.py'
+  - 'app/chat/page_routes.py'
+  - 'app/admin/routes.py'
+  - 'app/rag_eval/routes.py'
+  - 'app/rag_eval/page_routes.py'
+  - 'config/settings.py'
+  - 'config/secret_file.py'
+  - 'Document/rag_eval_production_acceptance_matrix.json'
+  - 'admin-frontend/vite.config.ts'
+  - 'chat-frontend/vite.config.ts'
+  - 'website-frontend/vite.config.ts'
+  - 'app/rag_eval/frontend/vite.config.ts'
   - '.env.example'
   - '.env.staging.example'
+
+# 构建相关配置只驱动 Dockerfile 静态检查，不单独构成一个执行组。
+build:
+  - 'Dockerfile'
+  - 'Agent/CausalAgentMCP/Dockerfile'
+  - 'Database/mysql/Dockerfile.*'
+  - 'docker-compose*.yml'
+  - '.dockerignore'
+  - 'requirements.txt'
+  - 'requirements-base.txt'
+  - 'requirements-test.txt'
+  - 'tests/smoke/requirements-deep-agent-py311-linux.lock'

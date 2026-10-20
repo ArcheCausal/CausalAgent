@@ -1,4 +1,7 @@
-"""预发 Compose、镜像和服务暴露边界的静态合同。"""
+"""预发 Compose、镜像和服务暴露边界的静态合同。
+
+工具需求：Docker CLI，用于展开 Compose 配置；缺少时跳过并保留未执行结论。
+"""
 
 from __future__ import annotations
 
@@ -7,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
@@ -18,7 +22,9 @@ STAGING_COMPOSE = REPO_ROOT / "docker-compose.staging.yml"
 STAGING_ENV = REPO_ROOT / ".env.staging.example"
 
 
+@lru_cache(maxsize=1)
 def _staging_config() -> dict:
+    """在输入文件和环境相同的范围内只展开一次预发 Compose 配置。"""
     if shutil.which("docker") is None:
         pytest.skip("docker CLI 不可用，跳过预发 Compose 配置验证")
 

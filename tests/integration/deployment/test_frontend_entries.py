@@ -1,10 +1,18 @@
+"""四套前端入口的 Flask 请求行为与配置默认值。
+
+文档职责：验证官网、普通用户应用、RAG 评测台的页面与资源路由、未登录跳转、
+权限拒绝、缺失构建产物和开发服务器接管行为。
+
+适用范围：修改页面路由、请求上下文、入口权限或前端产物目录配置时使用；
+构建阶段、Compose 传参和忽略规则由 `tests/contracts/deployment/` 覆盖。
+"""
+
 import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-import yaml
 from flask import Flask
 
 
@@ -328,112 +336,6 @@ class RemovedAliasTests(unittest.TestCase):
         self.assertEqual(legacy_static.status_code, 404)
         self.assertEqual(chat_assets.status_code, 404)
 
-    def test_frontend_directories_follow_the_entry_layout(self):
-        self.assertFalse(Path("app/static/rag_eval_app").exists())
-        self.assertTrue(Path("app/rag_eval/frontend_dist/index.html").is_file())
-        self.assertEqual(
-            Path("app/rag_eval/frontend_dist/index.html").read_text(encoding="utf-8").count("/rag-eval/assets/"),
-            2,
-        )
-        self.assertTrue(Path("website-frontend/src/App.vue").is_file())
-        self.assertTrue(Path("chat-frontend/src/App.vue").is_file())
-
-
-class FrontendDeploymentTests(unittest.TestCase):
-    """验证四个前端的构建阶段、产物目录和映像边界。"""
-
-    def test_dockerfile_builds_four_frontends_without_node_in_runtime(self):
-        dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
-
-        for fragment in (
-            "FROM node:24-alpine AS admin-builder",
-            "FROM node:24-alpine AS chat-builder",
-            "FROM node:24-alpine AS website-builder",
-            "FROM node:24-alpine AS rag-eval-builder",
-            "COPY packages/design-system/ /packages/design-system/",
-            "COPY packages/design-system/ /workspace/packages/design-system/",
-            "COPY --from=admin-builder /frontend/dist /opt/causalagent-admin",
-            "COPY --from=chat-builder /frontend/dist /opt/causalagent-chat",
-            "COPY --from=website-builder /frontend/dist /opt/causalagent-website",
-            "COPY --from=rag-eval-builder /workspace/app/rag_eval/frontend_dist /opt/causalagent-rag-eval",
-            "WEBSITE_FRONTEND_DIST_DIR=/opt/causalagent-website",
-            "RAG_EVAL_FRONTEND_DIST_DIR=/opt/causalagent-rag-eval",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, dockerfile)
-        self.assertEqual(dockerfile.count("COPY packages/design-system/ /packages/design-system/"), 3)
-
-        runtime_stage = dockerfile.split("FROM python-deps AS runtime", 1)[1]
-        self.assertNotIn("npm ", runtime_stage)
-        self.assertNotIn("node:", runtime_stage)
-        self.assertNotIn("vite", runtime_stage.lower())
-
-    def test_compose_passes_every_frontend_directory_outside_the_source_mount(self):
-        for filename in (
-            "docker-compose.yml",
-            "docker-compose.staging.yml",
-            "docker-compose.prod.yml",
-        ):
-            with self.subTest(filename=filename):
-                compose = yaml.safe_load(Path(filename).read_text(encoding="utf-8"))
-                app = compose["services"]["app"]
-                environment = _environment_dict(app["environment"])
-
-                self.assertNotIn("CHAT_FRONTEND_ENTRY", environment)
-                self.assertEqual(
-                    environment["CHAT_FRONTEND_DIST_DIR"],
-                    "${CHAT_FRONTEND_DIST_DIR:-/opt/causalagent-chat}",
-                )
-                self.assertEqual(
-                    environment["WEBSITE_FRONTEND_DIST_DIR"],
-                    "${WEBSITE_FRONTEND_DIST_DIR:-/opt/causalagent-website}",
-                )
-                self.assertEqual(
-                    environment["RAG_EVAL_FRONTEND_DIST_DIR"],
-                    "${RAG_EVAL_FRONTEND_DIST_DIR:-/opt/causalagent-rag-eval}",
-                )
-                volumes = [str(volume) for volume in app.get("volumes", [])]
-                for directory in (
-                    "/opt/causalagent-chat",
-                    "/opt/causalagent-website",
-                    "/opt/causalagent-rag-eval",
-                ):
-                    mounted = [volume for volume in volumes if directory in volume]
-                    self.assertEqual(mounted, [], directory)
-
-    def test_ignores_do_not_send_local_build_outputs(self):
-        dockerignore = Path(".dockerignore").read_text(encoding="utf-8")
-        gitignore = Path(".gitignore").read_text(encoding="utf-8")
-
-        for text in (dockerignore, gitignore):
-            for entry in (
-                "chat-frontend/node_modules/",
-                "chat-frontend/dist/",
-                "website-frontend/node_modules/",
-                "website-frontend/dist/",
-                "app/rag_eval/frontend/node_modules/",
-                "packages/design-system/node_modules/",
-            ):
-                with self.subTest(entry=entry):
-                    self.assertIn(entry, text)
-
-        self.assertIn("app/rag_eval/frontend_dist/", gitignore)
-        self.assertNotIn("app/static/rag_eval_app/", gitignore)
-        self.assertIn("app/rag_eval/frontend_dist/", dockerignore)
-        self.assertIn("packages/design-system/node_modules/", dockerignore)
-        self.assertIn("!packages/design-system/src/fonts/licenses/*.txt", dockerignore)
-
-    def test_frontend_configs_use_their_own_asset_base(self):
-        expectations = {
-            "website-frontend/vite.config.ts": "base: '/site-assets/'",
-            "chat-frontend/vite.config.ts": "base: '/dashboard-assets/'",
-            "app/rag_eval/frontend/vite.config.ts": 'base: "/rag-eval/"',
-            "admin-frontend/vite.config.ts": "base: '/admin/'",
-        }
-        for filename, fragment in expectations.items():
-            with self.subTest(filename=filename):
-                self.assertIn(fragment, Path(filename).read_text(encoding="utf-8"))
-
 
 class FrontendConfigTests(unittest.TestCase):
     """验证前端目录与开发服务器配置的默认值。"""
@@ -449,13 +351,6 @@ class FrontendConfigTests(unittest.TestCase):
         self.assertEqual(config.WEBSITE_VITE_DEV_SERVER_URL, "")
         self.assertEqual(config.CHAT_FRONTEND_DIST_DIR, "")
         self.assertEqual(config.RAG_EVAL_FRONTEND_DIST_DIR, "")
-
-
-def _environment_dict(environment):
-    """统一读取 Compose 的 list/mapping 两种 environment 写法。"""
-    if isinstance(environment, dict):
-        return environment
-    return dict(item.split("=", 1) for item in environment)
 
 
 if __name__ == "__main__":

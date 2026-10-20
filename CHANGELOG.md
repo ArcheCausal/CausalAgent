@@ -1920,7 +1920,21 @@
 - 【部署：Gunicorn 运行参数统一注入】
   - 【预发启动】：保留环境检查，Gunicorn workers、threads 和 timeout 改为容器启动时读取 WEB_WORKERS、WEB_THREADS 和 WEB_TIMEOUT。
   - 【生产配置】：向 app 注入同名变量及默认值，继续使用 Dockerfile 的启动命令，两套环境可以分别配置运行参数。
+- 【CI：测试分层与条件执行】
+  - 【执行组】：保留 backend、frontends、contracts 三个执行组，新增 build 过滤器只驱动 Dockerfile 静态检查；针对 develop 按路径选择，针对 main 执行全部常规组。
+  - 【路径映射】：补齐 CI、过滤器、pytest.ini、依赖锁、测试配置与 Dockerfile 的触发关系，前端目录只触发 frontends，契约测试只触发 contracts。
+  - 【目录归位】：将 Compose、Dockerfile、发布 workflow、migration 图和日志政策移入 tests/contracts，Flask 页面入口行为留在 tests/integration/deployment，真实 MySQL 查询移入 tests/e2e/database，纯函数用例进入 tests/unit。
+  - 【执行入口】：pytest.ini 明确限定默认收集范围为 unit、组件 integration 和 contracts；后端测试镜像默认执行 unit 与 integration，契约检查在具备 Git 和 Docker CLI 的宿主 runner 上执行；真实环境入口保持独立，根级 conftest 不再向 e2e、acceptance 和 smoke 注入离线配置。
+  - 【结果汇总】：新增 ci-result 检查，核对路径判断与实际任务结果；应执行的失败或意外跳过、路径判断失败和 main PR 未完成常规组都会使汇总失败。
+  - 【分支规则】：同步 main 与 develop 的规则集必需检查为 Python syntax、Pull request policy 和 CI result；保留原有审批、删除保护和快进限制。
+  - 【重复与缺陷】：取消重复的基础测试任务，统一 schema 快照模型名单并从完整基线派生摘要，登记等待确认扫描事件并修正结构化输出详情，修复 RAG 验收 runner 的目标模块名、子进程输出解码和 pytest 执行入口。
+  - 【共享准备】：预发与开发 Compose 契约在相同输入范围内只展开一次配置，四个前端的构建阶段、产物目录和资源前缀统一为一张参数表。
+  - 【多模态拆分】：把约 100KB 的多模态测试按核心与检索、文档解析、远程视觉、索引发布拆成四个文件，共享本地 fixture 独立成模块，验收矩阵与白名单同步新目标。
+  - 【验收入口】：RAG 验收 runner 改为通过 pytest 执行白名单目标，继承离线配置后再运行；修正 Windows 控制台输出编码和缺失输出时的解析。
+  - 【批处理计时】：事件写批次阈值改用可控时钟验证剩余窗口，消除对调度余量的依赖，并修正并发视觉 stub 的参数与缺失导入。
 - 【MCP：共享契约导入边界与镜像构建检查】
   - 【共享契约】：deep_agent_tools 包入口只导出轻量领域与传输契约，移除调度器、算法工具、RAG/Web 工具和测试执行器的主动加载，相关测试改为从对应子模块显式导入。
   - 【镜像发布】：MCP Dockerfile 在复制源码后导入真实服务入口，检查未加载 LangGraph、LangChain 或 Agent 运行时；发布工作流通过该 Dockerfile 阻止不满足导入边界的镜像推送。
   - 【回归与文档】：新增独立进程导入检查和构建发布契约检查，保留 Command 终态解析与依赖调度行为，同步运行时与部署说明。
+- 【分支合并：兼容 CI 测试分层与 MCP 导入边界】
+  - 【变更保留】：合入 develop 的 MCP 轻量契约导出与镜像入口检查，保留 CI 条件执行和测试分层，将新增 MCP 构建检查纳入 tests/contracts/deployment，并完整保留同日开发日志。

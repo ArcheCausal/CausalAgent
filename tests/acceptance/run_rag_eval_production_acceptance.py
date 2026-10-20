@@ -19,14 +19,14 @@ EXPECTED = {"pass", "single_head"}
 REQUIRES = {"repository_metadata", "temporary_fixture"}
 SOURCE_FORMATS = {"not_applicable", "pdf", "txt", "markdown", "csv", "xlsx", "image"}
 SAFE_UNITTEST_TARGETS = {
-    "tests.test_isolated_rag_eval_routes",
-    "tests.test_multimodal_contracts",
-    "tests.test_multimodal_rag_eval",
-    "tests.test_rag_eval_dataset_registry",
-    "tests.test_rag_eval_index_binding",
-    "tests.test_rag_eval_queue_capacity",
-    "tests.test_rag_eval_run_lifecycle",
-    "tests.test_rag_eval_worker_queue",
+    "tests.unit.rag_eval.test_isolated_rag_eval_routes",
+    "tests.unit.agent.test_multimodal_parsing",
+    "tests.unit.agent.test_multimodal_rag_eval",
+    "tests.unit.rag_eval.test_rag_eval_dataset_registry",
+    "tests.unit.rag_eval.test_rag_eval_index_binding",
+    "tests.unit.rag_eval.test_rag_eval_queue_capacity",
+    "tests.unit.rag_eval.test_rag_eval_run_lifecycle",
+    "tests.unit.rag_eval.test_rag_eval_worker_queue",
 }
 SAFE_COMPOSE_FILES = {"docker-compose.yml", "docker-compose.prod.yml", "docker-compose.replica.yml"}
 SAFE_READINESS_TARGETS = {"repository_metadata"}
@@ -151,17 +151,36 @@ def execute_check(check: dict) -> dict:
     """执行一个白名单内且不经 shell 的验收检查。"""
     command = None
     if check["runner"] == "unittest":
-        command = [sys.executable, "-m", "unittest", check["target"], "-v"]
+        # 目标模块通过 pytest 入口执行，才能获得 tests/conftest.py 安装的离线密钥
+        # 文件和 tracing 设置；unittest 直接加载模块会绕过这些收集期配置。
+        command = [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "/".join(check["target"].split(".")) + ".py",
+        ]
     elif check["runner"] == "compose":
         command = ["docker", "compose", "-f", check["target"], "config", "--quiet"]
     elif check["runner"] == "alembic":
         command = [sys.executable, "-m", "alembic", "heads"]
     elif check["runner"] == "readiness":
         return _repository_metadata_readiness(check)
-    completed = subprocess.run(command, cwd=REPOSITORY_ROOT, capture_output=True, text=True, check=False)
-    detail = (completed.stdout + completed.stderr).strip()
+    completed = subprocess.run(
+        command,
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    stdout = completed.stdout or ""
+    detail = (stdout + (completed.stderr or "")).strip()
     if check["runner"] == "alembic" and completed.returncode == 0:
-        heads = [line for line in completed.stdout.splitlines() if line.strip()]
+        heads = [line for line in stdout.splitlines() if line.strip()]
         passed = len(heads) == 1
     else:
         passed = completed.returncode == 0
@@ -207,6 +226,9 @@ def run(matrix: dict, layer: str | None = None, confirmed: bool = False, list_on
 
 def main() -> int:
     """解析安全且显式的层级选择，并打印验收报告。"""
+    # Windows 控制台默认代码页无法编码中文报告；显式使用 UTF-8 避免本地验收中断。
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser()
     parser.add_argument("--layer", choices=sorted(LAYERS))
     parser.add_argument("--list", action="store_true", dest="list_only")

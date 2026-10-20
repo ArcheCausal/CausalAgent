@@ -47,7 +47,7 @@ class RagEvalProductionAcceptanceTests(unittest.TestCase):
     def test_matrix_rejects_unknown_runner_target_requires_and_expected(self):
         for field, value in [
             ("runner", "shell"),
-            ("target", "tests.test_rag_eval;rm -rf ."),
+            ("target", "tests.unit.rag_eval.test_rag_eval;rm -rf ."),
             ("requires", ["arbitrary-command"]),
             ("expected", "ignore_failure"),
         ]:
@@ -76,16 +76,16 @@ class RagEvalProductionAcceptanceTests(unittest.TestCase):
     def test_capabilities_map_to_their_specialist_contract_targets(self):
         targets = {item["id"]: item["target"] for item in self.matrix["checks"]}
         expected = {
-            "contract.api.run_lifecycle": "tests.test_rag_eval_run_lifecycle",
-            "contract.api.deprecated_compatibility": "tests.test_rag_eval_run_lifecycle",
-            "contract.datasets.registry_and_ref": "tests.test_rag_eval_dataset_registry",
-            "contract.index.binding_gate": "tests.test_rag_eval_index_binding",
-            "contract.queue.capacity": "tests.test_rag_eval_queue_capacity",
+            "contract.api.run_lifecycle": "tests.unit.rag_eval.test_rag_eval_run_lifecycle",
+            "contract.api.deprecated_compatibility": "tests.unit.rag_eval.test_rag_eval_run_lifecycle",
+            "contract.datasets.registry_and_ref": "tests.unit.rag_eval.test_rag_eval_dataset_registry",
+            "contract.index.binding_gate": "tests.unit.rag_eval.test_rag_eval_index_binding",
+            "contract.queue.capacity": "tests.unit.rag_eval.test_rag_eval_queue_capacity",
         }
         self.assertEqual({key: targets[key] for key in expected}, expected)
         for source_format in ("pdf", "txt", "markdown", "csv", "xlsx", "image"):
             check = next(item for item in self.matrix["checks"] if item["source_format"] == source_format)
-            self.assertEqual(check["target"], "tests.test_multimodal_contracts")
+            self.assertEqual(check["target"], "tests.unit.agent.test_multimodal_parsing")
 
     def test_default_layer_is_contract_and_never_mutates_external_state(self):
         selected = self.runner.select_checks(self.matrix, layer="contract")
@@ -149,8 +149,34 @@ class RagEvalProductionAcceptanceTests(unittest.TestCase):
         command = subprocess_run.call_args.args[0]
         self.assertIsInstance(command, list)
         self.assertEqual(command[0], self.runner.sys.executable)
-        self.assertEqual(command[1:3], ["-m", "unittest"])
+        self.assertEqual(command[1:4], ["-m", "pytest", "-q"])
+        self.assertEqual(
+            command[4:],
+            ["-p", "no:cacheprovider", "tests/unit/rag_eval/test_rag_eval_run_lifecycle.py"],
+        )
         self.assertEqual(result["status"], "pass")
+
+    def test_failed_execution_without_output_still_produces_a_result(self):
+        check = next(item for item in self.matrix["checks"] if item["runner"] == "unittest")
+        with patch.object(self.runner.subprocess, "run") as subprocess_run:
+            subprocess_run.return_value.returncode = 1
+            subprocess_run.return_value.stdout = None
+            subprocess_run.return_value.stderr = None
+            result = self.runner.execute_check(check)
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["detail"], "")
+        self.assertEqual(subprocess_run.call_args.kwargs["encoding"], "utf-8")
+
+    def test_alembic_head_parsing_tolerates_missing_output(self):
+        check = next(item for item in self.matrix["checks"] if item["runner"] == "alembic")
+        with patch.object(self.runner.subprocess, "run") as subprocess_run:
+            subprocess_run.return_value.returncode = 0
+            subprocess_run.return_value.stdout = None
+            subprocess_run.return_value.stderr = None
+            result = self.runner.execute_check(check)
+
+        self.assertEqual(result["status"], "fail")
 
     def test_readiness_checks_required_repository_files_without_subprocess(self):
         check = next(item for item in self.matrix["checks"] if item["runner"] == "readiness")
