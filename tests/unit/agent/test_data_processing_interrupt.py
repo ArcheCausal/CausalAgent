@@ -32,8 +32,10 @@ def _registry() -> object:
 
 def test_interaction_tool_schema_exposes_only_controlled_operations() -> None:
     schema = DataProcessingTool(registry=_registry()).schema()
-    items = schema["parameters"]["properties"]["options"]["items"]
-    operations = items["properties"]["steps"]["items"]["properties"]["operation"]["enum"]
+    parameters = schema["parameters"]
+    definitions = parameters["$defs"]
+    items = definitions["DataProcessingInputOption"]
+    operations = definitions["PreprocessingStep"]["properties"]["operation"]["enum"]
 
     assert operations == [
         "select_columns",
@@ -41,13 +43,24 @@ def test_interaction_tool_schema_exposes_only_controlled_operations() -> None:
         "numeric_impute",
         "categorical_encode",
     ]
-    assert "capability_id" in schema["parameters"]["required"]
+    assert "capability_id" in parameters["required"]
+    assert set(parameters["properties"]) == {
+        "capability_id",
+        "reason",
+        "options",
+    }
+    assert set(items["properties"]) == {"label", "steps", "impact", "risks"}
+    assert "option_id" not in items["properties"]
+    assert "protected_columns" not in definitions["PreprocessingStep"]["properties"]
 
 
 def test_interaction_tool_is_materialized_with_title_and_exclusive_name() -> None:
     tool = DataProcessingTool(registry=_registry()).to_langchain_tool()
     assert tool.name == DATA_PROCESSING_TOOL_NAME
     assert "受控处理或诊断选项" in tool.description
+    exported = tool.tool_call_schema.model_json_schema()
+    assert set(exported["properties"]) == {"capability_id", "reason", "options"}
+    assert "runtime" not in exported["properties"]
 
 
 def test_option_identity_is_derived_from_capability_and_plan() -> None:
@@ -80,6 +93,9 @@ def _interaction_payload() -> dict:
     return {
         "type": "data_processing_request",
         "prompt": "当前列存在缺失值，请选择处理方式。",
+        "algorithm_name": "PC 因果发现",
+        "question_id": "child-question",
+        "expires_at": "2026-10-20T10:00:00.000000Z",
         "options": [
             {
                 "option_id": build_option_id(
@@ -148,3 +164,25 @@ def test_child_interrupt_is_rebridged_and_resumed_in_place(monkeypatch) -> None:
     assert len(calls) == 1
     assert isinstance(calls[0], Command)
     assert calls[0].resume == resume_answer
+
+
+def test_child_interrupt_payload_keeps_public_question_and_algorithm_name(
+    monkeypatch,
+) -> None:
+    """父图发布子图确认载荷时，不覆盖 question_id、截止时间或公开算法名称。"""
+
+    payload = _interaction_payload()
+    published: list[dict] = []
+    interrupt = SimpleNamespace(id="parent-question", value=payload)
+    monkeypatch.setattr(
+        "langgraph.types.interrupt",
+        lambda value: published.append(value) or {"option_id": payload["options"][0]["option_id"]},
+    )
+
+    from Agent.causal_agent.graph import _publish_child_interrupt
+
+    _publish_child_interrupt([interrupt])
+
+    assert published[0]["question_id"] == "child-question"
+    assert published[0]["algorithm_name"] == "PC 因果发现"
+    assert published[0]["expires_at"] == "2026-10-20T10:00:00.000000Z"

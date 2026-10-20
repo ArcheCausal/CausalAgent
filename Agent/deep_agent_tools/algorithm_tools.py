@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -20,11 +20,12 @@ from .models import (
     ActionAttempt,
     AlgorithmResult,
     DataProfile,
+    PreprocessingApproval,
     PreprocessingPlan,
     InvocationRecord,
 )
 from .identity import build_invocation_id, current_input_identity
-from .interaction import find_approved_plan
+from .interaction import resolve_approved_plan
 from .registry import AlgorithmRegistry, RegistryEntry
 from .runtime_updates import (
     algorithm_terminal_command,
@@ -65,7 +66,7 @@ class AlgorithmTool:
 
     @property
     def description(self) -> str:
-        return self.entry.spec.description
+        return self.entry.spec.model_description()
 
     @property
     def args_schema(self) -> type:
@@ -93,7 +94,12 @@ class AlgorithmTool:
             column_names=columns,
         )
 
-    def _adapter_input_from_runtime(self, runtime: Any) -> AdapterInput:
+    def _adapter_input_from_runtime(
+        self,
+        runtime: Any,
+        *,
+        resolved: tuple[PreprocessingApproval, PreprocessingPlan] | None = None,
+    ) -> AdapterInput:
         """从当前 ToolRuntime 生成输入快照；文件正文不进入 State。"""
 
         context = getattr(runtime, "context", None)
@@ -104,11 +110,6 @@ class AlgorithmTool:
         if not isinstance(state, Mapping):
             raise RuntimeError("ToolRuntime.state must be a mapping")
         dataset_csv = state.get("dataset_csv")
-        resolved = find_approved_plan(
-            state=state,
-            capability_id=self.entry.spec.capability_id,
-            plan=None,
-        )
         approval = resolved[0] if resolved is not None else None
         plan = resolved[1] if resolved is not None else None
         return AdapterInput(
@@ -340,46 +341,72 @@ class AlgorithmTool:
                 expected_context=self.runtime_context,
             )
             # 模型可以在同一次 Tool Call 中声明 preprocessing；运行时只在它与
-            # State 中获批方案完全一致时使用，否则返回结构化“需要确认”。
+            # State 中获批方案完全一致时使用。这里解析出的 plan/approval 会直接
+            # 进入 AdapterInput，后续不再按 capability_id 宽泛查找。
+            state = getattr(runtime, "state", None)
+            if not isinstance(state, Mapping):
+                raise RuntimeError("ToolRuntime.state must be a mapping")
             model_parameter_plan = kwargs.get("preprocessing")
-            if model_parameter_plan is not None:
-                state = getattr(runtime, "state", None)
-                if not isinstance(state, Mapping):
-                    raise RuntimeError("ToolRuntime.state must be a mapping")
-                proposed = PreprocessingPlan.model_validate(model_parameter_plan)
-                approved = (
-                    find_approved_plan(
-                        state=state,
-                        capability_id=self.entry.spec.capability_id,
-                        plan=proposed,
-                    )
-                    if isinstance(state.get("data_processing_approvals"), Mapping)
-                    else None
+            proposed = (
+                PreprocessingPlan.model_validate(model_parameter_plan)
+                if model_parameter_plan is not None
+                else None
+            )
+            resolution = resolve_approved_plan(
+                state=state,
+                capability_id=self.entry.spec.capability_id,
+                plan=proposed,
+            )
+            if resolution.status == "ambiguous":
+                return ToolMessage(
+                    content=json.dumps(
+                        {
+                            "status": "needs_confirmation",
+                            "reason": (
+                                "当前算法存在多个不同的已批准处理方案，请明确携带"
+                                "本次要执行的 preprocessing 方案。"
+                            ),
+                            "unmet_requirements": ["processing_plan_ambiguous"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    tool_call_id=identity.provider_call_id,
+                    name=self.name,
+                    status="error",
                 )
-                if approved is None:
-                    return ToolMessage(
-                        content=json.dumps(
-                            {
-                                "status": "needs_confirmation",
-                                "reason": (
-                                    "当前处理方案没有对应的用户确认。请先调用 "
-                                    "request_data_processing 取得确认，再携带同一方案重试。"
-                                ),
-                                "unmet_requirements": ["processing_not_approved"],
-                            },
-                            ensure_ascii=False,
-                        ),
-                        tool_call_id=identity.provider_call_id,
-                        name=self.name,
-                        status="error",
-                    )
+            resolved = resolution.entry
+            if model_parameter_plan is not None and resolved is None:
+                return ToolMessage(
+                    content=json.dumps(
+                        {
+                            "status": "needs_confirmation",
+                            "reason": (
+                                "当前处理方案没有对应的用户确认。请先调用 "
+                                "request_data_processing 取得确认，再携带同一方案重试。"
+                            ),
+                            "unmet_requirements": ["processing_not_approved"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    tool_call_id=identity.provider_call_id,
+                    name=self.name,
+                    status="error",
+                )
             # envelope 默认值 None 会进入 StructuredTool 参数；执行器 schema
             # 不接受该字段，必须在任何路径上剥离。
             kwargs.pop("preprocessing", None)
             started_at = datetime.now(timezone.utc)
-            active_adapter_input = self.adapter_input or self._adapter_input_from_runtime(
-                runtime
+            runtime_adapter_input = self._adapter_input_from_runtime(
+                runtime,
+                resolved=resolved,
             )
+            active_adapter_input = self.adapter_input or runtime_adapter_input
+            if resolved is not None:
+                active_adapter_input = replace(
+                    active_adapter_input,
+                    preprocessing=resolved[1],
+                    approval=resolved[0],
+                )
             public_decision = kwargs.pop("public_decision", None)
             # preprocessing 由运行时按获批方案注入；模型以同名字段自行填写时
             # 只用于与 State 中的确认内容核对，不能直接成为执行参数。

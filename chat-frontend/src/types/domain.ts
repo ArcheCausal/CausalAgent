@@ -167,6 +167,7 @@ export interface ProcessingOption {
 export interface WaitingInput {
   questionId: string
   prompt: string
+  algorithmName: string
   expiresAt: string | null
   options: ProcessingOption[]
   allowOther: boolean

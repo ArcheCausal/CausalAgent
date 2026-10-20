@@ -47,6 +47,7 @@ _INTERACTION_FIELDS = {
     "interaction_type",
     "question_id",
     "message",
+    "algorithm_name",
     "expires_at",
     "allow_other",
 }

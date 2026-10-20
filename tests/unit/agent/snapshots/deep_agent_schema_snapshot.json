@@ -39,7 +39,7 @@
         "provider_call_id",
         "input_identity"
       ],
-      "sha256": "1a7deb809bce55513a54699948e2400f643c9137b1ad36b4cfc56e2a1558ab5d",
+      "sha256": "7a09d0ab261933e980c59b26cc1324ab52fcf4cb70b3d283cc5edb514152ed7f",
       "title": "AlgorithmExecutionCommand"
     },
     "AlgorithmResult": {
@@ -305,7 +305,7 @@
         "version"
       ],
       "required": [],
-      "sha256": "45d7d0535f9f394dc3911034b5c682f88db43b1b81020d1d2f0e52cb4164226d",
+      "sha256": "f5bfdaa17b654f1b8764c525a7ee520f207dbe5f7c679eb7b4aa3703aa2f9625",
       "title": "PreprocessingPlan"
     },
     "PreprocessingStep": {
@@ -317,7 +317,7 @@
       "required": [
         "operation"
       ],
-      "sha256": "d61d1e00b77da63eafd1a3d055d7a2ffe322ac901af9b98f40d625dab96e4799",
+      "sha256": "392d8a4ec9b1d0165e6202bef25f6472d91960222cad45c7f9a608cb86298f36",
       "title": "PreprocessingStep"
     },
     "PublicDecision": {
@@ -446,19 +446,19 @@
   "tools": [
     {
       "capability_id": "causal.cdfm",
-      "schema_sha256": "719d706ca75fcfd6d18b7c64bb204c07fee0472904e61f6f85fbb62310959fd4",
+      "schema_sha256": "6ad48ec76e155f8d809f2a7d96a9767d05246f9d6d049dbc1f6fec5ff8bbc49b",
       "spec_digest": "485482d984b06ecdad26259ae810d60884da14ebbc98189eae998c80a7ef5201",
       "tool_name": "causal_cdfm"
     },
     {
       "capability_id": "causal.direct_lingam",
-      "schema_sha256": "37b96552e90850e50e3dc20ba22cfee64da965e65e60fb6b5490d83e46120035",
+      "schema_sha256": "b6dcf707097b024642f7ccfe2aa96554fb395d6e710f6723837086d0df34208a",
       "spec_digest": "ca8d3878f5ac98d9fc7a4cec6378eabf7ca606f23fb72526f7f3f636a8d3d734",
       "tool_name": "causal_direct_lingam"
     },
     {
       "capability_id": "causal.pc",
-      "schema_sha256": "a4cea47df4f937ebd2b0effb107f534bce97a2604cce9ef3b57bcc29b96e532f",
+      "schema_sha256": "f708844a5e2c28b75b91c3b35ace1deb1835d13ae6dfcb20290b1b78fd744f81",
       "spec_digest": "e4b07d2c0ee175c9cd96c2b7a7e1a08381f616df54eab3ae8367ef8566d7996c",
       "tool_name": "causal_pc"
     }

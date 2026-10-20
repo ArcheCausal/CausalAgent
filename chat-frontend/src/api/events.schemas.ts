@@ -101,6 +101,7 @@ export const interactionPayloadSchema = z.object({
   interaction_type: z.string().min(1),
   question_id: z.string().optional(),
   message: z.string(),
+  algorithm_name: z.string().optional(),
   expires_at: z.string().optional(),
   allow_other: z.boolean().optional(),
   options: z.array(processingOptionSchema).optional(),

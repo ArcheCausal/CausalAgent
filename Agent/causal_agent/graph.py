@@ -622,6 +622,8 @@ def _publish_child_interrupt(interrupts: list[Any]) -> Any:
         and raw_value.get("type") == DATA_PROCESSING_INTERACTION_TYPE
     ):
         request = DataProcessingRequest.model_validate(raw_value)
+        # 子图中断载荷已经包含父图发布的 question_id 和截止时间，
+        # 这里原样重发，避免父图再生成一个不同的确认标识。
         public_payload = request.model_dump(mode="json")
     return interrupt(public_payload)
 

@@ -17,9 +17,11 @@ from Agent.deep_agent_tools.interaction import (
     ProcessingOption,
     build_option_id,
     parse_selection,
+    resolve_approved_plan,
     validate_option_against_registry,
 )
 from Agent.deep_agent_tools.models import (
+    PreprocessingApproval,
     PreprocessingPlan,
     PreprocessingStep,
 )
@@ -144,6 +146,8 @@ def test_option_identity_is_stable_and_selection_parses_json() -> None:
     )
     assert payload["type"] == "interaction"
     assert payload["options"][0]["option_id"] == option.option_id
+    assert payload["question_id"] == "q-1"
+    assert payload["expires_at"].endswith("Z")
 
     selected, other = parse_selection(
         '{"option_id": "' + option.option_id + '"}',
@@ -209,3 +213,99 @@ def test_target_columns_cannot_be_dropped_by_missing_value_rows() -> None:
             profile=profile,
             protected_columns=("age",),
         )
+
+
+def _approved_plan_state(
+    *plans: PreprocessingPlan,
+    capability_id: str = "causal.pc",
+) -> dict[str, object]:
+    approvals: dict[str, object] = {}
+    for plan in plans:
+        option_id = build_option_id(capability_id=capability_id, plan_digest=plan.digest)
+        approvals[option_id] = {
+            "approval": PreprocessingApproval(
+                option_id=option_id,
+                question_id="q-1",
+                plan_digest=plan.digest,
+            ).model_dump(mode="json"),
+            "plan": plan.model_dump(mode="json"),
+            "capability_id": capability_id,
+        }
+    return {"data_processing_approvals": approvals}
+
+
+def test_approved_plan_resolution_matches_exact_digest() -> None:
+    older = PreprocessingPlan(
+        steps=(PreprocessingStep(operation="drop_rows", columns=("age",)),)
+    )
+    newer = PreprocessingPlan(
+        steps=(
+            PreprocessingStep(operation="numeric_impute", columns=("age",), method="median"),
+        )
+    )
+    state = _approved_plan_state(older, newer)
+
+    resolved = resolve_approved_plan(
+        state=state,
+        capability_id="causal.pc",
+        plan=newer,
+    )
+
+    assert resolved.status == "resolved"
+    assert resolved.entry is not None
+    assert resolved.entry[1].digest == newer.digest
+
+
+def test_approved_plan_resolution_requires_explicit_choice_when_ambiguous() -> None:
+    older = PreprocessingPlan(
+        steps=(PreprocessingStep(operation="drop_rows", columns=("age",)),)
+    )
+    newer = PreprocessingPlan(
+        steps=(
+            PreprocessingStep(operation="numeric_impute", columns=("age",), method="median"),
+        )
+    )
+    state = _approved_plan_state(older, newer)
+
+    assert (
+        resolve_approved_plan(state=state, capability_id="causal.pc", plan=None).status
+        == "ambiguous"
+    )
+    single = _approved_plan_state(newer)
+    resolved = resolve_approved_plan(
+        state=single,
+        capability_id="causal.pc",
+        plan=None,
+    )
+    assert resolved.status == "resolved"
+    assert resolved.entry is not None
+    assert resolved.entry[1].digest == newer.digest
+
+
+def test_approved_plan_resolution_ignores_unrelated_capability() -> None:
+    plan = PreprocessingPlan(
+        steps=(PreprocessingStep(operation="drop_rows", columns=("age",)),)
+    )
+    state = _approved_plan_state(plan, capability_id="causal.cdfm")
+
+    assert (
+        resolve_approved_plan(state=state, capability_id="causal.pc", plan=plan).status
+        == "missing"
+    )
+
+
+def test_approved_plan_rejects_inconsistent_option_identity() -> None:
+    plan = PreprocessingPlan(
+        steps=(PreprocessingStep(operation="drop_rows", columns=("age",)),)
+    )
+    state = _approved_plan_state(plan)
+    approvals = state["data_processing_approvals"]
+    assert isinstance(approvals, dict)
+    entry = next(iter(approvals.values()))
+    assert isinstance(entry, dict)
+    entry["approval"]["option_id"] = "opt_" + "0" * 24
+
+    assert (
+        resolve_approved_plan(state=state, capability_id="causal.pc", plan=plan).status
+        == "missing"
+    )
