@@ -1892,3 +1892,11 @@
   - 【前端】：消息卡片增加方案选择、影响说明、倒计时、提交中与过期状态，实时事件、活动任务和历史回放共用同一交互结构。
 - 【修复最长截断问题】
   - 增加deepseek最长输出
+---
+2026.10.20
+- 【Agent：处理确认工具契约与执行方案绑定】
+  - 【公开描述】：注册后的算法工具使用 AlgorithmSpec.model_description()，模型能够看到用法、数据要求、原生缺失处理、允许操作和最小行列数。
+  - 【确认输入】：request_data_processing 新增 DataProcessingInput 和显式 args_schema，从 ToolRuntime 注入运行时对象；DataProcessingInput.schema() 与真实工具共用字段定义，option_id、保护列和确认凭证仍由后端生成。
+  - 【方案校验】：确认前与 MCP 执行前共用 AlgorithmSpec.validate_preprocessing_plan()，检查操作范围、列名、保护列和步骤顺序；模型参数错误返回安全诊断。
+  - 【方案绑定】：算法工具按 capability_id 与 plan.digest 解析唯一获批记录，并将同一次解析的 plan/approval 传入 AdapterInput；存在多个不同获批方案时要求模型明确指定。
+  - 【前端说明】：确认卡片按结构化步骤生成确定性说明，显示公开算法名称；影响说明保留“未计算”边界。

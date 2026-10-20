@@ -12,6 +12,7 @@ from Agent.deep_agent.memory import build_in_memory_backend
 from Agent.deep_agent_tools.adapters.base import AdapterInput
 from Agent.deep_agent_tools.adapters.pc import PcAdapter
 from Agent.deep_agent_tools.algorithm_specs import build_tool_schema_snapshot
+from Agent.deep_agent_tools.algorithm_tools import AlgorithmTool
 from Agent.deep_agent_tools.error_codes import SafeErrorCode
 from Agent.deep_agent_tools.fake_algorithm_executor import FakeAlgorithmExecutor
 from Agent.deep_agent_tools.models import (
@@ -20,6 +21,8 @@ from Agent.deep_agent_tools.models import (
     PreprocessingStep,
 )
 from Agent.deep_agent_tools.preprocessing import build_data_profile_from_csv
+from Agent.deep_agent_tools.registry import build_default_registry
+from Agent.deep_agent_tools.algorithm_specs import DEFAULT_ALGORITHM_SPECS
 
 
 IDENTITY = TrustedJobIdentity(
@@ -131,3 +134,14 @@ def test_evidence_tool_schema_does_not_accept_preprocessing() -> None:
 
     schema = build_model_tool_input_schema(_RagEvidenceInput).model_json_schema()
     assert "preprocessing" not in schema["properties"]
+
+
+def test_registered_algorithm_tool_uses_spec_public_description() -> None:
+    registry = build_default_registry(
+        {spec.capability_id: object() for spec in DEFAULT_ALGORITHM_SPECS}
+    )
+    tool = AlgorithmTool(entry=registry.get("causal.pc"), adapter=object())
+
+    assert tool.description == tool.entry.spec.model_description()
+    assert "数据要求" in tool.description
+    assert "可确认的处理操作" in tool.description

@@ -7,6 +7,7 @@ function waiting(overrides: Partial<WaitingInput> = {}): WaitingInput {
   return {
     questionId: 'q-1',
     prompt: '请选择处理方式',
+    algorithmName: 'PC 因果发现',
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
     allowOther: true,
     selectedOptionId: null,
@@ -28,6 +29,8 @@ function waiting(overrides: Partial<WaitingInput> = {}): WaitingInput {
 describe('ProcessingOptions', () => {
   it('emits the chosen option and shows impact text', async () => {
     const wrapper = mount(ProcessingOptions, { props: { waiting: waiting() } })
+    expect(wrapper.text()).toContain('删除“age”中含缺失值的行')
+    expect(wrapper.text()).toContain('PC 因果发现')
     expect(wrapper.text()).toContain('剩余行数：未计算')
     expect(wrapper.text()).toContain('样本量会减少')
 

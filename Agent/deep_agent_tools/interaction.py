@@ -10,10 +10,11 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from .models import (
     ContractModel,
@@ -28,6 +29,7 @@ from .runtime_updates import (
     emit_public_decision_event,
     emit_tool_lifecycle_event,
     resolve_runtime_invocation,
+    with_tool_runtime_schema,
 )
 
 if TYPE_CHECKING:
@@ -79,6 +81,9 @@ class DataProcessingRequest(ContractModel):
 
     type: Literal["data_processing_request"] = DATA_PROCESSING_INTERACTION_TYPE
     prompt: str
+    algorithm_name: str = ""
+    question_id: str = ""
+    expires_at: str = ""
     options: tuple[ProcessingOption, ...]
     allow_other: bool = True
     expires_in_seconds: int = Field(default=DATA_PROCESSING_TIMEOUT_SECONDS, gt=0)
@@ -88,6 +93,24 @@ class DataProcessingRequest(ContractModel):
     def validate_prompt(cls, value: str) -> str:
         if not value.strip() or len(value) > 4000:
             raise ValueError("prompt must be a non-blank bounded string")
+        return value
+
+    @field_validator("algorithm_name")
+    @classmethod
+    def validate_algorithm_name(cls, value: str) -> str:
+        if not value:
+            return value
+        if value != value.strip() or len(value) > 200:
+            raise ValueError("algorithm_name must be a bounded trimmed string")
+        return value
+
+    @field_validator("question_id", "expires_at")
+    @classmethod
+    def validate_public_metadata(cls, value: str) -> str:
+        if not value:
+            return value
+        if value != value.strip() or len(value) > 255:
+            raise ValueError("public interaction metadata must be a bounded trimmed string")
         return value
 
     @model_validator(mode="after")
@@ -105,9 +128,11 @@ class DataProcessingRequest(ContractModel):
         return {
             "type": "interaction",
             "interaction_type": DATA_PROCESSING_INTERACTION_TYPE,
-            "question_id": question_id,
+            "question_id": question_id or self.question_id,
             "message": self.prompt,
-            "expires_at": expires_at.astimezone(timezone.utc).isoformat(),
+            "algorithm_name": self.algorithm_name,
+            "expires_at": self.expires_at
+            or expires_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
             "allow_other": self.allow_other,
             "options": [
                 {
@@ -128,6 +153,61 @@ class DataProcessingRequest(ContractModel):
                 for option in self.options
             ],
         }
+
+
+class DataProcessingInputOption(ContractModel):
+    """模型提交的一个候选方案；选项标识和确认凭证由后端生成。"""
+
+    label: str = Field(
+        min_length=1,
+        max_length=200,
+        description="面向用户的简短方案名称，说明采用什么处理。",
+    )
+    steps: tuple[PreprocessingStep, ...] = Field(
+        min_length=1,
+        description="按 select_columns、drop_rows、numeric_impute、categorical_encode 的顺序排列。",
+    )
+    impact: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "处理影响。只有已经计算的内容才能写精确数字；确认前未执行预览时写“未计算”。"
+        ),
+    )
+    risks: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description="这次处理可能引入的研究风险。",
+    )
+
+    @model_validator(mode="after")
+    def validate_steps(self) -> "DataProcessingInputOption":
+        PreprocessingPlan(steps=self.steps)
+        return self
+
+
+class DataProcessingInput(ContractModel):
+    """request_data_processing 的模型可见输入；不包含后端生成的确认字段。"""
+
+    capability_id: str = Field(
+        min_length=1,
+        description="准备执行的算法 capability_id。",
+    )
+    reason: str = Field(
+        min_length=1,
+        max_length=4000,
+        description="为什么当前数据不能直接执行该算法。",
+    )
+    options: tuple[DataProcessingInputOption, ...] = Field(
+        min_length=1,
+        max_length=3,
+        description="1 到 3 个候选处理方案；每个方案只使用该算法允许的操作和真实列名。",
+    )
+
+    @model_validator(mode="after")
+    def validate_option_identity(self) -> "DataProcessingInput":
+        for option in self.options:
+            if option.label != option.label.strip():
+                raise ValueError("option label must not contain surrounding whitespace")
+        return self
 
 
 def parse_selection(
@@ -183,32 +263,11 @@ def validate_option_against_registry(
         entry = registry.get(option.capability_id)
     except Exception as exc:
         raise ValueError("处理方案引用了未注册的算法") from exc
-    spec = entry.spec
-    operations = set(option.plan.operations())
-    unsupported = operations - set(spec.allowed_preprocessing)
-    if unsupported:
-        raise ValueError(
-            "该算法不允许的处理操作：" + "、".join(sorted(unsupported))
-        )
-    if profile is None:
-        raise ValueError("缺少数据画像，无法校验处理方案")
-    known_columns = set(profile.column_names)
-    for step in option.plan.steps:
-        unknown = set(step.columns) - known_columns
-        if unknown:
-            raise ValueError("处理方案引用了不存在的列：" + "、".join(sorted(unknown)))
-        if step.operation == "numeric_impute":
-            non_numeric = set(step.columns) - set(profile.numeric_columns)
-            if non_numeric:
-                raise ValueError(
-                    "数值插补只能用于数值列：" + "、".join(sorted(non_numeric))
-                )
-        if step.operation == "drop_rows" and set(step.columns) == known_columns:
-            raise ValueError("删行必须指定具体列，不能默认对全表删除")
-    # target/treatment 可以显式插补或编码，但不能因为缺失值被删行。
-    for step in option.plan.steps:
-        if step.operation == "drop_rows" and set(protected_columns) & set(step.columns):
-            raise ValueError("不能按目标变量或处理变量的缺失值删除整行")
+    entry.spec.validate_preprocessing_plan(
+        plan=option.plan,
+        profile=profile,
+        protected_columns=protected_columns,
+    )
 
 
 class DataProcessingTool:
@@ -220,76 +279,18 @@ class DataProcessingTool:
         self.registry = registry
 
     def schema(self) -> dict[str, Any]:
+        parameters = DataProcessingInput.model_json_schema()
+        parameters.pop("title", None)
+        parameters.pop("description", None)
         return {
             "name": self.name,
             "description": (
                 "当算法要求的数据条件与当前画像不一致时，向用户提交 1 到 3 个"
                 "受控处理或诊断选项。选项只使用算法 Spec 允许的操作和真实列名；"
-                "无法准确计算的影响必须标注“未计算”。调用后本轮会暂停等待用户。"
+                "无法准确计算的影响必须标注“未计算”；dropna 只删除缺失值，"
+                "不会删除正负无穷值。调用后本轮会暂停等待用户。"
             ),
-            "parameters": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "capability_id": {
-                        "type": "string",
-                        "description": "准备执行的算法 capability_id。",
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "为什么当前数据不能直接执行该算法。",
-                    },
-                    "options": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": 3,
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "label": {"type": "string"},
-                                "steps": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "additionalProperties": False,
-                                        "properties": {
-                                            "operation": {
-                                                "type": "string",
-                                                "enum": [
-                                                    "select_columns",
-                                                    "drop_rows",
-                                                    "numeric_impute",
-                                                    "categorical_encode",
-                                                ],
-                                            },
-                                            "columns": {
-                                                "type": "array",
-                                                "items": {"type": "string"},
-                                            },
-                                            "method": {
-                                                "type": ["string", "null"],
-                                                "enum": ["mean", "median", "ordinal", None],
-                                            },
-                                        },
-                                        "required": ["operation", "columns"],
-                                    },
-                                },
-                                "impact": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                },
-                                "risks": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                },
-                            },
-                            "required": ["label", "steps"],
-                        },
-                    },
-                },
-                "required": ["capability_id", "reason", "options"],
-            },
+            "parameters": parameters,
         }
 
     def to_langchain_tool(self) -> Any:
@@ -302,6 +303,7 @@ class DataProcessingTool:
             state = runtime.state
             if not isinstance(state, Mapping):
                 raise RuntimeError("ToolRuntime.state must be a mapping")
+            from langchain_core.messages import ToolMessage
             profile_value = state.get("data_profile")
             profile = (
                 profile_value
@@ -317,39 +319,144 @@ class DataProcessingTool:
                     value = analysis_parameters.get(key)
                     if isinstance(value, str) and value in (profile.column_names if profile else ()):
                         protected.append(value)
-            spec_entry = self.registry.get(str(kwargs.get("capability_id") or ""))
-            spec = spec_entry.spec
-            options: list[ProcessingOption] = []
-            for raw in kwargs.get("options") or []:
-                steps = tuple(
-                    PreprocessingStep.model_validate(step)
-                    for step in (raw.get("steps") or [])
+            try:
+                request_input = DataProcessingInput.model_validate(kwargs)
+            except ValidationError as exc:
+                await emit_tool_lifecycle_event(
+                    runtime,
+                    event_type="tool_call_result",
+                    identity=identity,
+                    tool_name=self.name,
+                    status="failed",
+                    safe_error_code="DATA_PROCESSING_INPUT_INVALID",
                 )
+                return ToolMessage(
+                    content=json.dumps(
+                        {
+                            "status": "invalid_input",
+                            "reason": "处理方案参数不符合要求，请按字段说明修正后重试。",
+                            "errors": _validation_diagnostics(exc),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    tool_call_id=identity.provider_call_id,
+                    name=self.name,
+                    status="error",
+                )
+            try:
+                spec_entry = self.registry.get(request_input.capability_id)
+            except Exception:
+                await emit_tool_lifecycle_event(
+                    runtime,
+                    event_type="tool_call_result",
+                    identity=identity,
+                    tool_name=self.name,
+                    status="failed",
+                    safe_error_code="UNKNOWN_CAPABILITY",
+                )
+                return ToolMessage(
+                    content=json.dumps(
+                        {
+                            "status": "invalid_input",
+                            "reason": "处理方案引用了未注册的算法 capability_id。",
+                            "errors": ["capability_id"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    tool_call_id=identity.provider_call_id,
+                    name=self.name,
+                    status="error",
+                )
+            spec = spec_entry.spec
+            if profile is None:
+                await emit_tool_lifecycle_event(
+                    runtime,
+                    event_type="tool_call_result",
+                    identity=identity,
+                    tool_name=self.name,
+                    status="failed",
+                    safe_error_code="DATA_PROFILE_UNAVAILABLE",
+                )
+                return ToolMessage(
+                    content=json.dumps(
+                        {
+                            "status": "invalid_input",
+                            "reason": "当前缺少数据画像，无法生成受控处理方案。",
+                            "errors": ["data_profile"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    tool_call_id=identity.provider_call_id,
+                    name=self.name,
+                    status="error",
+                )
+            options: list[ProcessingOption] = []
+            plan_digests: set[str] = set()
+            for index, raw in enumerate(request_input.options):
                 plan = PreprocessingPlan(
-                    steps=steps,
+                    steps=raw.steps,
                     protected_columns=tuple(protected),
                 )
+                if plan.digest in plan_digests:
+                    return ToolMessage(
+                        content=json.dumps(
+                            {
+                                "status": "invalid_input",
+                                "reason": "候选处理方案不能重复；请为每个选项提供不同的步骤。",
+                                "errors": ["options"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                        tool_call_id=identity.provider_call_id,
+                        name=self.name,
+                        status="error",
+                    )
+                plan_digests.add(plan.digest)
                 option = ProcessingOption(
                     option_id=build_option_id(
                         capability_id=spec.capability_id,
                         plan_digest=plan.digest,
                     ),
-                    label=str(raw.get("label") or ""),
+                    label=raw.label,
                     capability_id=spec.capability_id,
                     plan=plan,
-                    impact=tuple(str(item) for item in raw.get("impact") or []),
-                    risks=tuple(str(item) for item in raw.get("risks") or []),
+                    impact=tuple(str(item) for item in raw.impact),
+                    risks=tuple(str(item) for item in raw.risks),
                 )
-                validate_option_against_registry(
-                    option=option,
-                    registry=self.registry,
-                    profile=profile,
-                    protected_columns=tuple(protected),
-                )
+                try:
+                    validate_option_against_registry(
+                        option=option,
+                        registry=self.registry,
+                        profile=profile,
+                        protected_columns=tuple(protected),
+                    )
+                except ValueError as exc:
+                    await emit_tool_lifecycle_event(
+                        runtime,
+                        event_type="tool_call_result",
+                        identity=identity,
+                        tool_name=self.name,
+                        status="failed",
+                        safe_error_code="PREPROCESSING_PLAN_INVALID",
+                    )
+                    return ToolMessage(
+                        content=json.dumps(
+                            {
+                                "status": "invalid_input",
+                                "reason": str(exc),
+                                "errors": [f"options[{index}].steps"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                        tool_call_id=identity.provider_call_id,
+                        name=self.name,
+                        status="error",
+                    )
                 options.append(option)
             request = DataProcessingRequest(
-                prompt=str(kwargs.get("reason") or "").strip()
+                prompt=request_input.reason.strip()
                 or "当前数据需要确认处理方式后才能继续。",
+                algorithm_name=spec.public_name,
                 options=tuple(options),
             )
             await emit_tool_lifecycle_event(
@@ -358,7 +465,12 @@ class DataProcessingTool:
                 identity=identity,
                 tool_name=self.name,
             )
-            answer = interrupt(request.model_dump(mode="json"))
+            answer = interrupt(
+                request.public_payload(
+                    question_id=identity.provider_call_id,
+                    expires_at=confirmation_expiry(),
+                )
+            )
             selected, other_text = parse_selection(answer, options=request.options)
             if other_text is not None:
                 await emit_tool_lifecycle_event(
@@ -428,11 +540,26 @@ class DataProcessingTool:
             )
 
         call.__annotations__["runtime"] = ToolRuntime
+        runtime_args_schema = with_tool_runtime_schema(
+            DataProcessingInput,
+            tool_name=self.name,
+            tool_runtime_type=ToolRuntime,
+        )
         return StructuredTool.from_function(
             coroutine=call,
             name=self.name,
             description=self.schema()["description"],
+            args_schema=runtime_args_schema,
         )
+
+
+def _validation_diagnostics(exc: ValidationError) -> list[str]:
+    """只公开字段路径和稳定错误类型，不暴露模型原文或 Python 对象。"""
+
+    return [
+        ".".join(str(item) for item in error["loc"]) + ":" + str(error["type"])
+        for error in exc.errors(include_url=False, include_input=False)
+    ]
 
 
 def find_approved_plan(
@@ -446,7 +573,7 @@ def find_approved_plan(
     approvals = state.get("data_processing_approvals")
     if not isinstance(approvals, Mapping):
         return None
-    for raw in approvals.values():
+    for option_id, raw in approvals.items():
         if not isinstance(raw, Mapping):
             continue
         if str(raw.get("capability_id") or "") != capability_id:
@@ -457,8 +584,85 @@ def find_approved_plan(
         approved_plan = PreprocessingPlan.model_validate(plan_value)
         if plan is not None and approved_plan.digest != plan.digest:
             continue
-        return PreprocessingApproval.model_validate(raw.get("approval")), approved_plan
+        approval = PreprocessingApproval.model_validate(raw.get("approval"))
+        if option_id != approval.option_id:
+            continue
+        if approval.option_id != build_option_id(
+            capability_id=capability_id,
+            plan_digest=approved_plan.digest,
+        ):
+            continue
+        return approval, approved_plan
     return None
+
+
+@dataclass(frozen=True)
+class ApprovedPlanResolution:
+    """一次算法调用解析到的唯一批准方案，或需要模型补充的信息。"""
+
+    status: Literal["resolved", "missing", "ambiguous"]
+    entry: tuple[PreprocessingApproval, PreprocessingPlan] | None = None
+
+
+def resolve_approved_plan(
+    *,
+    state: Mapping[str, Any],
+    capability_id: str,
+    plan: PreprocessingPlan | None,
+) -> ApprovedPlanResolution:
+    """按算法和方案摘要解析唯一批准记录；省略方案时只在无歧义时自动取用。"""
+
+    if plan is not None:
+        entry = find_approved_plan(
+            state=state,
+            capability_id=capability_id,
+            plan=plan,
+        )
+        return ApprovedPlanResolution(
+            status="resolved" if entry is not None else "missing",
+            entry=entry,
+        )
+    matches = _approved_plan_entries(
+        state=state,
+        capability_id=capability_id,
+    )
+    if len(matches) == 1:
+        return ApprovedPlanResolution(status="resolved", entry=matches[0])
+    if len(matches) > 1:
+        return ApprovedPlanResolution(status="ambiguous")
+    return ApprovedPlanResolution(status="missing")
+
+
+def _approved_plan_entries(
+    *,
+    state: Mapping[str, Any],
+    capability_id: str,
+) -> tuple[tuple[PreprocessingApproval, PreprocessingPlan], ...]:
+    """读取同一算法下内容互不相同的批准记录。"""
+
+    approvals = state.get("data_processing_approvals")
+    if not isinstance(approvals, Mapping):
+        return ()
+    by_digest: dict[str, tuple[PreprocessingApproval, PreprocessingPlan]] = {}
+    for option_id, raw in approvals.items():
+        if not isinstance(raw, Mapping):
+            continue
+        if str(raw.get("capability_id") or "") != capability_id:
+            continue
+        plan_value = raw.get("plan")
+        if not isinstance(plan_value, Mapping):
+            continue
+        approved_plan = PreprocessingPlan.model_validate(plan_value)
+        approval = PreprocessingApproval.model_validate(raw.get("approval"))
+        if option_id != approval.option_id or approval.plan_digest != approved_plan.digest:
+            continue
+        if approval.option_id != build_option_id(
+            capability_id=capability_id,
+            plan_digest=approved_plan.digest,
+        ):
+            continue
+        by_digest.setdefault(approved_plan.digest, (approval, approved_plan))
+    return tuple(by_digest[key] for key in sorted(by_digest))
 
 
 def confirmation_expiry(now: datetime | None = None) -> datetime:

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import type { WaitingInput } from '../types/domain'
+import type { ProcessingOptionStep, WaitingInput } from '../types/domain'
 
 const props = defineProps<{
   waiting: WaitingInput
@@ -31,6 +31,29 @@ const countdown = computed(() => {
   const rest = String(seconds % 60).padStart(2, '0')
   return minutes + ':' + rest
 })
+
+const METHOD_LABELS: Record<string, string> = {
+  mean: '均值',
+  median: '中位数',
+  ordinal: '按确定性顺序编码',
+}
+
+function stepDescription(step: ProcessingOptionStep): string {
+  const columns = step.columns.map((column) => `“${column}”`).join('、')
+  if (!columns) return '未指定作用列'
+  if (step.operation === 'select_columns') return `只保留${columns}，其余列不参与分析`
+  if (step.operation === 'drop_rows') return `删除${columns}中含缺失值的行`
+  if (step.operation === 'numeric_impute') {
+    const method = step.method ? METHOD_LABELS[step.method] : null
+    return method
+      ? `对${columns}的缺失值使用该列${method}填补`
+      : `对${columns}的缺失值执行数值插补（未指定方法）`
+  }
+  if (step.operation === 'categorical_encode') {
+    return `将${columns}按确定性顺序编码为数值`
+  }
+  return `对${columns}执行 ${step.operation}`
+}
 
 watch(
   () => expired.value,
@@ -79,13 +102,17 @@ function choose(optionId: string): void {
           :aria-pressed="waiting.selectedOptionId === option.optionId"
           @click="choose(option.optionId)"
         >
-          <strong>{{ option.label }}</strong>
-          <span class="processing-option-algorithm">{{ option.capabilityId }}</span>
+          <strong v-if="option.steps.length">
+            {{ option.steps.map(stepDescription).join('；') }}
+          </strong>
+          <strong v-else>{{ option.label }}</strong>
+          <span class="processing-option-algorithm">
+            {{ waiting.algorithmName || option.capabilityId }}
+          </span>
         </button>
         <ul v-if="option.steps.length" class="processing-option-steps">
           <li v-for="(step, index) in option.steps" :key="index">
-            {{ step.operation }}：{{ step.columns.join('、') }}
-            <template v-if="step.method">（{{ step.method }}）</template>
+            {{ stepDescription(step) }}
           </li>
         </ul>
         <ul v-if="option.impact.length" class="processing-option-notes">

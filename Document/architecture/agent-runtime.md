@@ -64,7 +64,9 @@ agent → fold → preprocess → deep_agent → finalization_gate → report
 
 `AlgorithmDependencyDispatchMiddleware` 在 ToolNode 边界收集同一模型响应中的算法调用，按 `requires/produces` 分层：无依赖调用可并行，有依赖调用按层执行，并受单 Job 并发和工具总预算约束。Adapter 负责模型参数校验、确定性预处理、标准结果、raw result 完整性和 Ledger 更新；`McpAlgorithmExecutor` 只负责签名传输、远端执行结果校验和安全错误映射。CDFM 的 logits/probabilities 通过仅供 Executor 与 Adapter 使用的私有 envelope 保存到 raw artifact，不进入 `AlgorithmResult`、ToolMessage、SSE 或公共日志。可信 Job、文件、lease、HMAC 与数据库身份不会进入模型参数。
 
-`AlgorithmSpec` 还声明输入要求、原生处理能力、允许的额外处理操作和最小行列数，模型可见工具描述由这些字段生成。预检测画像区分阻断问题与非阻断提示，保留变量类型、缺失列、非有限值、空列、常数列和疑似标识符列。Deep Agent 根据画像生成 1 到 3 个受控处理选项，由本地 `request_data_processing` 工具校验后触发用户确认；确认工具必须独占一次工具调用轮次。
+`AlgorithmSpec` 还声明输入要求、原生处理能力、允许的额外处理操作和最小行列数，注册后的算法工具直接使用 `model_description()` 作为模型可见描述。预检测画像区分阻断问题与非阻断提示，保留变量类型、缺失列、非有限值、空列、常数列和疑似标识符列。Deep Agent 根据画像生成 1 到 3 个受控处理选项，由本地 `request_data_processing` 工具校验后触发用户确认；该工具的 `args_schema` 与辅助 schema 来自同一份 `DataProcessingInput`，`option_id`、保护列和确认凭证只由后端生成，确认工具必须独占一次工具调用轮次。
+
+确认前和 MCP 执行前共用 `AlgorithmSpec.validate_preprocessing_plan()` 检查操作范围、列名、保护列和步骤顺序。算法工具按 `capability_id + plan.digest` 解析唯一获批记录，并把这次解析得到的方案与凭证直接传给 Adapter；省略方案时只在无歧义时自动取用，多个不同获批方案要求模型明确指定。MCP 在执行前先按原 CSV 画像复核方案，再执行处理并检查处理后的真实数据，结果 provenance 记录同一个方案摘要。
 
 `causal-mcp` 是私网 Streamable HTTP/HTTP/1.1 服务。服务端以 MySQL primary strong read 校验 Job、attempt、lease 和 worker 身份，再使用有界队列及独立算法子进程运行 capability。MCP session 不保存 Job、checkpoint 或 Action Ledger。
 

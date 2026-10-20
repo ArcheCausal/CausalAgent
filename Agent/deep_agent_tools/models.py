@@ -139,9 +139,22 @@ PREPROCESSING_OPERATION_ORDER: tuple[PreprocessingOperation, ...] = (
 class PreprocessingStep(ContractModel):
     """一个已确认的数据处理步骤；只表达模型可理解的列与参数。"""
 
-    operation: PreprocessingOperation
-    columns: tuple[str, ...] = ()
-    method: Literal["mean", "median", "ordinal"] | None = None
+    operation: PreprocessingOperation = Field(
+        description=(
+            "处理操作：select_columns 选列，drop_rows 按列删除含缺失值的行，"
+            "numeric_impute 数值插补，categorical_encode 分类编码。"
+        )
+    )
+    columns: tuple[str, ...] = Field(
+        default=(),
+        description="步骤作用的真实列名；删行和插补必须明确列出列名。",
+    )
+    method: Literal["mean", "median", "ordinal"] | None = Field(
+        default=None,
+        description=(
+            "数值插补使用 mean 或 median；分类编码使用 ordinal；其他操作必须为 null。"
+        ),
+    )
 
     @field_validator("columns")
     @classmethod

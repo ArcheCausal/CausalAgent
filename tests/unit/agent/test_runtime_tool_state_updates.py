@@ -24,6 +24,8 @@ from Agent.deep_agent_tools import (
     build_default_registry,
 )
 from Agent.deep_agent_tools.adapters import build_default_adapters
+from Agent.deep_agent_tools.interaction import build_option_id
+from Agent.deep_agent_tools.models import PreprocessingApproval, PreprocessingPlan, PreprocessingStep
 
 
 IDENTITY = TrustedJobIdentity(
@@ -75,6 +77,25 @@ def _algorithm_tool(*, executor: FakeAlgorithmExecutor):
     return context, wrapped
 
 
+def _approved_plan_state(
+    *plans: PreprocessingPlan,
+) -> dict[str, object]:
+    return {
+        build_option_id(capability_id="causal.pc", plan_digest=plan.digest): {
+            "approval": PreprocessingApproval(
+                option_id=build_option_id(
+                    capability_id="causal.pc", plan_digest=plan.digest
+                ),
+                question_id=f"q-{index}",
+                plan_digest=plan.digest,
+            ).model_dump(mode="json"),
+            "plan": plan.model_dump(mode="json"),
+            "capability_id": "causal.pc",
+        }
+        for index, plan in enumerate(plans)
+    }
+
+
 def test_algorithm_langchain_tool_writes_result_and_terminal_ledger() -> None:
     context, tool = _algorithm_tool(executor=FakeAlgorithmExecutor())
 
@@ -96,6 +117,64 @@ def test_algorithm_langchain_tool_writes_result_and_terminal_ledger() -> None:
     assert ledger.attempts[0].revision == 2
     assert ledger.attempts[0].status == "succeeded"
     assert command.update["messages"][0].tool_call_id == "provider-call-1"
+
+
+def test_algorithm_tool_executes_the_plan_resolved_for_this_call() -> None:
+    """核对方案与实际传给 Adapter 的方案必须是同一次解析结果。"""
+
+    executor = FakeAlgorithmExecutor()
+    context, tool = _algorithm_tool(executor=executor)
+    older = PreprocessingPlan(
+        steps=(PreprocessingStep(operation="drop_rows", columns=("x",)),)
+    )
+    newer = PreprocessingPlan(
+        steps=(PreprocessingStep(operation="numeric_impute", columns=("x",), method="median"),)
+    )
+    runtime = _runtime(context, call_id="provider-call-plan-binding")
+    runtime.state = {
+        **runtime.state,
+        "data_processing_approvals": _approved_plan_state(older, newer),
+    }
+
+    asyncio.run(
+        tool.coroutine(
+            runtime=runtime,
+            alpha=0.05,
+            preprocessing=newer.model_dump(mode="json"),
+        )
+    )
+
+    assert executor.calls[0].command.preprocessing == newer
+    assert executor.calls[0].command.approval is not None
+    assert executor.calls[0].command.approval.plan_digest == newer.digest
+
+
+def test_algorithm_tool_requires_explicit_plan_when_multiple_are_approved() -> None:
+    executor = FakeAlgorithmExecutor()
+    context, tool = _algorithm_tool(executor=executor)
+    plans = (
+        PreprocessingPlan(
+            steps=(PreprocessingStep(operation="drop_rows", columns=("x",)),)
+        ),
+        PreprocessingPlan(
+            steps=(
+                PreprocessingStep(operation="numeric_impute", columns=("x",), method="median"),
+            )
+        ),
+    )
+    runtime = _runtime(context, call_id="provider-call-plan-ambiguous")
+    runtime.state = {
+        **runtime.state,
+        "data_processing_approvals": _approved_plan_state(*plans),
+    }
+
+    message = asyncio.run(tool.coroutine(runtime=runtime, alpha=0.05))
+
+    assert message.status == "error"
+    assert json.loads(message.content)["unmet_requirements"] == [
+        "processing_plan_ambiguous"
+    ]
+    assert executor.calls == []
 
 
 def test_algorithm_public_decision_is_emitted_and_removed_before_execution() -> None:
