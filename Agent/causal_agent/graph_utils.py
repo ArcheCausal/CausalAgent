@@ -383,17 +383,18 @@ def guarded_error_handler(
                         exc_info=_safe_exc_info(error),
                     )
                 else:
-                    details = {
-                        "failure_kind": _failure_kind(error, node_name),
-                        "final_attempt": final_attempt,
-                        "fallback": fallback_name,
-                        "cause_code": _cause_code(error),
-                    }
-                    details.update(_structured_output_details(error))
+                    failure_kind = _failure_kind(error, node_name)
+                    cause_code = _cause_code(error)
                     log_event(
                         LOGGER,
                         "job.node.degraded",
-                        details=details,
+                        details={
+                            "failure_kind": failure_kind,
+                            "final_attempt": final_attempt,
+                            "fallback": fallback_name,
+                            "cause_code": cause_code,
+                            **_structured_output_details(error),
+                        },
                         exc_info=_safe_exc_info(error),
                     )
                 return result

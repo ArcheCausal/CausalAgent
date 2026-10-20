@@ -1,4 +1,8 @@
-"""验证会话历史事件查询使用正确的 MySQL 复合索引。"""
+"""验证会话历史事件查询使用正确的 MySQL 复合索引。
+
+本测试需要真实 MySQL 主从，不属于默认 pytest 与容器 unit 测试范围。
+设置 CAUSALAGENT_RUN_DB_INTEGRATION=1 并从可访问数据库的环境执行。
+"""
 
 from __future__ import annotations
 

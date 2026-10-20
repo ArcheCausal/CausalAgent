@@ -1,4 +1,7 @@
-"""Alembic revision 图必须保持单一、无重复的可升级 head。"""
+"""Alembic revision 图必须保持单一、无重复的可升级 head。
+
+工具需求：真实的 Alembic 运行依赖；缺少时跳过并保留未执行结论。
+"""
 
 from __future__ import annotations
 
@@ -7,12 +10,15 @@ import sys
 import unittest
 from pathlib import Path
 
+import pytest
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 
 class AlembicMigrationGraphTests(unittest.TestCase):
     def test_heads_has_one_unique_merge_revision(self) -> None:
+        pytest.importorskip("alembic", reason="验证 migration head 需要 Alembic 运行依赖")
         result = subprocess.run(
             [sys.executable, "-m", "alembic", "heads"],
             cwd=REPOSITORY_ROOT,

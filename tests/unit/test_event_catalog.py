@@ -28,6 +28,8 @@ EXPECTED_CODES = {
     "job.create.accepted",
     "job.create.replayed",
     "job.create.failed",
+    "job.input_wait.expired",
+    "job.input_wait.expire_failed",
     "admin.audit.write_failed",
     "security.login.disabled_account",
     "auth.login.last_login_update_failed",

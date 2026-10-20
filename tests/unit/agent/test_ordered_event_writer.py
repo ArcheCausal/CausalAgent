@@ -21,6 +21,7 @@ from app.agent.worker.event_adapter import classify_graph_failure  # noqa: E402
 from app.agent.worker.event_writer import (  # noqa: E402
     OrderedEventWriter,
     TEXT_FLUSH_CHARACTER_LIMIT,
+    TEXT_FLUSH_INTERVAL_SECONDS,
 )
 from app.agent.worker.execution_guard import JobExecutionRevoked  # noqa: E402
 from app.agent.job_service import FailJobResult  # noqa: E402
@@ -79,18 +80,30 @@ class OrderedEventWriterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persisted[0]["delta"], "hello")
 
     async def test_50ms_is_measured_from_batch_start_not_last_chunk(self):
-        """持续到达的小 token 也不能无限延后时间阈值。"""
+        """剩余窗口按批起始时间扣减，第二个 token 必须并入同一批。"""
         writer = OrderedEventWriter(build_job(), "worker-a")
         persisted = []
         writer._persist = AsyncMock(side_effect=lambda payload: persisted.append(payload))
+        loop = asyncio.get_running_loop()
+        base = loop.time()
+        fake_now = [base]
 
-        await writer.submit(text_chunk("a"))
-        await asyncio.sleep(0.02)
-        await writer.submit(text_chunk("b"))
-        await asyncio.sleep(0.04)
+        with patch.object(loop, "time", lambda: fake_now[0]):
+            await writer.submit(text_chunk("a"))
+            started_at = writer.buffer["started_at"]
+            self.assertAlmostEqual(started_at, base, places=3)
+            # 20ms 后第二个 token 到达；剩余窗口应从批开始计算。
+            fake_now[0] = base + 0.02
+            await writer.submit(text_chunk("b"))
+            self.assertEqual("".join(writer.buffer["chunks"]), "ab")
+            self.assertAlmostEqual(
+                TEXT_FLUSH_INTERVAL_SECONDS - (fake_now[0] - started_at),
+                0.03,
+                places=3,
+            )
+        # 退出可控时钟前用真实 close 刷新剩余缓冲。
         await writer.close()
-
-        self.assertGreaterEqual(len(persisted), 1)
+        self.assertEqual(len(persisted), 1)
         self.assertEqual(persisted[0]["delta"], "ab")
 
     async def test_flushes_at_character_limit(self):

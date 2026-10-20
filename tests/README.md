@@ -8,20 +8,25 @@
 
 ```text
 tests/
-├── unit/               # 单个模块或最小 Flask 应用，外部依赖使用 fake/mock
+├── unit/               # 单个模块、纯函数或最小 Flask 应用，外部依赖使用 fake
 │   ├── admin/
 │   ├── agent/          # Agent、Deep Agent、知识库 RAG 与多模态契约
 │   ├── analytics/
 │   ├── auth/
 │   ├── chat/
 │   ├── database/
+│   ├── deployment/     # 发布包生成、预发环境保护等纯函数
 │   └── rag_eval/       # RAG 评测台本体：路由、队列、生命周期与生产验收
-├── integration/        # 跨模块静态契约、部署边界和 migration 链路
+├── integration/        # 多个实际组件之间的数据传递、生命周期和协作行为
 │   ├── admin/
 │   ├── agent/
 │   ├── database/
-│   ├── deployment/     # Compose、网关、入口与预发合同
-│   └── migrations/     # Alembic 图与迁移版本修复
+│   └── deployment/     # Flask 页面入口、静态资源与权限行为
+├── contracts/          # 跨文件配置一致性、部署约束、迁移图与静态政策
+│   ├── database/
+│   ├── deployment/
+│   └── observability/
+├── e2e/database/       # 需要真实 MySQL 主从的索引与查询验证
 ├── acceptance/         # 分层 RAG contract/integration/production runner
 ├── e2e/admin/          # 隔离主从 + PostgreSQL checkpoint E2E 模块
 ├── run_admin_31_e2e.ps1
@@ -29,13 +34,13 @@ tests/
 └── run_searxng_docker_validation.ps1
 ```
 
-`unit` 和 `integration` 表示依赖范围，`admin`、`auth`、`database` 等目录表示业务归属。新增测试时先判断是否需要真实跨模块依赖，再选择业务目录。仓库测试同时包含 pytest 风格函数与 `unittest.TestCase`，统一由 pytest 负责发现和执行。
+`unit`、`integration` 和 `contracts` 表示测试层级，`admin`、`auth`、`database` 等目录表示业务归属。测试层级说明这项测试证明什么，CI 执行组说明它在什么条件下运行，两者无需一一对应。新增测试时先判断依赖范围，再选择业务目录。仓库测试同时包含 pytest 风格函数与 `unittest.TestCase`，统一由 pytest 负责发现和执行。
 
-原 `tests/` 顶层的 focused tests 已按业务归位：RAG 评测台本体（`test_rag_eval_*.py`、`test_rag_candidate_*.py`、`test_isolated_*.py`、`test_rag_dataset_governance.py`、`test_rag_eval_production_acceptance.py`）进入 `tests/unit/rag_eval/`；多模态指数与检索（`test_multimodal_*.py`）与知识库 RAG 契约（`test_rag_release_portable_embedding.py`、`test_rag_runtime_lifecycle.py`、`test_rag_service_and_tool.py`、`test_ragas_generate_with_chunks_engine.py`、`test_rag_candidate_generation_and_sweep.py`）进入 `tests/unit/agent/`；部署契约（`test_staging_*.py`）进入 `tests/integration/deployment/`；迁移契约（`test_alembic_migration_graph.py`、`test_migration_version_repair.py`）进入 `tests/integration/migrations/`。这批测试由默认 pytest 直接收集，文件下沉后相对 `__file__` 的仓库根引用已同步为三级父目录。跨越测试与压测的边界约束见 `tests/AGENTS.md`。
+RAG 评测台本体（`test_rag_eval_*.py`、`test_rag_candidate_*.py`、`test_isolated_*.py`、`test_rag_dataset_governance.py`、`test_rag_eval_production_acceptance.py`）位于 `tests/unit/rag_eval/`；多模态指数与检索（`test_multimodal_*.py`）与知识库 RAG 契约（`test_rag_release_portable_embedding.py`、`test_rag_runtime_lifecycle.py`、`test_rag_service_and_tool.py`、`test_ragas_generate_with_chunks_engine.py`、`test_rag_candidate_generation_and_sweep.py`）位于 `tests/unit/agent/`。部署、迁移和日志政策检查位于 `tests/contracts/`，Flask 页面入口行为位于 `tests/integration/deployment/`，迁移版本修复的纯函数用例位于 `tests/unit/database/`。默认 pytest 通过 `pytest.ini` 的 `testpaths` 收集 `unit`、`integration` 和 `contracts`，并排除 `smoke` 与 `db_integration`。跨越测试与压测的边界约束见 `tests/AGENTS.md`。
 
 对 staging 入口执行真实 HTTP/SSE 负载的压测客户端不在 `tests/` 之下，位于仓库根 `loadtest/`，不进入默认 pytest 与 CI 执行范围。压测的运行产物、凭据和报告正文都不提交，唯一入库的压测索引是 `loadtest/evidence/index.md`。
 
-`integration/deployment/` 只做不启动容器的 Compose 部署契约检查，包括预发服务、网络、卷、镜像 digest 和公网端口边界；SearXNG 的 `SEARXNG_SECRET` 注入和 `/healthz` 真实容器验证通过 `tests/run_searxng_docker_validation.ps1` 手工执行，不属于默认 pytest 范围。
+`contracts/deployment/` 只做不启动容器的 Compose、Dockerfile、发布 workflow 和镜像边界检查；`integration/deployment/` 只验证 Flask 页面与静态资源的路由行为。SearXNG 的 `SEARXNG_SECRET` 注入和 `/healthz` 真实容器验证通过 `tests/run_searxng_docker_validation.ps1` 手工执行，不属于默认 pytest 范围。需要真实 MySQL 的 `tests/e2e/database/test_load_session_event_query.py` 同样不进入默认范围。
 
 ## 前端与页面入口
 
@@ -44,7 +49,7 @@ tests/
 页面入口与构建产物的 Flask 契约由本地或发布前手工检查：
 
 ```powershell
-python -m pytest -p no:cacheprovider tests/integration/deployment/test_frontend_entrypoints.py
+python -m pytest -p no:cacheprovider tests/integration/deployment/test_frontend_entries.py tests/contracts/deployment/test_frontend_entrypoints.py
 docker compose -f docker-compose.yml config --quiet
 docker compose --env-file .env.staging.example -f docker-compose.staging.yml config --quiet
 docker compose -f docker-compose.prod.yml config --quiet
@@ -69,7 +74,7 @@ docker compose -f docker-compose.prod.yml config --quiet
 docker compose -f docker-compose.test.yml build unit-test
 ```
 
-运行全部单元测试：
+运行默认范围（全部单元测试与离线组件 integration）：
 
 ```bash
 docker compose -f docker-compose.test.yml run --rm unit-test
@@ -92,7 +97,7 @@ docker compose -f docker-compose.test.yml run --rm unit-test sh
 
 ## RAG 多模态与隔离评测验收
 
-多模态来源、staged index、release 和隔离评测的测试位于 `tests/unit/agent/test_multimodal_*.py` 与 `tests/unit/rag_eval/test_isolated_rag_eval_routes.py`、`tests/unit/rag_eval/test_rag_eval_*.py`；持久队列由默认开发 Compose 的 `rag-eval-worker` 执行。声明式矩阵在 `Document/rag_eval_production_acceptance_matrix.json`，安全 runner 在 `tests/acceptance/run_rag_eval_production_acceptance.py`：
+多模态来源、staged index、release 和隔离评测的测试位于 `tests/unit/agent/test_multimodal_*.py`（`contracts` 为核心与检索身份、`parsing`、`vision`、`indexing` 按职责拆分，共享 fixture 在 `multimodal_fixtures.py`）与 `tests/unit/rag_eval/test_isolated_rag_eval_routes.py`、`tests/unit/rag_eval/test_rag_eval_*.py`；持久队列由默认开发 Compose 的 `rag-eval-worker` 执行。声明式矩阵在 `Document/rag_eval_production_acceptance_matrix.json`，安全 runner 在 `tests/acceptance/run_rag_eval_production_acceptance.py`：
 
 ```bash
 # 只列出 contract 检查；不执行检查或写入报告
@@ -113,8 +118,10 @@ runner 不会代替真实资料摄取、外部模型/VLM、完整 Ragas 评测�
 未使用 Docker 时，需要先跟用户说明目前本地docker环境未启动/出错，需要在当前 Python 环境安装项目依赖和 `pytest`，用户同一之后然后运行：
 
 ```bash
-python -m pytest tests/unit
+python -m pytest
 ```
+
+不带路径参数时，`pytest.ini` 的 `testpaths` 把收集范围限定为 `tests/unit`、`tests/integration` 和 `tests/contracts`，并排除 `smoke` 与 `db_integration`。`tests/e2e/`、`tests/acceptance/` 和 `tests/smoke/` 使用各自的显式命令。
 
 这条路径只作为环境受限时的回退，不应由 Codex 或开发者反复临时安装依赖来充当团队测试环境。
 

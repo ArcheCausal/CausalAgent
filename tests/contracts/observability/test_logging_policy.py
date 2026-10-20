@@ -8,7 +8,7 @@ from pathlib import Path
 from observability.event_catalog import EVENT_SPECS, REASON_CODES
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_ROOTS = (
     PROJECT_ROOT / "app",
     PROJECT_ROOT / "Agent",
@@ -22,7 +22,11 @@ OFFLINE_LOG_ALLOWLIST = {
 }
 OFFLINE_PRINT_ALLOWLIST = {
     "Agent/Processing/data_visualize.py",
+    # 人工自检入口：只在直接执行模块时运行，不进入 worker/web/MCP 运行路径。
+    "Agent/Processing/nonlinearity.py",
     "Agent/causal/causalachieve.py",
+    # 构建期与一次性卷同步 CLI：输出用于镜像构建和运维命令。
+    "Agent/CausalAgentMCP/cdfm_weights.py",
     "Agent/knowledge_base/build_knowledge.py",
     "Agent/knowledge_base/query_rag.py",
     "Database/database_init.py",
@@ -101,6 +105,18 @@ def test_runtime_paths_have_no_plain_application_logging_calls():
             if _is_logger_receiver(node.func.value):
                 violations.append(f"{relative}:{node.lineno}:{node.func.attr}")
     assert violations == []
+
+
+def test_worker_wait_expiry_events_are_registered_with_bounded_count():
+    """等待确认扫描的收敛与失败都使用受管事件，数量字段不携带明细。"""
+    from observability.event_catalog import validate_event_details
+
+    _, expired, violation = validate_event_details("job.input_wait.expired", {"expired_count": 2})
+    assert (expired, violation) == ({"expired_count": 2}, None)
+    _, failed, violation = validate_event_details(
+        "job.input_wait.expire_failed", {"reason_code": "database_unavailable"}
+    )
+    assert (failed, violation) == ({"reason_code": "database_unavailable"}, None)
 
 
 def test_terminal_prints_are_confined_to_explicit_offline_or_cli_files():

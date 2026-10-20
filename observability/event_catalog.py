@@ -309,6 +309,19 @@ _events: dict[str, EventSpec] = {
         "分析任务创建失败",
         reason_code=REASON,
     ),
+    # 等待用户确认的独立扫描任务：每一轮收敛或失败都必须留下可检索的事件。
+    "job.input_wait.expired": _spec(
+        logging.INFO,
+        "lifecycle",
+        "等待用户确认的任务已超过期限",
+        expired_count=COUNT,
+    ),
+    "job.input_wait.expire_failed": _spec(
+        logging.ERROR,
+        "lifecycle",
+        "扫描等待用户确认的任务失败",
+        reason_code=REASON,
+    ),
     "admin.audit.write_failed": _spec(
         logging.ERROR,
         "dependency",

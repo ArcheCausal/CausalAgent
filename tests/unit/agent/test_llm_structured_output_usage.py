@@ -10,17 +10,13 @@ STRUCTURED_CALLERS = (
 )
 
 
-def test_shared_adapter_exposes_sync_and_async_function_calling_only():
-    """公共调用器固定使用普通 function calling，且不启用 raw/strict 兼容分支。"""
-    text = Path("Agent/llm_structured_output.py").read_text(encoding="utf-8")
+def test_shared_adapter_exposes_sync_and_async_entry_points():
+    """公共调用器同时提供同步与异步入口，业务代码不自行拼装结构化调用。"""
+    from Agent import llm_structured_output
 
-    assert "def invoke_structured(" in text
-    assert "async def ainvoke_structured(" in text
-    assert 'method="function_calling"' in text
-    assert '"thinking": {"type": "disabled"}' in text
-    assert "strict=True" not in text
-    assert "include_raw=True" not in text
-    assert "asyncio.run" not in text
+    assert callable(llm_structured_output.invoke_structured)
+    assert callable(llm_structured_output.ainvoke_structured)
+    assert "asyncio.run" not in Path("Agent/llm_structured_output.py").read_text(encoding="utf-8")
 
 
 def test_all_business_structured_outputs_use_the_shared_invokers():

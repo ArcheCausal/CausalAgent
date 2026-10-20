@@ -1,4 +1,7 @@
-"""SearXNG Compose 部署契约的静态验证。"""
+"""SearXNG Compose 部署契约的静态验证。
+
+工具需求：Docker CLI，用于展开 Compose 配置；缺少时跳过并保留未执行结论。
+"""
 
 from __future__ import annotations
 
@@ -6,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
@@ -14,7 +18,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+@lru_cache(maxsize=1)
 def _compose_config() -> dict:
+    """在输入文件和环境相同的范围内只展开一次开发 Compose 配置。"""
     if shutil.which("docker") is None:
         pytest.skip("docker CLI 不可用，跳过 Compose 配置验证")
 

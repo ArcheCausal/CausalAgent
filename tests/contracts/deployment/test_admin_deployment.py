@@ -3,6 +3,8 @@ from pathlib import Path
 
 import yaml
 
+from tests.contracts.deployment.frontend_layout import FRONTENDS_BY_NAME
+
 
 class AdminFrontendDeploymentTests(unittest.TestCase):
     """静态验证管理员 Vue 构建、托管和无 Node 运行时边界。"""
@@ -10,8 +12,8 @@ class AdminFrontendDeploymentTests(unittest.TestCase):
     def test_dockerfile_uses_node_builder_and_python_final_stage(self):
         """Node 24 只用于前端构建，最终阶段复制产物并运行 Python。"""
         text = Path("Dockerfile").read_text(encoding="utf-8")
+        layout = FRONTENDS_BY_NAME["admin"]
 
-        self.assertIn("FROM node:24-alpine AS admin-builder", text)
         self.assertIn(
             "COPY packages/design-system/src/ /packages/design-system/src/",
             text,
@@ -19,15 +21,8 @@ class AdminFrontendDeploymentTests(unittest.TestCase):
         self.assertIn("RUN npm ci", text)
         self.assertIn("RUN npm run build", text)
         self.assertIn("FROM python-deps AS runtime", text)
-        self.assertIn(
-            "COPY --from=admin-builder /frontend/dist /opt/causalagent-admin",
-            text,
-        )
-        self.assertIn(
-            "ENV ADMIN_FRONTEND_DIST_DIR=/opt/causalagent-admin",
-            text,
-        )
         final_stage = text.split("FROM python-deps AS runtime", 1)[1]
+        self.assertIn(layout.dist_env, final_stage)
         self.assertNotIn("npm ", final_stage)
         self.assertNotIn("vite", final_stage.lower())
         self.assertIn("gunicorn", final_stage)

@@ -418,9 +418,9 @@ flowchart LR
 
 详细的状态约束见 [`Document/development/chat-frontend.md`](Document/development/chat-frontend.md) 和 [`Document/development/website-frontend.md`](Document/development/website-frontend.md)。
 
-### 后端单元测试
+### 后端测试
 
-仓库提供独立的 `docker-compose.test.yml`，用于按需创建一次性单元测试容器。测试镜像预装项目 Python 依赖和 `pytest`，不连接 MySQL，禁用网络；当前源码以只读方式挂载到容器，因此修改代码后可以直接重新运行测试，无需重建镜像。
+仓库提供独立的 `docker-compose.test.yml`，用于按需创建一次性后端测试容器。测试镜像预装项目 Python 依赖和 `pytest`，不连接 MySQL，禁用网络；当前源码以只读方式挂载到容器，因此修改代码后可以直接重新运行测试，无需重建镜像。
 
 首次使用或测试依赖变化后构建测试镜像：
 
@@ -428,7 +428,7 @@ flowchart LR
 docker compose -f docker-compose.test.yml build unit-test
 ```
 
-运行全部后端单元测试，测试结束后自动删除本次容器：
+运行默认后端范围（单元测试与离线组件 integration），测试结束后自动删除本次容器：
 
 ```bash
 docker compose -f docker-compose.test.yml run --rm unit-test
@@ -446,7 +446,7 @@ docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p
 docker compose -f docker-compose.test.yml run --rm unit-test sh
 ```
 
-当前测试只保证 `tests/unit`；集成测试和隔离主从 E2E 的执行边界见 [`tests/README.md`](tests/README.md)。
+默认命令覆盖 `tests/unit` 与 `tests/integration`；契约检查、真实数据库和隔离主从 E2E 的执行边界见 [`tests/README.md`](tests/README.md)。
 
 
 
@@ -496,7 +496,7 @@ Release 包在构建时嵌入正式 HTTPS origin，强制关闭 debug 和开发�
 
 4. 向 `develop` 新建 Pull Request；只有 `develop` 可以向 `main` 发起合并请求
 
-5. 等待 `Python syntax`、`Light tests` 和 `Pull request policy` 检查通过后再合并
+5. 等待 `Python syntax`、`Pull request policy` 和 `CI result` 检查通过后再合并；`CI result` 会核对路径判断选中的测试组是否全部完成
 
 新建 Issue 时请使用仓库提供的 [`Issue Form`](.github/ISSUE_TEMPLATE/issue.yml)，按模板填写背景、问题描述、预期结果、复现步骤、验收标准和环境信息。除附件外的字段为 GitHub 原生必填项，但不限制填写内容；普通贡献者不能选择空白 Issue。
 

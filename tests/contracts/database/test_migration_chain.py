@@ -422,9 +422,19 @@ class MonitorSnapshotKeyWidthMigrationTests(unittest.TestCase):
 
     def test_cleanup_snapshot_keys_fit_the_widened_column(self):
         """清理快照键必须落在放宽后的上限内，且至少一个键依赖这次放宽。"""
-        from Database.monitoring import (
-            CLEANUP_OUTBOX_SNAPSHOT_KEY,
+        # 静态契约只读取常量定义，不导入会加载数据库驱动的监控模块。
+        monitoring_source = Path("Database/monitoring.py").read_text(encoding="utf-8")
+        cleanup_source = Path("app/agent/persistence_cleanup.py").read_text(encoding="utf-8")
+
+        def _constant(source: str, name: str) -> str:
+            marker = f'{name} = "'
+            return source.split(marker, 1)[1].split('"', 1)[0]
+
+        CLEANUP_RUNTIME_SNAPSHOT_KEY = _constant(monitoring_source, "CLEANUP_RUNTIME_SNAPSHOT_KEY")
+        CLEANUP_OUTBOX_SNAPSHOT_KEY = _constant(monitoring_source, "CLEANUP_OUTBOX_SNAPSHOT_KEY")
+        self.assertEqual(
             CLEANUP_RUNTIME_SNAPSHOT_KEY,
+            _constant(cleanup_source, "CLEANUP_RUNTIME_SNAPSHOT_KEY"),
         )
 
         lengths = {

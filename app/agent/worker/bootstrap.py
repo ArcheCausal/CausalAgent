@@ -191,7 +191,7 @@ async def expire_waiting_inputs_until_stopped(
             log_event(
                 LOGGER,
                 "job.input_wait.expire_failed",
-                details={"reason_code": "database_error"},
+                details={"reason_code": "database_unavailable"},
                 exc_info=True,
             )
         try:

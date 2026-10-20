@@ -28,7 +28,7 @@ FROM python-deps AS test
 COPY requirements-test.txt .
 RUN pip install --no-cache-dir -r requirements-test.txt
 
-CMD ["python", "-m", "pytest", "-p", "no:cacheprovider", "tests/unit"]
+CMD ["python", "-m", "pytest", "-p", "no:cacheprovider", "tests/unit", "tests/integration"]
 
 
 FROM node:24-alpine AS admin-builder
