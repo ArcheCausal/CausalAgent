@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from Agent.deep_agent_tools.identity import build_invocation_id, current_input_identity
+from Agent.deep_agent_tools.runtime_updates import normalize_tool_status
 from Agent.deep_agent_tools.models import (
     AlgorithmResult,
     FinalAnalysisDecision,
@@ -146,15 +147,7 @@ class FinalizationGate:
 
     @staticmethod
     def _expected_result_final_status(status: str) -> str:
-        return {
-            "valid": "succeeded",
-            "not_ready": "not_ready",
-            "timed_out": "timed_out",
-            "invalid_input": "failed",
-            "not_applicable": "not_applicable",
-            "skipped": "skipped",
-            "execution_failed": "failed",
-        }[status]
+        return normalize_tool_status(status)
 
     def _is_algorithm_record(self, record: InvocationRecord) -> bool:
         if self._algorithm_tool_names:
@@ -390,6 +383,15 @@ class FinalizationGate:
                 record,
                 identity=trusted_identity,
             )
+
+        # 不能只从结果查账本；执行前已登记但结果丢失的调用也必须拒绝。
+        result_by_invocation = {result.invocation_id: result for result in eligible.values()}
+        for invocation_id, record in current_ledger.items():
+            latest = max(record.attempts.values(), key=lambda item: (item.retry_ordinal, item.revision))
+            if latest.status in {"queued", "running"} or latest.status != record.final_status:
+                raise StructuredResponseError("algorithm action ledger is not terminal")
+            if invocation_id not in result_by_invocation:
+                raise StructuredResponseError("registered algorithm invocation has no terminal result")
 
         evidence_refs = {
             *dict(rag_evidence or {}).keys(),

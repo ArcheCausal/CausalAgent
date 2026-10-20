@@ -1894,9 +1894,20 @@
   - 增加deepseek最长输出
 ---
 2026.10.20
+- 【Agent：算法调用登记、统一终态与事件幂等】
+  - 【执行登记】：在算法外部调用前通过独立图状态更新登记 queued 与 running，持久化调用身份、Job 归属和原事件阶段；checkpoint 恢复按 revision 单调推进。
+  - 【超时与取消】：调度层统一管理 deadline，等待远端取消与资源清理后生成 timed_out；用户取消和执行资格撤销继续传播并停止分析，终态写回前重新检查 Job 资格。
+  - 【结果写回】：普通执行终态通过 Command 同时写入 ToolMessage、AlgorithmResult 和 Action Ledger；超时使用 ALGORITHM_TIMED_OUT，不携带因果图或原始算法产物，终态事件持久化等待不占用算法 deadline。
+  - 【依赖调度】：从 Command 的受控算法结果识别真实状态并保留失败更新，未知返回按契约失败处理；失败、超时及未发布的 artifact 不放行下游依赖。
+  - 【公共事件】：统一 valid 到 succeeded 的状态和文案转换，保留超时、取消、不适用及未执行语义；父图仅转发公开工具生命周期字段，sink、custom 与聚合兜底共用 invocation、attempt、retry 和事件类型生成的稳定键。
+  - 【恢复重放】：聚合兜底必须从结果与终态账本恢复完整身份、原事件阶段和原 attempt，复用相同事件内容；身份不完整时不按工具名合成完成事件，同一算法的独立合法调用分别保留终态。
+  - 【最终校验与报告】：FinalizationGate 要求所有已登记算法调用都有一致的终态和结果，缺失时阻止报告；有效 PC 与完整记录的 CDFM 超时可以共同通过校验，报告自动补充超时算法未完成且无可用因果图的分析限制。
+  - 【契约与维护】：扩展账本事件阶段和 skipped 状态契约，同步 schema 快照、运行时与 Job API 文档，补充跨模块回归和真实 MCP、MySQL/PostgreSQL 人工验收入口。
 - 【Agent：处理确认工具契约与执行方案绑定】
   - 【公开描述】：注册后的算法工具使用 AlgorithmSpec.model_description()，模型能够看到用法、数据要求、原生缺失处理、允许操作和最小行列数。
   - 【确认输入】：request_data_processing 新增 DataProcessingInput 和显式 args_schema，从 ToolRuntime 注入运行时对象；DataProcessingInput.schema() 与真实工具共用字段定义，option_id、保护列和确认凭证仍由后端生成。
   - 【方案校验】：确认前与 MCP 执行前共用 AlgorithmSpec.validate_preprocessing_plan()，检查操作范围、列名、保护列和步骤顺序；模型参数错误返回安全诊断。
   - 【方案绑定】：算法工具按 capability_id 与 plan.digest 解析唯一获批记录，并将同一次解析的 plan/approval 传入 AdapterInput；存在多个不同获批方案时要求模型明确指定。
   - 【前端说明】：确认卡片按结构化步骤生成确定性说明，显示公开算法名称；影响说明保留“未计算”边界。
+- 【分支合并：兼容算法终态与处理确认契约】
+  - 【工具与文档】：合并 develop 的唯一获批方案绑定、能力描述和注入参数契约，保留执行前调用登记、统一终态写回、取消传播及事件幂等，同步运行时说明。

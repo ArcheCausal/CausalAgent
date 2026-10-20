@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import asyncio
 import json
 from collections.abc import Mapping
@@ -21,18 +20,18 @@ from .models import (
     ActionAttempt,
     AlgorithmResult,
     DataProfile,
+    PreprocessingApproval,
     PreprocessingPlan,
     InvocationRecord,
-    McpInvocationContext,
 )
 from .identity import build_invocation_id, current_input_identity
-from .interaction import find_approved_plan, resolve_approved_plan
+from .interaction import resolve_approved_plan
 from .registry import AlgorithmRegistry, RegistryEntry
 from .runtime_updates import (
-    build_terminal_invocation,
-    build_tool_command,
+    algorithm_terminal_command,
     emit_public_decision_event,
     emit_tool_lifecycle_event,
+    normalize_tool_status,
     resolve_runtime_invocation,
     with_tool_runtime_schema,
 )
@@ -304,14 +303,7 @@ class AlgorithmTool:
             )
             raise
 
-        terminal_status = {
-            "valid": "succeeded",
-            "timed_out": "timed_out",
-            "not_ready": "not_ready",
-            "not_applicable": "not_applicable",
-            "invalid_input": "failed",
-            "execution_failed": "failed",
-        }[result.status]
+        terminal_status = normalize_tool_status(result.status)
         terminal = self._record(
             provider_call_id=provider_call_id,
             response_identity=response_identity,
@@ -339,12 +331,9 @@ class AlgorithmTool:
     def to_langchain_tool(self) -> Any:
         """包装为使用 ToolRuntime/Command 原子回写结果和 Ledger 的 Tool。"""
 
-        try:
-            from langchain.tools import ToolRuntime
-            from langchain_core.messages import ToolMessage
-            from langchain_core.tools import StructuredTool
-        except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover
-            raise RuntimeError("LangChain is not installed") from exc
+        from langchain.tools import ToolRuntime
+        from langchain_core.messages import ToolMessage
+        from langchain_core.tools import StructuredTool
 
         async def call(runtime: Any, **kwargs: Any) -> Any:
             identity = resolve_runtime_invocation(
@@ -434,73 +423,17 @@ class AlgorithmTool:
                 identity=identity,
                 tool_name=self.name,
             )
-            try:
-                result = await self.ainvoke(
-                    kwargs,
-                    provider_call_id=identity.provider_call_id,
-                    response_identity=identity.response_identity,
-                    runtime_context=identity.runtime_context,
-                    adapter_input=active_adapter_input,
-                )
-                await identity.runtime_context.ensure_active()
-            except (asyncio.CancelledError, JobExecutionRevoked):
-                await emit_tool_lifecycle_event(
-                    runtime,
-                    event_type="tool_call_result",
-                    identity=identity,
-                    tool_name=self.name,
-                    status="canceled",
-                )
-                raise
-            except Exception:
-                await emit_tool_lifecycle_event(
-                    runtime,
-                    event_type="tool_call_result",
-                    identity=identity,
-                    tool_name=self.name,
-                    status="failed",
-                    safe_error_code="ALGORITHM_RESULT_CONTRACT_INVALID",
-                )
-                raise
-            attempt_status = {
-                "valid": "succeeded",
-                "timed_out": "timed_out",
-                "not_ready": "not_ready",
-                "not_applicable": "not_applicable",
-                "invalid_input": "failed",
-                "execution_failed": "failed",
-            }[result.status]
-            safe_error_code = result.diagnostics.safe_error_code
-            if hasattr(safe_error_code, "value"):
-                safe_error_code = safe_error_code.value
-            await emit_tool_lifecycle_event(
-                runtime,
-                event_type="tool_call_result",
-                identity=identity,
-                tool_name=self.name,
-                status=(
-                    result.status
-                    if result.status in {"valid", "not_applicable", "skipped"}
-                    else "failed"
-                ),
-                safe_error_code=safe_error_code,
+            # 取消只清理资源并传播；调度层区分 deadline 和外部撤销，统一收口终态。
+            result = await self.ainvoke(
+                kwargs,
+                provider_call_id=identity.provider_call_id,
+                response_identity=identity.response_identity,
+                runtime_context=identity.runtime_context,
+                adapter_input=active_adapter_input,
             )
-            terminal = build_terminal_invocation(
-                identity=identity,
-                tool_name=self.name,
-                attempt_status=attempt_status,
-                started_at=started_at,
-                result_ref=result.result_ref,
-                safe_error_code=safe_error_code,
-            )
-            return build_tool_command(
-                identity=identity,
-                tool_name=self.name,
-                payload=result.model_dump(mode="json"),
-                ledger_record=terminal,
-                state_updates={
-                    "algorithm_results": {result.result_ref: result},
-                },
+            return await algorithm_terminal_command(
+                runtime, identity=identity, tool_name=self.name,
+                result=result, started_at=started_at,
             )
 
         # StructuredTool 会把 ToolRuntime 识别为 injected arg；显式 args_schema

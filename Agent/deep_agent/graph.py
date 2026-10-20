@@ -21,6 +21,7 @@ from Agent.deep_agent_tools.interaction import (
     DataProcessingTool,
 )
 from Agent.deep_agent_tools.dependency_dispatch import (
+    _tool_calls_from_state,
     build_algorithm_dependency_middleware,
 )
 
@@ -185,25 +186,48 @@ def _extract_verified_provider_response_id(
 
 
 def _build_message_identity_middleware(
-    *, provider_response_id_extractor: ProviderResponseIdExtractor | None = None
+    *, provider_response_id_extractor: ProviderResponseIdExtractor | None = None,
+    registry: AlgorithmRegistry | None = None,
 ) -> Any:
     """在每次模型响应后持久化 Tool 调用使用的 response fallback identity。"""
 
-    try:
-        from langchain.agents.middleware import AgentMiddleware
-    except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover
-        raise DeepAgentDependencyError("LangChain AgentMiddleware is not installed") from exc
+    from langchain.agents.middleware import AgentMiddleware
+    from Agent.deep_agent_tools.runtime_updates import (
+        RuntimeInvocationIdentity, build_pending_invocation,
+    )
 
     class MessageExecutionIdentityMiddleware(AgentMiddleware):
         def after_model(self, state: Any, runtime: Any) -> dict[str, Any]:
             # fallback 每轮都重新生成；provider ID 缺失时显式写 None，清除
             # 可能来自上一轮的旧值，而不是让 State reducer 沿用 stale identity。
-            return {
+            update = {
                 "message_execution_id": new_message_execution_id(),
                 "provider_response_id": _extract_verified_provider_response_id(
                     state, runtime, provider_response_id_extractor
                 ),
             }
+            if registry is not None:
+                tools = frozenset(entry.spec.tool_name for entry in registry.entries)
+                calls = _tool_calls_from_state(state, tools)
+                records = {}
+                provider_id = update["provider_response_id"]
+                for call in calls:
+                    if call.get("name") not in tools:
+                        continue
+                    identity = RuntimeInvocationIdentity(
+                        provider_call_id=call["id"],
+                        response_identity=provider_id or update["message_execution_id"],
+                        response_identity_source=(
+                            "provider_response_id" if provider_id else "message_execution_id"
+                        ),
+                        provider_response_id=provider_id,
+                        runtime_context=runtime.context,
+                    )
+                    record = build_pending_invocation(identity=identity, tool_name=call["name"])
+                    records[record.invocation_id] = record
+                if records:
+                    update["action_ledger"] = records
+            return update
 
     return MessageExecutionIdentityMiddleware()
 
@@ -303,7 +327,6 @@ def build_deep_agent(
         filesystem_middleware,
         _build_summarization_middleware(configured_model, profile),
         *build_budget_middlewares(profile),
-        _build_message_identity_middleware(),
     ]
     try:
         from langchain.agents.middleware import AgentMiddleware
@@ -377,6 +400,9 @@ def build_deep_agent(
             )
         )
         middleware.append(InteractionTurnGuardMiddleware())
+    # after_model 按注册的反序执行：先持久化 identity/queued，再写 running，
+    # 最后 ToolNode 才能开始外部调用。两个 hook 都有独立 checkpoint 边界。
+    middleware.append(_build_message_identity_middleware(registry=registry))
     kwargs: dict[str, Any] = {
         "model": configured_model,
         "tools": [

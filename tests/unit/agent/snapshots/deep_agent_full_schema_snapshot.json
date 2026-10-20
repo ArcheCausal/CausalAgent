@@ -53,6 +53,7 @@
             "succeeded",
             "failed",
             "not_applicable",
+            "skipped",
             "timed_out",
             "not_ready",
             "canceled",
@@ -1756,6 +1757,7 @@
                 "succeeded",
                 "failed",
                 "not_applicable",
+                "skipped",
                 "timed_out",
                 "not_ready",
                 "canceled",
@@ -1902,6 +1904,7 @@
             "succeeded",
             "failed",
             "not_applicable",
+            "skipped",
             "timed_out",
             "not_ready",
             "canceled",
@@ -1983,6 +1986,19 @@
           ],
           "default": null,
           "title": "Input Identity"
+        },
+        "event_step_id": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{24}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Step Id"
         },
         "attempts": {
           "additionalProperties": {

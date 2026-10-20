@@ -158,6 +158,36 @@ RAG/SearXNG 或完整 MySQL Job 验收。通过数量由实际 pytest 输出记�
 
 公开决策和刷新恢复的定向覆盖还包括：Tool envelope 剥离 `public_decision` 后执行器只接收科学参数；RAG/Web 检索器入参不含该字段且公开工具名进入事件；无效公开说明不阻断工具；Gate 后内部结果引用映射为公开算法名；`decision/tool_call` 事件经会话历史白名单回放；前端对先于父阶段到达的明细执行一次性暂存和补绘，并对实时决策做渐进展示、对同阶段并行决策串行展示、对历史回放和 `prefers-reduced-motion` 直接展示完整文本。并行 RAG/Web ToolNode 回归还必须覆盖同一查询内排名 reference、跨查询重叠来源和 ToolMessage/State reference 一致性。浏览器缓存通过聊天页脚本与样式版本参数失效。
 
+算法调用登记、统一终态和生命周期事件可独立运行无替代依赖的定向回归：
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps unit-test python -m pytest -p no:cacheprovider `
+  tests/integration/agent/test_algorithm_terminal_state.py `
+  tests/integration/agent/test_tool_lifecycle_events.py `
+  tests/unit/agent/test_deep_agent_models.py `
+  tests/unit/agent/test_action_ledger_reducers.py `
+  tests/unit/agent/test_deep_agent_schema_snapshots.py
+```
+
+这些检查使用真实 LangGraph、ToolNode、内存 checkpoint、生产本地 PC runner 和纯领域契约，覆盖执行前 queued/running 登记、revision 单调恢复、失败 Command 的状态保留、deadline 清理及依赖阻断、Gate 完整性、报告超时限制和 sink/custom/聚合路径的稳定键。纯 asyncio deadline 工作负载只证明调度控制流，不等价于 CDFM、远端取消、真实模型、PostgreSQL/MySQL 或浏览器 SSE 验收。
+
+真实算法终态另有两个[人工验收入口](../../tests/acceptance/p2_mcp/algorithm_terminal_acceptance.py)，不加入默认 pytest。`algorithm_terminal_acceptance.py` 的 server/client 分别运行在本次新建的容器中，仓库只读挂载 `/app`；服务端关闭外网，客户端使用 `--network container:<本次服务端容器>`。镜像需要同时具备测试环境的 LangGraph/应用依赖和 MCP 镜像的真实 CDFM 包；CDFM 权重按 `Agent/CausalAgentMCP/cdfm_weights.py` 的固定 revision 与摘要准备，只读挂载 `/weights`，设置 `CDFM_MODEL_PATH=/weights`、`HF_HUB_OFFLINE=1` 和 `TRANSFORMERS_OFFLINE=1`。容器内命令如下：
+
+```bash
+python tests/acceptance/p2_mcp/algorithm_terminal_acceptance.py server
+python tests/acceptance/p2_mcp/algorithm_terminal_acceptance.py client --deadline 0.75 --report /tmp/algorithm-terminal-report.json
+```
+
+服务端显式生成并冻结合成 CSV，保留默认真实进程池和 runner；它没有连接部署数据库。验收先做真实 CDFM 离线推理预检，再检查两次 PC、CDFM deadline、外部取消、Command/结果/账本/公共事件和进程清理；同一可信 Job 身份下的真实 PC 成功与 CDFM 超时结果还会一起进入 Gate，验证 PC 可被采用，空的显式报告草稿经程序装配后会自动含有 CDFM 分析限制。这不包含模型生成决策或报告。deadline 包括进程初始化与模型加载，不能解释为模型已经推理指定时长。缺失权重时 CDFM 项标为 `BLOCKED`，PC 的工程替补结果不算 CDFM 证据。退出码分别为 PASS=0、FAIL=1、BLOCKED=2。
+
+[真实持久化入口](../../tests/acceptance/p2_mcp/terminal_persistence_acceptance.py) 使用独立内部网络中的全新 MySQL/PostgreSQL 容器，不公开数据库端口。MySQL 仅在初始化时允许空 root 密码并创建空的 `terminal_acceptance` 库；PostgreSQL 创建同名库和用户，临时内部服务使用 trust 认证。客户端设置 `TERMINAL_ACCEPTANCE_MYSQL_HOST` 和 `TERMINAL_ACCEPTANCE_POSTGRES_HOST` 为本次容器名后运行：
+
+```bash
+python tests/acceptance/p2_mcp/terminal_persistence_acceptance.py
+```
+
+该脚本拒绝非空 MySQL 库，在容器内生成一次性凭据并修改初始密码，然后执行正式 bootstrap migration、真实注册/登录和 Session/Job 服务；覆盖重新建立连接池后的 PostgreSQL checkpoint 恢复、revision 单调性、两次本地真实 PC、持久化事件幂等、Flask SSE 的 Last-Event-ID/刷新和取消后的迟到写入拒绝。报告保存在 `/tmp/terminal-persistence-report.json`。重跑必须使用新空库，结束后保留数据库与报告；这不证明 MCP/CDFM 与数据库的完整组合、worker 崩溃接管、真实浏览器或模型报告生成。
+
 终态引用契约的定向覆盖还必须包含：把 RAG/Web 证据引用写入 `result_assessments` 时 Gate 以 `assessment_ref_unknown_result` 拒绝，只修该处后继续以 `proposal_evidence_ref_unknown` 拒绝，两处都修正后才通过；失败规则被翻译成脱敏修正指令并进入重试输入；身份/账本类失败不带规则码且保持通用指令；Gate 拒绝、降级与第二次 Deep Agent 修正各自发布稳定 `event_key` 的 `progress` 阶段说明，并由事件适配器绑定到对应阶段的活跃实例；未登记节点名或空文本不被外带。这几项由 `tests/unit/agent/test_final_analysis_decision.py`、`tests/unit/agent/test_deep_agent_parent_graph.py` 和 `tests/unit/agent/test_stream_events.py` 覆盖，结构化字段描述变更必须同步 `tests/unit/agent/snapshots/` 两个快照。
 
 全量 `tests/unit` 与 `tests/integration` 应在交付前重新执行，并以本次命令输出报告

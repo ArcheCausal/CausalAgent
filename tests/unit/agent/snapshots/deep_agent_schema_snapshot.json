@@ -14,7 +14,7 @@
         "revision",
         "status"
       ],
-      "sha256": "033a181214e143b228faaf2870d165b8144da9895cbc8b28b02c64a2816e3c5f",
+      "sha256": "7d4aa095f222ce68f31e5ee296e0d4924c80c4dbb373d61586f4ed3e4718a735",
       "title": "ActionAttempt"
     },
     "AlgorithmExecutionCommand": {
@@ -228,6 +228,7 @@
       "properties": [
         "attempt_count",
         "attempts",
+        "event_step_id",
         "final_status",
         "input_identity",
         "invocation_id",
@@ -250,7 +251,7 @@
         "tool_name",
         "final_status"
       ],
-      "sha256": "52860be0bb47525762bd597d0834fd1faf39f4023802ae13c8ba284067d59c20",
+      "sha256": "e7351c58aeb6f5a011bd3f0e9c1c14c30a285c928a938ca92039b1bab320b51c",
       "title": "InvocationRecord"
     },
     "McpInvocationContext": {

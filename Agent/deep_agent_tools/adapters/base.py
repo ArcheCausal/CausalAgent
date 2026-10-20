@@ -630,6 +630,9 @@ class BaseAlgorithmAdapter(ABC):
                     ),
                 },
             )
+            if result.status == "timed_out":
+                # deadline 已结束执行；没有成功算法产物，不能保存标准化快照冒充 raw。
+                return result
             # Fake executor 没有远端 raw payload，因此以标准化结果快照作为可复核
             # 的协议级 raw；真实 executor 若已提供 metadata 也必须从同一个 backend
             # 回读验证，不能仅凭引用和声明的 hash/size/version 放行。

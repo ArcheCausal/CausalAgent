@@ -163,13 +163,14 @@ def test_planned_call_snapshots_algorithm_spec_limits() -> None:
     assert plan.concurrency_limits == {"shared-cpu": 3}
 
 
-def test_effective_timeout_uses_spec_timeout_and_job_ceiling(monkeypatch) -> None:
+@pytest.mark.parametrize("job_ceiling", [0.05, 2])
+def test_effective_timeout_uses_spec_timeout_and_job_ceiling(job_ceiling) -> None:
     spec = _spec(
         capability_id="test.timeout",
         tool_name="timeout_tool",
         requires=frozenset({"tabular_dataset"}),
         produces=frozenset({"prepared"}),
-        timeout_seconds=7,
+        timeout_seconds=1,
     )
     registry = AlgorithmRegistry()
     registry.register(spec=spec, adapter=object())
@@ -178,25 +179,27 @@ def test_effective_timeout_uses_spec_timeout_and_job_ceiling(monkeypatch) -> Non
         registry=registry,
         initial_artifacts={"tabular_dataset"},
     )
-    observed_timeouts: list[float] = []
-    original_wait_for = asyncio.wait_for
-
-    async def record_timeout(awaitable, *, timeout):
-        observed_timeouts.append(timeout)
-        return await original_wait_for(awaitable, timeout=timeout)
-
-    monkeypatch.setattr(asyncio, "wait_for", record_timeout)
-
     async def scenario():
-        return await execute_dependency_plan(
-            plan,
-            lambda request: asyncio.sleep(0, result=request.call_id),
-            timeout_seconds=11,
+        started = asyncio.get_running_loop().time()
+        cleaned = asyncio.Event()
+
+        async def workload(request):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+        outcomes = await execute_dependency_plan(
+            plan, workload, timeout_seconds=job_ceiling,
         )
+        elapsed = asyncio.get_running_loop().time() - started
+        assert cleaned.is_set()
+        assert min(1, job_ceiling) <= elapsed < min(1, job_ceiling) + 1
+        return outcomes
 
     outcomes = asyncio.run(scenario())
-    assert outcomes[0].status == "succeeded"
-    assert observed_timeouts == [7]
+    assert outcomes[0].status == "timed_out"
+    assert not outcomes[0].published_artifacts
 
 
 def test_spec_default_concurrency_cannot_be_raised_by_job_limit() -> None:
@@ -282,8 +285,8 @@ def test_sibling_failure_does_not_cancel_and_dependent_call_is_not_ready() -> No
 
         async def execute(request):
             if request.call_id == "bad":
-                raise RuntimeError("expected fake failure")
-            return request.call_id
+                raise RuntimeError("execution failure")
+            return {"status": "succeeded"}
 
         outcomes = await execute_dependency_plan(plan, execute)
         return {outcome.request.call_id: outcome for outcome in outcomes}
@@ -441,7 +444,7 @@ def test_execution_enforces_job_concurrency_and_timeout() -> None:
             peak = max(peak, active)
             try:
                 await asyncio.sleep(0.02 if request.call_id != "2" else 0.2)
-                return request.call_id
+                return {"status": "succeeded"}
             finally:
                 active -= 1
 

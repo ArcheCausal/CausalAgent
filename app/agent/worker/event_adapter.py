@@ -9,7 +9,15 @@ import re
 import time
 from typing import Any
 
+from pydantic import ValidationError
+
 from Agent.deep_agent_tools.identity import build_deep_agent_step_id
+from Agent.deep_agent_tools.models import AlgorithmResult, InvocationRecord
+from Agent.deep_agent_tools.runtime_updates import (
+    _tool_result_summary,
+    normalize_tool_status,
+    tool_lifecycle_event_key,
+)
 
 
 NODE_DESCRIPTIONS = {
@@ -55,6 +63,7 @@ _ALGORITHM_TOOL_NAMES = {
     "causal.pc": "causal_pc",
     "causal.olc": "causal_olc",
     "causal.direct_lingam": "causal_direct_lingam",
+    "causal.cdfm": "causal_cdfm",
 }
 _DECISION_TOOL_KINDS = {
     "causal_pc": "algorithm",
@@ -183,8 +192,7 @@ class LangGraphEventAdapter:
         self.failed_attempts: dict[str, str] = {}
         self.streams: dict[str, dict[str, Any]] = {}
         self.decision_streams: dict[str, dict[str, Any]] = {}
-        self._lifecycle_tools: set[str] = set()
-        self._lifecycle_started_tools: set[str] = set()
+        self._lifecycle_event_keys: set[str] = set()
 
     def _base(self, event_type: str, step: dict[str, Any]) -> dict[str, Any]:
         """构造所有阶段事件共享的持久化字段。"""
@@ -332,23 +340,29 @@ class LangGraphEventAdapter:
         if event_type in {"tool_call_start", "tool_call_result"}:
             step = self._lifecycle_step(data)
             tool_name = self._safe_public_tool_name(data.get("tool_name"))
-            if event_type == "tool_call_result":
-                # 结果事件可能在 graph stream 的 task 事件之后才到达；先记住
-                # 已完成的逻辑工具，避免后续聚合 update 再造一条结果事件。
-                if step is not None:
-                    self._lifecycle_tools.add(tool_name)
-            elif step is not None:
-                self._lifecycle_started_tools.add(tool_name)
             if not step:
+                return []
+            supplied_event_key = data.get("_event_key")
+            if (
+                not isinstance(supplied_event_key, str)
+                or not supplied_event_key
+                or len(supplied_event_key) > 255
+                or supplied_event_key in self._lifecycle_event_keys
+            ):
                 return []
             event = self._base(event_type, step)
             supplied_step_id = str(data.get("step_id") or "")
             if _SAFE_STEP_ID.fullmatch(supplied_step_id):
                 event["step_id"] = supplied_step_id
+            supplied_attempt = data.get("attempt")
+            if (
+                isinstance(supplied_attempt, int)
+                and not isinstance(supplied_attempt, bool)
+                and supplied_attempt >= 0
+            ):
+                event["attempt"] = supplied_attempt
             event["tool_name"] = tool_name
-            supplied_event_key = str(data.get("_event_key") or "")
-            if supplied_event_key and len(supplied_event_key) <= 255:
-                event["_event_key"] = supplied_event_key
+            event["_event_key"] = supplied_event_key
             if event_type == "tool_call_start":
                 event["argument_keys"] = []
             else:
@@ -357,6 +371,7 @@ class LangGraphEventAdapter:
                 safe_error_code = self._safe_error_code(data)
                 if safe_error_code:
                     event["safe_error_code"] = safe_error_code
+            self._lifecycle_event_keys.add(supplied_event_key)
             return [event]
         task_id = str(data.get("task_id") or "")
         node_name = data.get("node_name")
@@ -409,25 +424,10 @@ class LangGraphEventAdapter:
         else:
             status = getattr(result, "status", None)
             success = getattr(result, "success", None)
-        normalized = str(getattr(status, "value", status) or "").strip()
-        if normalized in {"valid", "available", "no_results", "succeeded"}:
-            return "succeeded"
-        if normalized in {"not_ready", "disabled"}:
-            return "not_ready"
-        if normalized in {"timed_out", "timeout"}:
-            return "timed_out"
-        if normalized in {"canceled", "cancelled"}:
-            return "canceled"
-        if normalized in {
-            "invalid_input",
-            "not_applicable",
-            "execution_failed",
-            "unavailable",
-            "protocol_error",
-            "failed",
-        }:
-            return "failed"
-        return "succeeded" if success is not False else "failed"
+        # 旧兼容结果可能只有 success；显式状态始终交给公共边界的统一转换。
+        if status is None and isinstance(success, bool):
+            status = "succeeded" if success else "failed"
+        return normalize_tool_status(status)
 
     @staticmethod
     def _safe_error_code(result: Any) -> str | None:
@@ -451,28 +451,7 @@ class LangGraphEventAdapter:
 
         status = cls._safe_result_status(result)
         safe_error_code = cls._safe_error_code(result)
-        raw_status = (
-            result.get("status")
-            if isinstance(result, dict)
-            else getattr(result, "status", None)
-        )
-        raw_status = str(getattr(raw_status, "value", raw_status) or "").lower()
-        if status == "succeeded":
-            return "调用完成"
-        if status == "canceled":
-            return "调用已取消"
-        if status == "timed_out":
-            return "调用超时"
-        if safe_error_code == "WEB_SEARCH_DISABLED":
-            return "未启用"
-        if (
-            raw_status == "unavailable"
-            or status == "not_ready"
-            or safe_error_code
-            in {"RAG_RETRIEVAL_UNAVAILABLE", "WEB_SEARCH_UNAVAILABLE"}
-        ):
-            return "暂不可用"
-        return "调用失败"
+        return _tool_result_summary(status, safe_error_code)
 
     @staticmethod
     def _safe_algorithm_tool_name(result: Any) -> str:
@@ -495,26 +474,70 @@ class LangGraphEventAdapter:
         step: dict[str, Any],
         output: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        """把 Deep Agent 聚合结果投影为不含引用/正文的工具完成事件。"""
+        """仅从结果与终态账本的共同身份恢复可重放的工具完成事件。"""
         results = output.get("deep_agent_algorithm_results")
-        if not isinstance(results, dict):
+        ledger = output.get("deep_agent_action_ledger")
+        if not isinstance(results, dict) or not isinstance(ledger, dict):
             return []
         events: list[dict[str, Any]] = []
-        for result in results.values():
+        for result_ref, raw_result in results.items():
+            try:
+                result = AlgorithmResult.model_validate(raw_result)
+                record = InvocationRecord.model_validate(
+                    ledger.get(result.invocation_id)
+                )
+            except ValidationError:
+                continue
+            if (
+                result_ref != result.result_ref
+                or record.invocation_id != result.invocation_id
+                or record.result_ref != result.result_ref
+                or record.provider_call_id != result.provider_call_id
+                or record.job_id != self.job_id
+                or record.job_id != result.provenance.job_id
+                or record.attempt_count != result.provenance.attempt_count
+                or record.lease_epoch != result.provenance.lease_epoch
+                or record.input_identity != result.input_identity
+                or record.final_status == "pending"
+                or record.event_step_id is None
+                or not record.attempts
+            ):
+                continue
+            retry_ordinal = max(record.attempts)
+            attempt = record.attempts[retry_ordinal]
+            status = self._safe_result_status(result)
+            if (
+                attempt.status in {"queued", "running"}
+                or attempt.status != record.final_status
+                or normalize_tool_status(record.final_status) != status
+            ):
+                continue
             tool_name = self._safe_algorithm_tool_name(result)
-            if tool_name in self._lifecycle_tools:
+            if record.tool_name != tool_name:
+                continue
+            event_key = tool_lifecycle_event_key(
+                invocation_id=result.invocation_id,
+                attempt_count=result.provenance.attempt_count,
+                retry_ordinal=retry_ordinal,
+                event_type="tool_call_result",
+            )
+            if event_key in self._lifecycle_event_keys:
                 continue
             event = self._base("tool_call_result", step)
             event.update(
                 {
                     "tool_name": tool_name,
                     "summary": self._tool_result_summary(result),
-                    "status": self._safe_result_status(result),
+                    "status": status,
+                    "_event_key": event_key,
+                    "step_id": record.event_step_id,
+                    "attempt": record.attempt_count,
                 }
             )
             safe_error_code = self._safe_error_code(result)
             if safe_error_code:
                 event["safe_error_code"] = safe_error_code
+            self._lifecycle_event_keys.add(event_key)
             events.append(event)
         return events
 
@@ -666,7 +689,7 @@ class LangGraphEventAdapter:
             messages = output.get("messages") or []
             latest = messages[-1] if messages else None
             tool_name, argument_keys = self._tool_call(latest)
-            if tool_name and tool_name not in self._lifecycle_started_tools:
+            if tool_name:
                 event = self._base("tool_call_start", tool_step)
                 event.update(
                     {
