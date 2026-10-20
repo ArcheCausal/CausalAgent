@@ -33,6 +33,9 @@ from Agent.deep_agent_tools.models import (
     AlgorithmResult,
     AlgorithmResultProvenance,
     McpInvocationContext,
+    PreprocessingApproval,
+    PreprocessingPlan,
+    PreprocessingStep,
     StandardizedGraph,
 )
 from Agent.deep_agent_tools.algorithm_executor import AlgorithmExecutionResponse
@@ -186,6 +189,65 @@ def test_service_returns_normalized_result_without_raw_runner_text() -> None:
     assert "runner" not in payload["result"]
     assert payload["raw_payload"]["data"]["edges"][0]["from"] == "A"
     assert "raw_payload" not in payload["result"]
+
+
+def test_service_rejects_plan_with_operation_the_algorithm_does_not_allow() -> None:
+    """MCP 在执行前复用确认阶段的方案规则，不接受不支持的分类编码。"""
+
+    class Pool:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def ready(self) -> bool:
+            return True
+
+        async def execute(self, **kwargs):
+            self.calls.append(kwargs)
+            return ExecutionOutcome(
+                value={"success": True, "data": {"nodes": [], "edges": []}},
+                executor_slot_id="process-0",
+            )
+
+    plan = PreprocessingPlan(
+        steps=(PreprocessingStep(operation="categorical_encode", columns=("B",), method="ordinal"),)
+    )
+    context = _context()
+    command = _command(context).model_copy(
+        update={
+            "capability_id": CDFM_SPEC.capability_id,
+            "capability_version": CDFM_SPEC.version,
+            "spec_digest": CDFM_SPEC.spec_digest,
+            "parameters": {},
+            "preprocessing": plan,
+            "approval": PreprocessingApproval(
+                option_id="opt_" + "a" * 24,
+                question_id="q-1",
+                plan_digest=plan.digest,
+            ),
+        }
+    )
+    pool = Pool()
+    service = CausalMcpService(
+        config=_config(),
+        registry=build_default_registry(),
+        executor_pool=pool,
+        authority_reader=lambda _context: "A,B\n1,x\n2,y\n",
+        database_probe=lambda: True,
+    )
+
+    payload = asyncio.run(
+        service.execute_payload(
+            {
+                "command": command.model_dump(mode="json"),
+                "trusted_context": context.model_dump(mode="json"),
+                "signature": sign_invocation(context, command, "secret"),
+            }
+        )
+    )
+
+    assert payload["result"]["status"] == "invalid_input"
+    assert payload["result"]["diagnostics"]["safe_error_code"] == "PREPROCESSING_PLAN_INVALID"
+    assert pool.calls == []
 
 
 def test_service_logs_job_invocation_timeline_and_slow_threshold() -> None:

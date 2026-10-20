@@ -111,7 +111,8 @@ def build_model_tool_input_schema(
             default=None,
             description=(
                 "用户已经确认的处理方案。只填写 request_data_processing "
-                "返回的方案内容；运行时按获批记录核对，未获批的方案不会执行。"
+                "返回的方案内容；运行时按 capability_id 与方案摘要核对，"
+                "未获批或摘要不一致的方案不会执行。"
             ),
         )
     return type(
@@ -409,6 +410,44 @@ class AlgorithmSpec(ContractModel):
         if non_finite:
             return "存在非有限值，需要先确认处理：" + "、".join(sorted(non_finite))
         return None
+
+    def validate_preprocessing_plan(
+        self,
+        *,
+        plan: PreprocessingPlan,
+        profile: Any,
+        protected_columns: tuple[str, ...] = (),
+    ) -> None:
+        """校验确认前与 MCP 执行前共用的处理方案规则。
+
+        只检查方案本身是否可用于该算法，不判断真实 CSV 是否已经满足算法要求。
+        列类型来自画像；MCP 侧会基于处理后的真实数据重新建立画像并再次判断。
+        """
+
+        operations = set(plan.operations())
+        unsupported = operations - set(self.allowed_preprocessing)
+        if unsupported:
+            raise ValueError(
+                "该算法不允许的处理操作：" + "、".join(sorted(unsupported))
+            )
+        if profile is None:
+            raise ValueError("缺少数据画像，无法校验处理方案")
+        known_columns = set(profile.column_names)
+        for step in plan.steps:
+            unknown = set(step.columns) - known_columns
+            if unknown:
+                raise ValueError("处理方案引用了不存在的列：" + "、".join(sorted(unknown)))
+            if step.operation == "numeric_impute":
+                non_numeric = set(step.columns) - set(profile.numeric_columns)
+                if non_numeric:
+                    raise ValueError(
+                        "数值插补只能用于数值列：" + "、".join(sorted(non_numeric))
+                    )
+            if step.operation == "drop_rows" and set(step.columns) == known_columns:
+                raise ValueError("删行必须指定具体列，不能默认对全表删除")
+        for step in plan.steps:
+            if step.operation == "drop_rows" and set(protected_columns) & set(step.columns):
+                raise ValueError("不能按目标变量或处理变量的缺失值删除整行")
 
     def required_processing_reason(
         self,

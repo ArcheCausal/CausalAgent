@@ -173,6 +173,7 @@
           "description": "一个已确认的数据处理步骤；只表达模型可理解的列与参数。",
           "properties": {
             "operation": {
+              "description": "处理操作：select_columns 选列，drop_rows 按列删除含缺失值的行，numeric_impute 数值插补，categorical_encode 分类编码。",
               "enum": [
                 "select_columns",
                 "drop_rows",
@@ -184,6 +185,7 @@
             },
             "columns": {
               "default": [],
+              "description": "步骤作用的真实列名；删行和插补必须明确列出列名。",
               "items": {
                 "type": "string"
               },
@@ -205,6 +207,7 @@
                 }
               ],
               "default": null,
+              "description": "数值插补使用 mean 或 median；分类编码使用 ordinal；其他操作必须为 null。",
               "title": "Method"
             }
           },
@@ -2102,6 +2105,7 @@
           "description": "一个已确认的数据处理步骤；只表达模型可理解的列与参数。",
           "properties": {
             "operation": {
+              "description": "处理操作：select_columns 选列，drop_rows 按列删除含缺失值的行，numeric_impute 数值插补，categorical_encode 分类编码。",
               "enum": [
                 "select_columns",
                 "drop_rows",
@@ -2113,6 +2117,7 @@
             },
             "columns": {
               "default": [],
+              "description": "步骤作用的真实列名；删行和插补必须明确列出列名。",
               "items": {
                 "type": "string"
               },
@@ -2134,6 +2139,7 @@
                 }
               ],
               "default": null,
+              "description": "数值插补使用 mean 或 median；分类编码使用 ordinal；其他操作必须为 null。",
               "title": "Method"
             }
           },
@@ -2178,6 +2184,7 @@
       "description": "一个已确认的数据处理步骤；只表达模型可理解的列与参数。",
       "properties": {
         "operation": {
+          "description": "处理操作：select_columns 选列，drop_rows 按列删除含缺失值的行，numeric_impute 数值插补，categorical_encode 分类编码。",
           "enum": [
             "select_columns",
             "drop_rows",
@@ -2189,6 +2196,7 @@
         },
         "columns": {
           "default": [],
+          "description": "步骤作用的真实列名；删行和插补必须明确列出列名。",
           "items": {
             "type": "string"
           },
@@ -2210,6 +2218,7 @@
             }
           ],
           "default": null,
+          "description": "数值插补使用 mean 或 median；分类编码使用 ordinal；其他操作必须为 null。",
           "title": "Method"
         }
       },
@@ -2800,7 +2809,7 @@
                 }
               ],
               "default": null,
-              "description": "用户已经确认的处理方案。只填写 request_data_processing 返回的方案内容；运行时按获批记录核对，未获批的方案不会执行。",
+              "description": "用户已经确认的处理方案。只填写 request_data_processing 返回的方案内容；运行时按 capability_id 与方案摘要核对，未获批或摘要不一致的方案不会执行。",
               "title": "Preprocessing"
             }
           },
@@ -2913,7 +2922,7 @@
                 }
               ],
               "default": null,
-              "description": "用户已经确认的处理方案。只填写 request_data_processing 返回的方案内容；运行时按获批记录核对，未获批的方案不会执行。",
+              "description": "用户已经确认的处理方案。只填写 request_data_processing 返回的方案内容；运行时按 capability_id 与方案摘要核对，未获批或摘要不一致的方案不会执行。",
               "title": "Preprocessing"
             }
           },
@@ -3044,7 +3053,7 @@
                 }
               ],
               "default": null,
-              "description": "用户已经确认的处理方案。只填写 request_data_processing 返回的方案内容；运行时按获批记录核对，未获批的方案不会执行。",
+              "description": "用户已经确认的处理方案。只填写 request_data_processing 返回的方案内容；运行时按 capability_id 与方案摘要核对，未获批或摘要不一致的方案不会执行。",
               "title": "Preprocessing"
             }
           },

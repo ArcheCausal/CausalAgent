@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import inspect
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
+from langchain_core.tools import InjectedToolArg
 from pydantic import Field
 
 from .identity import (
@@ -211,13 +212,19 @@ def with_tool_runtime_schema(
     tool_name: str,
     tool_runtime_type: type,
 ) -> type:
-    """给内部校验 schema 增加 injected runtime，模型可见 schema 会过滤它。"""
+    """给内部校验 schema 增加 injected runtime，模型可见 schema 会过滤它。
+
+    参数校验仍会收到 ``runtime``，因此这里把它标注为 ``InjectedToolArg``。
+    否则 pydantic 无法为运行时对象生成 JSON Schema。
+    """
 
     return type(
         f"{tool_name.title().replace('_', '')}RuntimeInput",
         (base_schema,),
         {
-            "__annotations__": {"runtime": tool_runtime_type},
+            "__annotations__": {
+                "runtime": Annotated[tool_runtime_type, InjectedToolArg]
+            },
             "__module__": base_schema.__module__,
             "model_config": dict(base_schema.model_config)
             | {"arbitrary_types_allowed": True},

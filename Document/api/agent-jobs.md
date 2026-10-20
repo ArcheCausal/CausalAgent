@@ -56,7 +56,7 @@ Last-Event-ID: 42
 
 也兼容 `last_event_id=42` 查询参数。服务端从 `analysis_job_events.id > 42` 读取事件，返回标准 SSE 的 `id`、`event`、`data` 字段；没有新事件时按配置轮询并发送 heartbeat。事件 payload 按事件类型执行字段白名单清洗，worker 的 `attempt`、未知附加字段和内部对象不会对外可见。
 
-`interrupt` 事件可带 `interaction` 公开结构，用于数据处理确认：`interaction_type`、`question_id`、`message`、`expires_at`、`allow_other` 和最多 3 个 `options`。每个选项包含稳定 `option_id`、算法 `capability_id`、处理步骤、影响说明和风险；未计算的影响会明确标注，不提供虚假精确值。
+`interrupt` 事件可带 `interaction` 公开结构，用于数据处理确认：`interaction_type`、`question_id`、`message`、`algorithm_name`、`expires_at`、`allow_other` 和最多 3 个 `options`。每个选项包含稳定 `option_id`、算法 `capability_id`、处理步骤、影响说明和风险；`algorithm_name` 是用户可见的公开算法名称，前端用它替代内部标识。前端根据结构化步骤生成确定性的执行说明，模型生成的影响说明在确认前没有执行预览时标注“未计算”，不提供虚假精确值。
 
 收到 `interrupt` 后，前端应展示公开问题或方案并等待恢复；收到 `final_result`、`error` 或 `canceled` 后连接结束。若 Job 已经进入终态，即使数据库查询时没有新的事件，服务端也会结束连接。
 

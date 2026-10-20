@@ -10,6 +10,7 @@ describe('processing option projection', () => {
           interaction_type: 'data_processing_request',
           question_id: 'q-1',
           message: '请选择缺失值处理方式',
+          algorithm_name: 'PC 因果发现',
           expires_at: '2026-10-19T10:00:00.000000Z',
           allow_other: true,
           options: [
@@ -36,6 +37,7 @@ describe('processing option projection', () => {
       capabilityId: 'causal.pc',
     })
     expect(waiting?.options[0]?.steps[0]?.columns).toEqual(['age'])
+    expect(waiting?.algorithmName).toBe('PC 因果发现')
   })
 
   it('keeps plain text interrupts without options usable', () => {
@@ -43,5 +45,6 @@ describe('processing option projection', () => {
     expect(waiting?.options).toEqual([])
     expect(waiting?.allowOther).toBe(true)
     expect(waiting?.expiresAt).toBeNull()
+    expect(waiting?.algorithmName).toBe('')
   })
 })

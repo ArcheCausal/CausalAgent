@@ -149,6 +149,7 @@ export function waitingInputFromInteraction(
   return {
     questionId,
     prompt,
+    algorithmName: typeof interaction?.algorithm_name === 'string' ? interaction.algorithm_name : '',
     expiresAt: typeof interaction?.expires_at === 'string' ? interaction.expires_at : null,
     options,
     allowOther: interaction?.allow_other !== false,

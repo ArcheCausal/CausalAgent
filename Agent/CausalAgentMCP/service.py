@@ -484,6 +484,16 @@ class CausalMcpService:
                         SafeErrorCode.PREPROCESSING_PLAN_INVALID
                     )
                 try:
+                    spec.validate_preprocessing_plan(
+                        plan=command.preprocessing,
+                        profile=build_data_profile_from_csv(csv_data),
+                        protected_columns=command.preprocessing.protected_columns,
+                    )
+                except ValueError as exc:
+                    raise McpServiceError(
+                        SafeErrorCode.PREPROCESSING_PLAN_INVALID
+                    ) from exc
+                try:
                     csv_data, view_summary = apply_preprocessing(
                         csv_data,
                         command.preprocessing,
