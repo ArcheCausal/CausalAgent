@@ -50,6 +50,9 @@ COPY observability ./observability
 # 预发环境门禁脚本由一次性 seed 服务复用；只复制该脚本，不带入部署工具。
 COPY scripts/staging_environment_guard.py ./scripts/staging_environment_guard.py
 
+# 必须在 MCP 自身依赖中导入真实入口；禁止共享契约隐式加载 Agent 运行时。
+RUN python -c "import Agent.CausalAgentMCP.app; import sys; forbidden = sorted(name for name in sys.modules if name.startswith(('langgraph', 'langchain', 'Agent.deep_agent.')) or name == 'Agent.deep_agent'); assert not forbidden, f'MCP imported Agent runtime modules: {forbidden}'; print('mcp-import-boundary-ok')"
+
 # 只读权重目录：构建末尾下载并校验，不合格直接构建失败。
 RUN python -m Agent.CausalAgentMCP.cdfm_weights fetch \
       --destination /opt/cdfm-weights-image \

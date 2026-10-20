@@ -60,6 +60,8 @@ agent → fold → preprocess → deep_agent → finalization_gate → report
 
 ## 算法工具与 causal-mcp
 
+`Agent.deep_agent_tools` 包入口只导出错误码、数据模型、算法规格、执行协议、身份函数和 Registry 等轻量契约。MCP 与 Agent 运行时共用这些契约；依赖调度器、算法工具、RAG/Web 工具和测试执行器由调用者从对应子模块显式导入。MCP 导入契约不会加载 LangGraph、LangChain 或 `Agent.deep_agent`；`dependency_planner.py` 仍直接依赖 LangGraph 的 `Command` 并检查算法调用终态。
+
 模型看到的是由本地 `AlgorithmSpec` 生成的 LangChain function tools。当前默认 allowlist 包含 PC、DirectLiNGAM 和 CDFM；OLC 的 Spec、Adapter、runner 和算法代码仍保留，但不进入 worker Registry、MCP runner registry 或旧兼容 MCP 工具面。运行时不会调用远端 `list_tools()` 来动态扩展模型工具。CDFM 工具只公开可选 `threshold`，模型路径、CPU device、标准化和缺失值处理策略由 causal-mcp 固定。
 
 `AlgorithmDependencyDispatchMiddleware` 在 ToolNode 边界收集同一模型响应中的算法调用，按 `requires/produces` 分层：无依赖调用可并行，有依赖调用按层执行，并受单 Job 并发和工具总预算约束。Adapter 负责模型参数校验、确定性预处理、标准结果、raw result 完整性和 Ledger 更新；`McpAlgorithmExecutor` 只负责签名传输、远端执行结果校验和安全错误映射。CDFM 的 logits/probabilities 通过仅供 Executor 与 Adapter 使用的私有 envelope 保存到 raw artifact，不进入 `AlgorithmResult`、ToolMessage、SSE 或公共日志。可信 Job、文件、lease、HMAC 与数据库身份不会进入模型参数。

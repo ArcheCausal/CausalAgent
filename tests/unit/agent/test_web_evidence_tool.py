@@ -2,7 +2,7 @@
 
 import asyncio
 
-from Agent.deep_agent_tools import WebEvidenceTool
+from Agent.deep_agent_tools.web_evidence_tool import WebEvidenceTool
 
 
 def test_disabled_web_search_does_not_touch_searcher() -> None:

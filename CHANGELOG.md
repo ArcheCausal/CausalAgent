@@ -1920,3 +1920,7 @@
 - 【部署：Gunicorn 运行参数统一注入】
   - 【预发启动】：保留环境检查，Gunicorn workers、threads 和 timeout 改为容器启动时读取 WEB_WORKERS、WEB_THREADS 和 WEB_TIMEOUT。
   - 【生产配置】：向 app 注入同名变量及默认值，继续使用 Dockerfile 的启动命令，两套环境可以分别配置运行参数。
+- 【MCP：共享契约导入边界与镜像构建检查】
+  - 【共享契约】：deep_agent_tools 包入口只导出轻量领域与传输契约，移除调度器、算法工具、RAG/Web 工具和测试执行器的主动加载，相关测试改为从对应子模块显式导入。
+  - 【镜像发布】：MCP Dockerfile 在复制源码后导入真实服务入口，检查未加载 LangGraph、LangChain 或 Agent 运行时；发布工作流通过该 Dockerfile 阻止不满足导入边界的镜像推送。
+  - 【回归与文档】：新增独立进程导入检查和构建发布契约检查，保留 Command 终态解析与依赖调度行为，同步运行时与部署说明。
