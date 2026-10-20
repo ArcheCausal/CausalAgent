@@ -25,6 +25,7 @@ const emit = defineEmits<{
 const { text } = useLocale()
 const textarea = ref<HTMLTextAreaElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
+const isDragOver = ref(false)
 const isWaiting = computed(() => props.activeJob?.uiState === 'waiting_input')
 const isRunning = computed(() => Boolean(props.activeJob && ['queued', 'running', 'canceling'].includes(props.activeJob.uiState)))
 const isCanceling = computed(() => props.activeJob?.uiState === 'canceling')
@@ -89,11 +90,38 @@ function onUploadClick(): void {
   triggerUpload()
 }
 
+function isCsvFile(file: File): boolean { return file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv') }
+
+function onDragOver(event: DragEvent): void {
+  isDragOver.value = Array.from(event.dataTransfer?.types ?? []).includes('Files')
+    && !props.sending && !isRunning.value
+}
+
+function onDragLeave(event: DragEvent): void {
+  const next = event.relatedTarget
+  isDragOver.value = !(next instanceof Node && (event.currentTarget as Node).contains(next))
+}
+
+function onDrop(event: DragEvent): void {
+  isDragOver.value = false
+  const file = event.dataTransfer?.files[0]
+  if (props.sending || isRunning.value || !file || !isCsvFile(file)) return
+  if (props.authRequired) emit('request-auth', 'upload')
+  else emit('upload', file)
+}
+
 watch(() => props.draft, () => { void nextTick(resize) })
 </script>
 
 <template>
-  <section class="composer" aria-label="消息输入区">
+  <section
+    class="composer"
+    :class="{ 'is-drag-over': isDragOver }"
+    aria-label="消息输入区"
+    @dragover.prevent="onDragOver"
+    @dragleave="onDragLeave"
+    @drop.prevent="onDrop"
+  >
     <div v-if="selectedFile" class="selected-file-draft">
       <div class="selected-file-card">
         <span class="selected-file-icon" aria-hidden="true">{{ selectedFileType }}</span>
@@ -147,5 +175,25 @@ watch(() => props.draft, () => { void nextTick(resize) })
         <span class="send-button-stop" aria-hidden="true"></span>
       </button>
     </div>
+    <div v-if="isDragOver" class="composer-drop-hint" aria-live="polite">{{ text.dropCsvHint }}</div>
   </section>
 </template>
+
+<style scoped>
+.composer.is-drag-over { border-color: var(--color-primary); border-style: dashed; }
+
+.composer-drop-hint {
+  position: absolute;
+  z-index: 1;
+  inset: 8px;
+  display: grid;
+  padding: 16px;
+  color: var(--color-primary);
+  background: var(--color-surface);
+  border: 1px dashed var(--color-primary);
+  border-radius: 12px;
+  font-size: 14px;
+  place-items: center;
+  pointer-events: none;
+}
+</style>

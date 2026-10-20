@@ -44,4 +44,50 @@ describe('Composer', () => {
     expect(wrapper.emitted('cancel')).toHaveLength(1)
     expect(wrapper.emitted('send')).toBeUndefined()
   })
+
+  it('uploads a CSV file dropped inside the composer', async () => {
+    const file = new File(['x,y\n1,2'], 'data.csv', { type: 'text/csv' })
+    const wrapper = mount(Composer, {
+      props: {
+        draft: '',
+        webSearchEnabled: false,
+        selectedFile: null,
+        activeJob: null,
+        sending: false,
+      },
+    })
+    const composer = wrapper.get('.composer')
+    const dataTransfer = { types: ['Files'], files: [file] }
+
+    await composer.trigger('dragover', { dataTransfer })
+    expect(composer.classes()).toContain('is-drag-over')
+    expect(composer.text()).toContain('释放 CSV 文件以上传')
+
+    await composer.trigger('drop', { dataTransfer })
+
+    expect(wrapper.emitted('upload')).toEqual([[file]])
+    expect(composer.classes()).not.toContain('is-drag-over')
+  })
+
+  it('ignores unsupported and disabled file drops', async () => {
+    const pdf = new File(['content'], 'report.pdf', { type: 'application/pdf' })
+    const wrapper = mount(Composer, {
+      props: {
+        draft: '',
+        webSearchEnabled: false,
+        selectedFile: null,
+        activeJob: null,
+        sending: false,
+      },
+    })
+
+    await wrapper.get('.composer').trigger('drop', { dataTransfer: { files: [pdf] } })
+    expect(wrapper.emitted('upload')).toBeUndefined()
+
+    await wrapper.setProps({ sending: true })
+    await wrapper.get('.composer').trigger('drop', {
+      dataTransfer: { files: [new File(['x,y\n1,2'], 'data.csv', { type: 'text/csv' })] },
+    })
+    expect(wrapper.emitted('upload')).toBeUndefined()
+  })
 })
