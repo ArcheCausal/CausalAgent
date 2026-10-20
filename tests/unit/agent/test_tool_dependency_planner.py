@@ -8,15 +8,17 @@ from Agent.deep_agent_tools import (
     AlgorithmRegistry,
     AlgorithmResult,
     AlgorithmResultProvenance,
-    DependencyPlanningError,
     Diagnostics,
     PC_SPEC,
     SafeErrorCode,
+)
+from Agent.deep_agent_tools.algorithm_specs import AlgorithmSpec, CausalPcInput
+from Agent.deep_agent_tools.dependency_planner import (
+    DependencyPlanningError,
     ToolCallRequest,
     build_dependency_plan,
     execute_dependency_plan,
 )
-from Agent.deep_agent_tools.algorithm_specs import AlgorithmSpec, CausalPcInput
 from Agent.deep_agent_tools.models import StandardizedGraph
 from app.agent.worker.execution_guard import JobExecutionRevoked
 

@@ -9,6 +9,35 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
+def test_mcp_image_checks_real_entrypoint_after_copying_source() -> None:
+    dockerfile = (PROJECT_ROOT / "Agent/CausalAgentMCP/Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    check = next(
+        line for line in dockerfile.splitlines()
+        if line.startswith('RUN python -c "import Agent.CausalAgentMCP.app;')
+    )
+    for module in ("langgraph", "langchain", "Agent.deep_agent.", "Agent.deep_agent"):
+        assert repr(module) in check
+    assert "sys.modules" in check
+    assert "assert not forbidden" in check
+    for source in ("Agent", "app", "config", "Database", "observability"):
+        assert dockerfile.index(f"COPY {source} ./{source}") < dockerfile.index(check)
+
+
+def test_mcp_publish_build_uses_checked_dockerfile() -> None:
+    workflow = (PROJECT_ROOT / ".github/workflows/publish-staging-images.yml").read_text(
+        encoding="utf-8"
+    )
+    assert re.search(
+        r"image: causalagent-mcp\s+context: \.\s+file: Agent/CausalAgentMCP/Dockerfile",
+        workflow,
+    )
+    assert "uses: docker/build-push-action@v6" in workflow
+    assert "file: ${{ matrix.file }}" in workflow
+    assert "push: true" in workflow
+
+
 def _service_block(text: str, service: str) -> str:
     match = re.search(
         rf"(?ms)^  {re.escape(service)}:\n.*?(?=^  [A-Za-z0-9_-]+:|\Z)",

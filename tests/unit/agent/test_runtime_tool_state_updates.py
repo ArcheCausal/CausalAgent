@@ -16,16 +16,16 @@ from Agent.deep_agent.state import ProjectDeepAgentState
 from Agent.deep_agent.memory import build_in_memory_backend
 from Agent.deep_agent_tools import (
     DataProfile,
-    FakeAlgorithmExecutor,
-    RagEvidenceTool,
     SafeErrorCode,
-    WebEvidenceTool,
-    build_algorithm_tools,
     build_default_registry,
 )
 from Agent.deep_agent_tools.adapters import build_default_adapters
+from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
+from Agent.deep_agent_tools.fake_algorithm_executor import FakeAlgorithmExecutor
 from Agent.deep_agent_tools.interaction import build_option_id
 from Agent.deep_agent_tools.models import PreprocessingApproval, PreprocessingPlan, PreprocessingStep
+from Agent.deep_agent_tools.rag_evidence_tool import RagEvidenceTool
+from Agent.deep_agent_tools.web_evidence_tool import WebEvidenceTool
 
 
 IDENTITY = TrustedJobIdentity(
