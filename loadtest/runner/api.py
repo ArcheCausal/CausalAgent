@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import ssl
+import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 
-from runner.config import HTTP_TIMEOUT_SECONDS, SSE_IDLE_READ_TIMEOUT_SECONDS
+from runner import config
+from runner.config import HTTP_TIMEOUT_SECONDS
 from runner.metrics import HttpSample, Recorder, SseSample
 
 TERMINAL_EVENTS = {"final_result", "error", "canceled"}
@@ -22,6 +26,18 @@ PROGRESS_EVENTS = {
     "node_retry",
     "node_end",
 }
+
+_SSL_CONTEXT: ssl.SSLContext | None = None
+_SSL_CONTEXT_LOCK = threading.Lock()
+
+
+def shared_ssl_context() -> ssl.SSLContext:
+    """进程内只加载一次系统信任证书，避免阻塞每条异步 SSE 的事件循环。"""
+    global _SSL_CONTEXT
+    with _SSL_CONTEXT_LOCK:
+        if _SSL_CONTEXT is None:
+            _SSL_CONTEXT = ssl.create_default_context()
+        return _SSL_CONTEXT
 
 
 def new_idempotency_key() -> str:
@@ -40,6 +56,9 @@ class SseOutcome:
     sample: SseSample
     terminal_event: str | None
     interrupt_payload: dict | None
+    terminal_received_at: float | None = None
+    errors: list[str] = field(default_factory=list)
+    event_ids: list[int] = field(default_factory=list)
 
 
 class UserClient:
@@ -49,27 +68,39 @@ class UserClient:
         self.base_url = base_url
         self.recorder = recorder
         self.username = username
+        self.ssl_context = shared_ssl_context()
         self.client = httpx.Client(
             base_url=base_url,
-            # 读取超时按 SSE 空闲等待设置：一次读取允许等待多久，长排队 Job 不会被误判为断线。
-            timeout=httpx.Timeout(
-                HTTP_TIMEOUT_SECONDS, read=SSE_IDLE_READ_TIMEOUT_SECONDS
-            ),
+            verify=self.ssl_context,
+            timeout=httpx.Timeout(HTTP_TIMEOUT_SECONDS),
             follow_redirects=False,
             headers={"User-Agent": "causalagent-loadtest/1.0"},
         )
         self.csrf_token: str | None = None
         # 由执行器注入的并发信号量；SSE 订阅按档位上单独限流。
         self.sse_gate = None
+        self._closed = threading.Event()
+        self._job_requests: dict[str, tuple[str, float]] = {}
+        self._job_sse_errors: dict[str, list[str]] = {}
+        self._first_event_seen: set[str] = set()
+        self._request_lock = threading.Lock()
 
     def close(self) -> None:
+        self._closed.set()
         self.client.close()
+
+    def bind_job_request(self, job_id: str, logical_request_id: str, created_at: float) -> None:
+        """绑定终态回调需要的逻辑请求及首次 POST 时间（monotonic）。"""
+        with self._request_lock:
+            self._job_requests.setdefault(job_id, (logical_request_id, created_at))
 
     # --- 基础请求 ---
 
     def request(self, method: str, path: str, **kwargs) -> httpx.Response:
         """执行一次请求并记录耗时、状态码和传输错误。"""
         started = time.monotonic()
+        started_at = time.time()
+        kwargs.setdefault("timeout", HTTP_TIMEOUT_SECONDS)
         error = ""
         try:
             response = self.client.request(method, path, **kwargs)
@@ -86,6 +117,8 @@ class UserClient:
                 status=status,
                 duration_ms=duration_ms,
                 error=error,
+                started_at=started_at,
+                finished_at=time.time(),
             )
         )
         if response is None:
@@ -99,6 +132,7 @@ class UserClient:
 
     def raw_request(self, method: str, path: str, **kwargs) -> httpx.Response:
         """不写入统计的执行路径，供健康探测等旁路调用使用。"""
+        kwargs.setdefault("timeout", HTTP_TIMEOUT_SECONDS)
         try:
             return self.client.request(method, path, **kwargs)
         except httpx.HTTPError as exc:
@@ -187,6 +221,8 @@ class UserClient:
         file_id: int | None,
         idempotency_key: str,
         web_search_enabled: bool = False,
+        *,
+        timeout: float = HTTP_TIMEOUT_SECONDS,
     ) -> tuple[int, dict]:
         """创建分析 Job；返回状态码与响应体。"""
         body: dict = {
@@ -201,13 +237,16 @@ class UserClient:
             "/api/agent/jobs",
             json=body,
             headers={"Idempotency-Key": idempotency_key},
+            timeout=timeout,
         )
 
-    def active_jobs(self, session_id: str | None = None) -> list:
+    def active_jobs(
+        self, session_id: str | None = None, *, timeout: float = HTTP_TIMEOUT_SECONDS
+    ) -> list:
         """读取当前用户的活动 Job。"""
         params = {"session_id": session_id} if session_id else None
         status, payload = self.json_request(
-            "GET", "/api/agent/jobs/active", params=params
+            "GET", "/api/agent/jobs/active", params=params, timeout=timeout
         )
         if status != 200 or not payload.get("success"):
             raise ApiError(f"active jobs 失败: {status} {payload}")
@@ -222,7 +261,8 @@ class UserClient:
         )
 
     def resume_job(
-        self, job_id: str, question_id: str, answer: str, idempotency_key: str
+        self, job_id: str, question_id: str, answer: str | dict, idempotency_key: str,
+        *, timeout: float = HTTP_TIMEOUT_SECONDS,
     ) -> tuple[int, dict]:
         """恢复 waiting_input Job。"""
         return self.json_request(
@@ -230,117 +270,35 @@ class UserClient:
             f"/api/agent/jobs/{job_id}/resume",
             json={"question_id": question_id, "answer": answer},
             headers={"Idempotency-Key": idempotency_key},
+            timeout=timeout,
         )
 
-    def count_job_events(self, job_id: str) -> int:
-        """完整读取事件流并统计事件数量，用于与订阅收到的事件集合比对。"""
-        count = 0
-        with self.client.stream(
-            "GET",
-            f"/api/agent/jobs/{job_id}/events",
-            headers={"Accept": "text/event-stream"},
-        ) as response:
-            if response.status_code != 200:
-                return -1
-            for event_type, _event_id, _payload in _iter_sse(response):
-                if event_type in TERMINAL_EVENTS or event_type == "interrupt":
-                    break
-                count += 1
-        return count
-
-    # --- SSE ---
+    def count_job_events(self, job_id: str, deadline: float | None = None) -> int:
+        """独立重放历史事件；不写入实时终态和 SSE 计分样本。"""
+        result = self.subscribe_job_events(job_id, deadline=deadline, audit=True)
+        if result.terminal_event not in TERMINAL_EVENTS:
+            return -1
+        return len(set(result.event_ids))
 
     def subscribe_job_events(
         self,
         job_id: str,
         after_event_id: int = 0,
         allow_reconnect: bool = True,
+        deadline: float | None = None,
+        stop_event: threading.Event | None = None,
+        *,
+        audit: bool = False,
     ) -> SseOutcome:
-        """订阅 Job 事件流，必要时用 Last-Event-ID 重连直到终态。"""
-        if self.sse_gate is not None:
-            with self.sse_gate:
-                return self._subscribe(job_id, after_event_id, allow_reconnect)
-        return self._subscribe(job_id, after_event_id, allow_reconnect)
+        """立即订阅；deadline 为 monotonic 截止，可被 Recorder 的截止继续缩短。"""
+        from runner.sse import subscribe
 
-    def _subscribe(
-        self,
-        job_id: str,
-        after_event_id: int,
-        allow_reconnect: bool,
-    ) -> SseOutcome:
-        """实际订阅循环；SSE 并发额度由调用方负责。"""
-        received_ids: list[int] = []
-        disconnects = 0
-        reconnects = 0
-        first_event_ms: float | None = None
-        terminal_event_ms: float | None = None
-        terminal_event: str | None = None
-        interrupt_payload: dict | None = None
-        error = ""
-        cursor = after_event_id
-        started = time.monotonic()
-        stream_started_at = started
-
-        while True:
-            headers = {"Accept": "text/event-stream"}
-            if cursor:
-                headers["Last-Event-ID"] = str(cursor)
-            saw_terminal = False
-            stream_started = time.monotonic()
-            try:
-                with self.client.stream(
-                    "GET", f"/api/agent/jobs/{job_id}/events", headers=headers
-                ) as response:
-                    if response.status_code != 200:
-                        error = f"SSE status {response.status_code}"
-                        break
-                    for event_type, event_id, payload in _iter_sse(response):
-                        if event_id is not None:
-                            cursor = event_id
-                            received_ids.append(event_id)
-                        if first_event_ms is None and event_type in PROGRESS_EVENTS | TERMINAL_EVENTS:
-                            first_event_ms = (time.monotonic() - stream_started_at) * 1000
-                        if event_type in TERMINAL_EVENTS:
-                            terminal_event = event_type
-                            terminal_event_ms = (time.monotonic() - stream_started_at) * 1000
-                            saw_terminal = True
-                            break
-                        if event_type == "interrupt":
-                            interrupt_payload = payload
-                            terminal_event_ms = (time.monotonic() - stream_started_at) * 1000
-                            saw_terminal = True
-                            break
-            except httpx.HTTPError as exc:
-                error = type(exc).__name__
-
-            if saw_terminal:
-                break
-            if time.monotonic() - stream_started < 0.5:
-                error = error or "stream_closed_without_terminal"
-                break
-            disconnects += 1
-            if not allow_reconnect:
-                break
-            reconnects += 1
-            time.sleep(0.5)
-
-        sample = SseSample(
-            job_id=job_id,
-            first_event_ms=first_event_ms,
-            terminal_event_ms=terminal_event_ms,
-            terminal_event=terminal_event,
-            last_event_id=cursor,
-            disconnects=disconnects,
-            reconnects=reconnects,
-            received_ids=received_ids,
-            error=error,
-        )
-        self.recorder.record_sse(sample)
-        return SseOutcome(
-            sample=sample,
-            terminal_event=terminal_event,
-            interrupt_payload=interrupt_payload,
-        )
+        deadline = (time.monotonic() + config.JOB_OBSERVE_DEADLINE_SECONDS
+                    if deadline is None else deadline)
+        result = asyncio.run(subscribe(
+            self, job_id, after_event_id, allow_reconnect, deadline, stop_event, audit
+        ))
+        return SseOutcome(**result)
 
 
 def _iter_sse(response: httpx.Response):

@@ -203,6 +203,9 @@ services:
     environment:
       - MYSQL_HOST=mysql  # 仍然使用服务名
       - MYSQL_USER=${MYSQL_USER}
+      - WEB_WORKERS=${WEB_WORKERS:-1}
+      - WEB_THREADS=${WEB_THREADS:-12}
+      - WEB_TIMEOUT=${WEB_TIMEOUT:-120}
 
       - MYSQL_DATABASE=${MYSQL_DATABASE}
       - MYSQL_POOL_SIZE_WRITE=${MYSQL_POOL_SIZE_WRITE:-5}

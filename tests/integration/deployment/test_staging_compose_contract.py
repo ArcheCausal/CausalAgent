@@ -2,14 +2,59 @@
 
 from __future__ import annotations
 
+import json
+import shlex
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+WEB_PARAMETERS = (
+    ("--workers", "WEB_WORKERS", "1"),
+    ("--threads", "WEB_THREADS", "12"),
+    ("--timeout", "WEB_TIMEOUT", "120"),
+)
 
 
 class StagingComposeContractTests(unittest.TestCase):
+    def test_staging_web_parameters_expand_in_container_shell_after_guard(self) -> None:
+        compose = yaml.safe_load(
+            (REPOSITORY_ROOT / "docker-compose.staging.yml").read_text(encoding="utf-8")
+        )
+        app = compose["services"]["app"]
+        self.assertEqual(app["command"][:2], ["sh", "-c"])
+        command = shlex.split(app["command"][2])
+        self.assertEqual(
+            command[:5],
+            ["python", "scripts/staging_environment_guard.py", "&&", "exec", "gunicorn"],
+        )
+        self.assertEqual(command[-1], "CausalAgent:app")
+        for option, variable, default in WEB_PARAMETERS:
+            with self.subTest(variable=variable):
+                self.assertEqual(command[command.index(option) + 1], f"$${{{variable}}}")
+                self.assertEqual(app["environment"][variable], f"${{{variable}:-{default}}}")
+
+    def test_production_web_parameters_feed_dockerfile_default_command(self) -> None:
+        compose = yaml.safe_load(
+            (REPOSITORY_ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")
+        )
+        app = compose["services"]["app"]
+        self.assertNotIn("command", app)
+        self.assertNotIn("entrypoint", app)
+        environment = dict(item.split("=", 1) for item in app["environment"])
+        dockerfile = (REPOSITORY_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        runtime_cmd = next(line for line in reversed(dockerfile.splitlines()) if line.startswith("CMD "))
+        command = json.loads(runtime_cmd.removeprefix("CMD "))
+        self.assertEqual(command[:2], ["sh", "-c"])
+        arguments = shlex.split(command[2])
+        for option, variable, default in WEB_PARAMETERS:
+            with self.subTest(variable=variable):
+                expression = f"${{{variable}:-{default}}}"
+                self.assertEqual(environment.get(variable), expression)
+                self.assertEqual(arguments[arguments.index(option) + 1], expression)
+
     def test_mysql_readiness_uses_tcp_port_not_init_socket(self) -> None:
         expected = 'mysqladmin ping --protocol=tcp -h 127.0.0.1 -P 3306 -u root'
         for filename in (

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 
@@ -26,7 +27,9 @@ def _numeric(values: list) -> list[float]:
     result: list[float] = []
     for value in values:
         try:
-            result.append(float(value))
+            number = float(value)
+            if not isinstance(value, bool) and math.isfinite(number):
+                result.append(number)
         except (TypeError, ValueError):
             continue
     return result
@@ -66,7 +69,7 @@ def _host_field(sample: dict, name: str):
     return sample.get(name)
 
 
-def summarize(sample: dict) -> dict:
+def summarize(sample: dict, *, _with_phases: bool = True) -> dict:
     """把原始采样换算为窗口内的资源摘要。
 
     CPU 使用率由相邻两次采样的 jiffies 差值计算，避免依赖某个瞬间的读数；
@@ -79,11 +82,13 @@ def summarize(sample: dict) -> dict:
         current_total = _host_field(current, "cpu_total_jiffies")
         previous_idle = _host_field(previous, "cpu_idle_jiffies")
         current_idle = _host_field(current, "cpu_idle_jiffies")
-        if None in (previous_total, current_total, previous_idle, current_idle):
+        values = _numeric([previous_total, current_total, previous_idle, current_idle])
+        if len(values) != 4:
             continue
+        previous_total, current_total, previous_idle, current_idle = values
         total_delta = current_total - previous_total
         idle_delta = current_idle - previous_idle
-        if total_delta <= 0:
+        if total_delta <= 0 or not 0 <= idle_delta <= total_delta:
             continue
         cpu_rates.append(round((1 - idle_delta / total_delta) * 100, 1))
     loads = _numeric([_host_field(item, "load1") for item in samples])
@@ -100,6 +105,8 @@ def summarize(sample: dict) -> dict:
     summary = {
         "label": sample.get("label"),
         "schema_version": sample.get("schema_version"),
+        "status": sample.get("status", "legacy"),
+        "observation_status": sample.get("observation_status", "missing"),
         "run_id": sample.get("run_id"),
         "started_at": sample.get("started_at"),
         "finished_at": sample.get("finished_at"),
@@ -120,6 +127,31 @@ def summarize(sample: dict) -> dict:
         "container_states_last": _last_field(samples, "container_states"),
         "exited_containers_last": _last_field(samples, "exited_containers"),
     }
+    if _with_phases:
+        from ops.server_evidence import epoch
+
+        stopped = epoch(sample.get("stop_submitting_at") or sample.get("submission_stopped_at"))
+        load_started = epoch(sample.get("load_started_at"))
+        ended = epoch(sample.get("observation_ended_at"))
+        summary.update(stop_submitting_at=stopped, load_started_at=load_started, observation_ended_at=ended,
+                       checkpoints=sample.get("checkpoints") or {}, phases={})
+        if stopped is not None:
+            buckets = {"load": [], "observation": [], "client_drain": [], "server_observation": []}
+            for item in samples:
+                at = epoch(_host_field(item, "timestamp"))
+                if at is None:
+                    continue
+                if at > stopped:
+                    buckets["observation"].append(item)
+                elif load_started is not None and load_started <= at:
+                    buckets["load"].append(item)
+                if ended is not None and stopped < at <= ended:
+                    buckets["client_drain"].append(item)
+                if ended is not None and at > max(stopped, ended):
+                    buckets["server_observation"].append(item)
+            summary["phases"] = {name: summarize({"samples": rows}, _with_phases=False)
+                                 for name, rows in buckets.items()}
+            summary["server_observation_seconds"] = max(0, (epoch(sample.get("finished_at")) or stopped) - stopped)
     return summary
 
 
@@ -130,11 +162,13 @@ def render(summary: dict | None) -> list[str]:
             "- 负载窗口资源曲线：未采集（需要在服务器上并行运行 "
             "loadtest/stage_resource_sample.sh）",
         ]
-    return [
+    lines = [
+        f"- 采集状态：{summary.get('status', 'legacy')}；停止提交后检查点："
+        f"{summary.get('observation_status', 'missing')}，客户端排空与服务器观察分别记录。",
         f"- 采样文件：{summary.get('schema_version')}（run_id {summary.get('run_id')}）",
-        f"- 负载窗口：{summary.get('started_at')} 至 {summary.get('finished_at')}"
+        f"- 服务器采样窗口：{summary.get('started_at')} 至 {summary.get('finished_at')}"
         f"（每 {summary.get('interval_seconds')} 秒采样，共 {summary.get('sample_count')} 次）",
-        f"- CPU 使用率（{summary.get('cpu_count')} 核）：均值 {summary.get('cpu_percent_avg')}%，"
+        f"- 全窗口 CPU 使用率（{summary.get('cpu_count')} 核）：均值 {summary.get('cpu_percent_avg')}%，"
         f"峰值 {summary.get('cpu_percent_max')}%",
         f"- 1 分钟负载均值：均值 {summary.get('load1_avg')}，峰值 {summary.get('load1_max')}",
         f"- 可用内存最低值 {summary.get('mem_available_mb_min')} MB"
@@ -145,6 +179,23 @@ def render(summary: dict | None) -> list[str]:
         f"- 主库连接数峰值：{_show(summary.get('threads_connected_max'))}",
         f"- 窗口末容器：{_container_summary(summary)}",
     ]
+    lines.extend(["", "| 资源阶段 | 样本数 | CPU 均值/峰值 % | 可用内存最低 MB | 排队峰值 | 连接峰值 |",
+                  "| --- | --- | --- | --- | --- | --- |"])
+    phases = summary.get("phases") or {}
+    for key, label in (("load", "负载"), ("client_drain", "客户端排空"),
+                       ("server_observation", "额外服务器观察")):
+        phase = phases.get(key)
+        boundary_missing = summary.get("stop_submitting_at") is None or (
+            key != "load" and summary.get("observation_ended_at") is None) or (
+            key == "load" and summary.get("load_started_at") is None)
+        if boundary_missing or not phase or not phase.get("sample_count"):
+            lines.append(f"| {label} | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 |")
+        else:
+            lines.append(f"| {label} | {phase['sample_count']} | "
+                         f"{_show(phase.get('cpu_percent_avg'))}/{_show(phase.get('cpu_percent_max'))} | "
+                         f"{_show(phase.get('mem_available_mb_min'))} | {_show(phase.get('queued_max'))} | "
+                         f"{_show(phase.get('threads_connected_max'))} |")
+    return lines
 
 
 def _show(value) -> str:

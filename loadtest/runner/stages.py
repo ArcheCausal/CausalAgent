@@ -6,6 +6,8 @@ import json
 import random
 import threading
 import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from runner import config
@@ -75,10 +77,24 @@ def run_stage(
     spec = config.STAGES[stage]
     users = min(int(spec["users"]), len(accounts))
     sessions_per_user = max(1, int(spec.get("sessions_per_user", 1)))
-    recorder = Recorder(run_id=run_id or make_run_id(stage))
+    if users < 1:
+        raise ValueError("档位至少需要一个真实测试账号")
+    chosen_run_id = run_id or make_run_id(stage)
+    if Path(chosen_run_id).name != chosen_run_id or chosen_run_id in {".", ".."}:
+        raise ValueError("run_id 必须是单一目录名")
+    output_dir = config.RUNS_DIR / chosen_run_id
+    if (output_dir / "jobs.jsonl").exists() or (output_dir / "summary.json").exists():
+        raise ValueError("run_id 已有运行产物，请使用新的 run_id")
+    recorder = Recorder(run_id=chosen_run_id, output_dir=output_dir)
     recorder.stage = stage
     recorder.users = users
     recorder.server_baseline = server_baseline
+    recorder.scenario = dict(spec)
+    if spec["mode"] == "cdfm_rate":
+        def start_arrivals():
+            recorder.arrival_started_monotonic = time.monotonic()
+            recorder.arrival_started_at = time.time()
+        recorder.arrival_barrier = threading.Barrier(users, action=start_arrivals)
     stop = StopController()
     capacity = spec.get("active_jobs")
     job_gate = CountingGate(None if capacity is None else int(capacity))
@@ -130,20 +146,32 @@ def run_stage(
     monitor.start()
     for thread in threads:
         thread.join()
-    recorder.finished_at = time.time()
+    recorder.stop_submitting_at = time.time()
+    recorder.stop_submitting_monotonic = time.monotonic()
+    (output_dir / "phases.json").write_text(json.dumps({
+        "run_id": recorder.run_id, "started_at": recorder.started_at,
+        "stop_submitting_at": recorder.stop_submitting_at,
+    }), encoding="utf-8")
     stop.trip("负载结束")
+    monitor.join()
     recorder.peak_active_jobs = job_gate.peak
-    recorder.peak_sse = sse_gate.peak
     recorder.peak_sessions_per_user = sessions_per_user
     recorder.peak_active_jobs_per_account = max(
         (context.peak_active_jobs for context in contexts), default=0
     )
     recorder.note(
         f"配置上限：活动 Job {capacity if capacity is not None else '不限'}，"
-        f"SSE {spec['sse']}；实际峰值：活动 Job {job_gate.peak}，SSE {sse_gate.peak}"
+        f"SSE 客户端额度 {spec['sse']}；客户端活动 Job 峰值 {job_gate.peak}"
     )
 
     _drain_and_release(contexts, recorder, stop)
+    recorder.observation_ended_at = time.time()
+    recorder.finished_at = recorder.observation_ended_at
+    (output_dir / "phases.json").write_text(json.dumps({
+        "run_id": recorder.run_id, "started_at": recorder.started_at,
+        "stop_submitting_at": recorder.stop_submitting_at,
+        "observation_ended_at": recorder.observation_ended_at,
+    }), encoding="utf-8")
 
     for context in contexts:
         context.client.close()
@@ -169,9 +197,17 @@ def _run_user(
     try:
         if spec["mode"] == "full_flow":
             user.run_full_flow(int(spec["flows"]))
+        elif spec["mode"] == "cdfm_fixed":
+            total = int(spec.get("tasks", 4))
+            rounds = total // recorder.users + int(context.index <= total % recorder.users)
+            user.run_cdfm_fixed(rounds)
+        elif spec["mode"] == "cdfm_rate":
+            _run_arrivals(user, recorder, stop, spec)
         else:
             user.run_mixed(float(spec["duration"]))
     except Exception as exc:  # 单个账号失败不应中断整档负载
+        if spec["mode"] == "cdfm_rate":
+            recorder.arrival_barrier.abort()
         recorder.note(f"虚拟账号 {context.username} 异常退出: {type(exc).__name__}: {exc}")
 
 
@@ -180,6 +216,7 @@ def _monitor(probe: UserContext, recorder: Recorder, stop: StopController) -> No
     client = probe.client
     while not stop.triggered:
         started = time.monotonic()
+        started_at = time.time()
         status = 0
         error = ""
         try:
@@ -195,49 +232,169 @@ def _monitor(probe: UserContext, recorder: Recorder, stop: StopController) -> No
                 status=status,
                 duration_ms=duration_ms,
                 error=error,
+                started_at=started_at,
+                finished_at=time.time(),
             )
         )
         if status >= 500:
             stop.trip(f"健康探测出现 {status}")
-        time.sleep(5.0)
+        for _ in range(50):
+            if stop.triggered:
+                break
+            time.sleep(0.1)
+
+
+def _run_arrivals(user: VirtualUser, recorder: Recorder, stop: StopController, spec: dict) -> None:
+    """按固定节拍安排提交，繁忙客户端拒发的节拍仍进入记录。"""
+    rate = float(spec["arrival_rate"])
+    if rate <= 0:
+        raise ValueError("arrival_rate 必须大于零")
+    duration = float(spec["duration"])
+    workers = int(spec.get("arrival_workers", 4))
+    total = int(spec["tasks"])
+    plan = [(str(uuid.uuid4()), ordinal)
+            for ordinal in range(user.ctx.index - 1, total, recorder.users)]
+    # 准备失败也必须保留完整分母，逻辑身份先于登录及 barrier 登记。
+    for logical, ordinal in plan:
+        recorder.register_request(logical, username=user.ctx.username,
+            user_index=user.ctx.index, scenario="cdfm_rate", arrival_ordinal=ordinal,
+            scheduled_at=None, admission="pending")
+    tick = 0
+    started_at = None
+    prepared = False
+    reason = "submission_stopped"
+    try:
+        user.prepare()
+        prepared = True
+        recorder.arrival_barrier.wait(timeout=config.HTTP_TIMEOUT_SECONDS * 3)
+        started = recorder.arrival_started_monotonic
+        started_at = recorder.arrival_started_at
+        deadline = started + duration
+        user.set_submission_deadline(deadline)
+        for logical, ordinal in plan:
+            recorder.lifecycle(logical, event="arrival_scheduled",
+                scheduled_at=started_at + ordinal / rate,
+                submission_deadline_at=started_at + duration)
+        pending = set()
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"arrival-{user.ctx.index}") as pool:
+            while tick < len(plan) and not stop.triggered:
+                logical, ordinal = plan[tick]
+                now = time.monotonic()
+                if now >= deadline or ordinal / rate >= duration:
+                    reason = "outside_load_duration"
+                    break
+                scheduled = started + ordinal / rate
+                scheduled_at = started_at + ordinal / rate
+                remaining = scheduled - now
+                if remaining > 0:
+                    time.sleep(min(remaining, .1, deadline - now))
+                    continue
+                pending = {f for f in pending if not f.done()}
+                if len(pending) >= workers:
+                    _arrival_not_sent(recorder, logical, "client_submit_capacity", scheduled_at)
+                else:
+                    pending.add(pool.submit(_arrival, user, recorder, logical,
+                                            scheduled, scheduled_at, deadline))
+                tick += 1
+            for future in pending:
+                future.result()
+    except Exception as exc:
+        recorder.arrival_barrier.abort()
+        reason = ("arrival_barrier_failed" if isinstance(exc, threading.BrokenBarrierError)
+                  else "arrival_preparation_failed" if not prepared
+                  else "arrival_scheduler_failed")
+        raise
+    finally:
+        for logical, ordinal in plan[tick:]:
+            scheduled_at = None if started_at is None else started_at + ordinal / rate
+            _arrival_not_sent(recorder, logical, reason, scheduled_at)
+
+
+def _arrival_not_sent(recorder: Recorder, logical: str, reason: str,
+                      scheduled_at: float | None) -> None:
+    recorder.lifecycle(logical, event="not_sent", admission="not_sent",
+        reason=reason, not_sent_reason=reason, scheduled_at=scheduled_at,
+        scheduler_lag_ms=(None if scheduled_at is None else
+                          max(0, time.time() - scheduled_at) * 1000))
+
+
+def _arrival(user: VirtualUser, recorder: Recorder, logical: str,
+             scheduled: float, scheduled_at: float, deadline: float) -> None:
+    try:
+        lag = max(0, time.monotonic() - scheduled)
+        user.submit_arrival(logical_request_id=logical, scheduled_at=scheduled_at,
+                            scheduler_lag_ms=lag * 1000, deadline=deadline)
+    except Exception as exc:
+        row = recorder.requests[logical]
+        if row.get("admission") == "pending" and row.get("post_started_at") is None:
+            _arrival_not_sent(recorder, logical, "arrival_dispatch_failed", scheduled_at)
+        recorder.lifecycle(logical, event="arrival_dispatch_error",
+                            dispatch_error=type(exc).__name__)
+        recorder.note(f"CDFM 到达提交失败：{type(exc).__name__}")
 
 
 def _drain_and_release(
     contexts: list[UserContext], recorder: Recorder, stop: StopController
 ) -> None:
     """停止提交后等待后台观察器与活动 Job 清空，并记录队列恢复时间。"""
-    started = time.monotonic()
+    started = getattr(recorder, "stop_submitting_monotonic", time.monotonic())
     budget = config.DRAIN_DEADLINE_SECONDS
-    for context in contexts:
-        context_remaining = max(0.0, budget - (time.monotonic() - started))
-        for thread in list(context.observers):
-            thread.join(timeout=context_remaining)
-    observers_alive = sum(
-        1 for context in contexts for thread in context.observers if thread.is_alive()
-    )
-    if observers_alive:
-        recorder.note(
-            f"排空期限 {budget:.0f} 秒到达时仍有 {observers_alive} 个后台观察器在等待终态"
-        )
-        stop.trip(f"停止提交后 {budget:.0f} 秒仍有 Job 未到达终态")
-
+    checkpoint = config.DRAIN_CHECKPOINT_SECONDS
     deadline = started + budget
+    recorder.observation_deadline = min(recorder.observation_deadline, deadline)
+    checkpoint_result = None
+    state = "unknown"
+    drained_at = None
     while time.monotonic() < deadline:
         pending = 0
+        failures = 0
+        unresolved = any(r.get("admission") in {"unknown", "pending", "acceptance_unknown"}
+                         for r in recorder.requests.values())
         for context in contexts:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failures += 1
+                break
             try:
-                pending += len(context.client.active_jobs())
-            except Exception:
-                continue
-        if pending == 0:
-            recorder.note(
-                f"停止提交后 {time.monotonic() - started:.1f} 秒活动 Job 清空"
-            )
-            recorder.server_after = {"drain_seconds": round(time.monotonic() - started, 1)}
-            return
-        time.sleep(5.0)
-    recorder.note(f"停止提交后 {budget:.0f} 秒内活动 Job 未清空")
-    stop.trip(f"停止提交后队列 {budget:.0f} 秒没有减少")
+                # active API 包含账号历史会话；只将本轮已登记 Job 计入。
+                pending += sum(str(job.get("job_id")) in recorder.job_created_ids
+                               for job in context.client.active_jobs(
+                                   timeout=min(config.HTTP_TIMEOUT_SECONDS, remaining)))
+            except Exception as exc:
+                failures += 1
+                recorder.note(f"排空状态查询未知：{context.username}/{type(exc).__name__}")
+        alive = [t for c in contexts for t in c.observers if t.is_alive()]
+        state = "unknown" if failures or unresolved else ("active" if pending else "empty")
+        elapsed = time.monotonic() - started
+        if checkpoint_result is None and elapsed >= checkpoint:
+            checkpoint_result = {"at": time.time(), "state": state,
+                                 "observed_ms": elapsed * 1000,
+                                 "observers_alive": len(alive), "drained": None,
+                                 "client_cleared_within_checkpoint": False}
+        if state == "empty" and not alive and elapsed <= budget:
+            drained_at = elapsed * 1000
+            break
+        # 每次 join 都重新计算预算，轮询不得重复消费整段剩余期限。
+        for thread in alive:
+            thread.join(timeout=max(0, min(.05, deadline - time.monotonic())))
+        recorder.observation_stop.wait(min(1, max(0, deadline - time.monotonic())))
+    recorder.observation_stop.set()
+    # 停止观察不是取消服务端 Job。等待所有写入者退出后才冻结证据。
+    for context in contexts:
+        for thread in list(context.observers):
+            thread.join()
+    elapsed_ms = (time.monotonic() - started) * 1000
+    if checkpoint_result is None and drained_at is not None and drained_at <= checkpoint * 1000:
+        checkpoint_result = {"state": "empty", "observers_alive": 0, "drained": None,
+                             "client_cleared_within_checkpoint": True, "observed_drain_ms": drained_at}
+    recorder.drain = {"checkpoint_ms": checkpoint * 1000, "checkpoint": checkpoint_result,
+                      "observation_limit_ms": budget * 1000, "final_state": state,
+                      "client_observers_cleared": True,
+                      "business_active_cleared": state == "empty" if state != "unknown" else None,
+                      "client_cleared_within_deadline": drained_at is not None,
+                      "client_drain_ms": drained_at, "execution_released": None,
+                      "finally_drained": None, "drain_ms": None,
+                      "observed_ms": elapsed_ms}
     recorder.server_after = {"drain_seconds": None}
 
 
@@ -254,69 +411,7 @@ def write_run_outputs(summary: dict, run_output_dir: Path) -> Path:
 
 
 def render_notes(summary: dict) -> str:
-    """把聚合结果整理成可读的运行说明。"""
-    http = summary["http"]
-    job = summary["job"]
-    sse = summary["sse"]
-    lines = [
-        f"# 运行记录 {summary['run_id']}",
-        "",
-        f"- 档位: {summary['stage']}",
-        f"- 虚拟账号: {summary['users']}",
-        f"- 时长: {summary['elapsed_seconds']} 秒",
-        "",
-        "## HTTP",
-        "",
-        f"- 请求数: {http['requests']}，RPS: {http['rps']}",
-        f"- p50/p95/p99: {_ms(http['p50_ms'])} / {_ms(http['p95_ms'])} / {_ms(http['p99_ms'])}",
-        f"- 状态码分布: {json.dumps(http['status_counts'], ensure_ascii=False)}",
-        f"- 4xx/5xx/传输错误: {http['client_errors_4xx']} / "
-        f"{http['server_errors_5xx']} / {http['timeouts_or_transport_errors']}",
-        "",
-        "## Job",
-        "",
-        f"- 创建尝试: {job.get('create_attempts', 0)}，成功创建唯一新 Job: {job['created']}",
-        f"- 幂等重放: {job['idempotent_replays']}，超额跳过: {job.get('submissions_over_budget', 0)}，"
-        f"会话忙跳过: {job.get('submissions_session_busy', 0)}",
-        f"- 每账号成功创建上限使用最多: {job.get('budget_used_max', 0)}",
-        f"- 终态分布: {json.dumps(job['terminal_status_counts'], ensure_ascii=False)}",
-        f"- 观察超时 Job: {job.get('observation_timeouts', 0)}，"
-        f"排队观测超时: {job.get('queue_observe_timeouts', 0)}",
-        f"- 排队 p50/p95: {_seconds(job.get('queue_p50_seconds'))} / "
-        f"{_seconds(job.get('queue_p95_seconds'))}",
-        f"- 执行 p50/p95: {_seconds(job.get('execution_p50_seconds'))} / "
-        f"{_seconds(job.get('execution_p95_seconds'))}",
-        f"- 总耗时 p50/p95: {_seconds(job.get('total_p50_seconds'))} / "
-        f"{_seconds(job.get('total_p95_seconds'))}",
-        f"- 历史一致: {job['history_consistent']}/{job['history_checked']}",
-        "",
-        "## SSE",
-        "",
-        f"- 订阅数: {sse['subscriptions']}",
-        f"- 首事件 p50/p95: {_ms(sse['first_event_p50_ms'])} / {_ms(sse['first_event_p95_ms'])}",
-        f"- 终态 p50/p95: {_ms(sse['terminal_latency_p50_ms'])} / "
-        f"{_ms(sse['terminal_latency_p95_ms'])}",
-        f"- 断线/重连: {sse['disconnects']} / {sse['reconnects']}",
-        f"- 重复/乱序事件: {sse['duplicate_events']} / {sse['out_of_order_events']}",
-        f"- 比对得到的漏事件: {sse['verified_missing_events']}",
-        f"- 事件 ID 缺口(信息项): {sse['id_gap_events_informational']}",
-        "",
-        "## 说明",
-        "",
-    ]
-    lines.extend(f"- {item}" for item in summary["notes"])
-    return "\n".join(lines) + "\n"
+    """运行说明与正式报告使用相同的 v2 口径和旧产物兼容规则。"""
+    from runner.report import render_stage_report
 
-
-def _ms(value) -> str:
-    """把毫秒值格式化为一位小数；空值返回“未采集”。"""
-    if value is None:
-        return "未采集"
-    return f"{value:.1f} ms"
-
-
-def _seconds(value) -> str:
-    """把秒值格式化为一位小数；空值返回“未采集”。"""
-    if value is None:
-        return "未采集"
-    return f"{value:.1f} s"
+    return render_stage_report(summary)

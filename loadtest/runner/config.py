@@ -78,6 +78,19 @@ STAGES: dict[str, dict] = {
         "mode": "mixed",
         "sessions_per_user": 2,
     },
+    "cdfm_fixed": {
+        "users": 1, "active_jobs": None, "sse": 8,
+        "mode": "cdfm_fixed",
+        "rows": 200, "seed": 20261020, "tasks": 4,
+        "score_group": "cdfm_fixed",
+    },
+    "cdfm_rate": {
+        "users": 1, "active_jobs": None, "sse": 8,
+        "mode": "cdfm_rate", "rows": 200, "seed": 20261020,
+        "tasks": 20, "arrival_rate": 0.1, "duration": 200,
+        "arrival_workers": 8, "arrival_pending": 16,
+        "score_group": "cdfm_rate",
+    },
 }
 
 # 混合操作比例：查询、页面与登录状态、上传、创建 Job。
@@ -94,14 +107,15 @@ THINK_MAX_SECONDS = 5.0
 # 4. 压测停止后的排空期限。
 HTTP_TIMEOUT_SECONDS = float(os.environ.get("LOADTEST_HTTP_TIMEOUT_SECONDS", "30"))
 SSE_IDLE_READ_TIMEOUT_SECONDS = float(
-    os.environ.get("LOADTEST_SSE_IDLE_READ_TIMEOUT_SECONDS", "1800")
+    os.environ.get("LOADTEST_SSE_IDLE_READ_TIMEOUT_SECONDS", "45")
 )
 JOB_OBSERVE_DEADLINE_SECONDS = float(
     os.environ.get("LOADTEST_JOB_OBSERVE_DEADLINE_SECONDS", "1800")
 )
-DRAIN_DEADLINE_SECONDS = float(os.environ.get("LOADTEST_DRAIN_DEADLINE_SECONDS", "300"))
+DRAIN_DEADLINE_SECONDS = float(os.environ.get("LOADTEST_DRAIN_DEADLINE_SECONDS", "1800"))
+DRAIN_CHECKPOINT_SECONDS = float(os.environ.get("LOADTEST_DRAIN_CHECKPOINT_SECONDS", "300"))
 
-# 排队观测：记录创建到进入 running 的耗时；超过该秒数仍未进入运行，仍继续观察并标注为长排队。
+# 兼容旧编排器配置；客户端不再轮询推算排队时间，排队/执行耗时由主库计算。
 QUEUE_OBSERVE_TIMEOUT_SECONDS = float(
     os.environ.get("LOADTEST_QUEUE_OBSERVE_TIMEOUT_SECONDS", "120")
 )
@@ -112,4 +126,18 @@ JOB_SLOT_WAIT_SECONDS = float(os.environ.get("LOADTEST_JOB_SLOT_WAIT_SECONDS", "
 # 同一会话重复提交时，等待会话释放的最长时间，用来测量真实 API 的活动 Job 约束。
 SESSION_SLOT_WAIT_SECONDS = float(
     os.environ.get("LOADTEST_SESSION_SLOT_WAIT_SECONDS", "30")
+)
+
+# SSE 的读取等待与总观察截止分别控制；重连次数包括网关错误和提前 EOF。
+SSE_MAX_RECONNECTS = 3
+SSE_RECONNECT_DELAY_SECONDS = 0.5
+OBSERVATION_CHECK_INTERVAL_SECONDS = 0.05
+CREATE_MAX_ATTEMPTS = 3
+CDFM_ROWS = 200
+CDFM_SEED = 20261020
+ARRIVAL_WORKERS = 8
+ARRIVAL_PENDING = 16
+CDFM_MESSAGE = (
+    "请仅使用 CDFM（causal.cdfm）对上传文件全部五个连续数值变量进行因果发现，"
+    "使用全部数据行，不抽样，不调用其他因果发现算法，不进行网络搜索，生成因果图和报告。"
 )

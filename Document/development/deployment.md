@@ -17,7 +17,9 @@
 
 四个前端的 Vite 构建会把 Geist Sans 和 Noto Sans SC 的 WOFF2 子集放入各自的资源目录，并把字体对应的 OFL 文件复制到 `assets/font-licenses/`，文件名包含内容摘要。许可文本通过各前端已有的资源路由提供，与同目录带 hash 的字体资源一样可以安全使用 immutable 缓存；发布时字体与许可证必须一起保留。
 
-最终运行镜像不包含 Node、npm，不启动 Vite，不开放 Node 端口；Gunicorn 默认绑定 `0.0.0.0:5001`，由 `WEB_WORKERS`、`WEB_THREADS` 和 `WEB_TIMEOUT` 调整 Web 进程参数。
+最终运行镜像不包含 Node、npm，不启动 Vite，不开放 Node 端口；Gunicorn 默认绑定 `0.0.0.0:5001`，由 `WEB_WORKERS`、`WEB_THREADS` 和 `WEB_TIMEOUT` 分别调整进程数、每进程线程数和超时秒数，默认值为 `1`、`12` 和 `120`。
+
+预发 `app` 保留 `python scripts/staging_environment_guard.py && exec gunicorn` 启动顺序，三个参数分别使用 `--workers $${WEB_WORKERS}`、`--threads $${WEB_THREADS}` 和 `--timeout $${WEB_TIMEOUT}`。Compose 通过 `environment` 注入配置值；命令中的 `$$` 阻止 Compose 提前插值，再由容器内的 `sh -c` 展开变量。生产 `app.environment` 同样注入三项 `WEB_*` 配置，变量未设置或为空时使用上述默认值，并沿用 Dockerfile 的默认启动命令。
 
 四个前端各自使用独立的运行时目录，Compose 默认指向镜像内产物，源码卷不能覆盖这些目录：官网 `WEBSITE_FRONTEND_DIST_DIR=/opt/causalagent-website`，普通用户应用 `CHAT_FRONTEND_DIST_DIR=/opt/causalagent-chat`，RAG 评测台 `RAG_EVAL_FRONTEND_DIST_DIR=/opt/causalagent-rag-eval`，管理员系统 `ADMIN_FRONTEND_DIST_DIR=/opt/causalagent-admin`。
 
