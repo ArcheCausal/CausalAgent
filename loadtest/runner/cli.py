@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from runner.evidence import (
 from runner import resource
 from runner.preflight import render_preflight, run_preflight
 from runner.recovery import run_recovery_suite
-from runner.report import render_stage_report
+from runner.report import _value, render_stage_report
 from runner.stages import make_run_id, run_stage, write_run_outputs
 from runner.verify_packet import build_verify_packet
 
@@ -44,6 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
     stage.add_argument("--stage", required=True, choices=sorted(config.STAGES))
     stage.add_argument("--users", type=int, default=0, help="覆盖档位的虚拟用户数")
     stage.add_argument("--duration", type=float, default=0.0, help="覆盖档位的持续时间")
+    stage.add_argument("--rows", type=int, help="CDFM 固定数据行数")
+    stage.add_argument("--seed", type=int, help="CDFM 数据随机种子；相同规模和种子生成相同输入")
+    stage.add_argument("--tasks", type=int, help="CDFM 本档任务总量")
+    stage.add_argument("--arrival-rate", type=float, help="仅 cdfm_rate：整档每秒计划到达请求数")
     stage.add_argument(
         "--run-id",
         default="",
@@ -146,6 +151,8 @@ def _cmd_logcheck(base_url: str, stage: str) -> int:
 
 def render_logcheck(result: dict) -> str:
     """把日志核查结果整理为可读文本。"""
+    if result.get("scope") != "run" or not result.get("run_id"):
+        return "本轮日志侧指标：未采集。旧日志缺少 run_id 或 scope=run，不提供本轮 MCP 错误或成功数量。\n"
     counts = result["counts"]
     lines = [
         f"# 日志核查 {result['stage']}",
@@ -189,8 +196,8 @@ def render_logcheck(result: dict) -> str:
                   "| --- | --- | --- | --- | --- |"])
     for capability, stats in (result.get("capability") or {}).items():
         lines.append(
-            f"| {capability} | {stats.get('received', 0)} | {stats.get('finished', 0)} | "
-            f"{stats.get('failed', 0)} | {stats.get('slow', 0)} |"
+            f"| {capability} | {_value(stats.get('received'))} | {_value(stats.get('finished'))} | "
+            f"{_value(stats.get('failed'))} | {_value(stats.get('slow'))} |"
         )
     lines.extend(["", "## 事件码分布", ""])
     for service, codes in (result.get("event_codes") or {}).items():
@@ -212,18 +219,12 @@ def render_logcheck(result: dict) -> str:
                 f"- {item.get('timestamp')} {item.get('event_code')} "
                 f"{json.dumps(item.get('details'), ensure_ascii=False)}"
             )
-    history = result.get("mcp_failure_history") or {}
-    if history:
-        lines.extend(
-            [
-                "",
-                "## MCP 最近七天成功与失败",
-                "",
-                f"- 完成（按能力）：{json.dumps(history.get('finished_by_capability', {}), ensure_ascii=False)}",
-                f"- 失败（按能力）：{json.dumps(history.get('failed_by_capability', {}), ensure_ascii=False)}",
-                f"- CDFM 权重加载次数：{history.get('cdfm_model_load_attempts')}",
-            ]
-        )
+    lines.extend(["", "## 日志取证范围", "",
+                  f"- run_id：{result.get('run_id') or '未采集'}；scope：{result.get('scope') or '未采集'}",
+                  f"- 采集状态：{result.get('status') or '未采集'}",
+                  f"- 逐 Job/服务覆盖：{json.dumps(result.get('coverage'), ensure_ascii=False)}",
+                  f"- CDFM 证据状态：{(result.get('cdfm') or {}).get('status') or '未采集'}",
+                  "旧日志产物若未声明本轮 Job 范围，不用于计算本轮成功率。"])
     return "\n".join(lines) + "\n"
 
 
@@ -310,10 +311,14 @@ def _cmd_export_job_ids(out: str) -> int:
         count = len([line for line in path.read_text(encoding="utf-8").splitlines() if line])
         total += count
         print(f"已写入 {path}（{count} 个 job_id）")
+        request_manifest = path.with_name(path.name.replace("job-ids-", "requests-")).with_suffix(".json")
+        if request_manifest.exists():
+            print(f"已写入含未知接纳请求的身份清单：{request_manifest}")
     print(f"共导出 {total} 个 job_id 到 {target_dir}")
     print(
         "下一步：把清单上传到服务器后执行 "
-        "sudo bash loadtest/job_db_check.sh <run_id> <job_ids.txt>"
+        "sudo bash loadtest/job_db_check.sh <run_id> <requests-stage.json>；"
+        "同时部署 loadtest/ops/server_evidence.py。旧 job_ids.txt 仅核对已知 Job。"
     )
     return 0
 
@@ -357,11 +362,36 @@ def _cmd_accounts(base_url: str, count: int, verify: bool) -> int:
 
 def _cmd_stage(args, server_baseline: dict | None) -> int:
     spec = dict(config.STAGES[args.stage])
+    cdfm = spec["mode"] in ("cdfm_fixed", "cdfm_rate")
+    if args.users < 0 or not math.isfinite(args.duration) or args.duration < 0:
+        print("users 必须为正整数，duration 必须为有限正数；0 表示使用档位默认值。")
+        return 2
+    for name in ("rows", "tasks"):
+        value = getattr(args, name)
+        if value is not None and (not cdfm or value <= 0):
+            print(f"--{name} 只用于 CDFM 档位，且必须为正整数。")
+            return 2
+        if value is not None:
+            spec[name] = value
+    if args.seed is not None:
+        if not cdfm:
+            print("--seed 只用于 CDFM 档位。")
+            return 2
+        spec["seed"] = args.seed
+    if args.arrival_rate is not None:
+        if spec["mode"] != "cdfm_rate" or not math.isfinite(args.arrival_rate) or args.arrival_rate <= 0:
+            print("--arrival-rate 只用于 cdfm_rate，且必须为有限正数。")
+            return 2
+        spec["arrival_rate"] = args.arrival_rate
     if args.users:
         spec["users"] = args.users
     if args.duration:
+        if spec["mode"] == "cdfm_fixed":
+            print("cdfm_fixed 以 --tasks 指定任务量；持续时间请使用 cdfm_rate 的 --duration。")
+            return 2
         spec["duration"] = args.duration
-        spec["mode"] = "mixed"
+        if not cdfm:
+            spec["mode"] = "mixed"
     config.STAGES[args.stage] = spec
     accounts = load_accounts()
     if len(accounts) < spec["users"]:
@@ -377,6 +407,8 @@ def _cmd_stage(args, server_baseline: dict | None) -> int:
     write_run_outputs(summary, run_dir)
     print(render_stage_report(summary))
     print(f"运行产物目录: {run_dir}")
+    if summary.get("db_checked_at") is None:
+        print("主库核对待完成：请按本轮 run_id 导出 job_id，采集后 attach-job-db，再生成最终报告。")
     return 0
 
 
@@ -392,6 +424,11 @@ def _cmd_recovery(
     write_run_outputs(summary, run_dir)
     print(render_stage_report(summary))
     print(f"运行产物目录: {run_dir}")
+    if any(item.get("passed") is False for item in summary.get("checks", [])):
+        return 1
+    if summary.get("special_evidence_gaps") or any(item.get("passed") is None for item in summary.get("checks", [])):
+        print("专项尚未完成：执行释放、进程终止或真实前端等证据缺口见报告（退出码 3）。")
+        return 3
     return 0
 
 
