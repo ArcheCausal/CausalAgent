@@ -256,7 +256,16 @@ services:
       causalagent_observability: "true"
       causalagent_service: web
       causalagent_environment: staging
-    command: ["sh", "-c", "python scripts/staging_environment_guard.py && exec gunicorn --bind 0.0.0.0:5001 --workers 1 --threads 12 --timeout 120 CausalAgent:app"]
+    command:
+      - sh
+      - -c
+      - >-
+        python scripts/staging_environment_guard.py &&
+        exec gunicorn --bind 0.0.0.0:5001
+        --workers "$${WEB_WORKERS}"
+        --threads "$${WEB_THREADS}"
+        --timeout "$${WEB_TIMEOUT}"
+        CausalAgent:app
     environment: *app_environment
     volumes:
       - rag_eval_staging_eval:/app/tmp/rag_eval
