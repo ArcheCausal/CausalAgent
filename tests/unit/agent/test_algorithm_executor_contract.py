@@ -14,8 +14,8 @@ from Agent.deep_agent_tools import (
     McpInvocationContext,
     PC_SPEC,
     SafeErrorCode,
-    FakeAlgorithmExecutor,
 )
+from Agent.deep_agent_tools.fake_algorithm_executor import FakeAlgorithmExecutor
 
 
 def _context() -> McpInvocationContext:

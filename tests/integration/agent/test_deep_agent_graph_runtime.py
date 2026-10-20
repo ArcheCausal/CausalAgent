@@ -17,7 +17,7 @@ def test_real_deep_agent_graph_builds_without_default_subagent() -> None:
     from Agent.deep_agent.context import AgentRunContext
     from Agent.deep_agent.graph import DeepAgentGraphConfig, build_deep_agent
     from Agent.deep_agent.state import ProjectDeepAgentState
-    from Agent.deep_agent_tools import RagEvidenceTool
+    from Agent.deep_agent_tools.rag_evidence_tool import RagEvidenceTool
 
     class Retriever:
         def get_evidence(self, query, *, max_contexts=None):
@@ -55,11 +55,11 @@ def test_real_deep_agent_graph_wires_static_algorithm_registry() -> None:
     from Agent.deep_agent.graph import DeepAgentGraphConfig, build_deep_agent
     from Agent.deep_agent_tools import (
         DEFAULT_ALGORITHM_SPECS,
-        FakeAlgorithmExecutor,
-        build_algorithm_tools,
         build_default_registry,
     )
     from Agent.deep_agent_tools.adapters import build_default_adapters
+    from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
+    from Agent.deep_agent_tools.fake_algorithm_executor import FakeAlgorithmExecutor
 
     backend = StateBackend()
     executor = FakeAlgorithmExecutor()

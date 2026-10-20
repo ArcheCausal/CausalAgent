@@ -6,6 +6,8 @@
 
 ## 镜像构建
 
+`Agent/CausalAgentMCP/Dockerfile` 使用 MCP 自己的依赖环境，在复制源码后执行 `python -c "import Agent.CausalAgentMCP.app"`，并检查导入完成后的 `sys.modules` 中没有 `langgraph*`、`langchain*` 或 `Agent.deep_agent` 及其子模块。`publish-staging-images.yml` 的 MCP 构建直接使用该 Dockerfile，导入失败或越过依赖边界都会阻止镜像推送。此检查不需要数据库或部署密钥；发布前仍须用真实数据库和配置启动镜像并确认 `/ready` 返回成功，并执行算法 `Command` 终态解析与依赖调度回归。
+
 `Dockerfile` 当前有六个重要阶段：
 
 1. `python-deps` 按 `tests/smoke/requirements-deep-agent-py311-linux.lock` 的 hash 锁定安装全部 Python 依赖（含 CPU PyTorch），不使用 `requirements-base.txt` 与 `requirements.txt` 在线求解。

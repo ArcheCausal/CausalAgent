@@ -81,7 +81,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push commit-tagged image
+      # MCP Dockerfile 在复制源码后执行入口导入及运行时依赖边界检查，失败即阻止推送。
+      - name: Build, validate and push commit-tagged image
         id: build
         uses: docker/build-push-action@v6
         with:

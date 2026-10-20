@@ -8,12 +8,12 @@ from Agent.deep_agent import AgentRunContext, FinalizationGate, TrustedJobIdenti
 from Agent.deep_agent.memory import build_in_memory_backend
 from Agent.deep_agent_tools import (
     DataProfile,
-    FakeAlgorithmExecutor,
     SafeErrorCode,
-    build_algorithm_tools,
     build_default_registry,
 )
 from Agent.deep_agent_tools.adapters import build_default_adapters
+from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
+from Agent.deep_agent_tools.fake_algorithm_executor import FakeAlgorithmExecutor
 
 from Agent.deep_agent.finalization import (
     FinalizationRetryController,
