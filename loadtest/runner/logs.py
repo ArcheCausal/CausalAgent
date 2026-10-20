@@ -9,13 +9,12 @@ import json
 import os
 import re
 import time
-import uuid
 from pathlib import Path
 
 import httpx
 
 from runner import config
-from runner.evidence import latest_runs
+from runner.evidence import _job_ids, latest_runs
 
 DEPLOY_ENV_CANDIDATES = ("../.env.staging", ".env.staging")
 
@@ -124,16 +123,23 @@ class GrafanaLoki:
         self.client.close()
 
 
-def resolve_run_window(stage: str) -> tuple[int, int] | None:
+def resolve_run_window(stage: str, summary: dict | None = None) -> tuple[int, int] | None:
     """按档位找到最近一次运行的时间窗口，返回纳秒时间戳。"""
-    path = latest_runs(config.RUNS_DIR).get(stage)
-    if path is None:
-        return None
-    summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
+    if summary is None:
+        path = latest_runs(config.RUNS_DIR).get(stage)
+        if path is None:
+            return None
+        summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
     started = summary.get("started_at")
     finished = summary.get("finished_at")
     if not started or not finished:
         return None
+    from ops.server_evidence import epoch
+
+    db = summary.get("job_db_check") or {}
+    scoped = db.get("scope") == "run" and db.get("run_id") == summary.get("run_id")
+    checked = epoch(db.get("db_checked_at")) if scoped else None
+    finished = max(finished, checked) if checked is not None else finished
     return int(started * 1_000_000_000), int(finished * 1_000_000_000)
 
 
@@ -159,19 +165,20 @@ def scan_window(stage: str) -> dict:
 
 
 def sample_line(job_id: str, start_ns: int, end_ns: int) -> list[str]:
-    """列出每个服务引用该 job_id 的样本行，用于确认日志字段结构。"""
+    """只返回指定 Job 的白名单事件字段，不输出原始日志。"""
     client = GrafanaLoki(config.base_url())
     try:
         client.login()
         client.pick_loki()
-        out: list[str] = []
+        out = []
         for service in ("web", "worker", "mcp"):
             rows = client.query_range(
-                f'{{service_name="{service}"}} |= "{job_id}"', start_ns, end_ns, 3
+                f'{{service_name="{service}"}} |= {json.dumps(job_id)}', start_ns, end_ns, 20
             )
-            out.append(f"[{service}] 命中 {len(rows)} 行")
-            for row in rows[:2]:
-                out.append("  " + row["line"][:400])
+            for row in rows:
+                parsed = _parse_job_row(row, {job_id})
+                if parsed:
+                    out.append(json.dumps({"service": service, **parsed}, ensure_ascii=False))
         return out
     finally:
         client.close()
@@ -190,7 +197,7 @@ def main(stage: str | None = None) -> int:
         client.close()
         print(
             "Grafana 登录失败，日志侧核查暂时不可用。"
-            "需要可用的 Grafana 管理员口令；本机部署环境文件中的口令与服务器不一致。"
+            "请检查 Grafana 连接与认证配置；本次未取得日志证据。"
             f"（{exc}）"
         )
         return 1
@@ -207,287 +214,185 @@ def main(stage: str | None = None) -> int:
     return 0
 
 
-def logcheck(stage: str, base_url: str) -> dict:
-    """按档位运行窗口核查服务端日志，返回结构化结论。"""
-    window = resolve_run_window(stage)
-    if window is None:
-        raise RuntimeError(f"找不到 {stage} 的运行窗口")
-    start_ns, end_ns = window
-    client = GrafanaLoki(base_url)
-    try:
-        client.login()
-        client.pick_loki()
-        result: dict = {
-            "stage": stage,
-            "window_ns": [start_ns, end_ns],
-            "counts": _level_counts(client, start_ns, end_ns),
-            "errors": _error_samples(client, start_ns, end_ns),
-            "job_lifecycle": _job_lifecycle(client, stage, start_ns, end_ns),
-            "request_id_propagation": _request_id_propagation(
-                client, stage, start_ns, end_ns
-            ),
-            "capability": _capability_breakdown(client, start_ns, end_ns),
-            "event_codes": _event_code_counts(client, start_ns, end_ns),
-            "web_failures": _web_failures(client, start_ns, end_ns),
-            "worker_degraded": _worker_degraded(client, start_ns, end_ns),
-            "mcp_failure_history": _mcp_failure_history(client),
-        }
-        return result
-    finally:
-        client.close()
-
-
-def _level_counts(client: GrafanaLoki, start_ns: int, end_ns: int) -> dict:
-    """统计各服务在各日志级别下的条数。"""
-    counts: dict[str, int] = {}
-    for service in ("web", "worker", "mcp"):
-        for level in ("info", "warning", "error"):
-            rows = client.query_range(
-                f'{{service_name="{service}", level="{level}"}}',
-                start_ns,
-                end_ns,
-                2000,
-            )
-            counts[f"{service}/{level}"] = len(rows)
-    return counts
-
-
-def _error_samples(client: GrafanaLoki, start_ns: int, end_ns: int) -> dict:
-    """按服务取少量 error 级日志，只保留事件码与脱敏摘要。"""
-    samples: dict[str, list[dict]] = {}
-    for service in ("web", "worker", "mcp"):
-        rows = client.query_range(
-            f'{{service_name="{service}", level="error"}}', start_ns, end_ns, 20
-        )
-        samples[service] = [_summarize(row) for row in rows]
-    return samples
-
-
-def _job_lifecycle(
-    client: GrafanaLoki, stage: str, start_ns: int, end_ns: int
-) -> dict:
-    """取一档运行里的一个 job_id，回放它在各服务的事件序列。"""
-    job_id = _first_job_id(stage)
-    if not job_id:
-        return {"job_id": None, "note": "该档位没有记录到 job_id"}
-    events: list[dict] = []
-    for service in ("web", "worker", "mcp"):
-        rows = client.query_range(
-            f'{{service_name="{service}"}} |= "{job_id}"', start_ns, end_ns, 200
-        )
-        for row in rows:
-            events.append({"service": service, **_summarize(row)})
-    events.sort(key=lambda item: item["timestamp"])
-    return {"job_id": job_id, "event_count": len(events), "events": events}
-
-
-def _request_id_propagation(
-    client: GrafanaLoki, stage: str, start_ns: int, end_ns: int
-) -> dict:
-    """核对同一 Job 的 request_id 是否从入口沿用到 worker。
-
-    用一个已有的 job_id 在日志中关联：入口创建 Job 的行带有 request_id，
-    worker 处理同一 Job 的行应沿用同一个 request_id，而不是各自重生。
-    """
-    job_id = _first_job_id(stage)
-    if not job_id:
-        return {"job_id": None, "note": "该档位没有记录到 job_id"}
-    buckets: dict[str, set[str]] = {}
-    for service in ("web", "worker", "mcp"):
-        rows = client.query_range(
-            f'{{service_name="{service}"}} |= "{job_id}"', start_ns, end_ns, 200
-        )
-        ids = set()
-        for row in rows:
-            try:
-                payload = json.loads(row["line"])
-            except (json.JSONDecodeError, TypeError):
-                continue
-            request_id = payload.get("request_id")
-            if request_id:
-                ids.add(request_id)
-        buckets[service] = ids
-    entry_ids = buckets.get("web", set())
-    worker_ids = buckets.get("worker", set())
-    shared = entry_ids & worker_ids
-    return {
-        "job_id": job_id,
-        "gateway_entry_request_ids": sorted(entry_ids),
-        "worker_request_ids": sorted(worker_ids),
-        "shared_request_ids": sorted(shared),
-        "propagated": bool(shared),
-    }
-
-
-def _capability_breakdown(client: GrafanaLoki, start_ns: int, end_ns: int) -> dict:
-    """按算法能力统计收到、完成、失败与慢调用数量。
-
-    MCP 侧每个能力有独立并发额度，整体条数会被可并行能力放大；按能力拆开后
-    才能判断某个能力是否从未成功。
-    """
-    received: dict[str, int] = {}
-    finished: dict[str, int] = {}
-    failed: dict[str, int] = {}
-    slow: dict[str, int] = {}
-    for event_code, bucket in (
-        ("mcp.request.received", received),
-        ("mcp.tool.finished", finished),
-        ("mcp.tool.failed", failed),
-        ("mcp.tool.slow", slow),
-    ):
-        rows = client.query_range(
-            f'{{service_name="mcp"}} |= "{event_code}"', start_ns, end_ns, 5000
-        )
-        for row in rows:
-            try:
-                payload = json.loads(row["line"])
-            except (json.JSONDecodeError, TypeError):
-                continue
-            capability = (payload.get("details") or {}).get("capability") or "<未标注>"
-            bucket[capability] = bucket.get(capability, 0) + 1
-    return {
-        capability: {
-            "received": received.get(capability, 0),
-            "finished": finished.get(capability, 0),
-            "failed": failed.get(capability, 0),
-            "slow": slow.get(capability, 0),
-        }
-        for capability in sorted(set(received) | set(finished) | set(failed) | set(slow))
-    }
-
-
-def _event_code_counts(client: GrafanaLoki, start_ns: int, end_ns: int) -> dict:
-    """统计各服务在窗口内的事件码分布，用于识别非 error 级但异常的事件。"""
-    breakdown: dict[str, dict[str, int]] = {}
-    for service in ("web", "worker", "mcp"):
-        rows = client.query_range(
-            f'{{service_name="{service}"}}', start_ns, end_ns, 5000
-        )
-        counter: dict[str, int] = {}
-        for row in rows:
-            try:
-                payload = json.loads(row["line"])
-            except (json.JSONDecodeError, TypeError):
-                counter["<无法解析>"] = counter.get("<无法解析>", 0) + 1
-                continue
-            code = payload.get("event_code") or "<无事件码>"
-            counter[code] = counter.get(code, 0) + 1
-        breakdown[service] = dict(
-            sorted(counter.items(), key=lambda item: item[1], reverse=True)
-        )
-    return breakdown
-
-
-def _web_failures(client: GrafanaLoki, start_ns: int, end_ns: int) -> list[dict]:
-    """列出 web 侧 error 级请求失败的端点、状态码与异常类型。"""
-    rows = client.query_range(
-        '{service_name="web", level="error"}', start_ns, end_ns, 50
-    )
-    failures: list[dict] = []
-    for row in rows:
-        try:
-            payload = json.loads(row["line"])
-        except (json.JSONDecodeError, TypeError):
-            continue
-        details = payload.get("details") or {}
-        failures.append(
-            {
-                "timestamp": payload.get("timestamp"),
-                "event_code": payload.get("event_code"),
-                "method": details.get("method"),
-                "endpoint": details.get("endpoint"),
-                "status_code": details.get("status_code"),
-                "reason_code": details.get("reason_code"),
-                "exception_type": payload.get("exception_type"),
-                "request_id": payload.get("request_id"),
-                "stack_top": (payload.get("stack") or [None])[0],
-            }
-        )
-    return failures
-
-
-def _worker_degraded(client: GrafanaLoki, start_ns: int, end_ns: int) -> list[dict]:
-    """列出 worker 侧的 warning 事件，含节点降级与原因码。"""
-    rows = client.query_range(
-        '{service_name="worker", level="warning"}', start_ns, end_ns, 50
-    )
-    events: list[dict] = []
-    for row in rows:
-        try:
-            payload = json.loads(row["line"])
-        except (json.JSONDecodeError, TypeError):
-            continue
-        events.append(
-            {
-                "timestamp": payload.get("timestamp"),
-                "event_code": payload.get("event_code"),
-                "details": payload.get("details"),
-            }
-        )
-    return events
-
-
-def _mcp_failure_history(client: GrafanaLoki) -> dict:
-    """统计最近七天 MCP 侧的成功与失败，判断故障是否为长期存在。
-
-    CDFM 每次调用都会从 HuggingFace Hub 加载权重；把成功与失败按能力拆分，
-    可以直接判断某个能力在这段时间里是否从未成功过。
-    """
-    now_ns = int(time.time() * 1_000_000_000)
-    start_ns = now_ns - 7 * 24 * 3600 * 1_000_000_000
-    finished: dict[str, int] = {}
-    failed: dict[str, int] = {}
-    for event_code, bucket in (
-        ("mcp.tool.finished", finished),
-        ("mcp.tool.failed", failed),
-    ):
-        rows = client.query_range(
-            f'{{service_name="mcp"}} |= "{event_code}"', start_ns, now_ns, 5000
-        )
-        for row in rows:
-            try:
-                payload = json.loads(row["line"])
-            except (json.JSONDecodeError, TypeError):
-                continue
-            capability = (payload.get("details") or {}).get("capability") or "<未标注>"
-            bucket[capability] = bucket.get(capability, 0) + 1
-    reloads = client.query_range(
-        '{service_name="mcp"} |= "Loading CDFM from"', start_ns, now_ns, 5000
-    )
-    return {
-        "window_ns": [start_ns, now_ns],
-        "finished_by_capability": finished,
-        "failed_by_capability": failed,
-        "cdfm_model_load_attempts": len(reloads),
-    }
-
-
-
-def _summarize(row: dict) -> dict:
-    """只保留时间、事件码、级别与消息，去掉正文与堆栈细节。"""
+def _parse_job_row(row: dict, allowed: set[str]) -> dict | None:
+    """文本命中后仍需校验结构化 job_id；正文里的 UUID 不作为归属证据。"""
     try:
         payload = json.loads(row["line"])
-    except (json.JSONDecodeError, TypeError):
-        return {"timestamp": row.get("timestamp"), "raw_prefix": row["line"][:160]}
-    return {
-        "timestamp": payload.get("timestamp") or row.get("timestamp"),
-        "level": payload.get("level"),
-        "event_code": payload.get("event_code"),
-        "message": payload.get("message"),
-        "age_seconds": payload.get("age_seconds"),
-    }
+    except (json.JSONDecodeError, TypeError, KeyError):
+        return None
+    if not isinstance(payload, dict) or str(payload.get("job_id") or "") not in allowed:
+        return None
+    details = payload.get("details")
+    details = details if isinstance(details, dict) else {}
+    keys = ("capability", "attempt", "retry", "retry_ordinal", "status", "duration_ms",
+            "claim_kind", "reason_code", "status_code", "method")
+    result = {"timestamp": payload.get("timestamp") or row.get("timestamp"),
+              "loki_timestamp_ns": row.get("timestamp"), "job_id": str(payload["job_id"]),
+              "event_code": payload.get("event_code"), "level": payload.get("level"),
+              "request_id": payload.get("request_id"),
+              "invocation_id": payload.get("invocation_id") or details.get("invocation_id")}
+    result["details"] = {key: details[key] for key in keys if key in details}
+    return result
 
 
-def _first_job_id(stage: str) -> str | None:
+def _scoped_logs(client: GrafanaLoki, job_ids: list[str], start_ns: int, end_ns: int) -> tuple[list[dict], dict]:
+    """每个 Job/服务独立查询；截断或失败保留未知，不据空结果判定通过。"""
+    events, coverage, seen = [], {}, set()
+    limit = 5000
+    for job_id in job_ids:
+        for service in ("web", "worker", "mcp"):
+            key = f"{job_id}/{service}"
+            try:
+                rows = client.query_range(
+                    f'{{service_name="{service}"}} |= {json.dumps(job_id)}',
+                    start_ns, end_ns, limit
+                )
+            except (httpx.HTTPError, ValueError, TypeError):
+                coverage[key] = {"status": "unknown", "reason": "query_failed"}
+                continue
+            matched = 0
+            for row in rows:
+                parsed = _parse_job_row(row, {job_id})
+                if not parsed:
+                    continue
+                matched += 1
+                identity = (service, row.get("timestamp"), row.get("line"))
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                events.append({"service": service, **parsed})
+            coverage[key] = {"status": "unknown" if len(rows) >= limit or not matched else "collected",
+                             "reason": "limit_reached" if len(rows) >= limit else ("missing_job_logs" if not matched else None),
+                             "matched_rows": matched, "limit": limit}
+    events.sort(key=lambda row: int(row.get("loki_timestamp_ns") or 0))
+    return events, coverage
+
+
+def cdfm_log_evidence(events: list[dict], coverage: dict, job_ids: list[str]) -> dict:
+    """MCP invocation + retry 是日志中真实存在的尝试身份，不推测 worker attempt。"""
+    statuses = {"mcp.request.received": "received", "mcp.tool.finished": "succeeded",
+                "mcp.tool.failed": "failed", "mcp.tool.canceled": "canceled"}
+    attempts, unidentified = {}, []
+    allowed = set(job_ids)
+    for event in events:
+        details = event.get("details") or {}
+        if (event.get("service") != "mcp" or event.get("job_id") not in allowed
+                or "cdfm" not in str(details.get("capability") or "").lower()
+                or event.get("event_code") not in statuses):
+            continue
+        retry = details.get("retry_ordinal")
+        record = {"source": "mcp_logs", "job_id": event["job_id"],
+                  "invocation_id": event.get("invocation_id"), "attempt": details.get("attempt"),
+                  "retry": retry, "retry_ordinal": retry, "status": statuses[event["event_code"]],
+                  "duration_ms": details.get("duration_ms"), "event_id": None,
+                  "log_timestamp_ns": event.get("loki_timestamp_ns"),
+                  "request_id": event.get("request_id"), "event_codes": [event["event_code"]]}
+        if not record["invocation_id"] or not isinstance(retry, int) or isinstance(retry, bool) or retry < 0:
+            unidentified.append(record)
+            continue
+        key = (record["job_id"], record["invocation_id"], retry)
+        prior = attempts.get(key)
+        if prior is None:
+            attempts[key] = record
+            continue
+        codes = sorted(set(prior["event_codes"] + record["event_codes"]))
+        # received 和 terminal 是同一次尝试的两种观察。优先终态，再按实际日志时间排序。
+        rank = lambda item: (item["status"] != "received", int(item.get("log_timestamp_ns") or 0))
+        selected = record if rank(record) > rank(prior) else prior
+        selected["event_codes"] = codes
+        attempts[key] = selected
+    records = list(attempts.values()) + unidentified
+    mcp_coverage = {job_id: coverage.get(f"{job_id}/mcp", {"status": "unknown"}) for job_id in job_ids}
+    complete = bool(job_ids) and all(row.get("status") == "collected" for row in mcp_coverage.values())
+    logical = {(row["job_id"], row["invocation_id"]) for row in attempts.values()}
+    return {"source": "mcp_logs", "status": "collected" if complete and not unidentified else "missing",
+            "records": records, "coverage": mcp_coverage, "job_ids": job_ids,
+            "logical_calls": len(logical) if complete and not unidentified else None,
+            "actual_attempts": len(attempts) if complete and not unidentified else None,
+            "known_logical_calls": len(logical), "known_actual_attempts": len(attempts),
+            "unidentified_records": len(unidentified)}
+
+
+def logcheck(stage: str, base_url: str) -> dict:
+    """仅按本轮已知和主库核对恢复出的 Job 统计，不查询七天全局历史。"""
     path = latest_runs(config.RUNS_DIR).get(stage)
     if path is None:
-        return None
+        raise RuntimeError(f"找不到 {stage} 的运行窗口")
     summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
-    samples = summary.get("sse", {}).get("samples", [])
-    for sample in samples:
-        if sample.get("job_id"):
-            return str(sample["job_id"])
-    return None
+    window = resolve_run_window(stage, summary)
+    if window is None:
+        raise RuntimeError(f"找不到 {stage} 的运行窗口")
+    ids = _job_ids(summary)
+    db = summary.get("job_db_check") or {}
+    if db.get("scope") == "run" and db.get("run_id") == summary.get("run_id"):
+        ids = list(dict.fromkeys(ids + [str(row["job_id"]) for row in db.get("jobs", []) if row.get("job_id")]))
+    result = {"schema_version": "loadtest-logcheck-v2", "run_id": summary.get("run_id"),
+              "stage": stage, "scope": "run", "job_ids": ids, "window_ns": list(window),
+              "status": "unknown", "counts": {}, "errors": {}, "job_lifecycle": {},
+              "request_id_propagation": {}, "capability": {}, "event_codes": {},
+              "web_failures": [], "worker_degraded": [],
+              "mcp_failure_history": {}, "coverage": {}, "cdfm": {"status": "missing"}}
+    if not ids:
+        result["reason"] = "missing_run_job_ids"
+        return result
+    client = None
+    try:
+        client = GrafanaLoki(base_url)
+        client.login()
+        client.pick_loki()
+        events, coverage = _scoped_logs(client, ids, *window)
+    except (httpx.HTTPError, RuntimeError, ValueError):
+        result["reason"] = "log_source_unavailable"
+        return result
+    finally:
+        if client is not None:
+            client.close()
+    result["coverage"] = coverage
+    complete = bool(coverage) and all(row["status"] == "collected" for row in coverage.values())
+    result["status"] = "collected" if complete else "unknown"
+    for service in ("web", "worker", "mcp"):
+        own = [row for row in events if row["service"] == service]
+        result["event_codes"][service] = {}
+        for level in ("info", "warning", "error"):
+            result["counts"][f"{service}/{level}"] = sum(row.get("level") == level for row in own) if complete else None
+        result["errors"][service] = [row for row in own if row.get("level") == "error"]
+        for row in own:
+            code = row.get("event_code") or "<无事件码>"
+            counter = result["event_codes"][service]
+            counter[code] = counter.get(code, 0) + 1
+    lifecycles, propagation = [], []
+    for job_id in ids:
+        own = [row for row in events if row["job_id"] == job_id]
+        lifecycles.append({"job_id": job_id, "event_count": len(own), "events": own,
+                           "status": "collected" if own else "missing"})
+        web_ids = {row["request_id"] for row in own if row["service"] == "web" and row.get("request_id")}
+        worker_ids = {row["request_id"] for row in own if row["service"] == "worker" and row.get("request_id")}
+        propagation.append({"job_id": job_id, "gateway_entry_request_ids": sorted(web_ids),
+                            "worker_request_ids": sorted(worker_ids), "shared_request_ids": sorted(web_ids & worker_ids),
+                            "propagated": bool(web_ids & worker_ids) if web_ids and worker_ids else None})
+    result["job_lifecycle"] = {**lifecycles[0], "jobs": lifecycles}
+    result["request_id_propagation"] = {**propagation[0], "jobs": propagation}
+    codes = {"mcp.request.received": "received", "mcp.tool.finished": "finished",
+             "mcp.tool.failed": "failed", "mcp.tool.slow": "slow"}
+    for row in events:
+        capability = row["details"].get("capability")
+        if row["service"] == "mcp" and capability and row.get("event_code") in codes:
+            bucket = result["capability"].setdefault(capability, {key: 0 for key in codes.values()})
+            bucket[codes[row["event_code"]]] += 1
+    if not complete:
+        for bucket in result["capability"].values():
+            for key, count in bucket.items():
+                if count == 0:
+                    bucket[key] = None
+    result["web_failures"] = [row for row in events if row["service"] == "web" and row.get("level") == "error"]
+    result["worker_degraded"] = [row for row in events if row["service"] == "worker" and row.get("level") == "warning"]
+    result["cdfm"] = {**cdfm_log_evidence(events, coverage, ids),
+                       "run_id": summary.get("run_id"), "scope": "run"}
+    if db.get("scope") == "run" and db.get("run_id") == summary.get("run_id"):
+        known = [row for row in db.get("jobs", []) if row.get("job_id") in ids]
+        records = [call for row in known for call in row.get("cdfm_calls", [])]
+        result["cdfm"]["persisted_records"] = records
+    return result
 
 
 if __name__ == "__main__":

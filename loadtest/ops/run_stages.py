@@ -29,6 +29,7 @@ DEFAULT_STAGES = [
 
 
 def log(message: str) -> None:
+    DRIVER_LOG.parent.mkdir(parents=True, exist_ok=True)
     with DRIVER_LOG.open("a", encoding="utf-8") as handle:
         handle.write(message + "\n")
 
@@ -57,7 +58,7 @@ def main(stages: list[str]) -> int:
             exit_code = 1
             log(f"[driver] {stage} 失败，停止后续档位")
             break
-    log("=== driver done")
+    log("=== driver done" if exit_code == 0 else "=== driver unknown (证据不完整或档位未排空)")
     return exit_code
 
 
