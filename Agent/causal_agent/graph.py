@@ -511,7 +511,7 @@ async def _stream_deep_agent(
     child_context: AgentRunContext,
     runtime: Any,
 ) -> Mapping[str, Any]:
-    """消费内层 messages 流，并保留 values 流提供的完整 State。"""
+    """消费 messages/values，并只转发公开工具生命周期 custom。"""
 
     stream = getattr(deep_agent, "astream", None)
     if not callable(stream):
@@ -543,9 +543,10 @@ async def _stream_deep_agent(
         child_input,
         config=stream_config,
         context=child_context,
-        stream_mode=["messages", "values"],
+        stream_mode=["messages", "values", "custom"],
         subgraphs=True,
         version="v2",
+        durability="sync",
     ):
         if child_context is not None and hasattr(child_context, "ensure_active"):
             await child_context.ensure_active()
@@ -567,6 +568,26 @@ async def _stream_deep_agent(
                     "data": chunk.get("data"),
                 }
             )
+        if (
+            isinstance(chunk, Mapping)
+            and chunk.get("type") == "custom"
+            and isinstance(chunk.get("data"), Mapping)
+            and chunk["data"].get("type")
+            in {"tool_call_start", "tool_call_result"}
+            and callable(writer)
+        ):
+            # custom 中的其他内部进度、状态和工具正文不跨越父图边界。
+            # 内部事件键必须原样保留，才能与直接 sink 写入和聚合兜底幂等。
+            allowed_fields = {
+                "type", "step_id", "node_name", "title", "attempt",
+                "tool_name", "argument_keys", "summary", "status",
+                "safe_error_code", "_event_key",
+            }
+            writer({
+                key: value
+                for key, value in chunk["data"].items()
+                if key in allowed_fields
+            })
     if final_values is None:
         snapshot = await deep_agent.aget_state(child_config)
         final_values = getattr(snapshot, "values", None)
@@ -919,6 +940,10 @@ async def _finalization_gate_node(
             web_search_enabled=getattr(context, "web_search_enabled", None),
         )
     except StructuredResponseError as exc:
+        if exc.rule is None:
+            # 调用登记、终态或归属不完整属于程序事实错误，不能交给模型修正，
+            # 也不能在重试后继续生成报告。
+            raise
         retry_count = int(state.get("finalization_retry_count") or 0)
         if retry_count < 1:
             _emit_finalization_progress_notice(

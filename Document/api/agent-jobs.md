@@ -62,11 +62,15 @@ Last-Event-ID: 42
 
 `decision` 事件除既有路由说明外，还可包含 `decision_kind=algorithm|evidence|final`。`algorithm` 表示模型在同一次算法 Tool Call 中显式提交的公开选择依据，`evidence` 表示同一位置的 `rag_evidence_search`/`web_evidence_search` 检索依据，两者都可同时带公开工具名；`final` 只在 FinalizationGate 验证成功后产生，可带 `low|medium|high` 置信度。模型工具参数流中的公开摘要会先以 `decision_delta` 增量事件发送，工具开始/结果仍分别由可信工具边界发布；完整 `decision` 仍作为历史回放和无增量回退。公开说明是展示文本而非隐藏思维链，不包含内部结果引用；缺失或格式无效的工具说明不会阻止工具执行。相关事件都持久化到 `analysis_job_events`，SSE 重连按原 Event ID 续传，历史回放直接展示完整 `decision` 文本。
 
-FinalizationGate 拒绝时额外发布 `progress` 阶段说明，只含 `summary` 文本：第一次失败挂在 `finalization_gate` 阶段，说明未通过校验并给出脱敏后的具体修正要求；若该次修正仍未通过，则在同一阶段说明本次降级为仅基于已验证输入的报告。第二次 Deep Agent 启动修正时，`progress` 说明挂在新创建的 `deep_agent` 阶段，指出该阶段沿用已有工具结果、不重复调用工具。这两类说明与 `decision` 一样按稳定 `event_key` 幂等落库，SSE 重连和会话刷新按原 Event ID 回放。
+FinalizationGate 对模型可修正的决策拒绝额外发布 `progress` 阶段说明，只含 `summary` 文本：第一次失败挂在 `finalization_gate` 阶段，说明未通过校验并给出脱敏后的具体修正要求；若该次修正仍未通过，则在同一阶段说明本次降级为仅基于已验证输入的报告。第二次 Deep Agent 启动修正时，`progress` 说明挂在新创建的 `deep_agent` 阶段，指出该阶段沿用已有工具结果、不重复调用工具。这两类说明与 `decision` 一样按稳定 `event_key` 幂等落库，SSE 重连和会话刷新按原 Event ID 回放。调用登记未结束、终态结果缺失或归属不一致时直接终止，不进入报告降级。
+
+算法结果 `valid` 对外统一为 `tool_call_result.status=succeeded` 和“调用完成”；`timed_out`、`canceled`、`not_applicable`、`skipped` 分别显示“调用超时”“调用已取消”“不适用”“未执行”。实时写入、子图转发与聚合恢复按同一调用及执行 attempt、retry、事件类型生成内部幂等键；相同事件重放复用原 Event ID，同一算法的第二次合法调用保留独立结果。内部身份和事件键不会进入公共 payload。
+
+恢复兜底从调用账本取回原始阶段和执行 attempt，保证同键事件的内容保持一致；缺少完整身份的旧记录不合成新的完成事件。用户取消与 lease 撤销会停止分析，不发布普通算法完成事件或继续生成报告。
 
 新 Deep Agent 报告的 `final_result.data` 可包含程序生成的 `finalization_status`：`valid` 表示最终结构化决策已通过当前 Job/attempt/lease、AlgorithmResult 与 Action Ledger 校验；`degraded` 表示一次修正仍未通过，但系统生成了安全报告并将 Job 置为 `succeeded`。报告文档新增 `analysis_outcome`、`finalization_status`、`report_mode` 和 `execution_summary`。`report_mode=diagnostic` 表示本次没有有效算法结果、报告是诊断说明；`execution_summary` 公开算法状态、实际样本量、变量范围和是否使用了不同数据视图。分析结果类别、报告完整性和最终校验状态分别公开，不能把诊断报告表述为算法失败结论。
 
-`degraded` 结果不展示未经 Gate 验证的主图，也不把内部校验错误、provider ID、raw result 或工具参数返回给用户。该字段是结果质量元数据，不是模型的 `outcome`，旧 Job 没有该字段时按兼容语义处理。
+`degraded` 结果不展示未经 Gate 验证的主图，也不把内部校验错误、provider ID、raw result 或工具参数返回给用户。该字段是结果质量元数据，不是模型的 `outcome`，旧 Job 没有该字段时按兼容语义处理。算法超时若已完整记录，可以采用其他有效结果完成报告；报告正文固定保留超时算法未完成、未提供可用因果图的分析限制说明。
 
 新报告终态是结构化报告文档，`final_result.data` 的形状如下：
 

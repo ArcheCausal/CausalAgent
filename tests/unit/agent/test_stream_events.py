@@ -251,8 +251,8 @@ class StreamEventAdapterTests(unittest.TestCase):
         self.assertEqual(finished["summary"], "调用完成")
         self.assertNotIn("private file body", repr(finished))
 
-    def test_deep_agent_results_expose_controlled_status_only(self):
-        """新 Deep Agent 结果只投影工具名、状态和安全错误码。"""
+    def test_deep_agent_result_without_ledger_identity_cannot_emit_terminal(self):
+        """缺少调用账本的聚合片段不能凭工具名合成终态。"""
         self.adapter.convert(task_start("task-deep", "deep_agent"))
         events = self.adapter.convert({
             "type": "updates",
@@ -274,22 +274,7 @@ class StreamEventAdapterTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(len(events), 1)
-        self.assertEqual(
-            events[0],
-            {
-                "type": "tool_call_result",
-                "step_id": events[0]["step_id"],
-                "node_name": "deep_agent",
-                "title": "执行 Deep Agent 分析",
-                "attempt": 3,
-                "tool_name": "causal_pc",
-                "summary": "调用失败",
-                "status": "failed",
-                "safe_error_code": "ALGORITHM_EXECUTION_FAILED",
-            },
-        )
-        self.assertNotIn("private", repr(events[0]))
+        self.assertEqual(events, [])
 
     def test_public_algorithm_and_final_decisions_bind_to_their_parent_steps(self):
         deep_step = self.adapter.convert(task_start("task-deep", "deep_agent"))[0]
@@ -485,6 +470,7 @@ class StreamEventAdapterTests(unittest.TestCase):
                 "type": "tool_call_result",
                 "tool_name": "causal_pc",
                 "status": "canceled",
+                "_event_key": "controlled-canceled-call",
             },
         })
 
@@ -502,6 +488,7 @@ class StreamEventAdapterTests(unittest.TestCase):
                 "tool_name": "web_evidence_search",
                 "status": "not_ready",
                 "safe_error_code": "WEB_SEARCH_DISABLED",
+                "_event_key": "controlled-disabled-call",
             },
         })[0]
         unavailable = self.adapter.convert({
@@ -512,6 +499,7 @@ class StreamEventAdapterTests(unittest.TestCase):
                 "tool_name": "rag_evidence_search",
                 "status": "failed",
                 "safe_error_code": "RAG_RETRIEVAL_UNAVAILABLE",
+                "_event_key": "controlled-unavailable-call",
             },
         })[0]
 

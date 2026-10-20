@@ -97,6 +97,7 @@ ActionAttemptStatus: TypeAlias = Literal[
     "succeeded",
     "failed",
     "not_applicable",
+    "skipped",
     "timed_out",
     "not_ready",
     "canceled",
@@ -108,6 +109,7 @@ InvocationStatus: TypeAlias = Literal[
     "succeeded",
     "failed",
     "not_applicable",
+    "skipped",
     "timed_out",
     "not_ready",
     "canceled",
@@ -407,6 +409,10 @@ class AlgorithmResult(ContractModel):
         validate_result_ref_for_invocation(self.result_ref, self.invocation_id)
         if self.status == "valid" and self.standardized_graph is None:
             raise ValueError("valid AlgorithmResult must include standardized_graph")
+        if self.status == "timed_out" and (
+            self.standardized_graph is not None or self.raw_result_ref is not None
+        ):
+            raise ValueError("timed-out AlgorithmResult cannot carry a graph or raw artifact")
         if self.status in {"skipped", "not_applicable"}:
             if self.standardized_graph is not None:
                 raise ValueError(
@@ -501,6 +507,7 @@ class InvocationRecord(ContractModel):
     lease_epoch: int | None = Field(default=None, ge=0)
     worker_id: str | None = None
     input_identity: str | None = None
+    event_step_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{24}$")
     attempts: dict[int, ActionAttempt] = Field(default_factory=dict)
 
     @field_validator(

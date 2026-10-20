@@ -401,6 +401,26 @@ def build_report_document(
                     "报告块引用了不存在的证据: " + ", ".join(unknown_evidence)
                 )
 
+    # 超时是程序事实；即使模型正文省略限制，报告也必须保留这项说明。
+    public_names = {
+        "causal.pc": "PC", "causal.direct_lingam": "DirectLiNGAM",
+        "causal.cdfm": "CDFM", "causal.olc": "OLC",
+    }
+    timed_out_names = [
+        public_names.get(item.get("capability_id"), "算法")
+        for item in (execution_summary or {}).get("algorithms", [])
+        if isinstance(item, Mapping) and item.get("status") == "timed_out"
+    ]
+    if timed_out_names:
+        block_id = "algorithm_execution_limits"
+        while block_id in seen_block_ids:
+            block_id += "_"
+        normalized_blocks = [*normalized_blocks, MarkdownBlock(
+            id=block_id,
+            content="### 分析限制\n\n" + "、".join(timed_out_names)
+            + " 调用超时，未完成分析，未提供可用因果图。报告仅采用已完成且通过校验的结果。",
+        )]
+
     return ReportDocument(
         report_id=new_report_id(),
         title=validated_draft.title,

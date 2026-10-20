@@ -64,6 +64,12 @@ agent → fold → preprocess → deep_agent → finalization_gate → report
 
 `AlgorithmDependencyDispatchMiddleware` 在 ToolNode 边界收集同一模型响应中的算法调用，按 `requires/produces` 分层：无依赖调用可并行，有依赖调用按层执行，并受单 Job 并发和工具总预算约束。Adapter 负责模型参数校验、确定性预处理、标准结果、raw result 完整性和 Ledger 更新；`McpAlgorithmExecutor` 只负责签名传输、远端执行结果校验和安全错误映射。CDFM 的 logits/probabilities 通过仅供 Executor 与 Adapter 使用的私有 envelope 保存到 raw artifact，不进入 `AlgorithmResult`、ToolMessage、SSE 或公共日志。可信 Job、文件、lease、HMAC 与数据库身份不会进入模型参数。
 
+每次模型响应后，identity middleware 先把算法调用以 `pending/queued`、revision 0 登记到 Action Ledger；dispatch 的独立 `after_model` 节点再推进到 `pending/running`、revision 1。父图使用同步 checkpoint durability 消费子图，工具外部调用必须等这些 State 更新提交后才开始。调度器达到 deadline 时取消内部协程并等待 MCP control lane 完成清理，随后以 `timed_out`、`ALGORITHM_TIMED_OUT` 生成无因果图、无 raw artifact 的结果。工具清理路径不提前发布 `canceled`。普通成功、失败、超时及依赖未就绪均通过 `Command` 一并写回 ToolMessage、算法结果和 revision 2 终态账本；用户取消和 lease 撤销传播控制流并取消整批任务，不转成普通算法失败。
+
+调度器读取 `Command.update.algorithm_results` 中与当前 call/capability 匹配的受控结果，保留失败 Command 的 State 更新。只有明确的有效成功结果才发布依赖 artifact；失败、超时、不适用、跳过或无法识别的返回均不放行下游依赖。
+
+调用账本保留原始事件阶段 `event_step_id`；聚合兜底复用原阶段、执行 attempt、retry 和事件键，恢复后不使用新阶段改写旧事件的 payload。旧账本缺少事件阶段或完整调用身份时不合成完成事件。
+
 `AlgorithmSpec` 还声明输入要求、原生处理能力、允许的额外处理操作和最小行列数，模型可见工具描述由这些字段生成。预检测画像区分阻断问题与非阻断提示，保留变量类型、缺失列、非有限值、空列、常数列和疑似标识符列。Deep Agent 根据画像生成 1 到 3 个受控处理选项，由本地 `request_data_processing` 工具校验后触发用户确认；确认工具必须独占一次工具调用轮次。
 
 `causal-mcp` 是私网 Streamable HTTP/HTTP/1.1 服务。服务端以 MySQL primary strong read 校验 Job、attempt、lease 和 worker 身份，再使用有界队列及独立算法子进程运行 capability。MCP session 不保存 Job、checkpoint 或 Action Ledger。
@@ -90,6 +96,7 @@ Deep Agent 使用 `ToolStrategy(FinalAnalysisDecision)` 生成 `structured_respo
 - AlgorithmResult 与 Action Ledger 的 invocation、终态和结果引用一致；
 - provenance 属于当前 Job、attempt、lease、worker 与冻结输入；
 - 每个有效算法结果都有唯一取舍，主结果满足 outcome 约束。
+- 每个已登记算法调用都已有一致的终态结果；`pending`、`queued/running` 或缺少结果时禁止进入报告。
 - 分析运行（父图 `route_decision=fold`，含 `context_switch` 之后的 fold）在没有任何算法结果时，不得提交 `evidence_only` 或 `no_valid_algorithm`。
 - `web_search_enabled=true` 时，分析运行必须有一次 `web_evidence_search` terminal 调用；允许真实返回无结果/不可用状态，但不能零调用完成。RAG 是否调用由 Agent 自主决策。
 
@@ -97,7 +104,7 @@ Deep Agent 使用 `ToolStrategy(FinalAnalysisDecision)` 生成 `structured_respo
 
 最终决策的两套引用命名空间不混用：`result_assessments`、`primary_result_ref`、`conflicts.result_refs` 与 `revision_proposals.result_ref` 只接受本次运行返回的算法结果引用；RAG/Web 证据引用只能出现在 `revision_proposals.evidence_refs`。该分工以及“开启联网搜索时必须实际完成一次 Web 检索”的要求同时写在按运行提示和 Gate 校验中，RAG 是否检索由 Agent 自主判断，避免模型把“证据不采用”写进算法结果取舍。
 
-第一次校验失败时，父图把失败映射为稳定的规则码，再生成一条脱敏修正指令（包含被违反的具体引用规则）交回同一个 Deep Agent 子图；第二次仍失败则设置 `finalization_status=degraded` 并生成安全报告。身份、账本或状态一致性问题不带规则码，修正指令保持通用措辞，不把内部问题包装成模型可修正的指令。每次 Gate 拒绝都会发布一条 `progress` 阶段说明：可修正时挂在 `finalization_gate` 阶段并给出同一份修正要求，降级时说明本次仅基于已验证输入生成报告；第二次 Deep Agent 启动修正时，新阶段同样收到一条 `progress` 说明，指出该阶段沿用已有工具结果、不重复调用工具。`degraded` 不公开未经验证的主图或最终选择，但报告成功时 Job 仍以 `succeeded` 收敛。校验通过时设置 `finalization_status=valid`，并把内部结果引用转换为公开算法名称后发布最终决策说明。
+模型可修正的决策校验第一次失败时，父图把失败映射为稳定的规则码，再生成一条脱敏修正指令（包含被违反的具体引用规则）交回同一个 Deep Agent 子图；第二次仍失败则设置 `finalization_status=degraded` 并生成安全报告。身份、账本或状态一致性问题不带规则码，直接终止分析，不进入模型修正或报告降级。可修正的 Gate 拒绝会发布 `progress` 阶段说明：首次挂在 `finalization_gate` 阶段并给出同一份修正要求，降级时说明本次仅基于已验证输入生成报告；第二次 Deep Agent 启动修正时，新阶段同样收到一条 `progress` 说明，指出该阶段沿用已有工具结果、不重复调用工具。`degraded` 不公开未经验证的主图或最终选择，但报告成功时 Job 仍以 `succeeded` 收敛。校验通过时设置 `finalization_status=valid`，并把内部结果引用转换为公开算法名称后发布最终决策说明。已完整记录的算法超时不阻止使用其他有效结果；报告装配根据执行摘要固定追加超时算法的分析限制说明。
 
 报告节点让模型只产出 `ReportDraft`：报告标题、块结构、Markdown 文本和资源/证据引用。图表资源、因果图模型、来源和证据全部由后端注入并校验，块 ID 重复、块类型未知、`asset_key` 不存在或类型不匹配、`evidence_id` 不存在都会进入节点受控错误路径并生成降级报告文档，不保存部分报告。来源类别按证据通道（输入文件、知识库、联网检索）显式给出，不根据是否存在 URL 推断。报告装配还会把正文中出现且属于本次证据清单的 `ev_...` ID 回填到对应 `markdown.evidence_refs`，兼容模型漏填结构化字段；前端来源页脚据此提供“定位正文”。父 State 用 `chart_assets` 保存预处理阶段生成的结构化图表资源，用 `report_document` 保存后端装配完成的结构化报告文档；报告追问只使用文档摘要、资源说明、来源说明和证据说明，不把图表数据、因果图模型或完整文档塞进提示词。新报告不再依赖 `visualization_mapping`、Base64 图片、HTML 图片标签和 `[[CHART:...]]` 占位符。
 
@@ -105,7 +112,7 @@ Deep Agent 使用 `ToolStrategy(FinalAnalysisDecision)` 生成 `structured_respo
 
 ## 公共事件与恢复
 
-worker 使用 LangGraph v2 的 `updates`、`messages`、`custom` 和 `tasks` 流。父图以 `deep_agent.astream(..., stream_mode=["messages", "values"], subgraphs=True, version="v2")` 消费内层模型增量并保留完整 State，再通过父图 custom 流交给公共适配器；适配器只提取工具参数中已确认的 `public_decision.summary`，转换为 `decision_delta`，不外带原始参数或隐藏内容。算法、RAG、Web 工具在外部调用前后通过 `OrderedEventWriter` sink 写入 `tool_call_start`/`tool_call_result`；父 `deep_agent` update 只作为聚合结果的兼容去重兜底。内层 ToolMessage 不进入普通用户事件。
+worker 使用 LangGraph v2 的 `updates`、`messages`、`custom` 和 `tasks` 流。父图以 `deep_agent.astream(..., stream_mode=["messages", "values", "custom"], subgraphs=True, version="v2", durability="sync")` 消费内层模型增量并保留完整 State，再通过父图 custom 流交给公共适配器；适配器只提取工具参数中已确认的 `public_decision.summary`，转换为 `decision_delta`，不外带原始参数或隐藏内容。子图 custom 只转发白名单内的工具开始和结果字段。算法、RAG、Web 工具在外部调用前后通过 `OrderedEventWriter` sink 写入 `tool_call_start`/`tool_call_result`；直接 sink、custom 转发和聚合兜底共用由 invocation、执行 attempt、retry ordinal 和事件类型生成的稳定内部事件键。聚合兜底必须从结果与终态账本恢复一致身份，不能按工具名合成终态或去重。算法结果中的 `valid` 在公共事件边界转换为 `succeeded/调用完成`，超时、取消、不适用与跳过保持各自状态。内层 ToolMessage 和内部事件身份不进入普通用户事件。
 
 公共 payload 由 `event_adapter.py` 与 `public_events.py` 的白名单共同约束。`tool_call_result.status` 只允许受控状态；`safe_error_code` 必须符合固定格式。`finalization_status` 只出现在最终报告数据。事件写入由 Job、attempt、lease、worker 和稳定 `event_key` 保护；失去 lease 或收到取消的 worker 不能提交迟到结果。
 

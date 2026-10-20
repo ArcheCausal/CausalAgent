@@ -8,6 +8,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
+from langgraph.types import Command
+
 from Agent.execution_control import JobExecutionRevoked
 
 from .error_codes import SafeErrorCode
@@ -256,10 +258,23 @@ async def execute_dependency_plan(
             )
             try:
                 async with job_semaphore, key_semaphore:
-                    value = await asyncio.wait_for(
-                        execute(call.request),
-                        timeout=min(call.timeout_seconds, timeout_seconds),
-                    )
+                    task = asyncio.create_task(execute(call.request))
+                    try:
+                        done, _ = await asyncio.wait(
+                            {task}, timeout=min(call.timeout_seconds, timeout_seconds),
+                        )
+                        if not done:
+                            task.cancel()
+                            cleanup = await asyncio.gather(task, return_exceptions=True)
+                            if isinstance(cleanup[0], JobExecutionRevoked):
+                                raise cleanup[0]
+                            # 即使内部清理吞掉取消并返回，也不能变成迟到的成功。
+                            raise TimeoutError
+                        value = await task
+                    finally:
+                        if not task.done():
+                            task.cancel()
+                            await asyncio.gather(task, return_exceptions=True)
             except asyncio.CancelledError:
                 raise
             except JobExecutionRevoked:
@@ -318,11 +333,22 @@ def _classify_execution_result(
 ) -> tuple[str, SafeErrorCode | str | None, frozenset[str]]:
     """将 executor 返回值转换成调度器状态和已发布 artifact 快照。
 
-    旧 executor 返回任意值时继续沿用“正常返回即成功且发布 Spec 声明的
-    artifact”的兼容语义。新的结构化返回可以通过 ``status`` 和可选的
-    ``published_artifacts`` 明确表达失败或未发布结果；这样 producer 正常
-    返回但没有发布下游所需 artifact 时，不会错误放行依赖节点。
+    Command 必须携带本次调用的受控结果。只有明确的成功状态才允许发布
+    Spec artifact，无法识别的返回值按契约失败处理。
     """
+
+    if isinstance(value, Command):
+        update = value.update
+        results = update.get("algorithm_results") if isinstance(update, Mapping) else None
+        if not isinstance(results, Mapping) or len(results) != 1:
+            return "failed", SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID, frozenset()
+        try:
+            result = AlgorithmResult.model_validate(next(iter(results.values())))
+        except (TypeError, ValueError):
+            return "failed", SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID, frozenset()
+        if result.provider_call_id != call.request.call_id or result.capability_id != call.capability_id:
+            return "failed", SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID, frozenset()
+        return _classify_execution_result(call, result)
 
     if isinstance(value, AlgorithmResult):
         if value.status == "valid":
@@ -342,7 +368,7 @@ def _classify_execution_result(
         )
 
     if not isinstance(value, Mapping) or "status" not in value:
-        return "succeeded", None, frozenset(call.produces)
+        return "failed", SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID, frozenset()
 
     raw_status = value.get("status")
     status = getattr(raw_status, "value", raw_status)
@@ -370,6 +396,7 @@ def _classify_execution_result(
         "not_ready",
         "timed_out",
         "canceled",
+        "skipped",
     }:
         raw_error_code = value.get("safe_error_code")
         return (
@@ -412,6 +439,8 @@ def _published_artifacts(
 
 
 def _outcome_status(status: str) -> str:
+    if status == "canceled":
+        return "canceled"
     if status == "timed_out":
         return "timed_out"
     if status == "not_ready":
