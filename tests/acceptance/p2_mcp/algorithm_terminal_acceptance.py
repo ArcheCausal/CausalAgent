@@ -48,6 +48,7 @@ TEST_SIGNING_KEY = "isolated-terminal-acceptance-signing-only"
 SOURCE_FILES = (
     "Agent/causal_agent/graph.py", "Agent/Report/document.py",
     "Agent/deep_agent/graph.py", "Agent/deep_agent/finalization.py",
+    "Agent/deep_agent/state.py", "Agent/deep_agent_tools/preprocessing.py",
     "Agent/deep_agent_tools/algorithm_tools.py",
     "Agent/deep_agent_tools/adapters/base.py", "Agent/deep_agent_tools/models.py",
     "Agent/deep_agent_tools/dependency_dispatch.py",
@@ -76,6 +77,8 @@ def source_digest() -> str:
 
 def generate_fixture(path: Path) -> dict[str, Any]:
     """Create only a new, explicitly named synthetic test CSV, never user input."""
+    from Agent.deep_agent_tools.preprocessing import build_data_profile_from_csv
+
     rng = random.Random(20261020)
     with path.open("x", encoding="utf-8", newline="") as output:
         writer = csv.writer(output, lineterminator="\n")
@@ -88,6 +91,7 @@ def generate_fixture(path: Path) -> dict[str, Any]:
     return {
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "rows": 160, "columns": ["A", "B", "C", "D"],
+        "data_profile": build_data_profile_from_csv(path.read_text(encoding="utf-8")).model_dump(mode="json"),
         "authority": "explicit generated local frozen test CSV; no database authority",
     }
 
@@ -249,14 +253,12 @@ async def client(args: argparse.Namespace) -> dict[str, Any]:
     ))
     await pool.start()
     executor = McpAlgorithmExecutor(pool, signing_key=TEST_SIGNING_KEY, max_retries=0)
-    profile = DataProfile(
-        row_count=fixture["rows"], column_count=len(fixture["columns"]),
-        column_names=tuple(fixture["columns"]), numeric_columns=tuple(fixture["columns"]),
-    )
+    profile = DataProfile.model_validate(fixture["data_profile"])
 
     def make_run(
         calls: list[dict[str, Any]], deadline: float,
         trusted_identity: TrustedJobIdentity | None = None,
+        *, data_profile: DataProfile | None = None,
     ) -> dict[str, Any]:
         identity = trusted_identity or TrustedJobIdentity(
             job_id=str(uuid4()), session_id=str(uuid4()), user_id=7,
@@ -265,6 +267,7 @@ async def client(args: argparse.Namespace) -> dict[str, Any]:
         )
         events: list[dict[str, Any]] = []
         commands: list[Any] = []
+        handlers: list[str] = []
         backend = build_in_memory_backend(user_id=7)
         context = AgentRunContext(
             execution_guard=None, trusted_identity=identity,
@@ -303,7 +306,11 @@ async def client(args: argparse.Namespace) -> dict[str, Any]:
             require(len(ledger) == len(calls), "registration_missing_before_external_call")
             require(all(InvocationRecord.model_validate(v).attempts[0].status == "running"
                         for v in ledger.values()), "running_not_committed_before_call")
-            output = await middleware.awrap_tool_call(request, handler)
+            async def observed_handler(actual_request: Any) -> Any:
+                handlers.append(str(actual_request.tool_call["id"]))
+                return await handler(actual_request)
+
+            output = await middleware.awrap_tool_call(request, observed_handler)
             commands.append(output)
             return output
 
@@ -321,9 +328,10 @@ async def client(args: argparse.Namespace) -> dict[str, Any]:
         graph_ref["graph"] = graph
         return {
             "graph": graph, "config": config, "context": context, "registry": registry,
-            "events": events, "commands": commands, "backend": backend,
+            "events": events, "commands": commands, "backend": backend, "handlers": handlers,
             "input": {"messages": [AIMessage(content="", tool_calls=calls)],
-                      "data_profile": profile, "algorithm_results": {}, "action_ledger": {}},
+                      "data_profile": data_profile if data_profile is not None else profile,
+                      "algorithm_results": {}, "action_ledger": {}},
         }
 
     async def execute(run: dict[str, Any]) -> dict[str, Any]:
@@ -433,6 +441,9 @@ async def client(args: argparse.Namespace) -> dict[str, Any]:
         state = await execute(run)
         results = [AlgorithmResult.model_validate(v) for v in state["algorithm_results"].values()]
         require(len(results) == 2 and all(r.status == "valid" for r in results), "pc_two_valid_results")
+        require(sorted(run["handlers"]) == ["pc-first", "pc-second"], "pc_two_handler_calls")
+        remote = await status()
+        require(all(result.invocation_id in remote["terminal"] for result in results), "pc_two_remote_calls_missing")
         require(len({r.invocation_id for r in results}) == 2, "pc_invocation_identity_collapsed")
         require(all(isinstance(c, Command) for c in run["commands"]) and
                 len(run["commands"]) == 2, "pc_command_missing")
@@ -443,8 +454,109 @@ async def client(args: argparse.Namespace) -> dict[str, Any]:
         messages = [m for m in state["messages"] if isinstance(m, ToolMessage)]
         require(len(messages) == 2 and all(m.status == "success" and
                 json.loads(m.content)["status"] == "valid" for m in messages), "pc_tool_messages")
-        return {"status": "PASS", "valid_results": 2, "terminal_events": check_events(run, state),
+        return {"status": "PASS", "valid_results": 2, "real_mcp_calls": 2,
+                "handler_call_ids": sorted(run["handlers"]), "terminal_events": check_events(run, state),
                 "checkpoint_revisions": await check_checkpoints(run, True)}
+
+    async def input_isolation(mode: str) -> dict[str, Any]:
+        """同轮真实工具调用；远端进程池终态用于证明 MCP 请求确实被执行。"""
+        selected_profile = profile
+        expected_handlers = {"isolation-pc", "isolation-cdfm"}
+        blocked_ids: set[str] = set()
+        pc_arguments: dict[str, Any] = {}
+        if mode in {"cdfm_missing", "unapproved_pc", "invalid_pc_parameter"}:
+            # 与冻结 CSV 同一规模和列名，但未确认存储类型，模拟历史基础画像。
+            selected_profile = DataProfile(
+                row_count=profile.row_count, column_count=profile.column_count,
+                column_names=profile.column_names,
+            )
+            expected_handlers = {"isolation-pc"}
+            blocked_ids = {"isolation-cdfm"}
+        elif mode == "both_missing":
+            selected_profile = DataProfile(row_count=0, column_count=0)
+            expected_handlers = set()
+            blocked_ids = {"isolation-pc", "isolation-cdfm"}
+        if mode == "unapproved_pc":
+            pc_arguments = {"preprocessing": {"steps": [
+                {"operation": "select_columns", "columns": list(profile.column_names[:2])},
+            ]}}
+        elif mode == "invalid_pc_parameter":
+            pc_arguments = {"alpha": 2.0}
+        calls = [call("causal_pc", "isolation-pc"), call("causal_cdfm", "isolation-cdfm")]
+        calls[0]["args"] = pc_arguments
+        before = await status()
+        run = make_run(calls, 180, data_profile=selected_profile)
+        state = await execute(run)
+        results = {result.provider_call_id: result for raw in state["algorithm_results"].values()
+                   for result in (AlgorithmResult.model_validate(raw),)}
+        ids = {item["id"] for item in calls}
+        require(set(results) == ids and len(state["algorithm_results"]) == 2, "isolation_result_ids")
+        require(set(run["handlers"]) == expected_handlers and len(run["handlers"]) == len(expected_handlers),
+                "isolation_handler_ids")
+        records = {record.provider_call_id: record for raw in state["action_ledger"].values()
+                   for record in (InvocationRecord.model_validate(raw),)}
+        require(set(records) == ids and len({r.invocation_id for r in results.values()}) == 2,
+                "isolation_ledger_ids")
+        messages = [message for message in state["messages"] if isinstance(message, ToolMessage)]
+        require(len(messages) == 2 and {message.tool_call_id for message in messages} == ids,
+                "isolation_toolmessage_ids")
+        require(len(run["commands"]) == 2, "isolation_command_count")
+        command_ids = []
+        for command in run["commands"]:
+            require(isinstance(command, Command), "isolation_command_type")
+            values = command.update.get("algorithm_results", {})
+            require(len(values) == 1, "isolation_command_result_count")
+            command_ids.append(AlgorithmResult.model_validate(next(iter(values.values()))).provider_call_id)
+        require(set(command_ids) == ids, "isolation_command_call_ids")
+        remote = await status()
+        new_remote_ids = set(remote["terminal"]) - set(before["terminal"])
+        expected_remote_ids = {results[call_id].invocation_id for call_id in expected_handlers}
+        if mode in {"unapproved_pc", "invalid_pc_parameter"}:
+            expected_remote_ids = set()
+        require(new_remote_ids == expected_remote_ids, "isolation_remote_invocations")
+        for call_id, result in results.items():
+            record = records[call_id]
+            require(record.invocation_id == result.invocation_id and record.result_ref == result.result_ref,
+                    "isolation_result_ledger_identity")
+            public_status = {"valid": "succeeded", "invalid_input": "failed", "execution_failed": "failed"}.get(
+                result.status, result.status,
+            )
+            require(record.final_status == record.attempts[0].status == public_status, "isolation_ledger_status")
+            message = next(item for item in messages if item.tool_call_id == call_id)
+            message_payload = json.loads(message.content)
+            if message_payload.get("status") != "needs_confirmation":
+                require(message_payload.get("result_ref") == result.result_ref and
+                        message_payload.get("provider_call_id") == call_id and
+                        message_payload.get("status") == result.status, "isolation_message_result_identity")
+            if call_id in blocked_ids:
+                require(result.status == record.final_status == "not_ready", "isolation_blocked_status")
+                require(result.standardized_graph is None and result.raw_result_ref is None,
+                        "isolation_blocked_artifacts")
+                expected_summary = (
+                    "当前画像未确认全部列为数值类型，未执行算法。" if call_id == "isolation-cdfm"
+                    else "当前画像未确认所需表格输入，未执行算法。"
+                )
+                require(result.diagnostics.summary == expected_summary, "isolation_safe_unexecuted_summary")
+        if mode == "unapproved_pc":
+            pc_message = next(message for message in messages if message.tool_call_id == "isolation-pc")
+            require(json.loads(pc_message.content)["status"] == "needs_confirmation", "isolation_approval_bypassed")
+            require(results["isolation-pc"].status == "not_ready", "isolation_approval_terminal")
+        elif mode == "invalid_pc_parameter":
+            require(results["isolation-pc"].status == "execution_failed", "isolation_parameter_check_bypassed")
+        if mode in {"unapproved_pc", "invalid_pc_parameter"}:
+            pc_result = results["isolation-pc"]
+            require(pc_result.standardized_graph is None and pc_result.raw_result_ref is None,
+                    "isolation_rejected_pc_artifacts")
+        return {
+            "status": "PASS", "handler_call_ids": sorted(run["handlers"]),
+            "real_mcp_calls": len(new_remote_ids), "dependency_blocked_call_ids": sorted(blocked_ids),
+            "unexecuted_call_ids": sorted(call_id for call_id, result in results.items()
+                                          if result.invocation_id not in new_remote_ids),
+            "actual_results": {key: value.status for key, value in results.items()},
+            "safe_error_codes": {key: value.diagnostics.safe_error_code for key, value in results.items()},
+            "terminal_events": check_events(run, state),
+            "checkpoint_revisions": await check_checkpoints(run, True),
+        }
 
     async def deadline(algorithm: str = "causal_cdfm") -> dict[str, Any]:
         deadline_seconds = args.deadline if algorithm == "causal_cdfm" else min(args.deadline, 0.5)
@@ -568,6 +680,10 @@ async def client(args: argparse.Namespace) -> dict[str, Any]:
 
     try:
         await run_case("pc_two_legal_calls", pc_twice)
+        for mode in ("both_ready", "cdfm_missing", "both_missing", "unapproved_pc", "invalid_pc_parameter"):
+            async def isolation_case(selected: str = mode) -> dict[str, Any]:
+                return await input_isolation(selected)
+            await run_case("dispatch_" + mode, isolation_case)
         if initial["cdfm_preflight"]["status"] == "PASS":
             await run_case("cdfm_controlled_deadline", deadline)
             await run_case("real_pc_and_cdfm_timeout_finalization", mixed_finalization)

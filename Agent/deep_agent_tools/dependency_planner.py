@@ -18,7 +18,7 @@ from .registry import AlgorithmRegistry, UnknownCapabilityError
 
 
 class DependencyPlanningError(ValueError):
-    """未知 Tool、重复 call id、缺失 artifact 或环。"""
+    """未知 Tool、调用身份冲突或非法依赖图等计划契约错误。"""
 
     def __init__(self, message: str, *, safe_error_code: SafeErrorCode | str) -> None:
         super().__init__(message)
@@ -61,6 +61,7 @@ class DependencyPlan:
     dependencies: Mapping[str, frozenset[str]]
     initial_artifacts: frozenset[str]
     concurrency_limits: Mapping[str, int] = field(default_factory=dict)
+    missing_artifacts_by_call: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
     @property
     def calls(self) -> tuple[PlannedToolCall, ...]:
@@ -137,16 +138,15 @@ def build_dependency_plan(
             producers[artifact].append(call.request.call_id)
 
     dependencies: dict[str, set[str]] = {call_id: set() for call_id in by_id}
+    missing_artifacts_by_call: dict[str, set[str]] = {call_id: set() for call_id in by_id}
     for call_id, call in by_id.items():
         for artifact in call.requires:
             if artifact in available:
                 continue
             candidates = [candidate for candidate in producers.get(artifact, []) if candidate != call_id]
             if not candidates:
-                raise DependencyPlanningError(
-                    f"artifact is not ready: {artifact}",
-                    safe_error_code=SafeErrorCode.ALGORITHM_NOT_READY,
-                )
+                missing_artifacts_by_call[call_id].add(artifact)
+                continue
             dependencies[call_id].update(candidates)
 
     remaining = set(by_id)
@@ -173,6 +173,9 @@ def build_dependency_plan(
         dependencies={key: frozenset(value) for key, value in dependencies.items()},
         initial_artifacts=frozenset(initial_artifacts),
         concurrency_limits=concurrency_limits,
+        missing_artifacts_by_call={
+            key: frozenset(value) for key, value in missing_artifacts_by_call.items()
+        },
     )
 
 
@@ -230,7 +233,9 @@ async def execute_dependency_plan(
         for call in batch:
             prerequisites = plan.dependencies.get(call.request.call_id, frozenset())
             failed: list[str] = []
-            missing_artifacts: set[str] = set()
+            missing_artifacts = set(
+                plan.missing_artifacts_by_call.get(call.request.call_id, frozenset())
+            )
             for dependency in prerequisites:
                 dependency_outcome = outcomes.get(dependency)
                 if dependency_outcome is None or dependency_outcome.status != "succeeded":

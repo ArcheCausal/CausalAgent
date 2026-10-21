@@ -16,7 +16,7 @@
 | 文件对象 | MySQL `file_objects` | 按用户和 SHA-256 去重的不可变 BLOB |
 | 用户文件 | MySQL `user_files` | 用户可见文件名、访问统计和对象引用 |
 | 父图 checkpoint | PostgreSQL 官方 LangGraph 表 | Job 的外层恢复状态；`thread_id` 是 `analysis_jobs.job_id` |
-| Deep Agent checkpoint | PostgreSQL 官方 LangGraph 表 | 内层消息、工具状态和 raw 文件；使用稳定的 `deep-agent:<uuid5(job_id)>` thread 与 `deep_agent_v1` namespace |
+| Deep Agent checkpoint | PostgreSQL 官方 LangGraph 表 | 内层消息、工具状态和 raw 文件；使用稳定的 `deep-agent:<uuid5(job_id)>` thread，当前独立调用实际保存在根 namespace |
 | 长期记忆 Store | PostgreSQL 官方 `AsyncPostgresStore` 表 | 按可信 `user_id` namespace 保存 Deep Agent 两份 memory 文件；不属于 Job checkpoint |
 | checkpoint cleanup outbox | MySQL `checkpoint_cleanup_outbox` | Job 父子图 checkpoint 删除请求的可靠账本，按 `thread_id` 唯一 |
 | 用户记忆 cleanup outbox | MySQL `user_memory_cleanup_outbox` | 用户长期记忆 Store 删除请求的可靠账本，按 `user_id` 唯一，不关联 `users` 外键 |
@@ -76,8 +76,10 @@ checkpoint_ns = ""
 
 Deep Agent 的 checkpoint 与长期记忆共用 PostgreSQL 实例但不是同一类数据：父图以
 `thread_id=job_id` 保存外层 Job State；Deep Agent 子图以
-`thread_id=deep-agent:<uuid5(job_id)>` 和 `checkpoint_ns=deep_agent_v1` 保存内部
-messages、工具状态和短期 raw 文件。`AsyncPostgresStore` 另以
+`thread_id=deep-agent:<uuid5(job_id)>` 保存内部 messages、工具状态和短期 raw 文件。
+父图传入的 namespace 配置是 `deep_agent_v1`，当前独立调用实际保存在根 namespace（空字符串）；
+读取应以实际持久化位置为准，正式中断恢复和故障接管的验证边界见
+[`agent-runtime.md`](agent-runtime.md#父图子图与持久化)。`AsyncPostgresStore` 另以
 `("causalagent", "memory", str(user_id))` namespace 保存 `/memories/preferences.md`
 和 `/memories/research_background.md`。worker 首次使用某个用户 namespace 时只做
 create-if-absent 初始化，不覆盖已有内容；运行时对象与 MCP session 不会写入 Store。
