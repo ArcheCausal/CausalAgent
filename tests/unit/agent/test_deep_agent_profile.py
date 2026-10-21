@@ -18,6 +18,7 @@ from Agent.deep_agent.graph import (
     build_deep_agent,
 )
 from Agent.deep_agent.state import ProjectDeepAgentState
+from Agent.deep_agent.tool_call_protocol import ToolCallProtocolMiddleware
 
 
 def _identity_middleware(monkeypatch, *, provider_response_id_extractor=None):
@@ -247,10 +248,11 @@ def test_real_graph_builder_wires_state_context_profile_and_harness(monkeypatch)
     assert graph["tools"] == ["materialized-tool"]
     assert graph["model"].profile["max_input_tokens"] == 4096
     assert graph["subagents"] == []
-    assert graph["middleware"][0].kwargs["tools"] == ["read_file", "edit_file"]
-    assert graph["middleware"][0].kwargs["_permissions"] == graph["permissions"]
-    assert graph["middleware"][1].kwargs["trigger"] == ("fraction", 0.85)
-    assert graph["middleware"][1].kwargs["keep"] == ("fraction", 0.10)
+    assert isinstance(graph["middleware"][0], ToolCallProtocolMiddleware)
+    assert graph["middleware"][1].kwargs["tools"] == ["read_file", "edit_file"]
+    assert graph["middleware"][1].kwargs["_permissions"] == graph["permissions"]
+    assert graph["middleware"][2].kwargs["trigger"] == ("fraction", 0.85)
+    assert graph["middleware"][2].kwargs["keep"] == ("fraction", 0.10)
     identity_update = graph["middleware"][-1].after_model({}, None)
     assert identity_update["message_execution_id"]
     assert identity_update["provider_response_id"] is None
