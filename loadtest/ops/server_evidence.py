@@ -62,19 +62,22 @@ class Primary:
         values = {}
         for line in content.splitlines():
             key, separator, value = line.partition("=")
-            if separator and key in {"MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE"}:
+            if separator and key in {"MYSQL_USER", "MYSQL_DATABASE"}:
                 values[key] = value.strip().strip("\"'")
         self.user = values.get("MYSQL_USER")
-        self.password = values.get("MYSQL_PASSWORD")
         self.database = values.get("MYSQL_DATABASE", "rag_eval_staging")
-        self.ready = bool(self.user and self.password and re.fullmatch(r"[A-Za-z0-9_]+", self.database))
+        self.ready = bool(self.user and re.fullmatch(r"[A-Za-z0-9_]+", self.database))
 
     def query(self, sql):
         if not self.ready:
             return None
         # 每次采集使用主库只读事务，mysql 失败与成功查空严格区分。
-        raw = execute([*self.docker, "exec", "-e", f"MYSQL_PWD={self.password}",
-                       f"{self.project}-mysql-primary-1", "mysql", f"-u{self.user}",
+        # 密码仅在容器内从统一密钥文件读取，不经过宿主命令参数。
+        command = ('. /opt/causalagent/secret-env.sh; '
+                   'MYSQL_PWD="$(secret_value MYSQL_PASSWORD)" || exit 1; '
+                   'export MYSQL_PWD; exec mysql "$@"')
+        raw = execute([*self.docker, "exec", f"{self.project}-mysql-primary-1",
+                       "sh", "-c", command, "_", f"-u{self.user}",
                        "--default-character-set=utf8mb4", "-N", "-B", "--raw",
                        self.database, "-e",
                        "SET time_zone='+00:00'; SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ; "
@@ -89,7 +92,9 @@ class Primary:
 
 def literal(value) -> str:
     # UTF-8 十六进制字面量不受引号、反斜杠或 sql_mode 影响。
-    return "CONVERT(X'" + str(value).encode("utf-8").hex() + "' USING utf8mb4)"
+    # 与业务表字符序一致，避免 MySQL 8 默认字符序导致等值比较报 1267。
+    return ("CONVERT(X'" + str(value).encode("utf-8").hex()
+            + "' USING utf8mb4) COLLATE utf8mb4_unicode_ci")
 
 
 def manifest(path: str, run_id: str) -> dict:
