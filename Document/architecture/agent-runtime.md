@@ -36,7 +36,7 @@ agent → fold → preprocess → deep_agent → finalization_gate → report
 
 父图直接表达的其余路径为 `agent → report`（按当前分析上下文重新生成报告）、`agent → context_switch` 与 `context_switch → fold / report / inquiry_answer / normal_chat`（解析并切换分析上下文后再继续）；普通聊天和报告追问仍由 `normal_chat`、`inquiry_answer` 路径结束。父图只把问题、数据画像、分析参数和必要输入消息投影到 Deep Agent；子图返回时只接收算法结果、Action Ledger、RAG/Web evidence、结构化决策和 Gate/report 所需摘要。完整消息、Deep Agents 内部字段和中间计划不会回投影到父 State。
 
-父图 checkpoint 使用 `thread_id=analysis_jobs.job_id` 和空 namespace。Deep Agent 子图使用同一个 PostgreSQL saver，但使用稳定的 `thread_id=deep-agent:<uuid5(job_id)>` 与 `checkpoint_ns=deep_agent_v1`。子图 State 保存的分析身份由 Job、当前冻结输入和算法 Spec 摘要构成；worker、attempt 和 lease 只代表本次执行权限，恢复时不会因此重建整个子图。输入身份读取的是 invocation 级可刷新引用，服务端重新冻结输入或切换分析上下文后，旧执行产物不会被复用。Gate 要求修正时，从同一子图 checkpoint 追加受控指令。
+父图 checkpoint 使用 `thread_id=analysis_jobs.job_id` 和空 namespace。Deep Agent 子图使用同一个 PostgreSQL saver 和稳定的 `thread_id=deep-agent:<uuid5(job_id)>`。父图调用配置传入 `checkpoint_ns=deep_agent_v1`，当前 LangGraph 独立调用的子图实际保存在该 thread 的根 namespace（空字符串）；检查持久化状态时应读取实际保存的 namespace，不能仅从调用配置推定存储位置。该配置与存储位置差异下的正式中断恢复和故障接管仍需专门验证。子图 State 保存的分析身份由 Job、当前冻结输入和算法 Spec 摘要构成；worker、attempt 和 lease 只代表本次执行权限。输入身份读取的是 invocation 级可刷新引用，服务端重新冻结输入或切换分析上下文后，旧执行产物不会被复用。Gate 要求修正时，父图通过同一子图读取状态并追加受控指令。
 
 提交处理确认时，子图在内层 `interrupt` 暂停；父图节点识别子图 pending interrupt，以同一公开载荷在父图暂停并发布 `interrupt` 事件，不把子图标记为完成。用户答复重新进入父图节点后，通过 `Command(resume=...)` 传回子图原中断位置；子图在等待期间结束本轮执行并释放 MCP 请求、算法子进程和 worker 执行槽位。
 
@@ -44,7 +44,7 @@ agent → fold → preprocess → deep_agent → finalization_gate → report
 
 长期记忆由 `AsyncPostgresStore` 单独保存，不属于 Job checkpoint。模型只注册 `read_file` 和 `edit_file`，并且只允许写 `/memories/preferences.md` 与 `/memories/research_background.md`；其他写入由兜底 deny 拒绝。namespace 从可信 `AgentRunContext` 的 `user_id` 生成，首次使用时仅做 create-if-absent 初始化。Deep Agent 不启用 subagent、`task`、代码执行或宿主文件系统。
 
-当前 cleanup outbox 只按 `job_id` 删除父图 thread，尚未删除独立的 Deep Agent child thread；这一实现缺口及其影响见 [`job-file-lifecycle.md`](job-file-lifecycle.md)。
+cleanup outbox 在同一次清理中删除父图 Job thread 和独立的 Deep Agent child thread；两者均成功才确认完成，具体生命周期见 [`job-file-lifecycle.md`](job-file-lifecycle.md)。
 
 ## 分析上下文与追问路由
 
@@ -64,7 +64,13 @@ agent → fold → preprocess → deep_agent → finalization_gate → report
 
 模型看到的是由本地 `AlgorithmSpec` 生成的 LangChain function tools。当前默认 allowlist 包含 PC、DirectLiNGAM 和 CDFM；OLC 的 Spec、Adapter、runner 和算法代码仍保留，但不进入 worker Registry、MCP runner registry 或旧兼容 MCP 工具面。运行时不会调用远端 `list_tools()` 来动态扩展模型工具。CDFM 工具只公开可选 `threshold`，模型路径、CPU device、标准化和缺失值处理策略由 causal-mcp 固定。
 
-`AlgorithmDependencyDispatchMiddleware` 在 ToolNode 边界收集同一模型响应中的算法调用，按 `requires/produces` 分层：无依赖调用可并行，有依赖调用按层执行，并受单 Job 并发和工具总预算约束。Adapter 负责模型参数校验、确定性预处理、标准结果、raw result 完整性和 Ledger 更新；`McpAlgorithmExecutor` 只负责签名传输、远端执行结果校验和安全错误映射。CDFM 的 logits/probabilities 通过仅供 Executor 与 Adapter 使用的私有 envelope 保存到 raw artifact，不进入 `AlgorithmResult`、ToolMessage、SSE 或公共日志。可信 Job、文件、lease、HMAC 与数据库身份不会进入模型参数。
+预处理在 `analysis_parameters.data_profile` 保存本次冻结数据的完整画像。`to_deep_agent_input()` 优先校验该字段，只有字段不存在时才读取父 State 顶层 `data_profile`；选中的画像存在但非法时明确失败，不使用其他来源掩盖错误。转换复制全部行列、列顺序、数值列、分类列、缺失、非有限值、空列、常数列、疑似标识符和质量问题，不按 `column_profiles.inferred_type` 重新判断存储类型。两处完整画像都不存在时，历史 `column_profiles`、分析参数和 `file_summary` 只恢复可确认的行列事实，数值与分类类型保持未知。统计标签继续供统计推断、可视化、非线性检测和报告使用，文件摘要继续记录文件身份与基础事实。
+
+提供给模型的画像、子图 State、依赖调度器及 AlgorithmTool/Adapter 输入使用同一份转换结果；完整画像的缺失值事实同时决定 `missing_values_present`。完整画像采用顶层兼容来源时，投影后的分析参数也保存同值副本，父图原输入不被修改。工具和调度器不再从文件摘要分别重建画像；父图完成回写保存边界选中的完整画像副本。`continuous_tabular_dataset` 要求画像确认全部真实列名均为数值列，历史输入的未知类型不能满足这一前提。此转换只作用于新进入子图的输入，不修改旧任务已经保存的 checkpoint 或终态。
+
+`AlgorithmDependencyDispatchMiddleware` 在 ToolNode 边界收集同一模型响应中的算法调用，按 `requires/produces` 分层：无依赖调用可并行，有依赖调用按层执行，并受单 Job 并发和工具总预算约束。`DependencyPlan.missing_artifacts_by_call` 以原始 call ID 保存没有现存输入且没有本轮生产者的 artifact；该字段只属于运行时计划，不进入数据库 schema 或模型工具参数。被阻塞调用仍保留在拓扑批次内，执行前分别检查直接缺失、上游终态和实际发布的产物。直接缺失或上游未成功发布时只为该调用返回 `not_ready`；独立调用继续进入真实 handler 并接受参数、预处理和审批检查。例如 CDFM 未获得全部数值列的确认时不执行算法，但不会阻止独立的 PC 调用。未执行结果使用固定安全说明，无因果图或 raw artifact；每个调用仍通过自己的 `Command` 保存 ToolMessage、AlgorithmResult、终态 Ledger 和公共结果事件。重复 call ID、工具与 capability 身份冲突和非法依赖图仍属于受控契约错误，不作为普通缺失输入处理；取消和 lease 撤销继续传播控制流。
+
+Adapter 负责模型参数校验、确定性预处理、标准结果、raw result 完整性和 Ledger 更新；`McpAlgorithmExecutor` 只负责签名传输、远端执行结果校验和安全错误映射。CDFM 的 logits/probabilities 通过仅供 Executor 与 Adapter 使用的私有 envelope 保存到 raw artifact，不进入 `AlgorithmResult`、ToolMessage、SSE 或公共日志。可信 Job、文件、lease、HMAC 与数据库身份不会进入模型参数。
 
 `ToolCallProtocolMiddleware` 在完整模型响应之后检查最新 `AIMessage.invalid_tool_calls`。参数 JSON 解析失败时，它使用原调用 ID 追加 `status=error` 的 `ToolMessage`，说明工具未执行，并且不修改原参数、不把原始参数或底层异常写入返回内容；仅在本地 JSON 解析器能够确认时附带行列位置。当前响应任一调用缺少有效 ID，或调用 ID 重复时，运行以受控协议错误终止，不生成替代 ID。若仍有合法工具调用待执行，继续原工具路由；否则通过 `jump_to=model` 返回现有 `before_model` 链，继续接受模型预算检查。存在无效调用时，本轮 `structured_response` 会清空，父图继续使用既有 FinalizationGate 拒绝、一次修正和降级规则。该钩子只检查当前响应，不修复旧 checkpoint。
 

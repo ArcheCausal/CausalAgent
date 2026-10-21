@@ -1930,10 +1930,11 @@ def cancel_job(
                 source_event_id=event_id,
                 analysis_job_input_id=_latest_input_id(cursor, job_id),
             )
+            # CASE 必须读取取消前的 status，因此 status 放在 SET 的末尾。
             cursor.execute(
                 """
                 UPDATE analysis_jobs
-                SET status = 'canceled', active_session_key = NULL,
+                SET active_session_key = NULL,
                     current_question_id = NULL, current_waiting_prompt = NULL,
                     current_interaction = NULL, input_wait_expires_at = NULL,
                     cancel_idempotency_key = %s,
@@ -1945,7 +1946,8 @@ def cancel_job(
                     END,
                     worker_id = CASE WHEN status = 'running' THEN worker_id ELSE NULL END,
                     locked_at = CASE WHEN status = 'running' THEN locked_at ELSE NULL END,
-                    heartbeat_at = CASE WHEN status = 'running' THEN heartbeat_at ELSE NULL END
+                    heartbeat_at = CASE WHEN status = 'running' THEN heartbeat_at ELSE NULL END,
+                    status = 'canceled'
                 WHERE job_id = %s
                   AND status IN ('queued', 'running', 'waiting_input')
                 """,

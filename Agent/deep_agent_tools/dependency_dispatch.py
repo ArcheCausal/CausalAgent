@@ -58,26 +58,14 @@ def _state_data_profile(state: Mapping[str, Any]) -> DataProfile | None:
     if isinstance(value, DataProfile):
         return value
     if isinstance(value, Mapping):
-        try:
-            return DataProfile.model_validate(value)
-        except Exception:
-            return None
-    summary = state.get("file_summary")
-    if not isinstance(summary, Mapping):
+        return DataProfile.model_validate(value)
+    if value is None:
         return None
-    columns = tuple(str(column) for column in summary.get("columns", ()) if str(column))
-    try:
-        return DataProfile(
-            row_count=max(0, int(summary.get("rows") or 0)),
-            column_count=len(columns),
-            column_names=columns,
-        )
-    except (TypeError, ValueError):
-        return None
+    raise ValueError("data_profile must be a DataProfile or mapping")
 
 
 def _initial_artifacts(state: Mapping[str, Any]) -> frozenset[str]:
-    """从外层 admission 的画像推导已存在的数据 artifact。"""
+    """只读取父子 State 边界已转换的画像，判断输入 artifact 是否存在。"""
 
     profile = _state_data_profile(state)
     if profile is None or profile.row_count < 2 or profile.column_count < 2:
@@ -86,6 +74,8 @@ def _initial_artifacts(state: Mapping[str, Any]) -> frozenset[str]:
     if (
         not profile.categorical_columns
         and len(profile.numeric_columns) == profile.column_count
+        and len(set(profile.column_names)) == profile.column_count
+        and set(profile.numeric_columns) == set(profile.column_names)
     ):
         artifacts.add("continuous_tabular_dataset")
     return frozenset(artifacts)
@@ -376,7 +366,9 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
         call_by_id = {str(call["id"]): call for call in calls}
         tool_by_name = self._tool_map(request.runtime)
 
-        async def terminal_output(call_id: str, status: str, code: Any) -> Any:
+        async def terminal_output(
+            call_id: str, status: str, code: Any, *, summary: str | None = None,
+        ) -> Any:
             """为未返回 Command 的普通终态补齐真实诊断结果与账本。"""
 
             call = call_by_id[call_id]
@@ -394,7 +386,12 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                 invocation_id=invocation_id, provider_call_id=call_id,
                 capability_id=spec.capability_id, capability_version=spec.version,
                 status=status if status in {"timed_out", "not_ready", "not_applicable", "skipped"} else "execution_failed",
-                diagnostics=Diagnostics(safe_error_code=code),
+                diagnostics=Diagnostics(
+                    safe_error_code=code,
+                    summary=summary or (
+                        "工具输入尚未就绪，未执行算法。" if status == "not_ready" else None
+                    ),
+                ),
                 provenance=AlgorithmResultProvenance(
                     job_id=str(trusted.job_id), attempt_count=int(trusted.attempt_count),
                     lease_epoch=int(trusted.lease_epoch),
@@ -517,9 +514,21 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                     )]
                     outputs[call_id] = command
                     continue
+                missing = plan.missing_artifacts_by_call.get(call_id, frozenset())
+                summary = None
+                if outcome.status == "not_ready":
+                    if "continuous_tabular_dataset" in missing:
+                        summary = "当前画像未确认全部列为数值类型，未执行算法。"
+                    elif "tabular_dataset" in missing:
+                        summary = "当前画像未确认所需表格输入，未执行算法。"
+                    elif missing:
+                        summary = "所需输入尚未就绪，未执行算法。"
+                    else:
+                        summary = "上游调用未成功发布所需输入，未执行算法。"
                 outputs[call_id] = await terminal_output(
                     call_id, outcome.status,
                     outcome.safe_error_code or "ALGORITHM_EXECUTION_FAILED",
+                    summary=summary,
                 )
             if not outputs:
                 raise RuntimeError("dependency planner returned no tool outputs")
@@ -530,7 +539,10 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
             try:
                 outputs = {}
                 for call in calls:
-                    outputs[str(call["id"])] = await terminal_output(str(call["id"]), "not_ready", code)
+                    outputs[str(call["id"])] = await terminal_output(
+                        str(call["id"]), "failed", code,
+                        summary="工具调用计划不符合执行契约，未执行算法。",
+                    )
                 if not dispatch.future.done():
                     dispatch.future.set_result(outputs)
             except BaseException as terminal_error:

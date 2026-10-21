@@ -6,6 +6,8 @@ from collections.abc import Mapping
 import json
 from typing import Annotated, Any, TypedDict
 
+from deepagents.graph import DeepAgentState as _OfficialDeepAgentState
+
 from Agent.deep_agent_tools.models import (
     DataProfile,
     EvidenceResult,
@@ -21,15 +23,6 @@ from Agent.deep_agent.prompts import (
     MANDATORY_ALGORITHM_INSTRUCTION,
     MANDATORY_WEB_INSTRUCTION,
 )
-
-try:  # pragma: no cover - 真实依赖在 Docker/Spike 环境中验证
-    from deepagents.graph import DeepAgentState as _OfficialDeepAgentState
-except (ImportError, ModuleNotFoundError):
-
-    class _OfficialDeepAgentState(TypedDict, total=False):
-        """没有安装 deepagents 时用于协议测试的最小兼容基类。"""
-
-        messages: list[Any]
 
 
 class DeepAgentState(_OfficialDeepAgentState, total=False):
@@ -81,49 +74,37 @@ class ParentStateUpdate(TypedDict, total=False):
 
 
 def _as_data_profile(value: object, parent_state: Mapping[str, Any]) -> DataProfile:
-    if isinstance(value, DataProfile):
-        return value.model_copy(deep=True)
-    if isinstance(value, Mapping):
-        return DataProfile.model_validate(value)
+    """优先校验本次预处理画像；历史摘要只恢复明确的行列事实。"""
 
     analysis_parameters = parent_state.get("analysis_parameters")
-    if isinstance(analysis_parameters, Mapping):
-        columns = tuple(
-            str(column)
-            for column in analysis_parameters.get("columns", ())
-            if str(column)
-        )
-        column_profiles = analysis_parameters.get("column_profiles")
-        if isinstance(column_profiles, Mapping):
-            numeric_columns = tuple(
-                column
-                for column in columns
-                if isinstance(column_profiles.get(column), Mapping)
-                and column_profiles[column].get("inferred_type") == "continuous"
-            )
-            categorical_columns = tuple(
-                column for column in columns if column not in numeric_columns
-            )
-        else:
-            numeric_columns = ()
-            categorical_columns = ()
-        rows = analysis_parameters.get("n_rows") or 0
-        if columns or rows:
-            return DataProfile(
-                row_count=max(0, int(rows)),
-                column_count=len(columns),
-                column_names=columns,
-                numeric_columns=numeric_columns,
-                categorical_columns=categorical_columns,
-            )
+    if not isinstance(analysis_parameters, Mapping):
+        analysis_parameters = {}
+    # 按字段是否存在选择来源，不能把 null、空映射或非法值当成缺省。
+    if "data_profile" in analysis_parameters:
+        value = analysis_parameters["data_profile"]
+    if (
+        "data_profile" in analysis_parameters
+        or "data_profile" in parent_state
+        or value is not None
+    ):
+        if isinstance(value, DataProfile):
+            value = value.model_dump(mode="python")
+        return DataProfile.model_validate(value).model_copy(deep=True)
 
     file_summary = parent_state.get("file_summary")
     if not isinstance(file_summary, Mapping):
-        return DataProfile(row_count=0, column_count=0)
-    columns = tuple(str(column) for column in file_summary.get("columns", ()) if str(column))
-    rows = file_summary.get("rows") or 0
+        file_summary = {}
+    columns = analysis_parameters.get("columns")
+    if columns is None:
+        columns = file_summary.get("columns")
+    if columns is None:
+        column_profiles = analysis_parameters.get("column_profiles")
+        columns = tuple(column_profiles) if isinstance(column_profiles, Mapping) else ()
+    rows = analysis_parameters.get("n_rows")
+    if rows is None:
+        rows = file_summary.get("rows", 0)
     return DataProfile(
-        row_count=max(0, int(rows)),
+        row_count=rows if rows is not None else 0,
         column_count=len(columns),
         column_names=columns,
     )
@@ -238,6 +219,14 @@ def to_deep_agent_input(
     if not isinstance(preprocess_summary, str):
         preprocess_summary = ""
     data_profile = _as_data_profile(parent_state.get("data_profile"), parent_state)
+    has_complete_profile = (
+        "data_profile" in analysis_parameters or "data_profile" in parent_state
+    )
+    if has_complete_profile:
+        analysis_parameters = {
+            **analysis_parameters,
+            "data_profile": data_profile.model_dump(mode="json"),
+        }
     messages = [
         *messages,
         {
@@ -298,7 +287,11 @@ def to_deep_agent_input(
             if parent_state.get("message_execution_id")
             else None
         ),
-        missing_values_present=_missing_values_from_parent(parent_state),
+        missing_values_present=(
+            data_profile.has_missing_values
+            if has_complete_profile
+            else _missing_values_from_parent(parent_state)
+        ),
         data_processing_approvals=(
             None
             if reset_execution_artifacts
