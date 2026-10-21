@@ -30,6 +30,7 @@ from .memory import MEMORY_PATHS
 from .profile import DeepAgentBudget, DeepAgentProfile, build_filesystem_permissions
 from .prompts import build_deep_agent_system_prompt
 from .state import ProjectDeepAgentState
+from .tool_call_protocol import ToolCallProtocolMiddleware
 
 
 class DeepAgentDependencyError(RuntimeError):
@@ -323,7 +324,10 @@ def build_deep_agent(
         tools=["read_file", "edit_file"],
         _permissions=permissions,
     )
+    # after_model hooks execute in reverse registration order; place the protocol
+    # middleware first so it checks the response after identity, dispatch and budget.
     middleware = [
+        ToolCallProtocolMiddleware(),
         filesystem_middleware,
         _build_summarization_middleware(configured_model, profile),
         *build_budget_middlewares(profile),
@@ -401,7 +405,7 @@ def build_deep_agent(
         )
         middleware.append(InteractionTurnGuardMiddleware())
     # after_model 按注册的反序执行：先持久化 identity/queued，再写 running，
-    # 最后 ToolNode 才能开始外部调用。两个 hook 都有独立 checkpoint 边界。
+    # 协议钩子最后补齐无效 JSON 调用，随后才进入工具路由。各 hook 有独立边界。
     middleware.append(_build_message_identity_middleware(registry=registry))
     kwargs: dict[str, Any] = {
         "model": configured_model,
