@@ -250,8 +250,16 @@ def main(stage: str) -> int:
                    f">{shlex.quote(sample_file)} 2>{shlex.quote(remote + '/sample.err')}; "
                    f"printf '%s' $? >{shlex.quote(remote + '/sample.exit')}")
         # 启动不重试，避免 SSH 回执丢失后重复启动相同采样进程。
-        launched = ssh(f"nohup bash -c {shlex.quote(sampler)} </dev/null >/dev/null 2>&1 &", attempts=1)
-        if launched.returncode:
+        # 回执超时不等于未启动：改为只读核查远端是否已有本轮采样进程。
+        try:
+            launched = ssh(f"nohup bash -c {shlex.quote(sampler)} </dev/null >/dev/null 2>&1 &", attempts=1)
+            started = launched.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            started = False
+        if not started:
+            probe = ssh(f"pgrep -f {shlex.quote(remote + '/stage_resource_sample.sh ' + run_id)} | head -1", attempts=2)
+            started = probe.returncode == 0 and bool(probe.stdout.strip())
+        if not started:
             raise RuntimeError("sampler_start_unknown")
         environment = dict(os.environ, PYTHONIOENCODING="utf-8")
         with (run / "load.stdout.txt").open("w", encoding="utf-8") as stdout, (run / "load.stderr.txt").open("w", encoding="utf-8") as stderr:
@@ -268,9 +276,18 @@ def main(stage: str) -> int:
                     state["observation_ended_at"] = epoch(phases.get("observation_ended_at"))
                     if not stop_sent:
                         boundary = json.dumps({"run_id": run_id, "started_at": phases.get("started_at"), "stop_submitting_at": stopped})
-                        sent = ssh(f"printf '%s' {shlex.quote(boundary)} >{shlex.quote(remote + '/phases.tmp')} && "
-                                   f"mv {shlex.quote(remote + '/phases.tmp')} {shlex.quote(remote + '/phases.json')}", attempts=1)
-                        stop_sent = sent.returncode == 0
+                        # 写临时文件再改名是幂等的；SSH 偶发超时不应中断整轮编排，
+                        # 重试仍失败时保留 unknown，由采样器按无边界处理。
+                        for attempt in range(3):
+                            try:
+                                sent = ssh(f"printf '%s' {shlex.quote(boundary)} >{shlex.quote(remote + '/phases.tmp')} && "
+                                           f"mv {shlex.quote(remote + '/phases.tmp')} {shlex.quote(remote + '/phases.json')}", attempts=1)
+                            except (OSError, subprocess.SubprocessError):
+                                sent = None
+                            if sent is not None and sent.returncode == 0:
+                                stop_sent = True
+                                break
+                            time.sleep(2)
                         state["sampler_boundary_status"] = "collected" if stop_sent else "unknown"
                     for seconds in CHECKPOINTS:
                         key = format(seconds, "g")

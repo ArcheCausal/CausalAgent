@@ -89,7 +89,10 @@ class Primary:
 
 def literal(value) -> str:
     # UTF-8 十六进制字面量不受引号、反斜杠或 sql_mode 影响。
-    return "CONVERT(X'" + str(value).encode("utf-8").hex() + "' USING utf8mb4)"
+    # MySQL 8 的 utf8mb4 默认排序规则是 0900_ai_ci，而本库表字段是
+    # utf8mb4_unicode_ci；不显式声明排序规则时等值比较报 1267，整条记录会被误判为缺失。
+    return ("CONVERT(X'" + str(value).encode("utf-8").hex()
+            + "' USING utf8mb4) COLLATE utf8mb4_unicode_ci")
 
 
 def manifest(path: str, run_id: str) -> dict:
