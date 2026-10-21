@@ -234,6 +234,7 @@ jobs:
           tests/contracts/database
           tests/contracts/observability
           tests/unit/config/test_secret_file.py
+          tests/unit/config/test_secret_env_line_endings.py
           tests/unit/deployment/test_release_bundle.py
 
       - name: Validate Alloy configuration

@@ -40,7 +40,9 @@ loadtest/
 | stage_resource_sample.sh | 覆盖负载与排空阶段的定时采样：主机负载与内存、容器资源、数据库连接数、queued/running/draining 数量 |
 | job_db_check.sh | 按同轮请求身份 JSON 或旧 Job ID 清单核对主库，包含未知接纳、首次开始、事件集合与 CDFM 调用证据 |
 
-三个脚本的认证信息都从受控凭据文件读取，默认 /opt/causalagent-staging/.env.staging，可用 CAUSALAGENT_ENV_FILE 覆盖；容器名默认按 COMPOSE_PROJECT_NAME 推导，默认 causalagent-staging。没有采集或核对成功时，报告必须把对应项写成未采集，不得标记为通过。
+三个脚本只从部署配置读取数据库账号和库名，默认 /opt/causalagent-staging/.env.staging，可用 CAUSALAGENT_ENV_FILE 覆盖；数据库密码必须由容器内的 /opt/causalagent/secret-env.sh 从统一密钥文件读取，不得放入宿主命令参数。容器名默认按 COMPOSE_PROJECT_NAME 推导，默认 causalagent-staging。没有采集或核对成功时，报告必须把对应项写成未采集，不得标记为通过。
+
+采样器只启动一次，并保存实际采样进程 PID；确认启动时必须核验该 PID 的精确命令行与本轮 run_id，禁止仅用 pgrep 文本命中认定启动。读取采样退出码与 JSON 的传输错误需要在有界窗口内重试；窗口耗尽后保留 unknown，并继续独立的收尾快照与主库核对。
 
 stage_resource_sample.sh 的 samples 数组每一项包含 host、containers、queue、connections 四层；runner/resource.py 同时兼容早期的扁平采样格式。为避免拖长采样间隔，采样循环不逐容器调用 docker inspect，OOMKilled 结论由 server_side_collect.sh 的单次快照给出。
 

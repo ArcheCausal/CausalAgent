@@ -1,6 +1,6 @@
 """通过同源 Grafana 代理查询 Loki 日志，核对测试窗口内的服务端行为。
 
-凭据只在进程内从部署环境文件读取，不写入报告、日志或版本库，也不回显。
+账号从部署配置读取，口令从统一密钥文件读取，不写入报告、日志或版本库，也不回显。
 """
 
 from __future__ import annotations
@@ -22,27 +22,45 @@ DEPLOY_ENV_CANDIDATES = ("../.env.staging", ".env.staging")
 def read_grafana_credentials() -> tuple[str, str]:
     """读取 Grafana 账号与口令，不打印任何取值。
 
-    优先使用进程环境变量，随后才回退到部署环境文件；两者都不写入磁盘或报告。
+    支持显式进程凭据；否则账号从部署配置读取，口令只从统一密钥文件读取。
     """
     env_user = os.environ.get("GRAFANA_ADMIN_USER", "").strip()
     env_password = os.environ.get("GRAFANA_ADMIN_PASSWORD", "").strip()
     if env_user and env_password:
         return env_user, env_password
+    user = env_user
     for relative in DEPLOY_ENV_CANDIDATES:
         path = (config.LOADTEST_DIR / relative).resolve()
         if not path.exists():
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
-        user = _match(text, "GRAFANA_ADMIN_USER")
-        password = _match(text, "GRAFANA_ADMIN_PASSWORD")
-        if user and password and not password.startswith("REPLACE"):
-            return user, password
+        user = user or _match(text, "GRAFANA_ADMIN_USER")
+    secret_path = Path(os.environ.get(
+        "CAUSALAGENT_SECRET_FILE", str(config.LOADTEST_DIR.parent / "causalagent.env")
+    ))
+    try:
+        password = _match(
+            secret_path.read_text(encoding="utf-8"), "GRAFANA_ADMIN_PASSWORD", preserve_value=True
+        )
+    except OSError:
+        raise RuntimeError("无法读取 Grafana 统一密钥文件，请设置 CAUSALAGENT_SECRET_FILE") from None
+    if user and password and not password.startswith("REPLACE"):
+        return user, password
     raise RuntimeError("未找到可用的 Grafana 凭据")
 
 
-def _match(text: str, key: str) -> str:
+def _match(text: str, key: str, *, preserve_value: bool = False) -> str:
     match = re.search(rf"^{key}=(.*)$", text, re.MULTILINE)
-    return match.group(1).strip() if match else ""
+    if not match:
+        return ""
+    value = match.group(1).removesuffix("\r")
+    # 官方 Grafana 入口使用 Shell 读取器；引号和空格都是口令内容。
+    if preserve_value:
+        return value
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    return value
 
 
 class GrafanaLoki:
@@ -99,17 +117,27 @@ class GrafanaLoki:
         self, query: str, start_ns: int, end_ns: int, limit: int = 200
     ) -> list[dict]:
         """按时间窗口查询日志，返回 (时间戳, 原始行) 列表。"""
-        response = self.client.get(
-            f"{self.base_url}/api/datasources/proxy/uid/{self.loki_uid}"
-            "/loki/api/v1/query_range",
-            params={
-                "query": query,
-                "start": str(start_ns),
-                "end": str(end_ns),
-                "limit": str(limit),
-                "direction": "forward",
-            },
-        )
+        # 逐 Job 查询会形成连续请求，Loki 偶发返回 5xx 或连接错误；
+        # 有限重试只消除瞬时失败，持续失败仍保留 unknown，不当作无日志。
+        for attempt in range(3):
+            try:
+                response = self.client.get(
+                    f"{self.base_url}/api/datasources/proxy/uid/{self.loki_uid}"
+                    "/loki/api/v1/query_range",
+                    params={
+                        "query": query,
+                        "start": str(start_ns),
+                        "end": str(end_ns),
+                        "limit": str(limit),
+                        "direction": "forward",
+                    },
+                )
+                response.raise_for_status()
+                break
+            except (httpx.HTTPError, httpx.TransportError):
+                if attempt == 2:
+                    raise
+                time.sleep(1 + attempt)
         response.raise_for_status()
         streams = response.json().get("data", {}).get("result", [])
         rows: list[dict] = []
@@ -225,12 +253,16 @@ def _parse_job_row(row: dict, allowed: set[str]) -> dict | None:
     details = payload.get("details")
     details = details if isinstance(details, dict) else {}
     keys = ("capability", "attempt", "retry", "retry_ordinal", "status", "duration_ms",
-            "claim_kind", "reason_code", "status_code", "method")
+            "claim_kind", "reason_code", "status_code", "method",
+            "failure_phase", "error_category", "cause_code")
     result = {"timestamp": payload.get("timestamp") or row.get("timestamp"),
               "loki_timestamp_ns": row.get("timestamp"), "job_id": str(payload["job_id"]),
               "event_code": payload.get("event_code"), "level": payload.get("level"),
               "request_id": payload.get("request_id"),
               "invocation_id": payload.get("invocation_id") or details.get("invocation_id")}
+    result["exception_type"] = payload.get("exception_type")
+    stack = payload.get("stack")
+    result["stack_top"] = stack[-1] if isinstance(stack, list) and stack else None
     result["details"] = {key: details[key] for key in keys if key in details}
     return result
 

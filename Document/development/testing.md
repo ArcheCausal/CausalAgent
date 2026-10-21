@@ -42,7 +42,7 @@
 
 只改普通说明文档时，仅基础检查运行，其余组按路径结果跳过。结构化输出、流式配置和 schema 快照等用例统一由 `backend` 执行，没有独立的基础测试任务。`app/rag_eval/frontend/**` 只触发 `frontends` 和需要的契约检查，不因为位于 `app/` 下就启动后端组；`tests/contracts/**` 只触发 `contracts`。`ci-result` 汇总任务核对路径判断的预期结果和实际任务结果：应执行的失败、取消或意外跳过，以及路径判断失败都会使它失败。面向 `main` 的 Pull Request 要求常规组全部完成。
 
-**维护规则**：新增测试必须先放对层级，再更新 `.github/filters/paths.yaml`。跨模块测试要由它读取的生产文件触发，例如部署契约检查 Dockerfile，就必须在 Dockerfile 改变时运行，不能只在契约测试自身改变时运行。共享 CI、路径规则和公共测试配置变化时，宁可触发全部常规组。`tests/contracts/deployment/test_staging_compose.py` 和 `test_searxng_compose.py` 需要 Docker CLI，缺少时只跳过并保留未执行结论。
+**维护规则**：新增测试必须先放对层级，再更新 `.github/filters/paths.yaml`。跨模块测试要由它读取的生产文件触发，例如部署契约检查 Dockerfile，就必须在 Dockerfile 改变时运行，不能只在契约测试自身改变时运行。`loadtest/runner/**` 变化触发 backend 执行组，验证日志运行时与压测解析器之间的数据传递；共享 Shell 密钥读取器的行分隔符检查由部署契约组显式执行。共享 CI、路径规则和公共测试配置变化时，宁可触发全部常规组。`tests/contracts/deployment/test_staging_compose.py` 和 `test_searxng_compose.py` 需要 Docker CLI，缺少时只跳过并保留未执行结论。
 
 `main` 与 `develop` 的分支规则集 `mian and dev` 要求 `Python syntax`、`Pull request policy` 和 `CI result` 三个检查。删除或重命名工作流任务时，必须同时修改规则集的必需检查，否则 PR 会一直等待一个不会出现的检查。`CI result` 只在 Pull Request 上运行，push 与手动触发只做缓存预热。
 

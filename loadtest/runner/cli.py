@@ -189,7 +189,9 @@ def render_logcheck(result: dict) -> str:
             for item in items[:5]:
                 lines.append(
                     f"- {service} {item.get('timestamp')} "
-                    f"{item.get('event_code')} {item.get('message')}"
+                    f"{item.get('event_code')} "
+                    f"{json.dumps(item.get('details') or {}, ensure_ascii=False)} "
+                    f"异常 {item.get('exception_type')} 栈顶 {item.get('stack_top')}"
                 )
     lines.extend(["", "## MCP 按能力统计", "",
                   "| 能力 | 收到 | 完成 | 失败 | 慢调用 |",

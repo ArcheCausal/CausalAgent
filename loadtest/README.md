@@ -200,6 +200,12 @@ ops/stage_sampling.py 自动为每个 run_id 创建独立远端目录并上传�
 负载前快照、真实负载、持续采样、300 秒与最终主库检查、收尾快照，再将证据写回
 该轮摘要。停止提交边界取自客户端 phases.json，与观察结束、主库核对时间分别保存；
 采集失败、范围不明或缺少停止边界时保留 unknown，不宣称已排空。
+采样器只启动一次，记录真实 PID 并核验其命令行包含本轮服务器采样入口和 run_id；
+SSH 启动回执丢失时只核验进程，不重复启动。停止边界写入和采样结果回收使用有界重试，
+回收失败仍继续独立的收尾快照和最终主库核对，整档保留 unknown。
+
+服务器的 `.env.staging` 只提供数据库账号和库名；密码由数据库容器内的
+`/opt/causalagent/secret-env.sh` 从挂载的统一密钥文件读取。采集命令不传递密码参数。
 
 ~~~
 # 本地命令在 loadtest/ 内执行；SSH 配置见 ops/stage_sampling.py
@@ -275,8 +281,12 @@ sudo bash /tmp/_lt/<run_id>/job_db_check.sh <run_id> /tmp/_lt/<run_id>/requests.
 
 ## 日志侧核查
 
-runner verify-packet 生成 Job、请求 ID 与时间定位清单。日志凭据从受控配置读取，
-不回显、不写入报告；不可用时报告未采集。以下命令在 loadtest/ 内执行：
+runner verify-packet 生成 Job、请求 ID 与时间定位清单。Grafana 账号从部署配置或显式
+环境变量读取，口令从 `CAUSALAGENT_SECRET_FILE` 指定的统一密钥文件读取，未指定时使用
+仓库根目录的 `causalagent.env`，按官方容器 Shell 规则保留口令中的引号和空格；
+也保留显式进程账号与口令的调用方式。日志核查保留
+异常类型、失败阶段、错误分类、原因码和已经脱敏的栈顶位置，不读取异常正文。
+凭据不回显、不写入产物；日志源不可用时保留未采集状态。以下命令在 loadtest/ 内执行：
 
 ~~~
 .venv\Scripts\python.exe -m runner logs --stage stability
