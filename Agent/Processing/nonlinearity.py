@@ -55,10 +55,7 @@ def _insufficient(reason: str, n_vars: int = 0, n_rows: int = 0) -> dict[str, An
 
 
 def _ranks(x: np.ndarray) -> np.ndarray:
-    order = np.argsort(x, kind="stable")
-    ranks = np.empty(len(x), dtype=float)
-    ranks[order] = np.arange(len(x))
-    return ranks
+    return pd.Series(x).rank(method="average").to_numpy() - 1
 
 
 def _pair_degree(x: np.ndarray, y: np.ndarray, bins: np.ndarray) -> float:
@@ -102,25 +99,12 @@ def _null_p99(
     return float(np.quantile(samples, 0.99))
 
 
-def _candidate_columns(data_summary: Mapping[str, Any] | None) -> list[str]:
-    """复用 get_data_summary 的类型推断：连续、非常量、非疑似 ID。
-
-    排除 binary / categorical_numeric：K=10 等量分箱在二元列上退化（只剩 2 个非空箱）。
-    排除 possible_id：ID 列是均匀噪声，只会挤掉真变量名额。
-    """
-
-    profiles = (data_summary or {}).get("column_profiles")
-    if not isinstance(profiles, Mapping):
-        return []
-    declared = (data_summary or {}).get("columns")
-    order = [str(column) for column in declared] if declared else [str(key) for key in profiles]
-    return [
-        column
-        for column in order
-        if isinstance(profiles.get(column), Mapping)
-        and profiles[column].get("inferred_type") == "continuous"
-        and not profiles[column].get("possible_id")
-    ]
+def _candidate_columns(df: pd.DataFrame) -> list[str]:
+    """按本检验的数值和分箱条件取列，不由业务语义或旧类型标签取列。"""
+    return [column for column in df.columns
+            if pd.api.types.is_numeric_dtype(df[column].dtype)
+            and not pd.api.types.is_bool_dtype(df[column].dtype)
+            and df[column].replace([np.inf, -np.inf], np.nan).nunique() >= _BINS]
 
 
 def _measure(
@@ -134,9 +118,9 @@ def _measure(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """返回 (payload, 溯源)。溯源只给自检/排查用，不进 payload。"""
 
-    candidates = [column for column in _candidate_columns(data_summary) if column in df.columns]
+    candidates = _candidate_columns(df)
     if len(candidates) < 2:
-        return _insufficient("fewer_than_two_continuous_columns", len(candidates)), {}
+        return _insufficient("fewer_than_two_numeric_columns_with_at_least_10_distinct_values", len(candidates)), {}
 
     frame = df.loc[:, candidates]
     sampled = False
@@ -145,7 +129,7 @@ def _measure(
         frame = frame.iloc[:, np.sort(picked)]
         sampled = True
 
-    frame = frame.dropna()
+    frame = frame.replace([np.inf, -np.inf], np.nan).dropna()
     if len(frame) > max_rows:
         picked = np.random.default_rng(seed).choice(len(frame), size=max_rows, replace=False)
         frame = frame.iloc[np.sort(picked)]

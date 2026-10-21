@@ -276,15 +276,16 @@ def test_build_chart_assets_emits_structured_data_without_images() -> None:
     )
 
     assert set(assets) == {
-        "chart_histogram_age",
-        "chart_histogram_income",
+        "chart_bar_age",
+        "chart_bar_income",
         "chart_bar_city",
         "chart_heatmap_correlation",
     }
     assert "data:image" not in serialized
     assert "<img" not in serialized
-    histogram = assets["chart_histogram_age"]
-    assert len(histogram.data["counts"]) == len(histogram.data["bins"]) - 1
+    frequency = assets["chart_bar_age"]
+    assert len(frequency.data["counts"]) == len(frequency.data["categories"])
+    assert frequency.data["categories"] == [str(value) for value in sorted(frame["age"].unique())]
     assert assets["chart_heatmap_correlation"].data["variables"] == ["age", "income"]
 
     coerced = coerce_chart_assets({key: asset.model_dump(mode="json") for key, asset in assets.items()})

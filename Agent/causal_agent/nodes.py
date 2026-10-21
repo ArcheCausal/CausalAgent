@@ -839,6 +839,12 @@ async def _bind_analysis_context(
         update["analysis_context"] = context
     return update
 
+class MeasurementDeclaration(BaseModel):
+    column: str
+    kind: Literal["count", "ordinal", "category", "continuous", "binary", "unknown"]
+    evidence: str = Field(description="包含列名和测量含义的用户原话，必须逐字摘录；没有明确声明则不输出该条。")
+
+
 class foldQuery(BaseModel):
     """只从用户对话中提取因果分析所需的关键参数。"""
     target: Optional[str] = Field(
@@ -849,9 +855,10 @@ class foldQuery(BaseModel):
         None,
         description="从用户对话中识别出的处理变量(treatment)或干预变量(intervention)。如果未提及，则留空。"
     )
+    measurement_semantics: list[MeasurementDeclaration] = Field(default_factory=list)
 
 ## fold节点用到的函数
-from Agent.Processing.fold_processing import get_data_summary
+from Agent.Processing.fold_processing import get_data_summary, apply_measurement_semantics
 from Agent.Processing.fold_verify import validate_analysis
 from Agent.Processing.nonlinearity import measure_nonlinearity
 from Agent.Report.assets import (
@@ -921,6 +928,8 @@ async def fold_node(
             """你是一个智能助手，你的任务是从用户的最新消息中识别出以下信息，并以JSON格式返回：
             1. 用户关心的目标变量 (target/outcome)。
             2. 用户想要评估效果的处理变量 (treatment/intervention)。
+            3. measurement_semantics 只摘录用户明确陈述的列测量含义，并提供包含列名的逐字原话。
+               不能根据列名、整数、偏态或低基数推断业务含义；没有明确陈述时返回空列表。
 
             文件已经由当前 Job 的冻结输入确定，严禁从自然语言选择文件。
             如果用户没有提到目标或处理变量，请将对应字段设为 null。
@@ -961,11 +970,13 @@ async def fold_node(
 
         target = _normalize_optional_llm_text(structured_response.target)
         treatment = _normalize_optional_llm_text(structured_response.treatment)
+        semantic_declarations = [item.model_dump() for item in structured_response.measurement_semantics]
         
     except StructuredOutputError:
         _log_node_degradation("structured_output_error", "empty_parameters")
         target = None
         treatment = None
+        semantic_declarations = []
 
     try:
         file_row = await asyncio.to_thread(
@@ -978,6 +989,9 @@ async def fold_node(
         file_content_str = file_row["file_content"].decode("utf-8")
         df = await asyncio.to_thread(pd.read_csv, io.StringIO(file_content_str))
         data_summary = await asyncio.to_thread(get_data_summary, df)
+        user_text = "\n".join(message.content for message in state.get("messages", [])
+                              if isinstance(message, HumanMessage) and isinstance(message.content, str))
+        apply_measurement_semantics(data_summary, semantic_declarations, user_text=user_text)
     
     except Exception:
         _log_node_degradation(
@@ -1156,7 +1170,7 @@ async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
             2.  **目标变量和处理变量的摘录**: 对输入数据中的“target”和“treatment”进行摘取，并告知用户目前处理的变量是这两个变量。
             3.  **风险提示**: 提及数据中存在的潜在问题，例如高缺失值列、常数列、高基数分类变量或疑似ID列。
             4.  **结论**: 给出一个总体评价，说明数据是否已准备好进行下一步的因果分析。
-            5.  **线性/非线性说明**: 根据 `nonlinearity` 字段说明变量间关系以线性还是非线性机制为主及强度；`verdict` 为 `linear` 只表示未检出显著非线性结构，不等于确定线性；`verdict` 为 `insufficient` 时说明本次未能评估。
+            5.  **线性/非线性说明**: 根据 `nonlinearity` 字段说明是否检出非线性及统计强度，不能据此断言真实机制；`verdict` 为 `linear` 只表示未检出显著非线性结构，不等于确定线性；`verdict` 为 `insufficient` 时说明本次未能评估。
 
             请使用清晰、专业的语言，让非技术人员也能理解数据的基本状况。
             """),

@@ -84,21 +84,8 @@ def build_data_profile(frame: pd.DataFrame) -> DataProfile:
                     blocking=True,
                 )
             )
-        if pd.api.types.is_numeric_dtype(series):
+        if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
             numeric_columns.append(column)
-            values = pd.to_numeric(non_null, errors="coerce")
-            if len(values) == len(non_null) and (values % 1 == 0).all():
-                ratio = non_null.nunique(dropna=True) / len(non_null)
-                if ratio > 0.95:
-                    suspected_id_columns.append(column)
-                    issues.append(
-                        DataIssue(
-                            code="suspected_id_column",
-                            message=f"列 {column} 疑似标识符，不适合直接参与因果分析",
-                            columns=(column,),
-                            blocking=False,
-                        )
-                    )
         else:
             categorical_columns.append(column)
 
@@ -185,7 +172,9 @@ def profile_from_analysis_parameters(
         if not isinstance(profile, Mapping):
             continue
         inferred_type = str(profile.get("inferred_type") or "")
-        if inferred_type in {
+        features = profile.get("statistical_features") or {}
+        if features.get("is_numeric") is True or inferred_type in {
+            "numeric",
             "binary",
             "continuous",
             "categorical_numeric",
