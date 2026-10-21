@@ -58,26 +58,14 @@ def _state_data_profile(state: Mapping[str, Any]) -> DataProfile | None:
     if isinstance(value, DataProfile):
         return value
     if isinstance(value, Mapping):
-        try:
-            return DataProfile.model_validate(value)
-        except Exception:
-            return None
-    summary = state.get("file_summary")
-    if not isinstance(summary, Mapping):
+        return DataProfile.model_validate(value)
+    if value is None:
         return None
-    columns = tuple(str(column) for column in summary.get("columns", ()) if str(column))
-    try:
-        return DataProfile(
-            row_count=max(0, int(summary.get("rows") or 0)),
-            column_count=len(columns),
-            column_names=columns,
-        )
-    except (TypeError, ValueError):
-        return None
+    raise ValueError("data_profile must be a DataProfile or mapping")
 
 
 def _initial_artifacts(state: Mapping[str, Any]) -> frozenset[str]:
-    """从外层 admission 的画像推导已存在的数据 artifact。"""
+    """只读取父子 State 边界已转换的画像，判断输入 artifact 是否存在。"""
 
     profile = _state_data_profile(state)
     if profile is None or profile.row_count < 2 or profile.column_count < 2:
@@ -86,6 +74,8 @@ def _initial_artifacts(state: Mapping[str, Any]) -> frozenset[str]:
     if (
         not profile.categorical_columns
         and len(profile.numeric_columns) == profile.column_count
+        and len(set(profile.column_names)) == profile.column_count
+        and set(profile.numeric_columns) == set(profile.column_names)
     ):
         artifacts.add("continuous_tabular_dataset")
     return frozenset(artifacts)

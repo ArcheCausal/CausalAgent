@@ -82,17 +82,7 @@ class AlgorithmTool:
             return profile.model_copy(deep=True)
         if isinstance(profile, Mapping):
             return DataProfile.model_validate(profile)
-        file_summary = state.get("file_summary")
-        if not isinstance(file_summary, Mapping):
-            file_summary = {}
-        columns = tuple(
-            str(column) for column in file_summary.get("columns", ()) if str(column)
-        )
-        return DataProfile(
-            row_count=max(0, int(file_summary.get("rows") or 0)),
-            column_count=len(columns),
-            column_names=columns,
-        )
+        raise ValueError("converted data_profile is required in algorithm State")
 
     def _adapter_input_from_runtime(
         self,

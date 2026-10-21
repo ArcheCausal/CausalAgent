@@ -781,7 +781,7 @@ async def _deep_agent_parent_node(
     update = dict(from_deep_agent_output(child_state))
     update["deep_agent_run_id"] = child_run_id
     update["deep_agent_status"] = "completed"
-    # data_profile 是外层 admission 的只读摘要副本，不是 runtime dependency。
+    # 保存父子 State 边界选定的完整画像副本，保留类型和质量字段。
     data_profile = (
         child_input.get("data_profile")
         if isinstance(child_input, Mapping)
