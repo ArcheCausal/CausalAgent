@@ -18,6 +18,8 @@ secret_value() {
         return 1
     fi
     value="$(sed -n "s/^${key}=//p" "$SECRET_FILE" | head -n 1)"
+    # CRLF 的回车属于行分隔符，不能作为密码内容传给上游进程。
+    value="${value%"$(printf '\r')"}"
     if [ -z "$value" ]; then
         echo "secret key missing or empty: $key" >&2
         return 1
