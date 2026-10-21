@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from Agent.analysis_principles import CAUSAL_ANALYSIS_PRINCIPLES
 
-DEEP_AGENT_SYSTEM_PROMPT = """你是 CausalAgent 的因果分析助手。
+
+DEEP_AGENT_SYSTEM_PROMPT = CAUSAL_ANALYSIS_PRINCIPLES + """
+具体执行职责：
 
 你可以根据当前问题、数据画像和已返回的标准化结果，自主选择一个或多个因果算法、
 知识库证据或学术 Web 证据工具。若本次运行的受控提示明确要求因果算法或 Web 证据，

@@ -26,6 +26,9 @@ from .fault_tolerance import (
 from .analysis_context import (
     MAX_CONTEXT_QUESTION_CHARS,
     build_context_index,
+    build_report_analysis_context,
+    report_primary_result,
+    report_data_metadata,
     context_algorithm_summary,
     context_facts_text,
     context_graph,
@@ -871,8 +874,10 @@ from Agent.Report.assets import (
 from Agent.Report.document import (
     ChartAsset,
     ReportDraft,
+    ReportSchemaError,
     ReportDocument,
     build_report_document,
+    iter_report_blocks,
     report_document_summary,
 )
 
@@ -1167,7 +1172,7 @@ async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
 
             # 你的任务:
             1.  **开篇总结**: 简要说明数据集的规模（行数和列数）。
-            2.  **目标变量和处理变量的摘录**: 对输入数据中的“target”和“treatment”进行摘取，并告知用户目前处理的变量是这两个变量。
+            2.  **目标变量和处理变量的摘录**: 仅在已提供时摘录“target”和“treatment”；未指定时说明本次进行结构发现，不补造变量或阻断分析。
             3.  **风险提示**: 提及数据中存在的潜在问题，例如高缺失值列、常数列、高基数分类变量或疑似ID列。
             4.  **结论**: 给出一个总体评价，说明数据是否已准备好进行下一步的因果分析。
             5.  **线性/非线性说明**: 根据 `nonlinearity` 字段说明是否检出非线性及统计强度，不能据此断言真实机制；`verdict` 为 `linear` 只表示未检出显著非线性结构，不等于确定线性；`verdict` 为 `insufficient` 时说明本次未能评估。
@@ -1915,41 +1920,9 @@ async def postprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
 
 ## 调用元数据
 def _causal_method_context_for_report(analysis_result: Dict[str, Any]) -> str:
-    """为报告节点生成算法专用解释边界。"""
-    if not isinstance(analysis_result, dict):
-        return "No structured causal analysis result is available."
-
-    algorithm = str(analysis_result.get("algorithm", "")).strip().lower()
-    if algorithm != "direct_lingam":
-        return "No additional algorithm-specific reporting guidance is required."
-
-    implementation = analysis_result.get("implementation", {})
-    parameters = analysis_result.get("parameters", {})
-    raw_results = analysis_result.get("raw_results", {})
-    diagnostics = analysis_result.get("diagnostics", {})
-    causal_order_names = raw_results.get("causal_order_names", [])
-    causal_order_text = (
-        " -> ".join(str(name) for name in causal_order_names)
-        if isinstance(causal_order_names, list) and causal_order_names
-        else "not available"
-    )
-
-    return (
-        "DirectLiNGAM reporting guidance:\n"
-        f"- Implementation: causal-learn {implementation.get('version', 'unknown')} "
-        f"with embedded LiNGAM {implementation.get('embedded_version', 'unknown')}.\n"
-        f"- Parameters: measure={parameters.get('measure', 'unknown')}.\n"
-        f"- Samples/features: n_samples={diagnostics.get('n_samples', 'unknown')}, "
-        f"n_features={diagnostics.get('n_features', 'unknown')}.\n"
-        f"- Matrix convention: {analysis_result.get('matrix_convention', 'target_to_source')}; "
-        "B[target, source] means source -> target.\n"
-        f"- Estimated causal order: {causal_order_text}.\n"
-        "- Required assumptions: continuous numeric variables, linear structural equation model, "
-        "non-Gaussian and mutually independent errors, acyclic causal graph, and no unmodeled "
-        "latent confounders among the observed variables.\n"
-        "- Interpretation rule: weighted directed edges are candidate causal relations under these "
-        "assumptions, not experimentally verified causal facts."
-    )
+    """读取执行时的方法快照，不根据工具名推断算法或套用其他方法的假设。"""
+    return _prompt_json([{key: result.get(key) for key in ("algorithm", "method", "implementation", "data_view")}
+                         for result in analysis_result.get("results", [])])
 
 
 def _report_language_instruction() -> str:
@@ -1977,39 +1950,16 @@ def _report_revision_instruction(regeneration: bool) -> str:
 
 
 def _report_graph_asset(state: CausalAgentState):
-    """选择报告使用的因果图资源：优先采用通过校验的修订图，否则回退原始算法图。"""
-    analysis_result = state.get("causal_analysis_result")
-    if not isinstance(analysis_result, dict) or not analysis_result.get("success"):
-        # 报告修订只使用当前分析上下文里已经确认的规范化图。
-        context = _current_context(state)
-        graph_data = context_graph(context)
-        if graph_data is None:
-            return None
-        summary = context_algorithm_summary(context) or {}
-        return build_causal_graph_model(
-            graph_data,
-            graph_id=REPORT_GRAPH_ASSET_KEY,
-            algorithm=str(summary.get("algorithm") or ""),
-            graph_source="analysis_context",
-        )
-    postprocess_result = state.get("postprocess_result") or {}
-    revised_graph = postprocess_result.get("revised_graph")
-    has_valid_revised_graph = (
-        isinstance(revised_graph, dict)
-        and isinstance(revised_graph.get("nodes"), list)
-        and isinstance(revised_graph.get("edges"), list)
-        and not postprocess_result.get("error")
-    )
-    selected_graph = (
-        revised_graph if has_valid_revised_graph else analysis_result.get("data")
-    )
-    algorithm = analysis_result.get("algorithm")
+    """仅展示本次（或对应保存快照）经门禁选择的唯一主图。"""
+    primary = report_primary_result(build_report_analysis_context(state))
+    if primary is None or not primary.get("graph"):
+        return None
+    selected_graph = dict(primary["graph"], graph_semantics=primary.get("graph_semantics"))
     return build_causal_graph_model(
         selected_graph,
         graph_id=REPORT_GRAPH_ASSET_KEY,
-        algorithm=str(algorithm) if algorithm else "",
-        graph_source="postprocessed" if has_valid_revised_graph else "original",
-        revision_summary=str(postprocess_result.get("revision_summary") or ""),
+        algorithm=str(primary.get("algorithm") or ""),
+        graph_source="analysis_context" if state.get("report_revision_mode") == "full_regeneration_from_context" else "original",
     )
 
 
@@ -2023,24 +1973,6 @@ def _prompt_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2)
 
 
-_REPORT_METADATA_COLUMN_FIELDS = (
-    "inferred_type",
-    "unique_count",
-    "is_constant",
-    "missing_ratio",
-    "causal_suitability",
-    "possible_id",
-    "stats",
-    "issues",
-)
-
-_REPORT_METADATA_QUALITY_FIELDS = (
-    "total_missing_ratio",
-    "constant_columns",
-    "high_missing_columns",
-)
-
-
 def _report_metadata_for_prompt(analysis_parameters: Any) -> str:
     """给报告模型的数据概览：规模、列清单和每列的类型与质量标记。
 
@@ -2048,39 +1980,7 @@ def _report_metadata_for_prompt(analysis_parameters: Any) -> str:
     增长而不是随每列的取值数量增长。
     """
 
-    params = analysis_parameters if isinstance(analysis_parameters, dict) else {}
-    column_profiles = params.get("column_profiles")
-    columns = [str(column) for column in (params.get("columns") or [])]
-    if not columns and isinstance(column_profiles, dict):
-        columns = [str(column) for column in column_profiles]
-
-    profiles: dict[str, dict] = {}
-    if isinstance(column_profiles, dict):
-        for column, profile in column_profiles.items():
-            if not isinstance(profile, dict):
-                continue
-            profiles[str(column)] = {
-                field: profile[field]
-                for field in _REPORT_METADATA_COLUMN_FIELDS
-                if field in profile
-            }
-
-    quality = params.get("quality_assessment")
-    quality_summary: dict[str, Any] = {}
-    if isinstance(quality, dict):
-        quality_summary = {
-            field: quality[field]
-            for field in _REPORT_METADATA_QUALITY_FIELDS
-            if field in quality
-        }
-
-    return _prompt_json({
-        "n_rows": params.get("n_rows"),
-        "n_cols": params.get("n_cols", len(columns) or None),
-        "columns": columns,
-        "column_profiles": profiles,
-        "quality_assessment": quality_summary,
-    })
+    return _prompt_json(report_data_metadata(analysis_parameters))
 
 
 def _report_asset_manifest(assets: dict[str, Any]) -> list[dict[str, str]]:
@@ -2125,36 +2025,27 @@ def _report_document_from_state(state: CausalAgentState):
 def _report_execution_summary(state: CausalAgentState) -> dict[str, Any]:
     """按真实结果公开数据视图差异、算法状态和报告完整性事实。"""
 
-    from Agent.deep_agent_tools.models import AlgorithmResult
-
-    raw_results = state.get("deep_agent_algorithm_results")
-    results = raw_results.values() if isinstance(raw_results, dict) else ()
+    facts = build_report_analysis_context(state)
     algorithms: list[dict[str, Any]] = []
-    views: set[tuple[str, ...]] = set()
-    for raw in results:
-        try:
-            result = AlgorithmResult.model_validate(raw)
-        except Exception:
-            continue
-        view = result.data_view
-        if view is not None:
-            views.add(view.columns)
+    for result in facts.get("results", []):
+        view = result.get("data_view") or {}
         algorithms.append(
             {
-                "capability_id": result.capability_id,
-                "status": result.status,
-                "sample_count": view.row_count if view is not None else None,
-                "variable_count": view.column_count if view is not None else None,
-                "operations": list(view.operations) if view is not None else [],
+                "capability_id": result["algorithm"],
+                "public_name": (result.get("method") or {}).get("public_name"),
+                "status": result["status"], "disposition": result.get("disposition"),
+                "sample_count": view.get("row_count"),
+                "variable_count": view.get("column_count"),
+                "operations": view.get("operations", []),
             }
         )
-    decision = state.get("deep_agent_decision")
+    decision = facts.get("decision") or {}
     return {
-        "analysis_outcome": getattr(decision, "outcome", None),
+        "analysis_outcome": decision.get("outcome"),
         "report_completeness": "complete",
-        "finalization_status": state.get("finalization_status"),
+        "finalization_status": facts.get("finalization_status"),
         "algorithms": algorithms,
-        "data_views_differ": len(views) > 1,
+        "data_views_differ": (facts.get("data_view_comparison") or {}).get("data_views_differ"),
     }
 
 
@@ -2200,6 +2091,8 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
     图表资源、因果图模型、来源和证据全部由后端注入并校验。资源引用、块 ID 或
     证据引用非法时抛出 ReportSchemaError，进入图节点受控错误路径，不保存部分报告。
     """
+    facts = build_report_analysis_context(state)
+    decision = facts.get("decision") or {}
     chart_assets = coerce_chart_assets(state.get("chart_assets"))
     assets: dict[str, Any] = dict(chart_assets)
     graph_asset = _report_graph_asset(state)
@@ -2208,12 +2101,21 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
 
     regeneration = state.get("report_revision_mode") == "full_regeneration_from_context"
     context = _current_context(state)
+    rag_evidence = state.get("deep_agent_rag_evidence")
+    web_evidence = state.get("deep_agent_web_evidence")
+    file_summary = state.get("file_summary")
+    if regeneration:
+        rag_evidence = {item["evidence_ref"]: item for item in ((context or {}).get("latest_rag_evidence") or [])}
+        web_evidence = {item["evidence_ref"]: item for item in ((context or {}).get("latest_web_evidence") or [])}
+        file_summary = {"filename": (context or {}).get("filename"),
+                        "rows": facts.get("data_metadata", {}).get("n_rows"),
+                        "columns": facts.get("data_metadata", {}).get("columns", [])}
 
     resources = build_report_resources(
-        file_summary=state.get("file_summary"),
-        web_search_result=state.get("web_search_result"),
-        rag_evidence=state.get("deep_agent_rag_evidence"),
-        web_evidence=state.get("deep_agent_web_evidence"),
+        file_summary=file_summary,
+        web_search_result=None if regeneration else state.get("web_search_result"),
+        rag_evidence=rag_evidence,
+        web_evidence=web_evidence,
     )
 
     system_prompt_template = """
@@ -2235,11 +2137,20 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         {revision_instruction}
 
         ## 因果分析结果解读规则
-        - 如果因果分析结果包含 error_type，请明确说明算法未能产生有效因果图，不要声称“没有因果关系”。
-        - 如果因果分析结果包含 fallback_from 和 fallback_reason，请说明原算法不适用并已改用 fallback_tool 的结果。
-        - 只有当算法 success 为 true 且边列表为空时，才可以表述为“未发现显著因果边/因果关系”。
-        - 如果算法解释补充中出现 DirectLiNGAM，请明确说明线性、非高斯、误差独立、DAG 和无潜在混杂假设。
-        - DirectLiNGAM 的带权边只能解释为模型假设下的候选因果关系，不得写成实验已验证事实。
+        - 以统一分析事实中的方法快照、执行状态、输入视图和已通过门禁的选择为准。不得根据名称猜测方法，不得把一种方法的假设套用到另一种方法。
+        - 明确说明主结果是谁、selection_rationale、辅助与舍弃结果及其理由、conflicts 和 confidence_basis；没有主结果时说明 no_primary_reason，不能声称不存在因果关系。
+        - 所有图边都是本次方法约束下的候选结构。双箭头表示潜在共同原因候选，未证实共同原因；无向边的方向尚未识别。
+        - 边数只读取各结果的 edge_counts，不自行计数；directed、undirected、bidirected 分别计数，双箭头只算一条边。文字中的边数与逐边清单必须一致。
+        - 按 data_view_comparison 说明实际行数、列和处理差异；骨架接近不等于因果方向得到验证，算法结果没有自动合并。
+        - 逐边比较以 graph_comparisons 的实际端点、边型和 relation 为准。opposite_direction 才是方向相反；left_only/right_only 是仅一方存在，不能写成反向。
+        - 比较中的左右身份固定由 left_algorithm/right_algorithm 指定，不能自行将主结果叫作左侧。各类关系数量只读取 relation_counts，不自行重数清单。
+        - decision.conflicts 和取舍理由是模型评估文本，不是另一份图。若其中的边引用与 graph_comparisons 不符，明确说明该表述无法由边表支持，使用实际比较结果解释，不复述错误方向。
+        - 区分 checks_performed、assumptions_checked 和 not_checked。结构检查通过不证明统计假设、识别条件或方向正确。
+        - 整数不等于计数，低基数不等于业务类别；CSV 推断不是用户确认，测量语义未知时保持未知。
+        - 标题、章节名和结论也遵守测量语义边界：只有 user_description 且 user_stated 的语义可以当作用户陈述；未知列不能仅凭文件名或变量名命名为计数、告警次数等业务量。
+        - 统计检验限制须依据实际检验方法说明，不把离散列联表的格子频数要求套用于 Fisher-Z；没有执行的适用性诊断只列为未检验事项。
+        - PC 算法的一般性质与本次 independence_test 的条件分别解释；若使用 Fisher-Z，不能声称本次检验不受线性或分布条件限制。
+        - 没有可引用的知识库或联网证据时只说明缺少证据；除非存在明确失败状态，不得将未执行、未启用或不可用猜测为检索失败。
 
         ## 报告文档结构
         你必须返回一个 JSON 对象，只包含 title 和 blocks 两个字段：
@@ -2257,6 +2168,7 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         - markdown 块的 evidence_refs 只能引用下面“可用证据”列出的证据 ID；没有可用证据时请留空数组。
         - 块 id 在整篇报告中必须唯一，使用稳定的英文或拼音短名。
         - 不要重新计算或编造数据，图表数据由系统根据真实数据注入。
+        - 有 graph_main 资源时必须且只能使用一次 causal_graph 块；没有该资源时不得生成因果图块。
 
         ## 可用资源
         {asset_manifest}
@@ -2303,22 +2215,20 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         schema=ReportDraft,
         prompt=prompt,
         inputs={
-            "messages": llm_prompt_messages(state["messages"]),
-            "preprocess_meta_data": _report_metadata_for_prompt(
-                state.get("analysis_parameters")
-            ),
-            "preprocess_summary": state.get("preprocess_summary", {}),
-            "causal_analysis_result": state.get("causal_analysis_result", {}),
+            "messages": [message for message in state.get("messages", []) if isinstance(message, HumanMessage)][-1:],
+            "preprocess_meta_data": _prompt_json(facts.get("data_metadata", {})),
+            "preprocess_summary": "见数据概览和统计检查。",
+            "causal_analysis_result": _prompt_json(facts),
             "knowledge_base_result": knowledge_summary,
             "web_search_result": web_summary,
-            "postprocess_result": state.get("postprocess_result", {}),
+            "postprocess_result": "主图来自通过门禁的原始算法结果；修订建议不替换图。",
             "method_context": _causal_method_context_for_report(
-                state.get("causal_analysis_result", {})
+                facts
             ),
             "report_language": _report_language_instruction(),
             "system_role": causal_report_prompt(),
             "analysis_context_facts": (
-                context_facts_text(context) if context else "当前没有已保存的分析上下文。"
+                "本次报告只使用上面的统一分析事实，不能从历史报告补充结果。"
             ),
             "revision_instruction": _report_revision_instruction(regeneration),
             "asset_manifest": _prompt_json(_report_asset_manifest(assets)),
@@ -2334,20 +2244,17 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         assets=assets,
         sources=resources.sources,
         evidence_refs=resources.evidence_refs,
-        analysis_outcome=getattr(
-            state.get("deep_agent_decision"),
-            "outcome",
-            None,
-        ),
-        finalization_status=state.get("finalization_status"),
+        analysis_outcome=decision.get("outcome"),
+        finalization_status=facts.get("finalization_status"),
         report_mode=(
             "diagnostic"
-            if getattr(state.get("deep_agent_decision"), "outcome", None)
-            == "no_valid_algorithm"
+            if not facts.get("primary_result_ref")
             else "analysis"
         ),
         execution_summary=_report_execution_summary(state),
     )
+    if graph_asset is not None and not any(block.type == "causal_graph" for block in iter_report_blocks(document.blocks)):
+        raise ReportSchemaError("已选主结果的报告必须展示主图")
 
     return {
         "report_document": document,

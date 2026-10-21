@@ -321,6 +321,7 @@ def test_build_context_commit_projects_primary_result_evidence_and_report_id():
         "analysis_context": {"analysis_context_id": "ctx-1"},
         "analysis_parameters": {"target": "sales", "treatment": "promotion"},
         "deep_agent_algorithm_results": {"invocation-1:0": _result()},
+        "finalization_status": "valid",
         "deep_agent_decision": FinalAnalysisDecision(
             outcome="algorithm_supported",
             primary_result_ref="invocation-1:0",
@@ -368,7 +369,9 @@ def test_build_context_commit_skips_ambiguous_valid_results():
         "deep_agent_decision": None,
     }
 
-    assert build_context_commit(state) is None
+    saved = build_context_commit(state)["algorithm_summary"]
+    assert saved["status"] == "no_primary" and saved["graph"] is None
+    assert len(saved["analysis_facts"]["results"]) == 2
 
 
 def test_frozen_input_refresh_updates_mcp_context_and_identity():

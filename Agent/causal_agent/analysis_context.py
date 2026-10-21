@@ -11,10 +11,14 @@ Database/analysis_contexts.py，路由由 agent 节点根据后端解析结果�
 from __future__ import annotations
 
 import re
+import copy
+import json
 from collections.abc import Mapping, Sequence
+from itertools import combinations
 from typing import Any
 
-from Agent.deep_agent_tools.models import AlgorithmResult, EvidenceResult
+from Agent.deep_agent_tools.models import AlgorithmResult, EvidenceResult, FinalAnalysisDecision, StandardizedGraph
+from Agent.deep_agent_tools.graph_validation import validate_graph_structure
 
 
 MAX_ALGORITHM_SUMMARY_CHARS = 800
@@ -327,6 +331,17 @@ def context_facts_text(context: Mapping[str, Any] | None) -> str:
             lines.append(f"算法结论：{_text(summary['summary'])}")
         if summary.get("graph_semantics"):
             lines.append(f"图方向语义：{_text(summary['graph_semantics'])}")
+        facts = summary.get("analysis_facts")
+        if isinstance(facts, Mapping):
+            decision = facts.get("decision") or {}
+            lines.append("结果选择依据：" + _text(decision.get("selection_rationale") or facts.get("no_primary_reason")))
+            lines.append("置信依据：" + "；".join(decision.get("confidence_basis") or []))
+            for result in facts.get("results", []):
+                method = result.get("method") or {}
+                lines.append(f"方法：{method.get('public_name') or result.get('algorithm')}；契约版本：{result.get('capability_version')}；"
+                             f"处理：{result.get('disposition')}；依据：{result.get('assessment_rationale')}")
+            if decision.get("conflicts"):
+                lines.append("结果冲突：" + "；".join(item["summary"] for item in decision["conflicts"]))
         graph = summary.get("graph")
         if isinstance(graph, Mapping) and isinstance(graph.get("edges"), list):
             edges = [
@@ -371,7 +386,7 @@ def graph_edge_text(edge: Mapping[str, Any]) -> str:
 def _primary_algorithm_summary(state: Mapping[str, Any]) -> dict[str, Any] | None:
     """挑选本次执行的主算法结果并压成结构化事实。"""
     raw_results = state.get("deep_agent_algorithm_results")
-    if not isinstance(raw_results, Mapping) or not raw_results:
+    if state.get("finalization_status") != "valid" or not isinstance(raw_results, Mapping) or not raw_results:
         return None
     results: dict[str, AlgorithmResult] = {}
     for key, raw in raw_results.items():
@@ -388,16 +403,192 @@ def _primary_algorithm_summary(state: Mapping[str, Any]) -> dict[str, Any] | Non
     if not primary_ref and isinstance(decision, Mapping):
         primary_ref = decision.get("primary_result_ref")
     selected = results.get(str(primary_ref)) if primary_ref else None
-    if selected is None:
-        valid = [result for result in results.values() if result.status == "valid"]
-        selected = valid[0] if len(valid) == 1 else None
-    if selected is None:
+    if selected is None or selected.status != "valid":
         return None
     parameters = state.get("analysis_parameters")
     return normalize_algorithm_summary(
         selected,
         parameters=parameters if isinstance(parameters, Mapping) else None,
     )
+
+
+_REPORT_PROFILE_FIELDS = (
+    "storage_type", "inferred_type", "missing_count", "missing_ratio", "unique_count",
+    "is_constant", "statistical_features", "measurement_semantics", "stats", "issues",
+)
+_REPORT_METRICS = frozenset({
+    "n_samples", "n_features", "missing_values", "runtime_sec", "threshold",
+    "standardize", "missing_handling", "independence_test", "alpha",
+})
+
+
+def report_data_metadata(parameters: Any) -> dict[str, Any]:
+    """报告所需的数据概览；不带原始取值、CSV、文件身份或控制字段。"""
+    params = parameters if isinstance(parameters, Mapping) else {}
+    profiles = params.get("column_profiles") or {}
+    profiles = profiles if isinstance(profiles, Mapping) else {}
+    return {
+        "n_rows": params.get("n_rows"), "n_cols": params.get("n_cols"),
+        "columns": list(params.get("columns") or profiles.keys()),
+        "column_profiles": {str(column): {key: copy.deepcopy(profile[key]) for key in _REPORT_PROFILE_FIELDS if key in profile}
+                            for column, profile in profiles.items() if isinstance(profile, Mapping)},
+        "profile_thresholds": copy.deepcopy(params.get("profile_thresholds") or {}),
+        "quality_assessment": {key: copy.deepcopy(value) for key, value in (params.get("quality_assessment") or {}).items()
+                               if key in {"total_missing_ratio", "constant_columns", "high_missing_columns"}},
+        "nonlinearity": copy.deepcopy(params.get("nonlinearity")),
+    }
+
+
+def _report_result(result: AlgorithmResult, parameters: Any) -> dict[str, Any]:
+    summary = normalize_algorithm_summary(result, parameters=parameters)
+    graph = summary.get("graph")
+    if graph is not None:
+        edges = graph["edges"]
+        summary["edge_counts"] = {
+            "total": len(edges),
+            **{kind: sum(edge["edge_type"] == kind for edge in edges)
+               for kind in ("directed", "undirected", "bidirected", "partially_directed")},
+        }
+    else:
+        summary["edge_counts"] = None
+    for key in ("input_identity", "provenance"):
+        summary.pop(key, None)
+    summary["diagnostics"]["metrics"] = {
+        key: value for key, value in summary["diagnostics"]["metrics"].items() if key in _REPORT_METRICS
+    }
+    return summary
+
+
+def _data_view_comparison(results: list[dict[str, Any]]) -> dict[str, Any]:
+    views = [result.get("data_view") for result in results]
+    missing = [result["result_ref"] for result, view in zip(results, views) if not view]
+    distinct = {json.dumps(view, ensure_ascii=False, sort_keys=True) for view in views if view}
+    runner_processing = {result["result_ref"]: {key: value for key, value in result.get("diagnostics", {}).get("metrics", {}).items()
+                         if key in {"standardize", "missing_handling"}} for result in results}
+    return {
+        "status": "insufficient" if missing else "different" if len(distinct) > 1 else "same",
+        "data_views_differ": None if missing else len(distinct) > 1,
+        "compared_fields": ["row_count", "column_count", "columns", "operations", "plan_digest",
+                            "dropped_row_count", "imputed_columns", "encoded_columns"],
+        "missing_result_refs": missing,
+        "runner_processing": runner_processing,
+        "comparison_boundary": "data_view 比较送入 runner 的数据；runner 内部标准化与缺失处理另列，不声称内部计算相同。",
+    }
+
+
+def _graph_comparisons(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """逐变量对比较实际边，不把缺边误记为反向，不合并图或裁定真实方向。"""
+    def group_edges(graph: Mapping[str, Any]) -> dict[tuple[str, str], list[tuple[str, str, str]]]:
+        grouped: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
+        for edge in graph["edges"]:
+            source, target, kind = edge["source"], edge["target"], edge["edge_type"]
+            pair = tuple(sorted((source, target)))
+            if kind in {"undirected", "bidirected"}:
+                source, target = pair
+            grouped.setdefault(pair, []).append((kind, source, target))
+        return {pair: sorted(edges) for pair, edges in grouped.items()}
+
+    comparisons = []
+    valid = [result for result in results if result["status"] == "valid" and result.get("graph")]
+    for left, right in combinations(valid, 2):
+        left_pairs, right_pairs = group_edges(left["graph"]), group_edges(right["graph"])
+        pairs = []
+        for variables in sorted(left_pairs.keys() | right_pairs.keys()):
+            first, second = left_pairs.get(variables, []), right_pairs.get(variables, [])
+            if first == second:
+                relation = "same"
+            elif not first:
+                relation = "right_only"
+            elif not second:
+                relation = "left_only"
+            elif len(first) == len(second) == 1 and first[0][0] == second[0][0] == "directed":
+                relation = "opposite_direction"
+            else:
+                relation = "edge_type_difference"
+            pairs.append({"variables": list(variables), "relation": relation,
+                "left_edges": [{"edge_type": kind, "source": source, "target": target} for kind, source, target in first],
+                "right_edges": [{"edge_type": kind, "source": source, "target": target} for kind, source, target in second]})
+        comparisons.append({"left_result_ref": left["result_ref"], "right_result_ref": right["result_ref"],
+            "left_algorithm": left["algorithm"], "right_algorithm": right["algorithm"],
+            "relation_counts": {kind: sum(pair["relation"] == kind for pair in pairs)
+                for kind in ("same", "opposite_direction", "edge_type_difference", "left_only", "right_only")},
+            "pairs": pairs, "comparison_boundary": "仅比较本次候选边；未合并结果，不验证真实方向或方法假设。"})
+    return comparisons
+
+
+def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
+    """完整 State 到报告事实的唯一安全投影；重新生成只读取对应保存快照。"""
+    if state.get("report_revision_mode") == "full_regeneration_from_context":
+        stored = context_algorithm_summary(state.get("analysis_context")) or {}
+        facts = stored.get("analysis_facts")
+        if isinstance(facts, Mapping) and facts.get("schema_version") == "analysis-facts-v1":
+            return copy.deepcopy(dict(facts))
+        return {"schema_version": "analysis-facts-v1", "finalization_status": "not_recorded",
+                "primary_result_ref": None, "results": [], "decision": None,
+                "no_primary_reason": "本分析未保存完整选择依据，无法据此重建主图。", "data_metadata": {}}
+
+    params = state.get("analysis_parameters") or {}
+    raw_results = state.get("deep_agent_algorithm_results") or {}
+    raw_results = raw_results if isinstance(raw_results, Mapping) else {}
+    results: list[dict[str, Any]] = []
+    for ref, raw in raw_results.items():
+        try:
+            result = AlgorithmResult.model_validate(raw)
+        except (TypeError, ValueError):
+            continue
+        if ref == result.result_ref:
+            results.append(_report_result(result, params))
+    decision = None
+    raw_decision = state.get("deep_agent_decision")
+    if state.get("finalization_status") == "valid" and raw_decision is not None:
+        try:
+            decision = FinalAnalysisDecision.model_validate(raw_decision).model_dump(mode="json")
+        except (TypeError, ValueError):
+            pass
+    assessments = {item["result_ref"]: item for item in decision["result_assessments"]} if decision else {}
+    for result in results:
+        assessment = assessments.get(result["result_ref"])
+        result["disposition"] = assessment["disposition"] if assessment else ("discarded" if result["status"] != "valid" else "unassessed")
+        result["assessment_rationale"] = assessment["rationale"] if assessment else "最终决策没有采纳该结果，或尚未提供取舍说明。"
+    primary_ref = decision["primary_result_ref"] if decision else None
+    primary = next((result for result in results if result["result_ref"] == primary_ref and result["status"] == "valid"), None)
+    if primary is not None:
+        graph = primary.get("graph")
+        method = primary.get("method")
+        if not isinstance(graph, Mapping) or not isinstance(method, Mapping):
+            primary = None
+        else:
+            validated = validate_graph_structure(StandardizedGraph(
+                graph_semantics=primary["graph_semantics"], **graph), graph_semantics=method["graph_semantics"])
+            if not validated.valid:
+                primary = None
+    return {
+        "schema_version": "analysis-facts-v1", "finalization_status": state.get("finalization_status") or "not_recorded",
+        "primary_result_ref": primary_ref if primary is not None else None,
+        "no_primary_reason": None if primary is not None else (
+            "所选结果缺少本次方法定义或未满足图约束，不能用于主图。" if primary_ref else
+            decision["selection_rationale"] if decision else "本次没有通过门禁的主结果选择，不能展示任意结果或复用旧图。"),
+        "decision": decision, "results": results,
+        "graph_comparisons": _graph_comparisons(results),
+        "data_view_comparison": _data_view_comparison(results),
+        "data_metadata": report_data_metadata(params),
+    }
+
+
+def report_primary_result(facts: Mapping[str, Any]) -> dict[str, Any] | None:
+    primary = facts.get("primary_result_ref")
+    if not primary or facts.get("finalization_status") != "valid":
+        return None
+    selected = next((result for result in facts.get("results", [])
+                     if result.get("result_ref") == primary and result.get("status") == "valid"), None)
+    if selected is None or not selected.get("method") or not selected.get("graph"):
+        return None
+    try:
+        graph = StandardizedGraph(graph_semantics=selected["graph_semantics"], **selected["graph"])
+        validation = validate_graph_structure(graph, graph_semantics=selected["method"]["graph_semantics"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return selected if validation.valid else None
 
 
 def _report_id_from_state(state: Mapping[str, Any]) -> str | None:
@@ -413,14 +604,23 @@ def _report_id_from_state(state: Mapping[str, Any]) -> str | None:
 def build_context_commit(state: Mapping[str, Any]) -> dict[str, Any] | None:
     """从最终父图 State 生成要写回分析上下文的已确认事实。
 
-    只包含主算法结果、RAG/Web 证据摘要和报告 ID；没有可写事实时返回 None。
+    包含主结果及各算法的精简分析事实、RAG/Web 证据摘要和报告 ID；没有可写事实时返回 None。
     该结果由 worker 作为内部字段传递，不进入公共事件或 checkpoint。
     """
     context = state.get("analysis_context")
     context_id = (
         context.get("analysis_context_id") if isinstance(context, Mapping) else None
     )
-    algorithm_summary = _primary_algorithm_summary(state)
+    algorithm_summary = None
+    if state.get("report_revision_mode") != "full_regeneration_from_context" and (
+        state.get("deep_agent_algorithm_results") or state.get("finalization_status")
+    ):
+        facts = build_report_analysis_context(state)
+        primary = report_primary_result(facts)
+        algorithm_summary = copy.deepcopy(primary) if primary else {
+            "status": "no_primary", "graph": None, "summary": facts["no_primary_reason"],
+        }
+        algorithm_summary["analysis_facts"] = facts
     rag_evidence = normalize_evidence_items(state.get("deep_agent_rag_evidence"))
     web_evidence = normalize_evidence_items(state.get("deep_agent_web_evidence"))
     report_id = _report_id_from_state(state)

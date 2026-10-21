@@ -351,6 +351,11 @@ def _safe_algorithm_result_summary(result: AlgorithmResult) -> dict[str, Any]:
         "summary": result.summary,
         "diagnostics": result.diagnostics.model_dump(mode="json"),
         "warnings": [warning.model_dump(mode="json") for warning in result.warnings],
+        "method": result.method.model_dump(mode="json") if result.method else None,
+        "implementation": result.implementation.model_dump(mode="json") if result.implementation else None,
+        "data_view": result.data_view.model_dump(mode="json") if result.data_view else None,
+        "graph": result.standardized_graph.model_dump(mode="json") if result.standardized_graph else None,
+        "graph_validation": result.graph_validation.model_dump(mode="json") if result.graph_validation else None,
     }
 
 
@@ -482,6 +487,8 @@ def _legacy_analysis_result(
                 ),
             }
         )
+    if decision is not None:
+        payload["decision"] = decision.model_dump(mode="json")
 
     primary_ref = getattr(decision, "primary_result_ref", None)
     primary = normalized_results.get(primary_ref) if primary_ref else None
@@ -495,6 +502,8 @@ def _legacy_analysis_result(
         payload["success"] = True
         payload["data"] = primary.standardized_graph.model_dump(mode="json")
         payload["primary_result_ref"] = primary.result_ref
+        payload["algorithm"] = primary.capability_id
+        payload["method"] = primary.method.model_dump(mode="json") if primary.method else None
     elif finalization_status == "valid" and getattr(decision, "outcome", None) == "evidence_only":
         payload["message"] = "本次分析未采用算法结果，仅返回证据型信息。"
     elif finalization_status == "valid" and getattr(decision, "outcome", None) == "no_valid_algorithm":
