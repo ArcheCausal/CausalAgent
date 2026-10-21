@@ -51,9 +51,15 @@
 
 密码、令牌和签名密钥统一保存在服务器上的单个密钥文件里，默认路径为 `/etc/causalagent/secrets/causalagent.env`，可以用环境变量 `CAUSALAGENT_SECRET_FILE` 覆盖。服务器发布必须将文件设为 `0640`、属主设为 `root`、属组设为容器专用 GID `3000`。Compose 会把该组加入 MySQL、PostgreSQL、Grafana 和 SearXNG 容器；发布校验检查服务器权限，验收还需确认各容器的实际读取身份可读。单进程本地运行仍可使用 `0600` 或 `0400`。该文件不进入 Git、部署包或镜像。允许出现的键由 `config/secret_file.py` 的 `SECRET_KEYS` 定义，模板见 [`deploy/secrets/causalagent.env.example`](../../deploy/secrets/causalagent.env.example)；未知键、重复键、空值、缺键和权限不安全都会让进程启动失败。
 
-应用容器通过 Compose secret 把该文件只读挂载到 `/run/secrets/causalagent.env`，应用、worker、MCP 和数据库配置由 `config/secret_file.py` 显式读取；加载器清除继承的密钥环境变量，不会把文件值重新写入进程环境。可选 LangSmith 集成会单独导出其 SDK 所需密钥。所有服务仍由 Compose 启动。Compose 负责选择镜像、提供普通环境变量并挂载密钥文件；镜像内的应用负责解释文件内容。项目 Python 服务直接调用密钥加载器；MySQL、PostgreSQL、SearXNG 和 Grafana 的上游入口不认识项目自定义的多键格式，由 `deploy/scripts/secret-env.sh` 只导出对应入口需要的变量，再执行上游入口。MySQL 主从使用基于官方 MySQL 构建的自有镜像，适配入口已写入镜像。离线开发工具 `Agent/knowledge_base/build_knowledge.py` 与 `Agent/knowledge_base/multimodal/cli.py` 可读取本地 `.env`，但不属于 app 或 worker 的生产启动路径。非敏感配置继续使用环境变量或非密钥配置文件。
+所有环境的容器通过 Compose secret 把该文件只读挂载到 `/run/secrets/causalagent.env`。应用、worker、MCP 和数据库配置由 `config/secret_file.py` 显式读取；加载器清除继承的密钥环境变量，不会把文件值重新写入进程环境。可选 LangSmith 集成会单独导出其 SDK 所需密钥。所有服务仍由 Compose 启动。Compose 负责选择镜像、提供普通环境变量并挂载密钥文件；镜像内的应用负责解释文件内容。项目 Python 服务直接调用密钥加载器；MySQL、PostgreSQL、SearXNG 和 Grafana 的上游入口不认识项目自定义的多键格式，由 `deploy/scripts/secret-env.sh` 只导出对应入口需要的变量，再执行上游入口。MySQL 主从使用基于官方 MySQL 构建的自有镜像，适配入口已写入镜像；镜像中的 mysql 用户属于 GID 3000，官方入口降权后仍可读取初始化所需密钥。离线开发工具 `Agent/knowledge_base/build_knowledge.py` 与 `Agent/knowledge_base/multimodal/cli.py` 可读取本地 `.env`，但不属于 app 或 worker 的生产启动路径。非敏感配置继续使用环境变量或非密钥配置文件。
 
 开发 Compose 使用仓库根目录的 `causalagent.env`（已加入 `.gitignore`）作为同一个密钥文件入口；首次启动前把它从 [`deploy/secrets/causalagent.env.example`](../../deploy/secrets/causalagent.env.example) 复制到仓库根目录并按需填写。
+
+开发 `docker-compose.yml` 与兼容入口 `docker-compose.replica.yml` 为所有读取密钥的服务固定设置已有的 `ENVIRONMENT=development`。Python 密钥加载器和官方镜像的 Shell 适配器在该环境下跳过 POSIX 权限位和属主检查，直接读取主机文件，以兼容 Windows Docker Desktop 呈现的挂载权限；文件仍须存在并可读，各入口原有的内容校验继续执行。不增加权限策略开关、密钥准备服务或密钥卷。预发、生产以及未显式设置 development 的 Linux 进程保留现有权限检查，服务器发布校验仍要求 `0640 root:3000`。
+
+开发 Python 服务通过仓库源码挂载读取当前实现；`causal-mcp` 只读挂载 `config/secret_file.py`，因此本地调整密钥读取逻辑后只需重建容器，不需要为了这项修改重新下载镜像中的 CDFM 权重。预发和生产继续使用镜像内代码。
+
+首次启动或代码更新后运行 `docker compose up -d --build`，后续启动运行 `docker compose up -d`。修改密钥文件后运行 `docker compose up -d --force-recreate`，让容器重新挂载并让各进程重新读取；已有数据库密码和 Grafana 账号不会因为修改文件而自动更新。
 
 ## 联网搜索（SearXNG）
 

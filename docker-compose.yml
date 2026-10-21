@@ -14,6 +14,7 @@ services:
       dockerfile: Dockerfile.primary
     container_name: causalagent_mysql_primary
     environment:
+      ENVIRONMENT: development
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_WRITE_USER: ${MYSQL_WRITE_USER:-${MYSQL_USER}}
@@ -43,6 +44,7 @@ services:
     image: postgres:16-alpine
     container_name: causalagent_postgres_checkpoint
     environment:
+      ENVIRONMENT: development
       POSTGRES_DB: ${CHECKPOINT_POSTGRES_DATABASE:-causalagent_checkpoints}
       POSTGRES_USER: ${CHECKPOINT_POSTGRES_USER:-causalagent_checkpoint}
     command:
@@ -73,6 +75,7 @@ services:
       dockerfile: Dockerfile.replica
     container_name: causalagent_mysql_replica
     environment:
+      ENVIRONMENT: development
       MYSQL_REPLICATION_USER: ${MYSQL_REPLICATION_USER:-replica}
     ports:
       - "3308:3306"
@@ -105,6 +108,7 @@ services:
       causalagent_service: "web"
       causalagent_environment: "development"
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=mysql-replica
@@ -206,6 +210,7 @@ services:
       causalagent_environment: "development"
     command: python -m app.agent.worker
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=mysql-replica
@@ -289,12 +294,15 @@ services:
       context: .
       dockerfile: Agent/CausalAgentMCP/Dockerfile
     container_name: causalagent_causal_mcp
+    volumes:
+      - ./config/secret_file.py:/app/config/secret_file.py:ro
     labels:
       causalagent_observability: "true"
       causalagent_service: "mcp"
       causalagent_environment: "development"
     command: python -m Agent.CausalAgentMCP.app
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=
@@ -344,6 +352,7 @@ services:
       causalagent_environment: "development"
     command: python -m Database.bootstrap
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_PORT=3306
@@ -381,6 +390,7 @@ services:
       causalagent_environment: "development"
     command: python -m Database.agent_persistence_cleanup_worker
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=mysql-replica
@@ -432,6 +442,7 @@ services:
       - path: .env
         required: false
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=mysql-replica
@@ -499,6 +510,7 @@ services:
       causalagent_environment: "development"
     command: python -m Database.monitor_worker
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=mysql-replica
@@ -561,6 +573,7 @@ services:
     container_name: causalagent_searxng
     restart: unless-stopped
     environment:
+      - ENVIRONMENT=development
       - SEARXNG_BASE_URL=http://searxng:8080/
     # SearXNG 官方镜像读取 SEARXNG_SECRET 环境变量；开发环境同样从密钥文件导出。
     entrypoint:
@@ -648,6 +661,7 @@ services:
     image: grafana/grafana:13.1.1
     container_name: causalagent_grafana
     environment:
+      ENVIRONMENT: development
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_USERS_DEFAULT_LANGUAGE: zh-Hans

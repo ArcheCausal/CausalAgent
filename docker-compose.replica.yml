@@ -17,6 +17,7 @@ services:
       dockerfile: Dockerfile.primary
     container_name: causalagent_mysql_primary
     environment:
+      ENVIRONMENT: development
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_WRITE_USER: ${MYSQL_WRITE_USER:-${MYSQL_USER}}
@@ -46,6 +47,7 @@ services:
     image: postgres:16-alpine
     container_name: causalagent_postgres_checkpoint
     environment:
+      ENVIRONMENT: development
       POSTGRES_DB: ${CHECKPOINT_POSTGRES_DATABASE:-causalagent_checkpoints}
       POSTGRES_USER: ${CHECKPOINT_POSTGRES_USER:-causalagent_checkpoint}
     ports:
@@ -76,6 +78,7 @@ services:
       dockerfile: Dockerfile.replica
     container_name: causalagent_mysql_replica
     environment:
+      ENVIRONMENT: development
       MYSQL_REPLICATION_USER: ${MYSQL_REPLICATION_USER:-replica}
     ports:
       - "3308:3306"
@@ -104,6 +107,7 @@ services:
     container_name: causalagent_app
     command: ["sh", "-c", "exec gunicorn --bind 0.0.0.0:5001 --workers ${WEB_WORKERS:-1} --threads ${WEB_THREADS:-12} --timeout ${WEB_TIMEOUT:-120} CausalAgent:app"]
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=mysql-replica
@@ -194,6 +198,7 @@ services:
     container_name: causalagent_worker
     command: python -m app.agent.worker
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=mysql-replica
@@ -263,6 +268,7 @@ services:
     container_name: causalagent_db_bootstrap
     command: python -m Database.bootstrap
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_PORT=3306
@@ -296,6 +302,7 @@ services:
     container_name: causalagent_agent_persistence_cleanup
     command: python -m Database.agent_persistence_cleanup_worker
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=mysql-replica
@@ -343,6 +350,7 @@ services:
     container_name: causalagent_monitor
     command: python -m Database.monitor_worker
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=mysql-replica
@@ -403,6 +411,7 @@ services:
       - path: .env
         required: false
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=mysql-replica

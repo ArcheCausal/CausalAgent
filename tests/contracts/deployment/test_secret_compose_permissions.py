@@ -55,6 +55,30 @@ def test_database_secret_readers_join_the_dedicated_secret_group() -> None:
             assert "3000" in {str(group) for group in service.get("group_add", [])}
 
 
+def test_only_development_compose_relaxes_secret_permissions() -> None:
+    for filename in ("docker-compose.yml", "docker-compose.replica.yml"):
+        compose = yaml.safe_load((REPO_ROOT / filename).read_text(encoding="utf-8"))
+        assert "dev-secrets-init" not in compose["services"]
+        assert "dev_secrets" not in compose["volumes"]
+        for service_name, service in compose["services"].items():
+            if not service.get("secrets"):
+                continue
+            environment = service["environment"]
+            if isinstance(environment, list):
+                environment = dict(item.split("=", 1) for item in environment)
+            assert environment["ENVIRONMENT"] == "development", service_name
+            assert service["secrets"] == [
+                {"source": "causalagent_env", "target": "causalagent.env"}
+            ]
+    for filename in ("docker-compose.staging.yml", "docker-compose.prod.yml"):
+        compose = yaml.safe_load((REPO_ROOT / filename).read_text(encoding="utf-8"))
+        for service_name, service in compose["services"].items():
+            environment = service.get("environment", {})
+            if isinstance(environment, list):
+                environment = dict(item.split("=", 1) for item in environment)
+            assert environment.get("ENVIRONMENT") in (None, "staging", "production"), service_name
+
+
 def test_production_compose_is_parsed_with_manifest_generated_images() -> None:
     compose = yaml.safe_load((REPO_ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8"))
     deploy_script = (REPO_ROOT / "scripts/deploy.sh").read_text(encoding="utf-8")

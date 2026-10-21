@@ -69,6 +69,7 @@ def test_development_mcp_is_private_and_worker_waits_for_health() -> None:
     worker = _service_block(compose, "worker")
 
     assert "dockerfile: Agent/CausalAgentMCP/Dockerfile" in mcp
+    assert "./config/secret_file.py:/app/config/secret_file.py:ro" in mcp
     assert "ports:" not in mcp
     assert "healthcheck:" in mcp
     assert "http://127.0.0.1:8080/ready" in mcp
@@ -90,6 +91,7 @@ def test_staging_and_production_mcp_keep_private_image_boundary() -> None:
     assert "STAGING_MCP_IMAGE" in staging_mcp
     assert "CAUSAL_MCP_IMAGE" in production_mcp
     for block in (staging_mcp, production_mcp):
+        assert "./config/secret_file.py:" not in block
         assert "ports:" not in block
         assert "healthcheck:" in block
         assert "http://127.0.0.1:8080/ready" in block

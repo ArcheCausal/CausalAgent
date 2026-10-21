@@ -39,6 +39,12 @@ require_secret_file_permissions() {
         echo "secret file not found: $SECRET_FILE" >&2
         return 1
     fi
+    # 开发 Compose 直接挂载 Windows 文件，不以其映射出的 POSIX 权限位拒绝启动。
+    if [ "${ENVIRONMENT:-}" = "development" ]; then
+        if [ -r "$SECRET_FILE" ]; then return 0; fi
+        echo "secret file is unreadable: $SECRET_FILE" >&2
+        return 1
+    fi
     metadata="$(stat -c '%a:%u:%g' "$SECRET_FILE" 2>/dev/null || stat -f '%Lp:%u:%g' "$SECRET_FILE")"
     mode="${metadata%%:*}"
     owner_and_group="${metadata#*:}"

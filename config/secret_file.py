@@ -85,8 +85,8 @@ def resolve_secret_file_path() -> Path:
 
 
 def _check_file_permissions(path: Path) -> None:
-    """限制 POSIX 权限模式；部署脚本会把 0640 限定给 root:3000。"""
-    if os.name == "nt":
+    """开发环境兼容主机挂载；其他环境保留 POSIX 权限检查。"""
+    if os.name == "nt" or os.environ.get("ENVIRONMENT") == "development":
         return
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode not in _ALLOWED_FILE_MODES:
