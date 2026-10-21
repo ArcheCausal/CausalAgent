@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 import hashlib
 import json
@@ -136,6 +137,19 @@ _ERROR_NAME_RULES: tuple[tuple[tuple[str, ...], str, str], ...] = (
         "server_error",
     ),
 )
+_MAX_FAILURE_CHAIN_NODES = 32
+_STRUCTURED_CAUSE_RULES = {
+    "timeout": (ERROR_CATEGORY_PROVIDER, "timeout"),
+    "connection_error": (ERROR_CATEGORY_PROVIDER, "connection_unavailable"),
+    "rate_limited": (ERROR_CATEGORY_PROVIDER, "rate_limited"),
+    "request_rejected": (ERROR_CATEGORY_PROVIDER, "request_rejected"),
+    "provider_error": (ERROR_CATEGORY_PROVIDER, "server_error"),
+    "tool_call_invalid": (ERROR_CATEGORY_PROTOCOL, "tool_call_invalid"),
+    "schema_invalid": (ERROR_CATEGORY_PROTOCOL, "schema_invalid"),
+    "json_invalid": (ERROR_CATEGORY_PROTOCOL, "json_invalid"),
+    "output_parser_error": (ERROR_CATEGORY_PROTOCOL, "output_parser_error"),
+    "truncated": (ERROR_CATEGORY_PROTOCOL, "truncated"),
+}
 
 
 @dataclass(frozen=True)
@@ -163,20 +177,52 @@ def _safe_exc_info(error: Any) -> tuple[type[BaseException], BaseException, Any]
     return type(error), error, error.__traceback__
 
 
+def _failure_chain(error: Any) -> Iterator[Any]:
+    """按包装对象、显式原因、未被抑制的上下文遍历，限制对象数并防环。"""
+    pending = [error]
+    seen: set[int] = set()
+    while pending and len(seen) < _MAX_FAILURE_CHAIN_NODES:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        cause = getattr(current, "__cause__", None)
+        context = (
+            getattr(current, "__context__", None)
+            if cause is None and not getattr(current, "__suppress_context__", False)
+            else None
+        )
+        # 栈逆序入列，让 LangGraph 的 error 对象优先于通用异常链。
+        for candidate in (context, cause, getattr(current, "error", None)):
+            if isinstance(candidate, BaseException) and id(candidate) not in seen:
+                pending.append(candidate)
+
+
 def classify_graph_failure(error: Any) -> FailureDiagnostic:
     """把 graph 终态异常映射为稳定故障域与原因码，不读取异常文本。
 
-    只按异常类名（含基类）归类，因此不会把连接串、路径或用户数据带进分类结果。
+    有界检查包装异常及原因链的类名（含基类）和白名单原因码，保留外层 exc_info。
     未识别的异常保持既有的 ``node_error`` 语义。
     """
-    names = _exception_class_names(error)
-    for tokens, error_category, reason_code in _ERROR_NAME_RULES:
-        if any(token in names for token in tokens):
-            return FailureDiagnostic(error_category, reason_code, _safe_exc_info(error))
+    exc_info = _safe_exc_info(error)
+    for candidate in _failure_chain(error):
+        names = _exception_class_names(candidate)
+        for tokens, error_category, reason_code in _ERROR_NAME_RULES:
+            if any(token in names for token in tokens):
+                return FailureDiagnostic(error_category, reason_code, exc_info)
+        cause_code = getattr(candidate, "safe_cause_code", None)
+        classification = (
+            _STRUCTURED_CAUSE_RULES.get(cause_code)
+            if isinstance(candidate, BaseException) and isinstance(cause_code, str)
+            else None
+        )
+        if classification is not None:
+            return FailureDiagnostic(*classification, exc_info)
     return FailureDiagnostic(
         ERROR_CATEGORY_INTERNAL,
         "node_error",
-        _safe_exc_info(error),
+        exc_info,
     )
 
 
