@@ -55,6 +55,8 @@ Agent 产生 interrupt 后，Job 进入 `waiting_input`，保留 `active_session
 
 恢复输入只允许文本或受限 JSON，服务端限制长度、深度、字段/数组项数和 UTF-8 字节数。恢复与取消操作各自要求 UUID v4 `Idempotency-Key`，相同键重放相同请求时返回原结果，不同参数返回冲突。取消支持 `queued/running/waiting_input`，写入稳定 `canceled` 生命周期事件；运行中取消只释放业务活动锁，执行占用在 graph/EventWriter/heartbeat 和可能的 MCP 远端取消完成 cleanup 前保持 `draining`。
 
+取消事务先按取消前的状态设置 `execution_state`、worker 身份、锁定时间和心跳，再写入 `status=canceled`，使运行中取消保留 cleanup 所需的执行身份，排队与等待输入取消则直接释放执行占用。
+
 ## 会话历史中的执行阶段
 
 `ExecutionPhase` 是接口和前端展示概念，不新增表或字段。一个 `analysis_job_inputs` 记录对应至多一个阶段：initial 输入形成 sequence 0，后续 resume 依次形成 sequence 1、2 等。公开节点事件从上一个边界之后开始，归入下一个 `interrupt`、`final_result`、`error` 或 `canceled` 边界所关联的输入；活动 Job 最后尚无边界的区间归入最新输入。

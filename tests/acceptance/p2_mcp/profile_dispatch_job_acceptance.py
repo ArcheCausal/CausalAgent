@@ -477,9 +477,164 @@ def verify_existing() -> None:
     finalize_verification(client, base, job_id, job, job_service.read_events_after(job_id))
 
 
+async def verify_fencing() -> None:
+    """隔离 worker 停止后，用正式服务领取、接管和取消新 Job。"""
+    import requests
+    from app.agent import job_service
+    from app.agent.worker.execution_guard import JobExecutionGuard
+    from app.agent.worker.mcp_client_pool import McpClientPool, McpClientPoolConfig
+    from app.auth.service import find_user
+    from Agent.deep_agent.context import TrustedJobIdentity
+    from Agent.deep_agent_tools.algorithm_specs import PC_SPEC
+    from Agent.deep_agent_tools.identity import build_invocation_id
+    from Agent.deep_agent_tools.mcp_algorithm_executor import McpAlgorithmExecutor
+    from Agent.deep_agent_tools.models import AlgorithmExecutionCommand
+    from Agent.execution_control import JobExecutionRevoked
+    from config.secret_file import load_secrets
+
+    prefix = os.environ["ACCEPTANCE_PREFIX"]
+    assert prefix.startswith("profile-job-")
+    assert os.environ["MYSQL_HOST"] == prefix + "-mysql"
+    browser = json.loads((SHARED / os.getenv("ACCEPTANCE_BROWSER_FILENAME", "browser.json")).read_text())
+    user_id = int(find_user(browser["username"])["id"])
+    assert not job_service.get_active_jobs(user_id), "refuse_active_user_jobs"
+    original = job_service.get_job_by_id(browser["job_id"])
+    original_events = job_service.read_events_after(browser["job_id"])
+    assert original["status"] == "succeeded"
+    client = requests.Session()
+    base = os.getenv("ACCEPTANCE_VERIFY_URL", "http://" + prefix + "-web:5001")
+    login = client.post(base + "/api/login", json={"username": browser["username"],
+                                                             "password": browser["password"]}, timeout=10)
+    assert login.status_code == 200
+    client.headers["X-CSRF-Token"] = login.json()["csrf_token"]
+    created = client.post(base + "/api/new_chat", timeout=10)
+    assert created.status_code == 200
+    session_id = created.json()["new_session_id"]
+    job, duplicate = job_service.create_job(
+        user_id, session_id, "隔离环境执行资格验收", str(uuid4()),
+        original["input_user_file_id"], request_id=str(uuid4()),
+    )
+    assert not duplicate
+    job_id = job["job_id"]
+    current = None
+    report = {"status": "FAIL", "scope": "real_mysql_lease_mcp_and_cancel", "job_id": job_id}
+    pool = McpClientPool(McpClientPoolConfig(
+        url=os.environ["CAUSAL_MCP_URL"], service_token=load_secrets()["CAUSAL_MCP_SERVICE_TOKEN"],
+        pool_size=1, control_pool_size=1, read_timeout_seconds=90,
+    ))
+
+    def identity(claim):
+        return TrustedJobIdentity(
+            job_id=job_id, session_id=session_id, user_id=user_id,
+            worker_id=claim["worker_id"], attempt_count=claim["attempt_count"],
+            lease_epoch=claim["lease_epoch"], input_identity=claim["input_file_hash"],
+        )
+
+    def guard(claim):
+        return JobExecutionGuard(job_id, claim["worker_id"], claim["attempt_count"], claim["lease_epoch"])
+
+    async def revoked(operation):
+        try:
+            await operation
+        except JobExecutionRevoked:
+            return True
+        raise AssertionError("revoked_execution_was_accepted")
+
+    async def execute(claim, call_id):
+        trusted = identity(claim)
+        invocation_id = build_invocation_id(job_id=job_id, response_identity="fencing", provider_call_id=call_id)
+        command = AlgorithmExecutionCommand(
+            invocation_id=invocation_id, provider_call_id=call_id, capability_id=PC_SPEC.capability_id,
+            capability_version=PC_SPEC.version, spec_digest=PC_SPEC.spec_digest,
+            input_identity=trusted.input_identity, parameters={"alpha": 0.05, "test": "fisherz"},
+        )
+        return await executor.execute(command, trusted.to_mcp_context(invocation_id=invocation_id))
+
+    def reject_event(claim, label):
+        before = job_service.read_events_after(job_id)
+        written = job_service.write_event(
+            job_id, claim["worker_id"], claim["attempt_count"], "phase",
+            {"type": "phase", "message": "执行资格检查"}, lease_epoch=claim["lease_epoch"],
+            event_key="acceptance:revoked:" + label,
+        )
+        return written is None and job_service.read_events_after(job_id) == before
+
+    def reject_terminal(claim, result):
+        before = job_service.get_job_by_id(job_id)
+        events = job_service.read_events_after(job_id)
+        accepted = job_service.complete_job(
+            job_id, claim["worker_id"], claim["attempt_count"],
+            result.model_dump(mode="json"), lease_epoch=claim["lease_epoch"],
+        )
+        return (not accepted and job_service.get_job_by_id(job_id) == before
+                and job_service.read_events_after(job_id) == events)
+
+    try:
+        current = job_service.claim_next_job("acceptance-old-worker")
+        assert current and current["job_id"] == job_id
+        old = current
+        old_guard = guard(old)
+        await old_guard.ensure_active()
+        await pool.start()
+        executor = McpAlgorithmExecutor(pool, signing_key=load_secrets()["CAUSAL_MCP_SIGNING_KEY_CURRENT"], max_retries=0)
+        initial = await execute(old, "before-revocation")
+        initial_result = getattr(initial, "result", initial)
+        assert initial_result.status == "valid"
+        # 真实等待 heartbeat 过期，不改 SQL 时间或租约字段。
+        await asyncio.sleep(2)
+        reclaimed = job_service.claim_next_job("acceptance-new-worker", stale_after_seconds=1)
+        assert reclaimed and reclaimed["job_id"] == job_id and reclaimed["claim_kind"] == "stale_recovery"
+        current = reclaimed
+        assert current["lease_epoch"] > old["lease_epoch"] and current["attempt_count"] > old["attempt_count"]
+        new_guard = guard(current)
+        await new_guard.ensure_active()
+        report.update({"initial_real_pc_valid": True, "real_stale_reclaim": True,
+                       "old_guard_revoked": await revoked(old_guard.check_after_call()),
+                       "old_signed_mcp_revoked": await revoked(execute(old, "after-takeover")),
+                       "old_event_rejected": reject_event(old, "old"),
+                       "old_terminal_rejected": reject_terminal(old, initial_result)})
+        cancel_key = str(uuid4())
+        canceled, replay = job_service.cancel_job(user_id, job_id, cancel_key)
+        assert not replay and canceled["status"] == "canceled" and canceled["execution_state"] == "draining"
+        report.update({"cancel_guard_revoked": await revoked(new_guard.check_after_call()),
+                       "cancel_signed_mcp_revoked": await revoked(execute(current, "after-cancel")),
+                       "cancel_event_rejected": reject_event(current, "canceled"),
+                       "cancel_terminal_rejected": reject_terminal(current, initial_result)})
+        _, replay = job_service.cancel_job(user_id, job_id, cancel_key)
+        report["cancel_idempotent"] = replay
+        report["cancel_event_once"] = sum(e["event_type"] == "canceled" for e in job_service.read_events_after(job_id)) == 1
+        assert job_service.release_execution_ownership(job_id, current["worker_id"], current["attempt_count"], current["lease_epoch"])
+        report["execution_released"] = job_service.get_job_by_id(job_id)["execution_state"] is None
+        queued, _ = job_service.create_job(
+            user_id, session_id, "隔离环境排队取消验收", str(uuid4()),
+            original["input_user_file_id"], request_id=str(uuid4()),
+        )
+        queued_canceled, _ = job_service.cancel_job(user_id, queued["job_id"], str(uuid4()))
+        report["queued_cancel_released"] = (queued_canceled["status"] == "canceled"
+                                            and queued_canceled["execution_state"] is None
+                                            and queued_canceled["worker_id"] is None)
+        report["original_job_unchanged"] = (job_service.get_job_by_id(original["job_id"]) == original
+                                             and job_service.read_events_after(original["job_id"]) == original_events)
+        assert all(value is True for key, value in report.items() if key not in {"status", "scope", "job_id"})
+        report["status"] = "PASS"
+        report["cancel_service_sha256"] = hashlib.sha256((ROOT / "app/agent/job_service.py").read_bytes()).hexdigest()
+        report["limitations"] = ["No running worker crash/checkpoint continuation",
+                                    "Revocation requests tested after reclaim/cancel, not during an in-flight algorithm"]
+    finally:
+        await pool.close()
+        remaining = job_service.get_job_by_id(job_id)
+        if remaining["status"] in job_service.ACTIVE_STATUSES:
+            job_service.cancel_job(user_id, job_id, str(uuid4()))
+            remaining = job_service.get_job_by_id(job_id)
+        if current and remaining.get("execution_state") == "draining":
+            job_service.release_execution_ownership(job_id, current["worker_id"], current["attempt_count"], current["lease_epoch"])
+        (SHARED / "fencing-report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(json.dumps(report), flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("role", choices=["launch", "bootstrap", "mcp", "web", "worker", "run", "verify"])
+    parser.add_argument("role", choices=["launch", "bootstrap", "mcp", "web", "worker", "run", "verify", "fencing"])
     parser.add_argument("--source-worker", default="causalagent_worker")
     parser.add_argument("--source-app", default="causalagent_app")
     parser.add_argument("--image", default="causalagent-terminal-acceptance:20261020")
@@ -497,6 +652,8 @@ def main() -> None:
         run_job_acceptance()
     elif args.role == "verify":
         verify_existing()
+    elif args.role == "fencing":
+        asyncio.run(verify_fencing())
     else:
         serve(args.role)
 
