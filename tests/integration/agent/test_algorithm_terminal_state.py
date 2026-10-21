@@ -743,8 +743,10 @@ def test_report_adds_deterministic_cdfm_timeout_limit_and_avoids_nested_block_id
     draft = ReportDraft(title="PC 与 CDFM 分析", blocks=blocks)
     original = draft.model_dump(mode="json")
     summary = {"algorithms": [
-        {"capability_id": "causal.pc", "status": "valid"},
-        {"capability_id": "causal.cdfm", "status": "timed_out"},
+        {"capability_id": PC_SPEC.capability_id, "status": "valid",
+         "public_name": PC_SPEC.method_definition().public_name},
+        {"capability_id": CDFM_SPEC.capability_id, "status": "timed_out",
+         "public_name": CDFM_SPEC.method_definition().public_name},
     ]}
     document = build_report_document(draft, execution_summary=summary)
     limit = document.blocks[-1]
