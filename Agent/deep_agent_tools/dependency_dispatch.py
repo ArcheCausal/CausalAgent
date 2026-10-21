@@ -386,6 +386,7 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                 invocation_id=invocation_id, provider_call_id=call_id,
                 capability_id=spec.capability_id, capability_version=spec.version,
                 status=status if status in {"timed_out", "not_ready", "not_applicable", "skipped"} else "execution_failed",
+                method=spec.method_definition(),
                 diagnostics=Diagnostics(
                     safe_error_code=code,
                     summary=summary or (

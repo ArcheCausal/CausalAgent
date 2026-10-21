@@ -104,6 +104,8 @@ CDFM v0.1 在 runner 内保持 `directed_graph` 和输入列顺序，按 `adjace
 
 [AlgorithmSpec](../../Agent/deep_agent_tools/algorithm_specs.py) 是方法解释的唯一来源，生成工具描述和执行时的 `MethodDefinition` 快照。当前 PC、DirectLiNGAM 和 CDFM 的方法契约版本为 `2.0`。`AlgorithmResult.method` 保存输入要求、假设、目标图类型、矩阵方向、边含义和边界；`implementation` 分开记录 runner、实际包版本、内嵌实现版本及权重身份，不把三者混作同一个版本。CDFM 本地权重记录实际 SHA256；只有本地 manifest 的文件摘要匹配时才采用其 revision，否则 revision 保持未知。
 
+调度器在输入依赖缺失时直接产生的 `not_ready` 等终态也保存已知的 `MethodDefinition`。这些调用没有执行算法，`implementation` 和原始结果保持为空，不能把方法定义误写成实际执行证据。
+
 | 方法 | 图与矩阵 | 解释边界 |
 |---|---|---|
 | PC | `pdag`，causal-learn 端点编码 | 普通有向边是候选方向，无向边尚未识别方向；要求合适的条件独立检验、马尔可夫性、忠实性和因果充分性。本次使用 Fisher-Z 时须说明偏相关与高斯条件独立关系的限制，不能从算法通用性推导本次检验不受分布条件限制 |

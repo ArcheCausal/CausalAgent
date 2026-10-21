@@ -185,6 +185,14 @@ docker exec <本次前缀>-worker python -B tests/acceptance/p2_mcp/profile_disp
 
 自动一致性检查不代替报告正文复核。还需逐项检查主辅身份、选择理由、逐边方向与类型、`edge_counts`、测量语义来源、假设和未检验事项；标题也不得将未知测量语义写成已确认业务量。记录时分别列出确定性检查、真实算法调用、完整模型/数据库/MCP/SSE 链路及新报告再生的实际结果与耗时；未执行或被环境中断的项目不能写为通过。前端改动另外执行相应静态、构建和真实页面检查。
 
+调度前拒绝的诊断路径另由真实 ToolNode 回归覆盖：
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps unit-test python -B -m pytest -p no:cacheprovider tests/integration/agent/test_algorithm_terminal_state.py::test_real_toolnode_rejection_preserves_method_snapshot
+```
+
+该检查使用生产工具、Registry 和调度器，覆盖行数不足及数值依赖未满足，核对结果、ToolMessage 和账本保留方法快照；不使用执行器替身，也不代表已运行被拒绝的算法。
+
 Deep Agent 新路径的定向测试覆盖静态 Algorithm Registry 与 `ToolNode` 依赖调度、父图
 `deep_agent → finalization_gate → report` 拓扑、父子 State 白名单投影、三类
 Finalization outcome/degraded 合同、RAG evidence 延迟初始化、可信 Web 开关、worker
