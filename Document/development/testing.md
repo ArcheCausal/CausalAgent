@@ -140,6 +140,51 @@ docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p
 
 ## Deep Agent 定向验证
 
+### 分析事实的一致性验收
+
+方法定义、混合图、画像、报告投影和保存后的恢复使用真实纯函数及领域模型检查，不替代算法或模型执行结果：
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps unit-test python -B -m pytest -p no:cacheprovider `
+  tests/unit/agent/test_algorithm_specs.py `
+  tests/unit/agent/test_analysis_facts_contracts.py `
+  tests/unit/agent/test_graph_semantics_contracts.py `
+  tests/unit/agent/test_cdfm_runner.py `
+  tests/unit/agent/test_data_profile_semantics.py `
+  tests/unit/agent/test_data_profile_projection.py `
+  tests/unit/agent/test_profile_chart_contracts.py `
+  tests/unit/agent/test_nonlinearity.py `
+  tests/unit/agent/test_report_facts_persistence.py `
+  tests/unit/agent/test_analysis_context_projection.py `
+  tests/unit/agent/test_report_document.py `
+  tests/unit/agent/test_shared_analysis_principles.py `
+  tests/unit/agent/test_deep_agent_schema_snapshots.py `
+  tests/unit/agent/test_shared_contract_imports.py `
+  tests/unit/agent/test_acceptance_json_comparison.py
+```
+
+四种 CDFM 变量对编码、真实有向环拒绝、无向闭合路径、双箭头图资产与文字语义、未知测量语义、输入视图差异，以及方向相反与单方缺边的区分，由这些确定性检查覆盖。它们不证明模型效果，也不说明真实运行一定产生了对应边型或冲突。schema 有计划地变化后使用 `tests/unit/agent/regenerate_schema_snapshots.py` 更新两份快照；生成时仅给 snapshots 子目录写权限，正式测试继续保持仓库只读、网络关闭。
+
+真实完整分析复用 [profile_dispatch_job_acceptance.py](../../tests/acceptance/p2_mcp/profile_dispatch_job_acceptance.py)。该人工入口从现有 worker 读取非敏感配置和密钥文件，只读挂载源码、输入文件与本地权重；创建独立网络、数据库及验收容器，不连接原业务数据库，不自动批准数据处理。先执行只读预检，再启动分析：
+
+```powershell
+python -B tests/acceptance/p2_mcp/profile_dispatch_job_acceptance.py launch --preflight-only --dataset <实际CSV路径> --cdfm-weights-volume <已有权重卷>
+python -B tests/acceptance/p2_mcp/profile_dispatch_job_acceptance.py launch --dataset <实际CSV路径> --data-mode generic --cdfm-weights-volume <已有权重卷> --port 5187
+```
+
+Alarm 窗口数据使用 `--data-mode alarm-windowed`，额外核对 11 个真实数值列及有效 PC 结果；其他数据使用 generic，不套用 Alarm 专项断言。`--prompt` 可指定真实分析问题，`--expect-capability` 可重复指定期望调用的能力；最终主结果仍由真实 DeepAgent 决策和门禁决定。预检只证明配置、文件和镜像可用，不能证明卷内权重或模型已经加载；实际运行另查权重摘要、raw artifact 与标准图对应关系。
+
+首次分析成功后，在本次仍运行的 worker 容器执行以下命令，以同一分析上下文重新生成报告，不重启已经退出的 run 容器：
+
+```powershell
+docker exec <本次前缀>-worker python -B tests/acceptance/p2_mcp/profile_dispatch_job_acceptance.py regenerate
+docker exec <本次前缀>-worker python -B tests/acceptance/p2_mcp/profile_dispatch_job_acceptance.py verify-regeneration
+```
+
+再生入口先保存幂等请求身份，复用现有 Job API；核对保存的方法快照、逐结果取舍、选择依据、输入视图、主图和报告资源，并检查再生没有新增算法调用。跨 MySQL JSON 与 checkpoint 的比较只允许 `1e-14` 的浮点序列化舍入差异，键、顺序、身份和其他字段保持严格比较，不修改生产事实以迁就验证。验收保留本次容器和证据，未自动删除数据库或卷。
+
+自动一致性检查不代替报告正文复核。还需逐项检查主辅身份、选择理由、逐边方向与类型、`edge_counts`、测量语义来源、假设和未检验事项；标题也不得将未知测量语义写成已确认业务量。记录时分别列出确定性检查、真实算法调用、完整模型/数据库/MCP/SSE 链路及新报告再生的实际结果与耗时；未执行或被环境中断的项目不能写为通过。前端改动另外执行相应静态、构建和真实页面检查。
+
 Deep Agent 新路径的定向测试覆盖静态 Algorithm Registry 与 `ToolNode` 依赖调度、父图
 `deep_agent → finalization_gate → report` 拓扑、父子 State 白名单投影、三类
 Finalization outcome/degraded 合同、RAG evidence 延迟初始化、可信 Web 开关、worker
