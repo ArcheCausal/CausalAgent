@@ -379,6 +379,40 @@ class DataViewSummary(ContractModel):
         return value
 
 
+class GraphValidation(ContractModel):
+    """图结构检查结果；通过不代表因果方向已获验证。"""
+
+    valid: bool
+    violations: list[str] = Field(default_factory=list)
+    checks_performed: list[str] = Field(default_factory=list)
+    not_checked: list[str] = Field(default_factory=list)
+
+
+class MethodDefinition(ContractModel):
+    """本次执行采用的方法契约快照，不随报告重新生成而更新。"""
+
+    capability_id: str
+    public_name: str
+    contract_version: str
+    description: str
+    input_requirements: tuple[str, ...] = ()
+    assumptions: tuple[str, ...] = ()
+    graph_semantics: str
+    matrix_convention: str
+    edge_meanings: dict[str, str] = Field(default_factory=dict)
+    limitations: tuple[str, ...] = ()
+
+
+class MethodImplementation(ContractModel):
+    """实际实现与权重身份；不包含宿主路径或模型凭据。"""
+
+    runner_version: str | None = None
+    package: str | None = None
+    package_version: str | None = None
+    embedded_version: str | None = None
+    weights: dict[str, str | None] = Field(default_factory=dict)
+
+
 class AlgorithmResult(ContractModel):
     """Adapter 对外发布的统一算法结果。"""
 
@@ -399,6 +433,9 @@ class AlgorithmResult(ContractModel):
     raw_result_serialization_version: str | None = None
     input_identity: str | None = None
     data_view: DataViewSummary | None = None
+    method: MethodDefinition | None = None
+    implementation: MethodImplementation | None = None
+    graph_validation: GraphValidation | None = None
     provenance: AlgorithmResultProvenance
 
     @field_validator(
@@ -420,6 +457,11 @@ class AlgorithmResult(ContractModel):
     @model_validator(mode="after")
     def validate_result_contract(self) -> "AlgorithmResult":
         validate_result_ref_for_invocation(self.result_ref, self.invocation_id)
+        if self.method is not None and (
+            self.method.capability_id != self.capability_id
+            or self.method.contract_version != self.capability_version
+        ):
+            raise ValueError("method snapshot does not match result identity")
         if self.status == "valid" and self.standardized_graph is None:
             raise ValueError("valid AlgorithmResult must include standardized_graph")
         if self.status == "timed_out" and (

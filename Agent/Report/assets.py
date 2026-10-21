@@ -268,10 +268,13 @@ def _vis_edge_type(raw_edge: Mapping[str, Any]) -> str:
         return raw_edge["edge_type"]
     arrows = raw_edge.get("arrows")
     if isinstance(arrows, str):
-        return _VIS_EDGE_TYPE_BY_ARROWS.get(arrows.strip(), "directed")
+        ends = {part.strip() for part in arrows.split(",") if part.strip()}
+        if ends == {"from", "to"}:
+            return "bidirected"
+        return _VIS_EDGE_TYPE_BY_ARROWS.get(arrows.strip(), "partially_directed")
     if raw_edge.get("dashes") is True:
         return "partially_directed"
-    return "directed"
+    return "undirected"
 
 
 def build_causal_graph_model(
@@ -325,6 +328,8 @@ def build_causal_graph_model(
         )
         if source_id is None or target_id is None:
             return None
+        if raw_edge.get("arrows") == "from":
+            source_id, target_id = target_id, source_id
 
         weight = raw_edge.get("weight")
         if not isinstance(weight, (int, float)) or isinstance(weight, bool):

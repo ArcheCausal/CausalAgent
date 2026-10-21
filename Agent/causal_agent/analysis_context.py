@@ -90,6 +90,10 @@ def normalize_algorithm_summary(
         "result_ref": result.result_ref,
         "algorithm": result.capability_id,
         "capability_version": result.capability_version,
+        "method": result.method.model_dump(mode="json") if result.method else None,
+        "implementation": result.implementation.model_dump(mode="json") if result.implementation else None,
+        "data_view": result.data_view.model_dump(mode="json") if result.data_view else None,
+        "graph_validation": result.graph_validation.model_dump(mode="json") if result.graph_validation else None,
         "status": result.status,
         "input_identity": result.provenance.input_identity,
         "parameters": {
@@ -326,7 +330,7 @@ def context_facts_text(context: Mapping[str, Any] | None) -> str:
         graph = summary.get("graph")
         if isinstance(graph, Mapping) and isinstance(graph.get("edges"), list):
             edges = [
-                f"{_text(edge.get('source'))} -> {_text(edge.get('target'))}"
+                graph_edge_text(edge)
                 for edge in graph["edges"]
                 if isinstance(edge, Mapping)
             ]
@@ -357,6 +361,13 @@ def context_facts_text(context: Mapping[str, Any] | None) -> str:
     if context.get("latest_report_title"):
         lines.append(f"最新报告标题：{_text(context['latest_report_title'])}")
     return "\n".join(lines)
+
+
+def graph_edge_text(edge: Mapping[str, Any]) -> str:
+    edge_type = edge.get("edge_type")
+    symbol = {"directed": "→", "undirected": "—", "bidirected": "↔", "partially_directed": "o→"}.get(edge_type, "?")
+    suffix = "（潜在共同原因候选，尚未证实）" if edge_type == "bidirected" else ""
+    return f"{_text(edge.get('source'))} {symbol} {_text(edge.get('target'))}{suffix}"
 def _primary_algorithm_summary(state: Mapping[str, Any]) -> dict[str, Any] | None:
     """挑选本次执行的主算法结果并压成结构化事实。"""
     raw_results = state.get("deep_agent_algorithm_results")

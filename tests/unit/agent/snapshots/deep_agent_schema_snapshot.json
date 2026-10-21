@@ -49,8 +49,11 @@
         "data_view",
         "diagnostics",
         "graph_semantics",
+        "graph_validation",
+        "implementation",
         "input_identity",
         "invocation_id",
+        "method",
         "provenance",
         "provider_call_id",
         "raw_result_ref",
@@ -72,7 +75,7 @@
         "status",
         "provenance"
       ],
-      "sha256": "4b26c29d8798e42d6854e53f9ba71a5f6fd8e3171c0869ebe9efb4fb761f002c",
+      "sha256": "af3cfc553f80596c4baef2360e4459b01fe9c8e54bf54df09c0dfa5c4805827f",
       "title": "AlgorithmResult"
     },
     "AlgorithmResultProvenance": {
@@ -224,6 +227,19 @@
       "sha256": "31cb634ae48fad84dc221be40fcff438ddcba9b6b893ee55e2d5dc9abf6f3ae6",
       "title": "GraphEdge"
     },
+    "GraphValidation": {
+      "properties": [
+        "checks_performed",
+        "not_checked",
+        "valid",
+        "violations"
+      ],
+      "required": [
+        "valid"
+      ],
+      "sha256": "5da315ede3f5d455749d7b6d97516b825a9ef96493ba4ad1d18d514e2bd9acc0",
+      "title": "GraphValidation"
+    },
     "InvocationRecord": {
       "properties": [
         "attempt_count",
@@ -283,6 +299,42 @@
       ],
       "sha256": "d07f8d4b713ce44abb36454327ba09e8c91896551350922a55a541d96721246f",
       "title": "McpInvocationContext"
+    },
+    "MethodDefinition": {
+      "properties": [
+        "assumptions",
+        "capability_id",
+        "contract_version",
+        "description",
+        "edge_meanings",
+        "graph_semantics",
+        "input_requirements",
+        "limitations",
+        "matrix_convention",
+        "public_name"
+      ],
+      "required": [
+        "capability_id",
+        "public_name",
+        "contract_version",
+        "description",
+        "graph_semantics",
+        "matrix_convention"
+      ],
+      "sha256": "b226e8c639eaae22552051c528acc98962f95e4484c1e650f6701183f724fb6c",
+      "title": "MethodDefinition"
+    },
+    "MethodImplementation": {
+      "properties": [
+        "embedded_version",
+        "package",
+        "package_version",
+        "runner_version",
+        "weights"
+      ],
+      "required": [],
+      "sha256": "971d380a384df0d0e35a2bbda0c776c4a583793e43e3522ce1685586c358de02",
+      "title": "MethodImplementation"
     },
     "PreprocessingApproval": {
       "properties": [
@@ -446,20 +498,20 @@
   "tools": [
     {
       "capability_id": "causal.cdfm",
-      "schema_sha256": "6ad48ec76e155f8d809f2a7d96a9767d05246f9d6d049dbc1f6fec5ff8bbc49b",
-      "spec_digest": "485482d984b06ecdad26259ae810d60884da14ebbc98189eae998c80a7ef5201",
+      "schema_sha256": "ace96d517f904e9af7358615c12aef1b5c241d30667890b882196cef48a8b1f8",
+      "spec_digest": "9a950ea5a1095e7c3b5ec97c48b231718213b6f9ea2ceb448e8f71f9a8944e27",
       "tool_name": "causal_cdfm"
     },
     {
       "capability_id": "causal.direct_lingam",
-      "schema_sha256": "b6dcf707097b024642f7ccfe2aa96554fb395d6e710f6723837086d0df34208a",
-      "spec_digest": "ca8d3878f5ac98d9fc7a4cec6378eabf7ca606f23fb72526f7f3f636a8d3d734",
+      "schema_sha256": "2f636c8b690dffef0af0d3da113aa690b480ab33205c088412ebaea5c87aaa81",
+      "spec_digest": "70fc8dfa9fc50e6fb934d6b4fea57b0b8c4e4732a70380c0e1305dfd8642e821",
       "tool_name": "causal_direct_lingam"
     },
     {
       "capability_id": "causal.pc",
-      "schema_sha256": "f708844a5e2c28b75b91c3b35ace1deb1835d13ae6dfcb20290b1b78fd744f81",
-      "spec_digest": "e4b07d2c0ee175c9cd96c2b7a7e1a08381f616df54eab3ae8367ef8566d7996c",
+      "schema_sha256": "a21b01909fd3b2df3d8c753a64954f46312f41146d6fff65420143a00f35ae68",
+      "spec_digest": "e679ec00c83fce30a4672ac829dbff72652b5e070a1ce5763226d51cbcec34c9",
       "tool_name": "causal_pc"
     }
   ]

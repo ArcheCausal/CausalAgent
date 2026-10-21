@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from Agent.deep_agent_tools.identity import build_invocation_id, current_input_identity
+from Agent.deep_agent_tools.algorithm_specs import get_algorithm_spec
+from Agent.deep_agent_tools.graph_validation import validate_graph_structure
 from Agent.deep_agent_tools.runtime_updates import normalize_tool_status
 from Agent.deep_agent_tools.models import (
     AlgorithmResult,
@@ -315,11 +317,7 @@ class FinalizationGate:
 
     def _tool_name_for_result(self, result: AlgorithmResult) -> str:
         if self.registry is None:
-            return {
-                "causal.pc": "causal_pc",
-                "causal.olc": "causal_olc",
-                "causal.direct_lingam": "causal_direct_lingam",
-            }.get(result.capability_id, result.capability_id)
+            return get_algorithm_spec(result.capability_id).tool_name
         try:
             entry = self.registry.get(result.capability_id)
         except Exception as exc:
@@ -407,6 +405,11 @@ class FinalizationGate:
             result.result_ref
             for result in eligible.values()
             if result.status == "valid"
+            and result.standardized_graph is not None
+            and validate_graph_structure(
+                result.standardized_graph,
+                graph_semantics=get_algorithm_spec(result.capability_id).graph_semantics,
+            ).valid
         }
         # 预检查拒绝、上下文变化或用户选择诊断都可以是有依据的“不适用”；
         # 这类结果视为已结束，不再要求模型制造一次必然失败的算法执行。
@@ -419,13 +422,16 @@ class FinalizationGate:
             assessment.result_ref: assessment
             for assessment in normalized_decision.result_assessments
         }
-        if not valid_refs.issubset(assessment_by_ref):
+        assessment_required = {result.result_ref for result in eligible.values() if result.status == "valid"}
+        if not assessment_required.issubset(assessment_by_ref):
             raise StructuredResponseError(
                 "each eligible valid result needs one assessment",
                 rule="valid_result_without_assessment",
             )
         for assessment in normalized_decision.result_assessments:
             result = eligible[assessment.result_ref]
+            if result.status == "valid" and result.result_ref not in valid_refs and assessment.disposition != "discarded":
+                raise StructuredResponseError("graph structure violates the method contract", rule="primary_graph_invalid")
             if (
                 result.status not in {"valid", "not_applicable", "skipped"}
                 and assessment.disposition != "discarded"
@@ -534,6 +540,7 @@ class FinalizationRetryController:
 # 不携带内部标识、结果内容或异常正文，因此可以同时用于模型重试指令和
 # 普通用户可见的公开事件。
 FINALIZATION_RETRY_HINTS: dict[str, str] = {
+    "primary_graph_invalid": "图结构违反方法约束的结果只能舍弃；不得自动删边或将双箭头拆成普通有向边。",
     "decision_missing": "必须提交结构化 FinalAnalysisDecision，不能只给文字结论。",
     "decision_schema_invalid": (
         "提交对象必须严格符合 FinalAnalysisDecision 的字段类型和取值，"

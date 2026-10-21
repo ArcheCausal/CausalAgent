@@ -3,16 +3,12 @@ import pandas as pd
 import csv
 import importlib
 import importlib.metadata
+import importlib.util
 import io
 
-# CDMIR: OLC algorithm 
-# 使用延迟导入 + 优雅降级，避免未安装时启动报错
-_CDMIR_AVAILABLE = False
-try:
-    from cdmir.discovery.funtional_based.one_component.olc import olc
-    _CDMIR_AVAILABLE = True
-except ImportError:
-    olc = None  # 占位，防止后续代码引用报错
+from Agent.deep_agent_tools.algorithm_specs import PC_SPEC, DIRECT_LINGAM_SPEC
+
+_CDMIR_AVAILABLE = importlib.util.find_spec("cdmir") is not None
 
 DIRECT_LINGAM_SCHEMA_VERSION = "causal_discovery_v1"
 DIRECT_LINGAM_ALGORITHM = "direct_lingam"
@@ -264,6 +260,8 @@ def _direct_lingam_success(
             "embedded_version": str(getattr(lingam_module, "__version__", "unknown")),
         },
         "parameters": {"measure": DIRECT_LINGAM_MEASURE},
+        "method": DIRECT_LINGAM_SPEC.method_definition().model_dump(mode="json"),
+        "runner_version": "causalachieve-v2",
         "matrix_convention": "target_to_source",
         "data": {
             "nodes": nodes_for_vis,
@@ -431,6 +429,13 @@ def run_pc_analysis(
         
         return {
             "success": True,
+            "algorithm": "pc",
+            "runner_version": "causalachieve-v2",
+            "method": PC_SPEC.method_definition().model_dump(mode="json"),
+            "implementation": {"package": "causal-learn", "version": importlib.metadata.version("causal-learn")},
+            "matrix_convention": PC_SPEC.matrix_convention,
+            "diagnostics": {"n_samples": int(data.shape[0]), "n_features": int(data.shape[1]),
+                            "alpha": alpha, "independence_test": "chisq" if indep_test is chisq else "fisherz"},
             "message": "因果分析成功完成。",
             "data": {
                 "nodes": nodes_for_vis,
@@ -536,6 +541,7 @@ def run_olc_analysis(csv_data_string: str, alpha: float = 0.05, beta: float = 0.
     if not _CDMIR_AVAILABLE:
         msg = "OLC 算法不可用：CDMIR 库未安装。请运行 'pip install git+https://github.com/DMIRLAB-Group/CDMIR.git' 安装。"
         return {"success": False, "message": msg, "algorithm": "olc"}
+    from cdmir.discovery.funtional_based.one_component.olc import olc
 
     try:
         string_io = io.StringIO(csv_data_string)

@@ -14,6 +14,7 @@ from Agent.causal_agent.analysis_context import (
     normalize_algorithm_summary,
     normalize_evidence_items,
 )
+from Agent.deep_agent_tools.algorithm_specs import DIRECT_LINGAM_SPEC
 from Agent.deep_agent.context import FrozenInputRef, TrustedJobIdentity
 from Agent.deep_agent_tools.models import (
     AlgorithmResult,
@@ -41,8 +42,8 @@ def _provenance(**overrides):
         input_identity="hash-a",
         spec_digest="spec-digest",
         invocation_id="invocation-1",
-        capability_id="causal_pc",
-        capability_version="1.0",
+        capability_id=DIRECT_LINGAM_SPEC.capability_id,
+        capability_version=DIRECT_LINGAM_SPEC.version,
         algorithm_runner_version="runner-3",
     )
     payload.update(overrides)
@@ -54,11 +55,12 @@ def _result(**overrides):
         result_ref="invocation-1:0",
         invocation_id="invocation-1",
         provider_call_id="call-1",
-        capability_id="causal_pc",
-        capability_version="1.0",
+        capability_id=DIRECT_LINGAM_SPEC.capability_id,
+        capability_version=DIRECT_LINGAM_SPEC.version,
         status="valid",
+        method=DIRECT_LINGAM_SPEC.method_definition(),
         standardized_graph=StandardizedGraph(
-            graph_semantics="source -> target",
+            graph_semantics=DIRECT_LINGAM_SPEC.graph_semantics,
             nodes=["promotion", "sales"],
             edges=[
                 GraphEdge(
@@ -69,7 +71,7 @@ def _result(**overrides):
                 )
             ],
         ),
-        graph_semantics="source -> target",
+        graph_semantics=DIRECT_LINGAM_SPEC.graph_semantics,
         summary="促销活动到销售额存在候选因果边。",
         diagnostics=Diagnostics(
             sample_count=120,
@@ -124,10 +126,10 @@ def test_algorithm_summary_keeps_normalized_graph_diagnostics_and_warnings():
     )
 
     assert summary["result_ref"] == "invocation-1:0"
-    assert summary["algorithm"] == "causal_pc"
+    assert summary["algorithm"] == DIRECT_LINGAM_SPEC.capability_id
     assert summary["status"] == "valid"
     assert summary["parameters"] == {"target": "sales", "treatment": "promotion"}
-    assert summary["graph_semantics"] == "source -> target"
+    assert summary["graph_semantics"] == DIRECT_LINGAM_SPEC.graph_semantics
     assert summary["graph"]["nodes"] == ["promotion", "sales"]
     assert summary["graph"]["edges"] == [
         {
@@ -287,7 +289,7 @@ def test_context_graph_and_facts_text_use_confirmed_facts_only():
     text = context_facts_text(context)
 
     assert "促销活动" in text
-    assert "promotion -> sales" in text
+    assert "promotion → sales" in text
     assert "内部文档" in text
     assert "促销效果报告" in text
 

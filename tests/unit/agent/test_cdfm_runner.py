@@ -15,8 +15,8 @@ def test_adjacency_to_edges_preserves_row_to_column_direction_and_cycles() -> No
 
     assert edges == [
         {"from": "A", "to": "B", "arrows": "to"},
-        {"from": "B", "to": "C", "arrows": "to"},
         {"from": "C", "to": "A", "arrows": "to"},
+        {"from": "B", "to": "C", "arrows": "to"},
     ]
 
 
