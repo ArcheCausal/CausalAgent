@@ -340,10 +340,11 @@ def _mcp_section(logcheck: dict | None, summary: dict) -> list[str]:
             "旧日志产物仍可读取，但缺少本轮归属时不参与本轮统计；同 stage 不能证明属于同一轮。",
             "补齐入口：runner logcheck --stage " + str(summary.get("stage", "")) + "。",
         ]
+    date_dir = summary.get("date_dir") or config.date_key(summary.get("started_at") or 0)
     lines = [
         f"- 日志证据状态：{_value(logcheck.get('status'))}；scope：{_value(logcheck.get('scope'))}",
         f"- 日志 run_id：{_value(logcheck.get('run_id'))}；逐 Job/服务覆盖：{_value(logcheck.get('coverage'))}",
-        "- 日志核查文件：local/evidence/logcheck-"
+        f"- 日志核查文件：local/evidence/{date_dir}/logcheck-"
         + str(logcheck.get("stage") or summary.get("stage", ""))
         + ".json",
         "",

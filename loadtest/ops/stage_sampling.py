@@ -22,8 +22,6 @@ from runner.evidence import export_request_manifest, merge_job_db_check
 from ops.server_evidence import epoch
 
 KEY = str(pathlib.Path.home() / ".ssh" / "causalagent_staging")
-RUNS = LOADTEST / "local" / "runs"
-LOG = RUNS / "_orch.log"
 HOST = os.environ.get("LOADTEST_SSH_HOST", "ubuntu@203.195.194.205")
 REMOTE_DIR = "/tmp/_lt"
 FINAL_LIMIT = config.DRAIN_DEADLINE_SECONDS
@@ -56,9 +54,14 @@ SPECS: dict[str, tuple[list[str], int]] = {
 }
 
 
-def log(message: str) -> None:
-    RUNS.mkdir(parents=True, exist_ok=True)
-    with LOG.open("a", encoding="utf-8") as handle:
+def log(message: str, run_id: str | None = None) -> None:
+    """编排日志跟随本次运行的日期目录，和其他产物一起归档。"""
+    if run_id:
+        runs_dir, _evidence_dir = config.run_dir_for(run_id)
+    else:
+        runs_dir, _evidence_dir = config.run_artifacts_dir(time.time())
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    with (runs_dir / "_orch.log").open("a", encoding="utf-8") as handle:
         handle.write(message + "\n")
 
 
@@ -109,6 +112,12 @@ def remote_dir(run_id: str) -> str:
     return f"{REMOTE_DIR}/{run_id}"
 
 
+def run_dir(run_id: str) -> pathlib.Path:
+    """按 run_id 日期前缀定位本次运行目录，避免不同日期的同名档位混在一起。"""
+    runs_dir, _evidence_dir = config.run_dir_for(run_id)
+    return runs_dir / run_id
+
+
 def make_run_id(stage: str) -> str:
     return f"{time.strftime('%Y%m%dT%H%M%S')}-{stage}"
 
@@ -135,9 +144,9 @@ def collect_server_snapshot(stage: str, phase: str, run_id: str) -> pathlib.Path
         return None
     if result.returncode or not isinstance(data, dict) or data.get("run_id") != run_id:
         return None
-    target = RUNS / run_id / f"server-{phase}.json"
+    target = run_dir(run_id) / f"server-{phase}.json"
     write_json(target, data)
-    log(f"[{stage}] {phase} snapshot saved")
+    log(f"[{stage}] {phase} snapshot saved", run_id)
     return target
 
 
@@ -205,7 +214,7 @@ def collect_sampler_result(run_id: str, timeout: float = 150) -> tuple[dict | No
 
 def current_summary(run_id: str, stage: str) -> dict:
     """运行中从真实追加账本重建请求身份，兼容尚未生成 summary 的检查点。"""
-    path = RUNS / run_id
+    path = run_dir(run_id)
     summary = read_json(path / "summary.json")
     if summary is not None:
         if summary.get("run_id") != run_id:
@@ -232,7 +241,7 @@ def current_summary(run_id: str, stage: str) -> dict:
 
 
 def check_jobs_in_db(stage: str, run_id: str, phase: str = "final") -> dict:
-    run = RUNS / run_id
+    run = run_dir(run_id)
     listing = export_request_manifest(current_summary(run_id, stage), run / f"requests-{phase}.json")
     inventory = read_json(listing) or {}
     query_budget = min(600, max(60, 30 + 5 * (len(inventory.get("requests", [])) + len(inventory.get("job_ids", [])))))
@@ -289,7 +298,7 @@ def main(stage: str) -> int:
         print("最终观察上限必须是有限正数")
         return 2
     run_id = make_run_id(stage)
-    run = RUNS / run_id
+    run = run_dir(run_id)
     run.mkdir(parents=True, exist_ok=False)
     state = {"schema_version": "loadtest-orchestration-v2", "run_id": run_id, "stage": stage,
              "status": "unknown", "checkpoints": {}, "stop_submitting_at": None,
@@ -394,12 +403,12 @@ def main(stage: str) -> int:
         summary["orchestration"] = state
         summary = merge_job_db_check(summary, final)
         write_json(run / "summary.json", summary)
-        log(f"[{stage}] run_id={run_id} status={state['status']}")
+        log(f"[{stage}] run_id={run_id} status={state['status']}", run_id)
         print(f"{stage}: {state['status']} ({run_id})")
         return 0 if healthy else 1
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         state.update(status="unknown", reason=str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__)
-        log(f"[{stage}] run_id={run_id} status=unknown reason={type(exc).__name__}")
+        log(f"[{stage}] run_id={run_id} status=unknown reason={type(exc).__name__}", run_id)
         return 1
     finally:
         # 异常不能让已启动的客户端继续提交；服务器采样保持有界观察，不停止业务服务。

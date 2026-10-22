@@ -1,6 +1,6 @@
 """只读取现存真实产物，验证资源汇总、清单导出和主库附加兼容性。
 
-不访问服务器，不启动负载，不构造业务 summary。新产物写入 local/evidence/
+不访问服务器，不启动负载，不构造业务 summary。新产物写入 local/evidence/<date>/
 独立验证目录；原始文件只校验哈希，不修改。
 """
 from __future__ import annotations
@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import time
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +16,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 from ops.server_evidence import manifest
-from runner import resource
+from runner import config, resource
 from runner.evidence import (_job_ids, _summary_table, build_evidence,
                              _load_logchecks, _render_unobserved_jobs,
                              export_request_manifest, latest_runs, merge_job_db_check)
@@ -23,12 +24,23 @@ from runner.evidence import (_job_ids, _summary_table, build_evidence,
 
 def main() -> int:
     local = BASE / "local"
-    destination = local / "evidence" / ("server-evidence-validation-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"))
+    # 默认校验最近一个有运行的日期目录；没有历史运行时才用当天。
+    date_dir = config.latest_run_date() or config.date_key(time.time())
+    runs_dir = local / "runs" / date_dir
+    evidence_dir = local / "evidence" / date_dir
+    if not runs_dir.is_dir():
+        print(f"没有可校验的运行目录：{runs_dir}")
+        return 2
+    destination = local / "evidence" / date_dir / ("server-evidence-validation-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"))
     destination.mkdir(parents=True, exist_ok=False)
-    summaries = sorted((local / "runs").glob("*/summary.json"))
-    samples = sorted(set((local / "runs").glob("*sample*.json")) | set((local / "runs").glob("*/*sample*.json")))
-    databases = sorted(set(local.glob("job-db-*.json")) | set((local / "evidence").glob("job-db-*.json")))
-    logchecks = sorted((local / "evidence").glob("logcheck-*.json"))
+    # 只校验所选日期目录，避免把不同日期的摘要混成一份兼容性结论。
+    summaries = sorted(runs_dir.glob("*/summary.json"))
+    samples = sorted(set(runs_dir.glob("*sample*.json"))
+                     | set(runs_dir.glob("*/*sample*.json")))
+    databases = sorted(set(local.glob("job-db-*.json"))
+                       | set((local / "evidence").glob("*/job-db-*.json"))
+                       | set((local / "evidence").glob("job-db-*.json")))
+    logchecks = sorted((local / "evidence").glob("*/logcheck-*.json"))
     inputs = summaries + samples + databases + logchecks
     hashes = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}
     db_by_run = {}
@@ -94,16 +106,16 @@ def main() -> int:
             assert "| 客户端排空 | 未采集 |" in rendered
         totals["real_resource_files"] += 1
         totals["real_resource_samples"] += summary["sample_count"]
-    selected = latest_runs(local / "runs")
-    scoped_logs = _load_logchecks(local / "evidence", selected)
+    selected = latest_runs(runs_dir)
+    scoped_logs = _load_logchecks(evidence_dir)
     for stage, row in scoped_logs.items():
         selected_summary = json.loads((selected[stage] / "summary.json").read_text(encoding="utf-8"))
         assert row.get("scope") == "run" and row.get("run_id") == selected_summary.get("run_id")
-    assert not _load_logchecks(local / "evidence")
-    assert not _render_unobserved_jobs(local / "evidence", {})
+    assert all(row.get("scope") == "run" and row.get("run_id") for row in scoped_logs.values())
+    assert not _render_unobserved_jobs(evidence_dir, {})
     table = "\n".join(_summary_table(selected))
     assert "已完成样本排队 p95 ms" in table and "cdfm_fixed" in table and "cdfm_rate" in table
-    combined, generated = build_evidence(local / "runs", destination / "reports")
+    combined, generated = build_evidence(runs_dir, destination / "reports")
     body = combined.read_text(encoding="utf-8")
     assert "执行时间为总耗时减去排队时间" not in body
     assert "客户端侧可复现的检查均已执行" not in body

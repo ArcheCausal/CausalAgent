@@ -14,7 +14,18 @@ from pathlib import Path
 import httpx
 
 from runner import config
-from runner.evidence import _job_ids, latest_runs
+from runner.evidence import _job_ids, latest_runs, select_run
+
+
+def _current_runs_dir() -> Path:
+    """取本次操作的日期目录；指定 run_id 时用该运行所在日期。"""
+    run_id = os.environ.get("LOADTEST_RUN_ID")
+    if run_id:
+        _run_dir, day_dir = select_run(run_id)
+        return day_dir
+    day = config.latest_run_date()
+    return (config.RUNS_DIR / day) if day else config.run_artifacts_dir(time.time())[0]
+
 
 DEPLOY_ENV_CANDIDATES = ("../.env.staging", ".env.staging")
 
@@ -154,7 +165,7 @@ class GrafanaLoki:
 def resolve_run_window(stage: str, summary: dict | None = None) -> tuple[int, int] | None:
     """按档位找到最近一次运行的时间窗口，返回纳秒时间戳。"""
     if summary is None:
-        path = latest_runs(config.RUNS_DIR).get(stage)
+        path = latest_runs(_current_runs_dir()).get(stage)
         if path is None:
             return None
         summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
@@ -347,7 +358,7 @@ def cdfm_log_evidence(events: list[dict], coverage: dict, job_ids: list[str]) ->
 
 def logcheck(stage: str, base_url: str) -> dict:
     """仅按本轮已知和主库核对恢复出的 Job 统计，不查询七天全局历史。"""
-    path = latest_runs(config.RUNS_DIR).get(stage)
+    path = latest_runs(_current_runs_dir()).get(stage)
     if path is None:
         raise RuntimeError(f"找不到 {stage} 的运行窗口")
     summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))

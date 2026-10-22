@@ -18,17 +18,22 @@ loadtest/
 ├── evidence/
 │   └── index.md       # 唯一入库的压测证据链索引
 ├── local/             # 全部本地产物，整体加入 .gitignore
-│   ├── runs/          # 每次运行的原始产物：逐档 summary.json、控制台输出、编排日志
-│   │   └── job-ids/   # 按档位导出的本轮 job_id 清单，供服务器逐 Job 核对
+│   ├── runs/          # 原始产物根目录，按运行日期分组
+│   │   └── <date>/    # 同一天的全部运行：<run_id>/ 与编排、驱动日志
+│   │       ├── <run_id>/  # 逐档 summary.json、jobs.jsonl、控制台输出与服务器采集
+│   │       └── job-ids/   # 按档位导出的本轮 job_id 清单，供服务器逐 Job 核对
 │   ├── data/          # 运行时生成的测试 CSV
-│   ├── evidence/      # 整理后的报告、逐档 logcheck、缺陷分析与服务器侧采集结果
+│   ├── evidence/      # 整理后的产物根目录，按运行日期分组
+│   │   └── <date>/    # 同一天的合并报告、逐档报告、logcheck 与缺陷分析
 │   ├── accounts.local.json      # 测试账号与密码
-│   ├── server-side-<run_id>-before.json  # 负载前的服务器只读采集结果
-│   ├── server-side-<run_id>-after.json   # 停止提交后的服务器只读采集结果
-│   └── job-db-<run_id>.json              # 逐 Job 主库终态只读核对结果
+│   ├── server-side-<run_id>-before.json  # 手工取回的负载前采集（历史路径）
+│   ├── server-side-<run_id>-after.json   # 手工取回的停止后采集（历史路径）
+│   └── job-db-<run_id>.json              # 手工取回的主库核对（历史路径）
 ├── README.md          # 使用说明
 └── requirements.txt   # 本地压测客户端依赖，不进入服务器镜像
 ```
+
+日期目录取 run_id 的 YYYYMMDD 前缀，没有合法前缀时取运行开始时刻的本地日期。同一天的全部档位与补跑共用同一个日期目录；跨午夜的运行整体归入起始日期。运行摘要、报告、logcheck 与服务器采集必须落在同一天的两个目录下，跨日期合并直接报错。
 
 ## 服务器只读脚本
 
@@ -49,7 +54,7 @@ stage_resource_sample.sh 的 samples 数组每一项包含 host、containers、q
 ## 凭据与产物
 
 - 账号密码只写入 `local/accounts.local.json`；不得出现在报告、日志、索引或提交中。
-- 原始产物写入 `local/runs/` 与 `local/data/`；整理后的报告与核查写入 `local/evidence/`。
+- 原始产物写入 `local/runs/<date>/` 与 `local/data/`；整理后的报告与核查写入 `local/evidence/<date>/`。
 - 三类内容都只在本地保留，用于重跑、排查与归档到团队知识库。
 
 ## 入库边界
@@ -57,12 +62,13 @@ stage_resource_sample.sh 的 samples 数组每一项包含 host、containers、q
 - 进入版本库的压测内容只有客户端程序、脚本、README、AGENTS.md、requirements.txt 与 `evidence/index.md`。
 - 本地产物已经集中到 `local/`，`.gitignore` 只需要一条 `/loadtest/local/` 规则即可整体排除，不再逐目录或逐文件名添加规则。
 - 新增本地产物时放进 `local/` 即已被覆盖，不需要改 `.gitignore`；只有当新增内容需要入库时，才在 `evidence/` 下登记并在本文件说明用途。
-- 产物文件名沿用如下命名：逐档报告 `<档位>-report.md`、日志核查 `logcheck-<档位>.json`、合并报告 `loadtest-report-<date>.md`、服务器侧采集 `server-side-<date>.json`、主库核对 `job-db-<date>.json`；客户端未观测到终态的那些 Job 的补充核对用 `job-db-<date>-extras.json`，由报告单独成节，不并入逐档比对的一致条数。
-- 编排脚本在负载开始前固定 run_id，三个 attach 命令都带 `--stage`；在跑多个档位时不要省略该参数，否则同一份采集会被写进每一档的运行摘要。
+- 产物文件名沿用如下命名：逐次运行报告 `<run_id>-report.md`、日志核查 `logcheck-<档位>.json`、合并报告 `loadtest-report-<date>.md`、服务器侧采集 `server-side-<date>.json`、主库核对 `job-db-<date>.json`；客户端未观测到终态的那些 Job 的补充核对用 `job-db-<date>-extras.json`，由报告单独成节，不并入逐档比对的一致条数。
+- 编排脚本在负载开始前固定 run_id，三个 attach 命令都带 `--stage`；在跑多个档位时不要省略该参数，否则同一份采集会被写进每一档的运行摘要。附加、日志与整理命令按 run_id 定位日期目录，未指定时取最近一个有运行的日期目录。
 
 ## 归档与清理
 
-- 每次输出报告后立即归档，并把 run_id、测试时间、被测镜像 digest、归档位置与结论追加到 `evidence/index.md`；索引是跨轮次累积的持久记录。
+- 每次输出报告后立即归档，并把 run_id、测试时间、被测镜像 digest、归档位置与结论追加到 `evidence/index.md`；索引是跨轮次累积的持久记录。旧版平铺产物用 `python -m runner migrate-artifacts` 预览，确认后再加 `--apply` 归入日期目录。
+- `evidence/index.md` 的归档位置写成 `local/evidence/<date>/<文件>`，与日期目录一致。
 - 清理本轮产物必须先归档并由用户自行删除；代理不得删除真实运行摘要、JSONL、数据、报告或其他重要产物。
 - `evidence/index.md` 不在 `local/` 内，清理 `local/` 不会影响索引。
 - 索引里“归档位置”为“待归档”时不得删除对应报告；先补上归档链接再清理。

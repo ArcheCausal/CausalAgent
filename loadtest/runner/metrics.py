@@ -82,8 +82,12 @@ class JobSample:
 class Recorder:
     """汇总一次运行内所有观测结果，可导出 JSON 摘要。"""
 
-    def __init__(self, run_id: str, output_dir: Path | None = None) -> None:
+    def __init__(
+        self, run_id: str, output_dir: Path | None = None, date_dir: str | None = None
+    ) -> None:
         self.run_id = run_id
+        # 日期目录名与 run_id 一起定位产物；缺省时由摘要开始时刻推出。
+        self.date_dir = date_dir
         self._lock = threading.Lock()
         self.requests: dict[str, dict] = {}
         self._job_requests: dict[str, str] = {}
@@ -299,6 +303,7 @@ class Recorder:
             "db_checked_at": self.db_checked_at,
             "drain": deepcopy(self.drain),
             "run_id": self.run_id,
+            "date_dir": self.date_dir,
             "stage": self.stage,
             "users": self.users,
             "peak_active_jobs": self.peak_active_jobs,

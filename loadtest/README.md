@@ -9,7 +9,7 @@
 - 客户端只在本地电脑运行，不占用服务器 CPU 与内存；服务器侧指标需要单独的只读采集入口。
 - 只使用测试账号与测试文件。明文 HTTP 入口下不允许出现真实用户密码或真实业务文件。
 - 账号密码只写入 loadtest/local/accounts.local.json，不进入报告、日志或版本库。
-- 运行产物写入 loadtest/local/runs/；整理后的报告与逐档核查写入 loadtest/local/evidence/，默认归档到本地和团队知识库，不进入版本库。
+- 运行产物写入 loadtest/local/runs/<date>/；整理后的报告与逐档核查写入 loadtest/local/evidence/<date>/，默认归档到本地和团队知识库，不进入版本库。日期取 run_id 的 YYYYMMDD 前缀，缺前缀时取开始时刻的本地日期。
 - 进入版本库的压测证据只有 loadtest/evidence/index.md 一份索引表；报告正文、logcheck JSON、缺陷分析和服务器侧采集结果都不提交。
 - 每次输出报告后立即归档，并把 run_id、测试时间、被测镜像 digest、归档位置和结论追加到 index.md。
 
@@ -46,6 +46,7 @@ py -3.12 -m venv .venv
 .venv\Scripts\python.exe -m runner recovery
 
 # 导出本轮 job_id 清单，供服务器上逐 Job 主库核对
+# 默认写入最近一次运行所在的日期目录 local/runs/<date>/job-ids/
 .venv\Scripts\python.exe -m runner export-job-ids
 
 # 整理证据包与核查定位清单
@@ -156,9 +157,9 @@ SSE 峰值只计成功收到 HTTP 200 响应头的连接，等待额度、等待
 
 ~~~
 # 以下命令在 loadtest/ 内执行；输出独立文件，保留原始产物
-.venv\Scripts\python.exe verify_report.py --run-summary local/runs/<run_id>/summary.json --output local/evidence/<run_id>-report-v2.md
-.venv\Scripts\python.exe verify_report.py --run-summary local/runs/<run_id>/summary.json --server-json local/server-side-<run_id>-before.json --after-json local/server-side-<run_id>-after.json --job-db-json local/job-db-<run_id>.json
-.venv\Scripts\python.exe verify_report.py --run-summary local/runs/<run_id>/summary.json --logcheck-json local/evidence/logcheck-<stage>.json --output local/evidence/<run_id>-report-v2.md
+.venv\Scripts\python.exe verify_report.py --run-summary local/runs/<date>/<run_id>/summary.json --output local/evidence/<date>/<run_id>-report-v2.md
+.venv\Scripts\python.exe verify_report.py --run-summary local/runs/<date>/<run_id>/summary.json --server-json local/server-side-<run_id>-before.json --after-json local/server-side-<run_id>-after.json --job-db-json local/job-db-<run_id>.json
+.venv\Scripts\python.exe verify_report.py --run-summary local/runs/<date>/<run_id>/summary.json --logcheck-json local/evidence/<date>/logcheck-<stage>.json --output local/evidence/<date>/<run_id>-report-v2.md
 ~~~
 
 旧的 server/db 两个位置参数仍可使用，但必须另加 `--run-summary`。跨 run_id 的证据
@@ -214,7 +215,7 @@ SSH 启动回执丢失时只核验进程，不重复启动。停止边界写入�
 ~~~
 
 编排逐档串行执行，遇到非零退出码停止。recovery 保留专项缺口时退出码为 3，请作为
-独立专项执行。local/runs/<run_id>/orchestration.json 保存负载退出码和检查点；
+独立专项执行。local/runs/<date>/<run_id>/orchestration.json 保存负载退出码和检查点；
 同目录的 jobs.jsonl、phases.json、原始采集和最终摘要组成该轮证据。负载退出码
 不能代替全部取证结果。
 
@@ -242,19 +243,19 @@ stop_submitting_at，不能猜时间。手工运行须并行启动采样和客�
 取回本地后按明确档位合并，命令在 loadtest/ 内执行：
 
 ~~~
-.venv\Scripts\python.exe -m runner attach-server --from local/runs/<run_id>/server-before.json --stage mid
-.venv\Scripts\python.exe -m runner attach-after --from local/runs/<run_id>/server-after.json --stage mid
-.venv\Scripts\python.exe -m runner attach-sample --from local/runs/<run_id>/stage-sample.json --stage mid
+.venv\Scripts\python.exe -m runner attach-server --from local/runs/<date>/<run_id>/server-before.json --stage mid
+.venv\Scripts\python.exe -m runner attach-after --from local/runs/<date>/<run_id>/server-after.json --stage mid
+.venv\Scripts\python.exe -m runner attach-sample --from local/runs/<date>/<run_id>/stage-sample.json --stage mid
 .venv\Scripts\python.exe -m runner evidence
 ~~~
 
-使用 attach 前确认该档最新运行就是指定 run_id；不同轮次的证据不得混入同一摘要。
+使用 attach 前设置精确的 run_id（`$env:LOADTEST_RUN_ID = '<run_id>'` 或全局 `--selected-run-id`），命令据此选择该运行所在的日期目录；不同日期、不同轮次的证据不得混入同一摘要。
 采集只读，不输出密钥、提示词或文件正文。缺少数据时保留 missing/error/unknown 和
 null，不能用 0 冒充采集成功。
 
 ## 逐请求与主库 Job 核对
 
-runner export-job-ids 同时输出 local/runs/job-ids/job-ids-<stage>.txt 和
+runner export-job-ids 同时输出 local/runs/<date>/job-ids/job-ids-<stage>.txt 和
 requests-<stage>.json。JSON 身份清单包含 run_id、逻辑请求、账号、会话和原幂等键，
 既包括已知 Job，也包括创建结果未知的请求；服务器只读核对，不重新发送创建请求。
 旧文本清单只覆盖已知 Job，无法核对没有拿到 job_id 的请求。
@@ -262,13 +263,13 @@ requests-<stage>.json。JSON 身份清单包含 run_id、逻辑请求、账号�
 ~~~
 # 本地 loadtest/ 内执行；确认清单属于指定 run_id
 .venv\Scripts\python.exe -m runner export-job-ids
-scp local/runs/job-ids/requests-mid.json ubuntu@<host>:/tmp/_lt/<run_id>/requests.json
+scp local/runs/<date>/job-ids/requests-mid.json ubuntu@<host>:/tmp/_lt/<run_id>/requests.json
 
 # 服务器执行；已部署完整采集器目录
 sudo bash /tmp/_lt/<run_id>/job_db_check.sh <run_id> /tmp/_lt/<run_id>/requests.json > /tmp/job-db-<run_id>.json
 
 # 将结果取回本地后，在 loadtest/ 内执行
-.venv\Scripts\python.exe -m runner attach-job-db --from local/runs/<run_id>/job-db-final.json --stage mid
+.venv\Scripts\python.exe -m runner attach-job-db --from local/runs/<date>/<run_id>/job-db-final.json --stage mid
 ~~~
 
 正常编排直接使用同轮 JSONL 或 summary 导出的请求清单，核对主库终态、会话归属、
@@ -304,7 +305,7 @@ MCP 日志提供真实调用身份、retry_ordinal、duration_ms 与事件状态
 run_id 与摘要一致且 scope=run，报告才在内存中注入 cdfm_log_evidence 并重新汇总，
 不改写历史 JSON。身份或计时字段缺失时保持未采集，不补造 attempt=0。
 全局累计数量不参与本轮成功率；旧日志未声明准确归属时只保留历史记录。产物写入
-local/evidence/logcheck-<stage>.json；只有 run_id 与摘要一致且 scope=run 时，才展示
+local/evidence/<date>/logcheck-<stage>.json；只有 run_id 与摘要一致且 scope=run 时，才展示
 本轮 MCP 错误、成功数量和 CDFM 统计。旧产物仍可读取，但无本轮 scope 时标为未采集，
 同 stage 不代表同一轮。报告同时展示状态和覆盖范围。没有真实日志或
 主库调用记录时，CDFM 与服务端专项仍未验收。
@@ -330,15 +331,16 @@ local/evidence/logcheck-<stage>.json；只有 run_id 与摘要一致且 scope=ru
 | local/ | 全部本地产物根目录，整体加入 .gitignore，方便整目录汇总与清理 |
 | local/data/ | 生成的测试 CSV |
 | local/accounts.local.json | 测试账号与密码 |
-| local/runs/ | 每次运行的原始产物 |
-| local/runs/job-ids/ | 按档位导出的本轮 job_id 清单，供服务器逐 Job 主库核对 |
-| local/evidence/ | 整理后的报告与核查结果，归档到本地和团队知识库 |
+| local/runs/<date>/ | 同一天的全部运行原始产物 |
+| local/runs/<date>/<run_id>/ | 一次运行的摘要、jobs.jsonl、phases.json、控制台输出与服务器采集 |
+| local/runs/<date>/job-ids/ | 按档位导出的本轮 job_id 清单，供服务器逐 Job 主库核对 |
+| local/evidence/<date>/ | 同一天的合并报告、逐档报告与核查结果，归档到本地和团队知识库 |
 | evidence/index.md | 唯一进入版本库的证据链索引：run_id、时间、镜像 digest、归档位置与结论 |
-| local/evidence/loadtest-report-<date>.md | 全部档位与专项的合并报告 |
-| local/evidence/log-verification.md | 按档位的 job_id、时间窗口与 Request ID 定位清单 |
-| local/evidence/logcheck-<档位>.json | 每档的日志侧核查原始结果 |
-| local/evidence/cdfm-failure-analysis.md | causal.cdfm 全部失败的定位与仍需在服务器完成的一步 |
-| local/evidence/source-catalog-500-analysis.md | GET /api/rag_eval/isolated/source-catalog 返回 500 的定位 |
+| local/evidence/<date>/loadtest-report-<date>.md | 当天全部档位与专项的合并报告 |
+| local/evidence/<date>/log-verification.md | 按档位的 job_id、时间窗口与 Request ID 定位清单 |
+| local/evidence/<date>/logcheck-<档位>.json | 每档的日志侧核查原始结果 |
+| local/evidence/<date>/cdfm-failure-analysis.md | causal.cdfm 全部失败的定位与仍需在服务器完成的一步 |
+| local/evidence/<date>/source-catalog-500-analysis.md | GET /api/rag_eval/isolated/source-catalog 返回 500 的定位 |
 | local/server-side-<run_id>-before.json | 负载前的服务器侧只读采集结果 |
 | local/server-side-<run_id>-after.json | 停止提交后的服务器只读采集结果 |
 | local/job-db-<run_id>.json | 逐 Job 主库终态只读核对结果 |

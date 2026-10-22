@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -12,6 +13,63 @@ LOCAL_DIR = LOADTEST_DIR / "local"
 DATA_DIR = LOCAL_DIR / "data"
 RUNS_DIR = LOCAL_DIR / "runs"
 EVIDENCE_DIR = LOCAL_DIR / "evidence"
+
+
+def date_key(timestamp: float) -> str:
+    """把运行开始时刻换算成本地日期键，日期边界跟随压测人员所在地时区。"""
+    return time.strftime("%Y%m%d", time.localtime(timestamp))
+
+
+def run_artifacts_dir(timestamp: float) -> tuple[Path, Path]:
+    """返回某次运行使用的日期目录及其中的原始产物目录。
+
+    同一天的全部运行共用 local/runs/<date>/ 与 local/evidence/<date>/；日期按本地
+    日历日计算，跨午夜的运行由 run_id 前缀固定在起始日期。
+    """
+    day = date_key(timestamp)
+    return RUNS_DIR / day, EVIDENCE_DIR / day
+
+
+def date_from_run_id(run_id: str) -> str | None:
+    """从 run_id 的 YYYYMMDD 前缀取日期；前缀不是合法日期时返回 None。"""
+    prefix = run_id[:8]
+    if len(prefix) != 8 or not prefix.isdigit():
+        return None
+    try:
+        time.strptime(prefix, "%Y%m%d")
+    except ValueError:
+        return None
+    return prefix
+
+
+def run_dir_for(run_id: str, started_at: float | None = None) -> tuple[Path, Path]:
+    """按 run_id 定位一次运行的产物目录。
+
+    run_id 自带日期前缀时以它为准，编排脚本与客户端因此得到同一目录；调用方传入
+    自定义 run_id 时退回开始时刻所在的本地日期。
+    """
+    day = date_from_run_id(run_id)
+    if day is None:
+        day = date_key(started_at if started_at else time.time())
+    return RUNS_DIR / day, EVIDENCE_DIR / day
+
+
+def latest_run_date() -> str | None:
+    """返回最近一个含运行摘要的日期目录；没有任何日期目录时返回 None。
+
+    未指定 run_id 的整理、附加与日志命令使用该日期，避免运行跨过午夜后误取当天
+    空目录；多个日期目录之间仍然彼此独立。
+    """
+    if not RUNS_DIR.is_dir():
+        return None
+    days = sorted(
+        path.name
+        for path in RUNS_DIR.iterdir()
+        if path.is_dir() and path.name.isdigit() and any(path.glob("*/summary.json"))
+    )
+    return days[-1] if days else None
+
+
 ACCOUNTS_PATH = LOCAL_DIR / "accounts.local.json"
 
 DEFAULT_BASE_URL = "http://203.195.194.205:8088"

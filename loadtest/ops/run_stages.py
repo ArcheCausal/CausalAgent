@@ -3,7 +3,7 @@
 用法：python ops/run_stages.py [档位 ...]
 
 不传档位时按既定顺序跑完全部档位。任何一档失败就停止后续档位，避免上一档未排空或
-核对失败时污染下一档；逐档日志写入 local/runs/_driver.log。
+核对失败时污染下一档；逐档日志写入 local/runs/<date>/_driver.log。
 """
 from __future__ import annotations
 
@@ -13,7 +13,9 @@ import sys
 import time
 
 BASE = pathlib.Path(__file__).resolve().parent.parent
-DRIVER_LOG = BASE / "local" / "runs" / "_driver.log"
+sys.path.insert(0, str(BASE))
+from runner import config
+
 DEFAULT_STAGES = [
     "low",
     "mid_low",
@@ -29,8 +31,10 @@ DEFAULT_STAGES = [
 
 
 def log(message: str) -> None:
-    DRIVER_LOG.parent.mkdir(parents=True, exist_ok=True)
-    with DRIVER_LOG.open("a", encoding="utf-8") as handle:
+    """驱动日志写入当天日期目录，与同一天的其他产物一起归档。"""
+    runs_dir, _evidence_dir = config.run_artifacts_dir(time.time())
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    with (runs_dir / "_driver.log").open("a", encoding="utf-8") as handle:
         handle.write(message + "\n")
 
 
