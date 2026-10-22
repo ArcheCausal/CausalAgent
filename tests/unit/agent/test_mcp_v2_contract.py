@@ -47,7 +47,6 @@ from app.agent.worker.mcp_client_pool import (
     McpTransportError,
 )
 from app.agent.worker.execution_guard import JobExecutionGuard, JobExecutionRevoked
-from observability.logging_runtime import current_log_context
 
 
 def test_default_mcp_registry_does_not_expose_disabled_olc() -> None:
@@ -142,53 +141,24 @@ def test_hmac_binds_command_and_rejects_expired_context() -> None:
 
 
 def test_service_returns_normalized_result_without_raw_runner_text() -> None:
-    class FakePool:
-        def ready(self) -> bool:
-            return True
+    from tests.support.local_algorithm_execution import LocalAlgorithmExecutor
 
-        async def execute(self, **kwargs):
-            await kwargs["before_start"](0.01)
-            return ExecutionOutcome(
-                value={
-                    "success": True,
-                    "data": {
-                        "nodes": [{"id": "A"}, {"id": "B"}],
-                        "edges": [{"from": "A", "to": "B", "arrows": "to"}],
-                    },
-                    "diagnostics": {"n_samples": 10, "n_features": 2},
-                },
-                executor_slot_id="process-0",
-            )
+    context = _context()
+    executor = LocalAlgorithmExecutor()
+    response = asyncio.run(executor.execute(_command(context), context))
+    result = response.result.model_dump(mode="json")
 
-    async def scenario():
-        context = _context()
-        command = _command(context)
-        service = CausalMcpService(
-            config=_config(),
-            registry=build_default_registry(),
-            executor_pool=FakePool(),
-            authority_reader=lambda _context: "A,B\n1,2\n3,4\n",
-            database_probe=lambda: True,
-        )
-        payload = await service.execute_payload(
-            {
-                "command": command.model_dump(mode="json"),
-                "trusted_context": context.model_dump(mode="json"),
-                "signature": sign_invocation(context, command, "secret"),
-            }
-        )
-        return payload
-
-    payload = asyncio.run(scenario())
-    assert payload["ok"] is True
-    assert payload["result"]["status"] == "valid"
-    assert payload["result"]["standardized_graph"]["edges"][0]["source"] == "A"
-    assert payload["result"]["diagnostics"]["sample_count"] == 10
-    assert payload["result"]["diagnostics"]["variable_count"] == 2
-    assert payload["result"]["diagnostics"]["metrics"]["n_features"] == 2
-    assert "runner" not in payload["result"]
-    assert payload["raw_payload"]["data"]["edges"][0]["from"] == "A"
-    assert "raw_payload" not in payload["result"]
+    assert result["status"] == "valid"
+    assert set(result["standardized_graph"]["nodes"]) == {"x", "y"}
+    assert result["standardized_graph"]["edges"]
+    assert result["diagnostics"]["sample_count"] == 100
+    assert result["diagnostics"]["variable_count"] == 2
+    assert result["diagnostics"]["metrics"]["n_features"] == 2
+    assert result["provenance"]["algorithm_runner_version"] == "causalachieve-v2"
+    assert result["implementation"]["runner_version"] == "causalachieve-v2"
+    assert "runner" not in result
+    assert "raw_payload" not in result
+    assert response.raw_payload["data"]["edges"]
 
 
 def test_service_rejects_plan_with_operation_the_algorithm_does_not_allow() -> None:
@@ -251,55 +221,56 @@ def test_service_rejects_plan_with_operation_the_algorithm_does_not_allow() -> N
 
 
 def test_service_logs_job_invocation_timeline_and_slow_threshold() -> None:
-    class SlowPool:
-        def ready(self) -> bool:
-            return True
+    import io
+    import json
+    import logging
 
-        async def execute(self, **kwargs):
-            await kwargs["before_start"](0.01)
-            await asyncio.sleep(0.03)
-            return ExecutionOutcome(
-                value={"success": True, "data": {"nodes": [], "edges": []}},
-                executor_slot_id="process-0",
-            )
+    from observability.logging_runtime import JsonLogFormatter
+    from tests.support.local_algorithm_execution import PC_CSV
 
     async def scenario():
         context = _context()
         command = _command(context)
+        pool = BoundedProcessPool(process_workers=1)
         service = CausalMcpService(
-            config=replace(_config(), slow_log_seconds=0.01),
+            config=replace(_config(), slow_log_seconds=0.001),
             registry=build_default_registry(),
-            executor_pool=SlowPool(),
-            authority_reader=lambda _context: "A,B\n1,2\n3,4\n",
-            database_probe=lambda: True,
+            executor_pool=pool,
+            authority_reader=lambda _context: PC_CSV,
         )
-        observed = []
-
-        def capture(_logger, event_code, **kwargs):
-            observed.append((event_code, kwargs.get("details"), current_log_context()))
-
-        with patch("Agent.CausalAgentMCP.service.log_event", side_effect=capture):
-            payload = await service.execute_payload(
-                {
-                    "command": command.model_dump(mode="json"),
-                    "trusted_context": context.model_dump(mode="json"),
-                    "signature": sign_invocation(context, command, "secret"),
-                }
-            )
-        return payload, observed
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(JsonLogFormatter("causal-mcp", "test"))
+        logger = logging.getLogger("Agent.CausalAgentMCP.service")
+        previous_level = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        await pool.start()
+        try:
+            payload = await service.execute_payload({
+                "command": command.model_dump(mode="json"),
+                "trusted_context": context.model_dump(mode="json"),
+                "signature": sign_invocation(context, command, "secret"),
+            })
+        finally:
+            await pool.close()
+            logger.removeHandler(handler)
+            logger.setLevel(previous_level)
+        return payload, [json.loads(line) for line in stream.getvalue().splitlines()]
 
     payload, observed = asyncio.run(scenario())
     assert payload["ok"] is True
-    assert [item[0] for item in observed] == [
-        "mcp.request.received",
-        "mcp.request.accepted",
-        "mcp.tool.slow",
-        "mcp.tool.finished",
-    ]
-    for _event, _details, context_fields in observed:
-        assert context_fields["job_id"] == _context().job_id
-        assert context_fields["invocation_id"] == _context().invocation_id
-        assert context_fields["tool"] == PC_SPEC.capability_id
+    assert payload["result"]["status"] == "valid"
+    events = [item["event_code"] for item in observed]
+    assert events[0] == "mcp.request.received"
+    assert events[-1] == "mcp.tool.finished"
+    assert events.count("mcp.request.accepted") == 1
+    assert events.count("mcp.tool.slow") == 1
+    # 慢调用计时包含排队，告警可以先于实际获得执行槽的 accepted 事件。
+    for item in observed:
+        assert item["job_id"] == _context().job_id
+        assert item["invocation_id"] == _context().invocation_id
+        assert item["tool"] == PC_SPEC.capability_id
 
 
 def test_bounded_pool_times_out_before_returning_late_result() -> None:
