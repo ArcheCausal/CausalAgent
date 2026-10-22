@@ -30,7 +30,7 @@ def build_verify_packet(runs_dir: Path, evidence_dir: Path) -> Path:
         "## 预检 Request ID 样本",
         "",
     ]
-    lines.append("预检以轮次清单中明确引用的产物为准。")
+    lines.extend(_preflight_samples(runs_dir))
     lines.extend(
         [
             "",
@@ -46,12 +46,6 @@ def build_verify_packet(runs_dir: Path, evidence_dir: Path) -> Path:
         if path is None:
             continue
         summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
-        request_rows = [{key: sample.get(key) for key in ("run_id", "request_id", "client_request_id",
-                        "response_request_id", "method", "path", "status", "error", "started_at",
-                        "finished_at", "duration_ms")} for sample in summary.get("http", {}).get("samples", [])]
-        (evidence_dir / f"{summary['run_id']}-request-diagnostics.json").write_text(
-            json.dumps({"run_id": summary["run_id"], "scope": "run", "requests": request_rows},
-                       ensure_ascii=False, indent=2), encoding="utf-8")
         job_ids = _job_ids(summary)
         sample = ", ".join(job_ids[:3]) or "无"
         lines.append(

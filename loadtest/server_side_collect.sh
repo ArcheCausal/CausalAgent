@@ -58,15 +58,29 @@ emit_string() {
     printf '"%s": "%s"' "$1" "$(json_string "$2")"
 }
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# Primary 按显式 READ -> WRITE -> legacy 配置选择一次；认证失败不换账号。
+MYSQL_USER_VALUE="$(read_env MYSQL_USER)"
+MYSQL_DATABASE_VALUE="$(read_env MYSQL_DATABASE)"
+[ -z "$MYSQL_DATABASE_VALUE" ] && MYSQL_DATABASE_VALUE="rag_eval_staging"
+
+mysql_query() {
+    if [ -z "$MYSQL_USER_VALUE" ]; then
+        printf 'missing'
+        return 0
+    fi
+    dk exec "$PROJECT-mysql-primary-1" sh -c '
+        . /opt/causalagent/secret-env.sh
+        MYSQL_PWD="$(secret_value MYSQL_PASSWORD)" || exit 1
+        export MYSQL_PWD
+        exec mysql "$@"
+    ' _ -u"$MYSQL_USER_VALUE" --default-character-set=utf8mb4 -N -B -e "$1" 2>/dev/null \
+        || printf 'error'
+}
 
 replica_query() {
     if [ "$DOCKER_SUDO" = "-1" ]; then printf 'missing'; return 0; fi
     dk exec "$PROJECT-mysql-replica-1" sh -c '
         . /opt/causalagent/secret-env.sh
         MYSQL_PWD="$(secret_value MYSQL_ROOT_PASSWORD)" || exit 1
-        MYSQL_PWD="${MYSQL_PWD%"$(printf '\r')"}"
         export MYSQL_PWD
         exec mysql "$@"
     ' _ -uroot -N -B -e "$1" 2>/dev/null \
@@ -119,24 +133,36 @@ if [ "$DOCKER_SUDO" != "-1" ]; then
     printf '    %s\n' "$(emit_string app_image_revision_label "$app_rev")"
     printf '  },\n'
 
-    primary_snapshot="$(python3 "$SCRIPT_DIR/ops/server_evidence.py" snapshot-db 2>/dev/null)"
-    rep_io="$(replica_query "SELECT service_state FROM performance_schema.replication_connection_status;" | head -1)"
-    rep_err="$(replica_query "SELECT COALESCE(MAX(last_error_number),0) FROM performance_schema.replication_connection_status;" | head -1)"
-    read_only="$(replica_query "SHOW VARIABLES WHERE Variable_name='read_only';" | awk '{print $2}')"
-    read_ok="$(replica_query "SELECT 1;" | head -1)"
-    python3 - "$primary_snapshot" "$rep_io" "$rep_err" "$read_only" "$read_ok" <<'PY'
-import json,sys
-try:
-    payload=json.loads(sys.argv[1])
-except ValueError:
-    payload={"mysql":{"status":"unknown","reason":"primary_collector_failed"},
-             "job_queue":{"status":"unknown","counts":None}}
-mysql=payload["mysql"]
-mysql.update(replication_io_state=sys.argv[2], replication_last_error_code=int(sys.argv[3]) if sys.argv[3].isdigit() else None,
-             replica_read_only=sys.argv[4], replica_read_query=sys.argv[5])
-for key in ("mysql","job_queue"):
-    print('  '+json.dumps(key)+': '+json.dumps(payload[key])+',')
-PY
+    if [ -n "$MYSQL_USER_VALUE" ]; then
+        tcon="$(mysql_query "SHOW GLOBAL STATUS WHERE Variable_name='Threads_connected';" | awk '{print $2}')"
+        trun="$(mysql_query "SHOW GLOBAL STATUS WHERE Variable_name='Threads_running';" | awk '{print $2}')"
+        tcre="$(mysql_query "SHOW GLOBAL STATUS WHERE Variable_name='Threads_created';" | awk '{print $2}')"
+        abor="$(mysql_query "SHOW GLOBAL STATUS WHERE Variable_name='Aborted_connects';" | awk '{print $2}')"
+        upti="$(mysql_query "SHOW GLOBAL STATUS WHERE Variable_name='Uptime';" | awk '{print $2}')"
+        rep_io="$(replica_query "SELECT service_state FROM performance_schema.replication_connection_status;" | head -1)"
+        rep_err="$(replica_query "SELECT COALESCE(last_error_message, 'none') FROM performance_schema.replication_connection_status;" | head -1)"
+        read_only="$(replica_query "SHOW VARIABLES WHERE Variable_name='read_only';" | awk '{print $2}')"
+        read_ok="$(replica_query "SELECT 1;" | head -1)"
+        jobs="$(mysql_query "SELECT CONCAT('total=', COUNT(*), ' queued=', SUM(status='queued'), ' running=', SUM(status='running'), ' succeeded=', SUM(status='succeeded'), ' failed=', SUM(status='failed'), ' canceled=', SUM(status='canceled'), ' waiting_input=', SUM(status='waiting_input')) FROM $MYSQL_DATABASE_VALUE.analysis_jobs;" | head -1)"
+        printf '  "mysql": {\n'
+        printf '    %s,\n' "$(emit_string threads_connected "$tcon")"
+        printf '    %s,\n' "$(emit_string threads_running "$trun")"
+        printf '    %s,\n' "$(emit_string threads_created "$tcre")"
+        printf '    %s,\n' "$(emit_string aborted_connects "$abor")"
+        printf '    %s,\n' "$(emit_string uptime_seconds "$upti")"
+        printf '    %s,\n' "$(emit_string replication_io_state "$rep_io")"
+        printf '    %s,\n' "$(emit_string replication_last_error "$rep_err")"
+        printf '    %s,\n' "$(emit_string replica_read_only "$read_only")"
+        printf '    %s\n' "$(emit_string replica_read_query "$read_ok")"
+        printf '  },\n'
+        printf '  "job_queue": {\n'
+        printf '    %s,\n' "$(emit_string table "$MYSQL_DATABASE_VALUE.analysis_jobs")"
+        printf '    %s\n' "$(emit_string counts "$jobs")"
+        printf '  },\n'
+    else
+        printf '  "mysql": {"status": "missing", "reason": "部署环境文件无 MYSQL_USER"},\n'
+        printf '  "job_queue": {"status": "missing", "reason": "凭据不可用"},\n'
+    fi
 else
     printf '  "containers_up": "missing",\n'
     printf '  "containers": "docker-unavailable",\n'

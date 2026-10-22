@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import math
 import threading
 import time
@@ -40,10 +39,6 @@ class HttpSample:
     error: str = ""
     started_at: float | None = None
     finished_at: float | None = None
-    request_id: str | None = None
-    client_request_id: str | None = None
-    response_request_id: str | None = None
-    run_id: str | None = None
 
 
 @dataclass
@@ -59,13 +54,6 @@ class SseSample:
     reconnects: int
     received_ids: list[int] = field(default_factory=list)
     error: str = ""
-    observation_end_reason: str | None = None
-    started_at: float | None = None
-    finished_at: float | None = None
-    intentional_disconnects: int = 0
-    reconnect_attempts: int = 0
-    reconnect_event_count: int = 0
-    connection_attempts: int = 0
 
 
 @dataclass
@@ -77,7 +65,7 @@ class JobSample:
     """
 
     job_id: str
-    created_status: int | None
+    created_status: int
     final_status: str | None
     queue_seconds: float | None
     execution_seconds: float | None
@@ -110,9 +98,6 @@ class Recorder:
         self.sse_states: dict[str, dict] = {}
         self.drain: dict = {}
         self.scenario: dict = {}
-        self.multi_session_evidence: list[dict] = []
-        self.input_manifest: list[dict] = []
-        self.task_budget_used = 0
         self.http: list[HttpSample] = []
         self.sse: list[SseSample] = []
         self.jobs: list[JobSample] = []
@@ -161,18 +146,12 @@ class Recorder:
             if logical_request_id in self.requests:
                 raise ValueError("逻辑请求已经登记")
             row = {"logical_request_id": logical_request_id, "admission": "pending",
-                   "intent_created_at": time.time(),
                    "username": None, "session_id": None, "idempotency_key": None,
                    "job_id": None, "created_request_at": None, "create_response_at": None,
                    "subscription_started_at": None, "sse_headers_at": None, "first_event_at": None,
                    "terminal_received_at": None, "user_wait_ms": None,
                    "wait_lower_bound_ms": None, "history_check_ms": None,
-                   "received_event_ids": None, "group": "ordinary", "business_class": "ordinary",
-                   "requires_terminal": True, "requires_full_stream": True,
-                   "observation_reason": "business_lifecycle",
-                   "observation_started_at": None, "observation_finished_at": None,
-                   "observation_end_reason": None, "cancel_attempts": [],
-                   "business_canceled": None, "execution_released": None, **fields}
+                   "received_event_ids": None, "group": "ordinary", **fields}
             self.requests[logical_request_id] = row
             self._append({"schema_version": "loadtest.lifecycle.v2", "run_id": self.run_id,
                           "event": "registered", "at": time.time(), **row})
@@ -209,29 +188,9 @@ class Recorder:
             mapping = getattr(self, field_name)
             mapping[user_index] = mapping.get(user_index, 0) + amount
 
-    def reserve_submission(self) -> bool:
-        """按整档保护上限占用一次逻辑提交，不增加业务重试。"""
-        with self._lock:
-            budget = self.scenario.get("task_budget")
-            if budget is not None and self.task_budget_used >= budget:
-                return False
-            self.task_budget_used += 1
-            return True
-
     def record_http(self, sample: HttpSample) -> None:
         with self._lock:
             self.http.append(sample)
-
-    def record_input(self, data: bytes, *, rows: int, columns: int, seed: int,
-                     user_index: int, scenario: str) -> None:
-        """只记录本次实际输入的元数据，不保存正文或重建历史哈希。"""
-        entry = {"rows": rows, "columns": columns, "seed": seed,
-                 "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data),
-                 "user_index": user_index, "scenario": scenario}
-        with self._lock:
-            self.input_manifest.append(entry)
-            self._append({"schema_version": "loadtest.lifecycle.v2", "run_id": self.run_id,
-                          "event": "input_manifest", "at": time.time(), **entry})
 
     def record_sse(self, sample: SseSample) -> None:
         with self._lock:
@@ -263,34 +222,13 @@ class Recorder:
             http = list(self.http)
             sse = list(self.sse)
             jobs = list(self.jobs)
-            created_ids = list(self.job_created_ids)
             notes = list(self.notes)
             requests = deepcopy(list(self.requests.values()))
             sse_states = deepcopy(self.sse_states)
+        observed_until = self.observation_ended_at or self.finished_at or time.time()
         for row in requests:
             if row.get("created_request_at") is not None and row.get("terminal_received_at") is None:
-                ended = row.get("observation_finished_at")
-                if ended is not None and row.get("admission") not in {"not_sent", "rejected", "conflict"}:
-                    row["wait_lower_bound_ms"] = max(0, ended - row["created_request_at"]) * 1000
-        # 专项可能只记录请求/SSE，而没有普通观察器的 JobSample。
-        # 兼容样本只能从真实账本派生；没有收到终态的时间与结果保持未知。
-        sampled = {sample.job_id for sample in jobs}
-        for job_id in created_ids:
-            if job_id in sampled:
-                continue
-            row = next((item for item in requests if item.get("job_id") == job_id
-                        and item.get("admission") in {"accepted", "replay"}), None)
-            if row is None:
-                continue
-            received = row.get("terminal_received_at") is not None
-            waited = row.get("user_wait_ms")
-            jobs.append(JobSample(job_id=job_id, created_status=row.get("created_status"),
-                final_status=row.get("final_status") if received else None,
-                queue_seconds=None, execution_seconds=None,
-                total_seconds=waited / 1000 if received and waited is not None else None,
-                history_consistent=None, user_index=row.get("user_index", 0),
-                observation="terminal" if received else row.get("observation_end_reason") or "unknown",
-                note="derived_from_real_request_ledger"))
+                row["wait_lower_bound_ms"] = max(0, observed_until - row["created_request_at"]) * 1000
 
         durations = [s.duration_ms for s in http]
         status_counts = Counter(s.status for s in http)
@@ -356,9 +294,6 @@ class Recorder:
             "schema_version": "loadtest.run.v2",
             "requests": requests,
             "scenario": self.scenario,
-            "multi_session_evidence": deepcopy(self.multi_session_evidence),
-            "input_manifest": deepcopy(self.input_manifest),
-            "task_budget_used": self.task_budget_used,
             "stop_submitting_at": self.stop_submitting_at,
             "observation_ended_at": self.observation_ended_at,
             "db_checked_at": self.db_checked_at,
@@ -389,7 +324,7 @@ class Recorder:
             },
             "job": {
                 "created": self.job_created,
-                "created_ids": created_ids,
+                "created_ids": list(self.job_created_ids),
                 "idempotent_replays": self.job_idempotent_replays,
                 "recorded": len(jobs),
                 "create_attempts": self.job_create_attempts,
@@ -433,23 +368,31 @@ class Recorder:
                 "terminal_latency_p95_ms": percentile(terminal_latency, 0.95),
                 "disconnects": sum(s.disconnects for s in sse),
                 "reconnects": sum(s.reconnects for s in sse),
-                "intentional_disconnects": sum(s.intentional_disconnects for s in sse),
-                "reconnect_attempts": sum(s.reconnect_attempts for s in sse),
-                "reconnect_event_count": sum(s.reconnect_event_count for s in sse),
                 "duplicate_events": duplicate_events,
                 "out_of_order_events": out_of_order_events,
                 "verified_missing_events": None,
                 "id_gap_events_informational": id_gap_events,
-                "samples": [{**asdict(s), "event_count": len(s.received_ids)} for s in sse],
+                "samples": [
+                    {
+                        "job_id": s.job_id,
+                        "first_event_ms": s.first_event_ms,
+                        "terminal_event_ms": s.terminal_event_ms,
+                        "terminal_event": s.terminal_event,
+                        "last_event_id": s.last_event_id,
+                        "disconnects": s.disconnects,
+                        "reconnects": s.reconnects,
+                        "event_count": len(s.received_ids),
+                        "error": s.error,
+                        "received_ids": s.received_ids,
+                    }
+                    for s in sse
+                ],
             },
             "server_baseline": self.server_baseline,
             "server_after": self.server_after,
             "notes": notes,
         }
-        from runner.manifest import collect_client_manifest
         from runner.capacity import enrich_summary
-        result["client_manifest"] = collect_client_manifest()
-        result["time_standard"] = "UTC"
         return enrich_summary(result)
 
     def save(self, path: Path) -> Path:

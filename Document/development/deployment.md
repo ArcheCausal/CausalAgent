@@ -56,8 +56,6 @@
 开发 Compose 使用仓库根目录的 `causalagent.env`（已加入 `.gitignore`）作为同一个密钥文件入口；首次启动前把它从 [`deploy/secrets/causalagent.env.example`](../../deploy/secrets/causalagent.env.example) 复制到仓库根目录并按需填写。
 
 `loadtest/` 的数据库只读采集器从部署环境文件读取账号和库名，通过数据库容器内的 `secret-env.sh` 读取密码；密码不放入 SSH 或 Docker 命令参数。本地 Grafana 日志核查默认从仓库根目录 `causalagent.env` 读取口令，可用 `CAUSALAGENT_SECRET_FILE` 指定其他受控文件；使用步骤见 [`loadtest/README.md`](../../loadtest/README.md)。
-采集器按配置选择配套的 `MYSQL_READ_USER` / `MYSQL_READ_PASSWORD`，未声明 READ 时选择 WRITE，最后兼容 legacy USER/PASSWORD；认证失败保留受控错误码，不切换账号。负载开始前必须通过真实主库查询、队列与连接数预检。
-预发网关对白名单只读 API 记录结构化 request ID、固定路由标签、HTTP/上游状态和上游连接、响应、请求耗时；不记录查询参数、资源正文或凭据。日志写入 `/proc/1/fd/1`，由容器日志采集。客户端与应用继续使用同一 `X-Request-ID`；没有应用记录时三段关联保持不完整，不能凭网关记录推定应用错误原因。
 Shell 密钥读取器兼容 LF 和 CRLF 换行，只移除行尾属于分隔符的回车，避免 Windows 保存的文件使密码多出一个字符；移除分隔符后为空的值仍然拒绝。本地 Grafana 核查读取统一密钥文件时使用相同规则，保留口令中的引号和空格。
 
 开发 `docker-compose.yml` 与兼容入口 `docker-compose.replica.yml` 为所有读取密钥的服务固定设置已有的 `ENVIRONMENT=development`。Python 密钥加载器和官方镜像的 Shell 适配器在该环境下跳过 POSIX 权限位和属主检查，直接读取主机文件，以兼容 Windows Docker Desktop 呈现的挂载权限；文件仍须存在并可读，各入口原有的内容校验继续执行。不增加权限策略开关、密钥准备服务或密钥卷。预发、生产以及未显式设置 development 的 Linux 进程保留现有权限检查，服务器发布校验仍要求 `0640 root:3000`。
