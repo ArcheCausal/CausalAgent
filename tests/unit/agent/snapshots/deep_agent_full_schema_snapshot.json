@@ -614,6 +614,183 @@
           "title": "GraphEdge",
           "type": "object"
         },
+        "GraphValidation": {
+          "additionalProperties": false,
+          "description": "图结构检查结果；通过不代表因果方向已获验证。",
+          "properties": {
+            "valid": {
+              "title": "Valid",
+              "type": "boolean"
+            },
+            "violations": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Violations",
+              "type": "array"
+            },
+            "checks_performed": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Checks Performed",
+              "type": "array"
+            },
+            "not_checked": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Not Checked",
+              "type": "array"
+            }
+          },
+          "required": [
+            "valid"
+          ],
+          "title": "GraphValidation",
+          "type": "object"
+        },
+        "MethodDefinition": {
+          "additionalProperties": false,
+          "description": "本次执行采用的方法契约快照，不随报告重新生成而更新。",
+          "properties": {
+            "capability_id": {
+              "title": "Capability Id",
+              "type": "string"
+            },
+            "public_name": {
+              "title": "Public Name",
+              "type": "string"
+            },
+            "contract_version": {
+              "title": "Contract Version",
+              "type": "string"
+            },
+            "description": {
+              "title": "Description",
+              "type": "string"
+            },
+            "input_requirements": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Input Requirements",
+              "type": "array"
+            },
+            "assumptions": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Assumptions",
+              "type": "array"
+            },
+            "graph_semantics": {
+              "title": "Graph Semantics",
+              "type": "string"
+            },
+            "matrix_convention": {
+              "title": "Matrix Convention",
+              "type": "string"
+            },
+            "edge_meanings": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Edge Meanings",
+              "type": "object"
+            },
+            "limitations": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Limitations",
+              "type": "array"
+            }
+          },
+          "required": [
+            "capability_id",
+            "public_name",
+            "contract_version",
+            "description",
+            "graph_semantics",
+            "matrix_convention"
+          ],
+          "title": "MethodDefinition",
+          "type": "object"
+        },
+        "MethodImplementation": {
+          "additionalProperties": false,
+          "description": "实际实现与权重身份；不包含宿主路径或模型凭据。",
+          "properties": {
+            "runner_version": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Runner Version"
+            },
+            "package": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Package"
+            },
+            "package_version": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Package Version"
+            },
+            "embedded_version": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Embedded Version"
+            },
+            "weights": {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "title": "Weights",
+              "type": "object"
+            }
+          },
+          "title": "MethodImplementation",
+          "type": "object"
+        },
         "SafeErrorCode": {
           "description": "首版允许跨边界传输的、无敏感细节的错误码。",
           "enum": [
@@ -847,6 +1024,39 @@
           "anyOf": [
             {
               "$ref": "#/$defs/DataViewSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "method": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MethodDefinition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "implementation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MethodImplementation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "graph_validation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphValidation"
             },
             {
               "type": "null"
@@ -1734,6 +1944,42 @@
       "title": "GraphEdge",
       "type": "object"
     },
+    "GraphValidation": {
+      "additionalProperties": false,
+      "description": "图结构检查结果；通过不代表因果方向已获验证。",
+      "properties": {
+        "valid": {
+          "title": "Valid",
+          "type": "boolean"
+        },
+        "violations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Violations",
+          "type": "array"
+        },
+        "checks_performed": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Checks Performed",
+          "type": "array"
+        },
+        "not_checked": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Not Checked",
+          "type": "array"
+        }
+      },
+      "required": [
+        "valid"
+      ],
+      "title": "GraphValidation",
+      "type": "object"
+    },
     "InvocationRecord": {
       "$defs": {
         "ActionAttempt": {
@@ -2087,6 +2333,147 @@
         "key_id"
       ],
       "title": "McpInvocationContext",
+      "type": "object"
+    },
+    "MethodDefinition": {
+      "additionalProperties": false,
+      "description": "本次执行采用的方法契约快照，不随报告重新生成而更新。",
+      "properties": {
+        "capability_id": {
+          "title": "Capability Id",
+          "type": "string"
+        },
+        "public_name": {
+          "title": "Public Name",
+          "type": "string"
+        },
+        "contract_version": {
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "input_requirements": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Input Requirements",
+          "type": "array"
+        },
+        "assumptions": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Assumptions",
+          "type": "array"
+        },
+        "graph_semantics": {
+          "title": "Graph Semantics",
+          "type": "string"
+        },
+        "matrix_convention": {
+          "title": "Matrix Convention",
+          "type": "string"
+        },
+        "edge_meanings": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Edge Meanings",
+          "type": "object"
+        },
+        "limitations": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        }
+      },
+      "required": [
+        "capability_id",
+        "public_name",
+        "contract_version",
+        "description",
+        "graph_semantics",
+        "matrix_convention"
+      ],
+      "title": "MethodDefinition",
+      "type": "object"
+    },
+    "MethodImplementation": {
+      "additionalProperties": false,
+      "description": "实际实现与权重身份；不包含宿主路径或模型凭据。",
+      "properties": {
+        "runner_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runner Version"
+        },
+        "package": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Package"
+        },
+        "package_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Package Version"
+        },
+        "embedded_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Embedded Version"
+        },
+        "weights": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Weights",
+          "type": "object"
+        }
+      },
+      "title": "MethodImplementation",
       "type": "object"
     },
     "PreprocessingApproval": {
@@ -2708,10 +3095,10 @@
   "tools": [
     {
       "capability_id": "causal.cdfm",
-      "spec_digest": "485482d984b06ecdad26259ae810d60884da14ebbc98189eae998c80a7ef5201",
+      "spec_digest": "9a950ea5a1095e7c3b5ec97c48b231718213b6f9ea2ceb448e8f71f9a8944e27",
       "tool": {
         "name": "causal_cdfm",
-        "description": "用预训练因果发现基础模型 CDFM 在连续数值表格数据上做零样本图推断，一次调用返回整张候选有向图。同一个 checkpoint 已覆盖线性、非线性、异方差、有序或离散观测、测量误差与潜在混杂等多类机制，因此机制未知或明显非线性时，比依赖单一假设的工具更合适，也可以与 PC、DirectLiNGAM 的结果并行对照。不传 threshold 时由服务端按模型自带校准器自动决定判决边界，传入 0 到 1 的数值可覆盖它。缺失值按 NaN/±Inf 掩码传递给模型；当前只接受连续数值列，不接受分类变量。输出只有边及其方向，不包含权重和置信度：方向可能随阈值变化，不可识别场景下方向证据不足，两条相反方向的边也可能对应潜在混杂，结果不构成准确率或生产能力证明。\n数据要求：全部输入变量必须是数值列；缺失值按原生掩码处理；非有限值仍需显式处理；可确认的处理操作：选列、按列删除含缺失值的行、数值插补；至少 2 行、2 列。如果原始数据不满足要求，先调用 request_data_processing 让用户确认处理方案，再携带同一方案调用本工具；不要自行假设清洗步骤。",
+        "description": "用预训练因果发现基础模型 CDFM 在数值表格数据上做零样本图推断，一次调用返回整张候选混合图。同一个 checkpoint 的训练机制包括线性、非线性、异方差、有序或离散观测、测量误差与潜在混杂等多类机制，因此机制未知或明显非线性时，可以作为候选方法，并与 PC、DirectLiNGAM 的结果分别对照。不传 threshold 时由服务端按模型自带校准器自动决定判决边界，传入 0 到 1 的数值可覆盖它。缺失值按 NaN/±Inf 掩码传递给模型；当前接收数值存储列，不接受未编码的非数值分类列。数值准入不证明测量语义连续，也不保证训练机制适用于当前分布。输出只有边及其方向，不包含权重和置信度：方向可能随阈值变化，不可识别场景下方向证据不足；成对的两个 1 解码为一条双箭头边，表示潜在共同原因候选，结果不构成准确率或生产能力证明。\n数据要求：全部输入变量必须是数值列；缺失值按原生掩码处理；非有限值仍需显式处理；可确认的处理操作：选列、按列删除含缺失值的行、数值插补；至少 2 行、2 列。\n方法假设：输入采用数值存储；实际测量语义和分布适用性须依据证据评估；零样本识别以预训练机制覆盖当前数据分布为前提；变量名、样本顺序和冻结输入身份由外层准入固定；CDFM checkpoint 可由 causal-mcp 服务端加载。\n目标图：acyclic_directed_mixed_graph；矩阵约定：row_to_column_pair_binary。\n边语义：directed：模型推断的候选因果方向；bidirected：潜在共同原因候选，不代表已经证实存在共同原因。\n适用边界：机制覆盖不保证当前数据上的可识别性或准确率；阈值可改变结构；边不携带效应量或置信度；不继承 LiNGAM 的线性、非高斯和无潜在混杂假设。如果原始数据不满足要求，先调用 request_data_processing 让用户确认处理方案，再携带同一方案调用本工具；不要自行假设清洗步骤。",
         "parameters": {
           "additionalProperties": false,
           "properties": {
@@ -2836,10 +3223,10 @@
     },
     {
       "capability_id": "causal.direct_lingam",
-      "spec_digest": "ca8d3878f5ac98d9fc7a4cec6378eabf7ca606f23fb72526f7f3f636a8d3d734",
+      "spec_digest": "70fc8dfa9fc50e6fb934d6b4fea57b0b8c4e4732a70380c0e1305dfd8642e821",
       "tool": {
         "name": "causal_direct_lingam",
-        "description": "在连续数值数据上使用 DirectLiNGAM 估计有向无环因果结构。适用于线性、非高斯、误差独立且没有潜在混杂的场景。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；可确认的处理操作：选列、按列删除含缺失值的行、数值插补；至少 2 行、2 列。如果原始数据不满足要求，先调用 request_data_processing 让用户确认处理方案，再携带同一方案调用本工具；不要自行假设清洗步骤。",
+        "description": "在连续数值数据上使用 DirectLiNGAM 估计有向无环因果结构。适用于线性、非高斯、误差独立且没有潜在混杂的场景。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；可确认的处理操作：选列、按列删除含缺失值的行、数值插补；至少 2 行、2 列。\n方法假设：输入为连续数值变量；因果机制近似线性且噪声非高斯；误差独立并且不存在潜在混杂。\n目标图：dag_target_to_source；矩阵约定：target_to_source。\n边语义：directed：线性结构方程中的候选直接作用；权重是系数而非置信度。\n适用边界：线性、非高斯、误差独立和无潜在混杂须分别检验或保持未检验；图中系数不是已识别的干预效应。如果原始数据不满足要求，先调用 request_data_processing 让用户确认处理方案，再携带同一方案调用本工具；不要自行假设清洗步骤。",
         "parameters": {
           "additionalProperties": false,
           "properties": {
@@ -2949,10 +3336,10 @@
     },
     {
       "capability_id": "causal.pc",
-      "spec_digest": "e4b07d2c0ee175c9cd96c2b7a7e1a08381f616df54eab3ae8367ef8566d7996c",
+      "spec_digest": "e679ec00c83fce30a4672ac829dbff72652b5e070a1ce5763226d51cbcec34c9",
       "tool": {
         "name": "causal_pc",
-        "description": "在表格数据上使用 PC 方法发现条件独立结构并生成部分有向图。适用于一般观测因果发现；需要数值或可确定性编码的表格数据，不应在明显存在潜在混杂且需要专门处理时作为唯一方法。\n数据要求：分类列必须先按确定性顺序编码；不允许存在缺失值、空列或非有限值；可确认的处理操作：选列、按列删除含缺失值的行、数值插补、分类编码；至少 2 行、2 列。如果原始数据不满足要求，先调用 request_data_processing 让用户确认处理方案，再携带同一方案调用本工具；不要自行假设清洗步骤。",
+        "description": "在表格数据上使用 PC 方法发现条件独立结构并生成部分有向图。适用于一般观测因果发现；需要数值或可确定性编码的表格数据，不应在明显存在潜在混杂且需要专门处理时作为唯一方法。\n数据要求：分类列必须先按确定性顺序编码；不允许存在缺失值、空列或非有限值；可确认的处理操作：选列、按列删除含缺失值的行、数值插补、分类编码；至少 2 行、2 列。\n方法假设：条件独立性检验适用于当前数据；因果马尔可夫性、忠实性和无潜在混杂的因果充分性；数据中的变量名和样本身份已经由外层准入冻结。\n目标图：pdag；矩阵约定：causal_learn_endpoints。\n边语义：directed：候选因果方向；undirected：方向尚未识别的相邻关系。\n适用边界：条件独立性检验和有限样本会影响结构；具体条件按实际 independence_test 判断；Fisher-Z 基于偏相关与高斯条件独立关系，不能因 PC 是通用算法就声称本次检验不受线性或分布条件限制；骨架相近不等于方向得到验证；不直接估计因果效应。如果原始数据不满足要求，先调用 request_data_processing 让用户确认处理方案，再携带同一方案调用本工具；不要自行假设清洗步骤。",
         "parameters": {
           "additionalProperties": false,
           "properties": {

@@ -51,7 +51,8 @@ def test_complete_profile_preserves_all_facts_and_consumer_input(
     assert quality_profile.non_finite_columns == ("nonfinite",)
     assert quality_profile.empty_columns == ("empty",)
     assert quality_profile.constant_columns == ("constant",)
-    assert quality_profile.suspected_id_columns == ("record_id",)
+    assert quality_profile.suspected_id_columns == ()
+    assert "record_id" in quality_profile.numeric_columns
     parent = {
         "analysis_parameters": {
             "data_profile": quality_profile if as_model else original,

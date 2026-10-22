@@ -1,6 +1,5 @@
 """结构化报告文档的 schema、资源投影、持久化与受控错误路径测试。"""
 
-import asyncio
 import json
 import os
 
@@ -22,7 +21,6 @@ for key, value in {
 
 
 from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
-from langchain_core.runnables import RunnableLambda  # noqa: E402
 from langgraph.errors import NodeError  # noqa: E402
 
 from Agent.Report.assets import (  # noqa: E402
@@ -45,7 +43,6 @@ from Agent.Report.document import (  # noqa: E402
 )
 from Agent.causal_agent import nodes  # noqa: E402
 from Agent.causal_agent.fault_tolerance import recover_report  # noqa: E402
-from Agent.llm_structured_output import StructuredOutputError  # noqa: E402
 from app.agent.worker.result_presenter import process_final_result  # noqa: E402
 from app.chat.response_storage import prepare_ai_response_for_storage  # noqa: E402
 
@@ -89,33 +86,6 @@ def _histogram_asset() -> ChartAsset:
 
 def _draft(blocks: list[dict]) -> ReportDraft:
     return ReportDraft.model_validate({"title": "因果分析报告", "blocks": blocks})
-
-
-class _StructuredModel:
-    """最小模型替身：记录提示词并返回固定的结构化草稿，不发起网络调用。"""
-
-    def __init__(self, draft: dict, captured: dict | None = None) -> None:
-        self.draft = draft
-        self.captured = captured if captured is not None else {}
-        self.extra_body: dict = {}
-
-    def model_copy(self, *, update=None, **kwargs):
-        return _StructuredModel(self.draft, self.captured)
-
-    def with_structured_output(self, schema, **_kwargs):
-        async def invoke(prompt_value):
-            self.captured["messages"] = prompt_value.to_messages()
-            return schema.model_validate(self.draft)
-
-        return RunnableLambda(invoke)
-
-
-class _FailingStructuredModel(_StructuredModel):
-    def with_structured_output(self, schema, **_kwargs):
-        async def invoke(_prompt_value):
-            raise RuntimeError("provider rejected tool call")
-
-        return RunnableLambda(invoke)
 
 
 def _report_state(**overrides) -> dict:
@@ -276,15 +246,16 @@ def test_build_chart_assets_emits_structured_data_without_images() -> None:
     )
 
     assert set(assets) == {
-        "chart_histogram_age",
-        "chart_histogram_income",
+        "chart_bar_age",
+        "chart_bar_income",
         "chart_bar_city",
         "chart_heatmap_correlation",
     }
     assert "data:image" not in serialized
     assert "<img" not in serialized
-    histogram = assets["chart_histogram_age"]
-    assert len(histogram.data["counts"]) == len(histogram.data["bins"]) - 1
+    frequency = assets["chart_bar_age"]
+    assert len(frequency.data["counts"]) == len(frequency.data["categories"])
+    assert frequency.data["categories"] == [str(value) for value in sorted(frame["age"].unique())]
     assert assets["chart_heatmap_correlation"].data["variables"] == ["age", "income"]
 
     coerced = coerce_chart_assets({key: asset.model_dump(mode="json") for key, asset in assets.items()})
@@ -393,62 +364,33 @@ def test_unsupported_evidence_payload_is_skipped_without_sources() -> None:
     assert index.evidence_refs == []
 
 
-def test_report_graph_asset_prefers_postprocessed_revision() -> None:
-    revised = nodes._report_graph_asset(_report_state(postprocess_result={"revised_graph": REVISED_GRAPH}))
-    assert revised is not None
-    assert revised.graph_id == "graph_main"
-    assert revised.metadata["graph_source"] == "postprocessed"
-    assert [(edge.source, edge.target) for edge in revised.edges] == [("node_income", "node_age")]
-    assert [edge.id for edge in revised.edges] == ["edge_income_age"]
-
-    for postprocess_result in (None, {}, {"revised_graph": []}, {"revised_graph": REVISED_GRAPH, "error": "failed"}):
-        original = nodes._report_graph_asset(_report_state(postprocess_result=postprocess_result))
-        assert original is not None
-        assert original.metadata["graph_source"] == "original"
-        assert original.metadata["algorithm"] == "causal_pc"
-        assert [(edge.source, edge.target) for edge in original.edges] == [("node_age", "node_income")]
-        assert [edge.id for edge in original.edges] == ["edge_age_income"]
-
-    assert nodes._report_graph_asset(_report_state(causal_analysis_result={"success": False})) is None
+def test_report_graph_never_uses_unselected_legacy_or_revision_graph() -> None:
+    state = _report_state(postprocess_result={"revised_graph": REVISED_GRAPH})
+    assert nodes._report_graph_asset(state) is None
 
 
-def test_report_node_injects_assets_and_evidence_without_sending_data_points() -> None:
-    captured: dict = {}
-    model = _StructuredModel(
-        {
-            "title": "因果分析报告",
-            "blocks": [
-                {"id": "markdown_result", "type": "markdown", "content": "结论", "evidence_refs": []},
-                {"id": "chart_age", "type": "chart", "title": "年龄分布", "asset_key": "chart_histogram_age"},
-                {"id": "graph_main_block", "type": "causal_graph", "title": "主要因果关系", "asset_key": "graph_main"},
-            ],
-        },
-        captured,
+def test_report_projection_and_document_inject_resources_without_raw_data() -> None:
+    state = _report_state()
+    resources = build_report_resources(
+        file_summary=state["file_summary"], web_search_result=None,
+        rag_evidence=None, web_evidence=None,
     )
-
-    result = asyncio.run(nodes.report_node(_report_state(), model))
-    document = result["report_document"]
-
-    assert isinstance(document, ReportDocument)
-    assert set(document.assets) == {"chart_histogram_age", "graph_main"}
+    assets = coerce_chart_assets(state["chart_assets"])
+    draft = _draft([
+        {"id": "result", "type": "markdown", "content": "数据概览"},
+        {"id": "chart_age", "type": "chart", "asset_key": "chart_histogram_age"},
+    ])
+    document = build_report_document(draft, assets=assets, sources=resources.sources,
+                                     evidence_refs=resources.evidence_refs)
+    assert set(document.assets) == {"chart_histogram_age"}
     assert [source.kind for source in document.sources] == ["file"]
     assert document.evidence_refs
-    payload = json.dumps(document.model_dump(mode="json"), ensure_ascii=False)
-    assert "data:image" not in payload and "<img" not in payload
-    assert "[[CHART:" not in payload
-
-    prompt = "\n".join(str(message.content) for message in captured["messages"])
-    assert "chart_histogram_age" in prompt
-    assert "graph_main" in prompt
-    assert document.evidence_refs[0].evidence_id in prompt
-    assert result["messages"][0].name == "report"
-
-    # 结构化输入必须是 JSON 文本，而不是单引号、无缩进的 Python 字典字面量。
-    assert '"asset_key": "chart_histogram_age"' in prompt
-    assert f'"evidence_id": "{document.evidence_refs[0].evidence_id}"' in prompt
-    assert '"inferred_type": "continuous"' in prompt
-    assert "'asset_key'" not in prompt
-    assert "value_counts" not in prompt
+    manifest = nodes._report_asset_manifest(assets)
+    assert manifest[0]["asset_key"] == "chart_histogram_age"
+    assert "bins" not in json.dumps(manifest)
+    metadata = nodes._report_metadata_for_prompt(state["analysis_parameters"])
+    assert "value_counts" not in metadata
+    assert json.loads(metadata)["columns"] == ["age"]
 
 
 def test_build_report_document_recovers_textual_evidence_ids_for_navigation() -> None:
@@ -523,20 +465,13 @@ def test_report_metadata_prompt_handles_missing_or_malformed_input() -> None:
     assert fallback["column_profiles"] == {"age": {"inferred_type": "continuous"}}
 
 
-def test_report_node_rejects_unknown_asset_from_model_output() -> None:
-    model = _StructuredModel({
-        "title": "因果分析报告",
-        "blocks": [{"id": "chart_bad", "type": "chart", "asset_key": "chart_unknown"}],
-    })
-
+def test_report_document_rejects_unknown_asset() -> None:
+    draft = _draft([{"id": "chart_bad", "type": "chart", "asset_key": "chart_unknown"}])
     with pytest.raises(ReportSchemaError):
-        asyncio.run(nodes.report_node(_report_state(), model))
+        build_report_document(draft, assets={})
 
 
 def test_report_structured_output_failure_enters_degraded_document_path() -> None:
-    with pytest.raises(StructuredOutputError):
-        asyncio.run(nodes.report_node(_report_state(), _FailingStructuredModel({})))
-
     recovered = recover_report(_report_state(), NodeError("report", RuntimeError("boom")))
     document = recovered["report_document"]
     assert isinstance(document, ReportDocument)

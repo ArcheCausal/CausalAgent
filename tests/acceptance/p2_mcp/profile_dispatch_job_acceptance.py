@@ -1,7 +1,9 @@
 """真实模型、正式 worker/MCP 与隔离数据库的人工 Job 验收入口。
 
 从宿主机执行 ``python <本文件> launch --cdfm-weights-volume <固定权重卷>``。
-默认保留全部新容器与证据；run/verify 退出码为 PASS=0、FAIL=1、BLOCKED=2。
+launch --preflight-only 只检查启动条件，不创建资源；--dataset 必须显式指定。
+默认保留全部新容器与证据；验收退出码为 PASS=0、FAIL=1、BLOCKED=2。
+原分析完成后，在 worker 容器内执行 regenerate；verify-regeneration 只复核已提交的再生。
 只读取现有 worker 配置/模型密钥及应用前端产物，不连接原业务数据库。
 不自动批准数据处理，不修改 checkpoint，不预设模型或算法结果。
 报告仅包含计数、状态和一致性结论；凭据和文件正文只留在容器内。
@@ -15,6 +17,7 @@ from collections import Counter
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import secrets
@@ -28,7 +31,24 @@ ROOT = Path(__file__).resolve().parents[3]
 ENTRY = "tests/acceptance/p2_mcp/profile_dispatch_job_acceptance.py"
 SHARED = Path("/acceptance")
 SOURCE_FILES = ("Agent/deep_agent/state.py", "Agent/deep_agent_tools/dependency_planner.py",
-                "Agent/deep_agent_tools/dependency_dispatch.py")
+                "Agent/deep_agent_tools/dependency_dispatch.py",
+                "Agent/deep_agent_tools/algorithm_specs.py", "Agent/deep_agent_tools/models.py",
+                "Agent/deep_agent_tools/adapters/base.py", "Agent/deep_agent_tools/adapters/normalization.py",
+                "Agent/deep_agent_tools/normalization.py", "Agent/deep_agent_tools/graph_validation.py",
+                "Agent/causal/cdfm_runner.py", "Agent/CausalAgentMCP/service.py",
+                "Agent/causal_agent/analysis_context.py", "Agent/causal_agent/nodes.py",
+                "Agent/Report/assets.py", "Agent/Report/document.py",
+                "Agent/analysis_principles.py", "Agent/deep_agent/prompts.py",
+                "Agent/causal_agent/back_prompt.py", "Agent/Processing/fold_processing.py",
+                "Agent/Processing/nonlinearity.py", "Agent/deep_agent_tools/preprocessing.py",
+                "Agent/causal/causalachieve.py", "Agent/deep_agent/finalization.py",
+                "Agent/causal_agent/graph.py", ENTRY)
+DEFAULT_PROMPT = ("请对上传的数据进行因果分析。请使用 PC（fisherz）和 CDFM 分别分析并比较；"
+                  "两者没有依赖，请尽量在同一轮调用。必须依据实际数据画像检查输入，不要仅凭统计标签"
+                  "推断数值类型。不得跳过数据处理确认，也不要假定任何算法成功。请使用实际返回结果"
+                  "完成最终决策和完整报告。")
+REGENERATION_PROMPT = ("请仅根据当前分析上下文重新生成完整报告。沿用已保存的主辅结果选择、方法定义、"
+                       "数据视图和实际权重身份，不重新执行算法、不重新处理数据，也不改变分析上下文。")
 
 
 def source_fingerprint() -> dict:
@@ -43,19 +63,66 @@ def docker(*args: str, payload: str | None = None) -> str:
     return result.stdout.strip()
 
 
+def secret_mount_args(source: dict) -> list[str]:
+    mounts = {mount["Destination"]: mount for mount in source["Mounts"]}
+    single_file = "/run/secrets/causalagent.env" in mounts
+    mount = mounts.get("/run/secrets/causalagent.env") or mounts.get("/run/secrets")
+    if not mount or mount["Type"] not in {"bind", "volume"} or (single_file and mount["Type"] != "bind"):
+        raise RuntimeError("supported_secret_mount_required")
+    origin = mount.get("Name") or mount["Source"]
+    target = "/source-secrets/causalagent.env" if single_file else "/source-secrets"
+    return ["--mount", f"type={mount['Type']},source={origin},target={target},readonly"]
+
+
 def launch(args) -> None:
+    # Complete read-only preflight before mkdir/network/volume/container creation.
+    dataset = Path(args.dataset).resolve()
+    if not dataset.is_file():
+        raise RuntimeError("dataset_file_required")
+    prompt = args.prompt.strip() if args.prompt is not None else DEFAULT_PROMPT
+    if not prompt:
+        raise RuntimeError("nonempty_prompt_required")
+    source = json.loads(docker("inspect", args.source_worker))[0]
+    app = json.loads(docker("inspect", args.source_app))[0]
+    if not source["State"]["Running"] or not app["State"]["Running"]:
+        raise RuntimeError("running_source_containers_required")
+    secret_binding = secret_mount_args(source)
+    for image in (args.image, "mysql:8.0", "postgres:16-alpine"):
+        docker("image", "inspect", image)
+    if args.cdfm_weights_volume:
+        docker("volume", "inspect", args.cdfm_weights_volume)
+    docker("exec", args.source_worker, "python", "-B", "-c",
+           "from pathlib import Path; assert Path('/run/secrets/causalagent.env').is_file()")
+    docker("exec", args.source_app, "python", "-B", "-c",
+           "from pathlib import Path; assert all(Path(p).is_dir() for p in "
+           "('/app/chat-frontend/dist', '/app/website-frontend/dist'))")
+    configuration = {"data_mode": args.data_mode,
+                     "expected_capabilities": sorted(set(args.expect_capability or ["causal.pc", "causal.cdfm"])),
+                     "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()}
+    fingerprint = source_fingerprint()
+    if args.preflight_only:
+        print(json.dumps({"preflight": "PASS", "resources_created": False, **configuration,
+                          "weights_volume_exists": bool(args.cdfm_weights_volume),
+                          "weights_contents_verified": False, "source_files": len(fingerprint["files"]),
+                          "source_digest": fingerprint["digest"]}), flush=True)
+        return
     prefix = "profile-job-" + uuid4().hex[:10]
     evidence = ROOT / "tmp" / prefix
     evidence.mkdir(parents=True)
-    source = json.loads(docker("inspect", args.source_worker))[0]
+    manifest = {"prefix": prefix, "runner": prefix + "-run",
+                "web_url": f"http://127.0.0.1:{args.port}",
+                "evidence_directory": str(evidence), "retained": True, "configuration": configuration,
+                "source": fingerprint}
+    (evidence / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print(json.dumps(manifest), flush=True)
     source_env = dict(item.split("=", 1) for item in source["Config"]["Env"])
     # Copy non-secret deployment settings without rendering values to stdout.
     secret_names = {"SECRET_KEY", "API_KEY", "CAUSAL_MCP_SIGNING_KEY_CURRENT",
                     "CAUSAL_MCP_SIGNING_KEY_PREVIOUS"}
     inherited = {key: value for key, value in source_env.items()
                  if key not in secret_names
-                 and not key.endswith(("_PASSWORD", "_API_KEY", "_TOKEN", "_SECRET"))
-                 and not key.startswith(("MYSQL_", "CHECKPOINT_POSTGRES_"))
+                 and not key.endswith(("_PASSWORD", "_KEY", "_TOKEN", "_SECRET"))
+                 and not key.startswith(("MYSQL_", "CHECKPOINT_POSTGRES_", "ACCEPTANCE_"))
                  and key not in {"HOSTNAME", "HOME", "PATH", "PYTHONPATH"}}
     inherited.update({
         "MYSQL_HOST": prefix + "-mysql", "MYSQL_WRITE_HOST": prefix + "-mysql",
@@ -71,33 +138,29 @@ def launch(args) -> None:
         "LANGSMITH_TRACING": "false", "LANGCHAIN_TRACING_V2": "false",
         "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
         "ACCEPTANCE_PREFIX": prefix,
+        "ACCEPTANCE_CONFIGURATION": json.dumps(configuration),
+        "ACCEPTANCE_PROMPT": prompt, "ACCEPTANCE_DATASET_NAME": dataset.name,
     })
     docker("network", "create", "--internal", prefix + "-db")
     docker("network", "create", prefix + "-egress")
     docker("volume", "create", prefix + "-evidence")
-    docker("run", "-d", "--name", prefix + "-mysql", "--network", prefix + "-db",
+    docker("run", "--pull=never", "-d", "--name", prefix + "-mysql", "--network", prefix + "-db",
            "-e", "MYSQL_ALLOW_EMPTY_PASSWORD=yes", "-e", "MYSQL_DATABASE=terminal_acceptance", "mysql:8.0")
-    docker("run", "-d", "--name", prefix + "-postgres", "--network", prefix + "-db",
+    docker("run", "--pull=never", "-d", "--name", prefix + "-postgres", "--network", prefix + "-db",
            "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "-e", "POSTGRES_USER=terminal_acceptance",
            "-e", "POSTGRES_DB=terminal_acceptance", "postgres:16-alpine")
     docker("cp", args.source_app + ":/app/chat-frontend/dist", str(evidence / "frontend"))
     docker("cp", args.source_app + ":/app/website-frontend/dist", str(evidence / "website"))
-    secret_mount = next(m for m in source["Mounts"] if m["Destination"] == "/run/secrets")
-    secret_source = secret_mount.get("Name") or secret_mount["Source"]
 
     def container(role: str, *, initialize: bool = False) -> str:
         name = prefix + "-" + role
         primary_network = prefix + ("-egress" if role == "web" else "-db")
-        command = ["create", "--name", name, "--network", primary_network,
+        command = ["create", "--pull=never", "--name", name, "--network", primary_network,
                    "-w", "/app", "-v", str(ROOT) + ":/app:ro",
                    "-v", prefix + "-evidence:/acceptance",
-                   "-v", str(Path(args.dataset).resolve()) + ":/dataset/input.csv:ro"]
+                   "--mount", f"type=bind,source={dataset},target=/dataset/input.csv,readonly"]
         if initialize:
-            command += ["-v", secret_source + ":/source-secrets:ro"]
-        if role == "mcp" and args.cdfm_weights_volume:
-            command += ["-v", args.cdfm_weights_volume + ":/weights:ro",
-                        "-e", "CDFM_MODEL_PATH=/weights", "-e", "HF_HUB_OFFLINE=1",
-                        "-e", "TRANSFORMERS_OFFLINE=1"]
+            command += secret_binding
         if role == "web":
             command += ["-p", f"127.0.0.1:{args.port}:5001",
                         "-v", str(evidence / "frontend") + ":/frontend:ro",
@@ -105,6 +168,10 @@ def launch(args) -> None:
         # Environment values here are non-secret; model keys stay in the volume.
         for key, value in inherited.items():
             command += ["-e", key + "=" + value]
+        if role == "mcp" and args.cdfm_weights_volume:
+            command += ["--mount", f"type=volume,source={args.cdfm_weights_volume},target=/weights,readonly",
+                        "-e", "CDFM_MODEL_PATH=/weights", "-e", "HF_HUB_OFFLINE=1",
+                        "-e", "TRANSFORMERS_OFFLINE=1"]
         command += ["--entrypoint", "python", args.image, ENTRY, role]
         docker(*command)
         if role == "web":
@@ -117,15 +184,11 @@ def launch(args) -> None:
     bootstrap = container("bootstrap", initialize=True)
     code = docker("wait", bootstrap)
     if code != "0":
-        print(docker("logs", bootstrap), flush=True)
         raise RuntimeError("isolated_bootstrap_failed")
     for role in ("mcp", "web", "worker"):
         container(role)
     runner = container("run")
-    manifest = {"prefix": prefix, "runner": runner, "web_url": f"http://127.0.0.1:{args.port}",
-                "evidence_directory": str(evidence), "retained": True}
-    (evidence / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    print(json.dumps(manifest), flush=True)
+    assert runner == manifest["runner"]
     print("Isolated acceptance started; inspect runner logs and retained report.json.", flush=True)
 
 
@@ -200,13 +263,64 @@ def serve(role: str) -> None:
         asyncio.run(main_async())
 
 
-def emit(report: dict) -> None:
-    (SHARED / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+def browser_path() -> Path:
+    filename = os.getenv("ACCEPTANCE_BROWSER_FILENAME", "browser.json")
+    assert filename and Path(filename).name == filename and filename not in {".", ".."}
+    return SHARED / filename
+
+
+def save_browser(browser: dict, *, exclusive: bool = False) -> None:
+    flags = os.O_CREAT | os.O_WRONLY | (os.O_EXCL if exclusive else os.O_TRUNC)
+    descriptor = os.open(browser_path(), flags, 0o600)
+    os.chmod(browser_path(), 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+        json.dump(browser, output)
+
+
+def json_digest(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
+
+
+def equivalent_json(left, right) -> bool:
+    """跨 MySQL JSON 与 checkpoint 比较，只允许浮点序列化的舍入差异。"""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return math.isclose(left, right, rel_tol=1e-14, abs_tol=1e-14)
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(equivalent_json(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(equivalent_json(a, b) for a, b in zip(left, right))
+    return left == right
+
+
+def emit(report: dict, *, section: str | None = None) -> None:
+    path = SHARED / "report.json"
+    stored = json.loads(path.read_text(encoding="utf-8")) if section and path.is_file() else {}
+    path.write_text(json.dumps({**stored, section: report} if section else report, indent=2), encoding="utf-8")
     print(json.dumps(report), flush=True)
     raise SystemExit({"PASS": 0, "FAIL": 1, "BLOCKED": 2}.get(report["status"], 1))
 
 
-async def inspect_checkpoint(job_id: str) -> dict:
+def wait_for_job(job_id: str, user_id: int, *, section: str | None = None) -> tuple[dict, list]:
+    from app.agent import job_service
+
+    until = time.monotonic() + 1200
+    while True:
+        job = job_service.get_job_for_user(job_id, user_id)
+        events = job_service.read_events_after(job_id)
+        print(json.dumps({"status": job["status"], "events": len(events),
+                          "event_types": dict(Counter(event["event_type"] for event in events))}), flush=True)
+        if job["status"] in job_service.TERMINAL_STATUSES or job["status"] == "waiting_input":
+            return job, events
+        if time.monotonic() > until:
+            emit({"status": "BLOCKED", "reason": "job_wait_timeout", "job_id": job_id}, section=section)
+        time.sleep(15)
+
+
+async def inspect_checkpoint(job_id: str, configuration: dict) -> dict:
     from Agent.causal_agent.postgres_checkpointer import open_checkpoint_pool, build_checkpointer
     from Agent.deep_agent.state import ProjectDeepAgentState, to_deep_agent_input
     from Agent.deep_agent_tools.identity import build_deep_agent_run_id
@@ -284,16 +398,21 @@ async def inspect_checkpoint(job_id: str) -> dict:
         pc = [result for result in results if result.capability_id == "causal.pc"]
         cdfm = [result for result in results if result.capability_id == "causal.cdfm"]
         decision = child_values.get("structured_response")
+        decision = decision.model_dump(mode="json") if hasattr(decision, "model_dump") else decision
+        primary_ref = (decision or {}).get("primary_result_ref")
+        expected = set(configuration["expected_capabilities"])
         pc_primary = bool(decision and any(result.status == "valid"
-            and result.result_ref == decision.primary_result_ref for result in pc))
+            and result.result_ref == primary_ref for result in pc))
         requested_primary = bool(decision and any(result.status == "valid"
-            and result.result_ref == decision.primary_result_ref for result in [*pc, *cdfm]))
+            and result.capability_id in expected and result.result_ref == primary_ref for result in results))
+        selection_consistent = bool(decision and (requested_primary or (primary_ref is None
+            and decision.get("outcome") in {"no_valid_algorithm", "evidence_only"})))
         messages = child_values.get("messages", [])
         last_algorithm_tool = max((i for i, msg in enumerate(messages)
             if getattr(msg, "type", None) == "tool" and getattr(msg, "tool_call_id", None) in call_ids), default=len(messages))
         model_after_results = any(getattr(msg, "type", None) == "ai" for msg in messages[last_algorithm_tool + 1:])
         terminal_statuses = {"succeeded", "failed", "timed_out", "not_applicable", "skipped", "canceled", "not_ready", "discarded"}
-        both_terminal = bool(pc and cdfm and identity_matches and all(
+        requested_terminal = bool(expected.issubset({result.capability_id for result in results}) and identity_matches and all(
             record.final_status in terminal_statuses for record in algorithm_records))
         from app.agent import job_service
         persisted = job_service.read_events_after(job_id)
@@ -320,14 +439,16 @@ async def inspect_checkpoint(job_id: str) -> dict:
                 "call_result_ledger_bijection": identity_matches,
                 "tool_message_payloads_match_results": tool_payloads_match,
                 "algorithm_terminal_events_match_calls": terminals_match,
-                "both_requested_capabilities_terminal": both_terminal,
+                "requested_capabilities_terminal": requested_terminal,
                 "raw_result_integrity": all(raw_verified.values()) if raw_verified else False,
+                "valid_results_have_verified_raw": all(raw_verified[result.result_ref] for result in results if result.status == "valid"),
                 "pc_valid_with_verified_raw": any(result.status == "valid" and raw_verified[result.result_ref] for result in pc),
                 "cdfm_result_statuses": [result.status for result in cdfm],
                 "cdfm_inference": "PASS" if any(result.status == "valid" and raw_verified[result.result_ref] for result in cdfm) else "BLOCKED",
                 "structured_decision_exists": decision is not None,
                 "decision_primary_is_valid_pc": pc_primary,
                 "decision_primary_is_valid_requested_algorithm": requested_primary,
+                "decision_selection_consistent": selection_consistent,
                 "thread_model_call_count": child_values.get("thread_model_call_count", 0),
                 "model_response_after_algorithm_results": model_after_results,
                 "finalization_status": parent_values.get("finalization_status"),
@@ -372,11 +493,11 @@ def run_job_acceptance() -> None:
     assert session_response.status_code == 200
     session_id = session_response.json()["new_session_id"]
     with Path("/dataset/input.csv").open("rb") as data:
-        uploaded = client.post(base + "/api/upload_file", files={"file": ("Alarm-window-counts-300.csv", data, "text/csv")})
+        uploaded = client.post(base + "/api/upload_file", files={"file": (os.environ["ACCEPTANCE_DATASET_NAME"], data, "text/csv")}, timeout=60)
     assert uploaded.status_code == 200
     payload = {"session_id": session_id, "input_user_file_id": uploaded.json()["user_file_id"],
                "web_search_enabled": False,
-               "message": "请对上传的 Alarm 窗口计数数据进行因果分析。请使用 PC（fisherz）和 CDFM 分别分析并比较；两者没有依赖，请尽量在同一轮调用。必须依据实际数据画像检查输入，不要仅凭统计标签推断数值类型。不得跳过数据处理确认，也不要假定任何算法成功。请使用实际返回结果完成最终决策和报告。"}
+               "message": os.environ["ACCEPTANCE_PROMPT"]}
     key = str(uuid4())
     created = client.post(base + "/api/agent/jobs", json=payload, headers={"Idempotency-Key": key})
     assert created.status_code == 202
@@ -385,33 +506,22 @@ def run_job_acceptance() -> None:
     assert replay.status_code == 200 and replay.json()["job_id"] == job_id
     # Only container-local browser credentials; stdout/report never contains them.
     browser = {"username": username, "password": password,
-                "cookies": client.cookies.get_dict(), "session_id": session_id, "job_id": job_id}
-    browser_filename = os.getenv("ACCEPTANCE_BROWSER_FILENAME", "browser.json")
-    assert Path(browser_filename).name == browser_filename
-    descriptor = os.open(SHARED / browser_filename, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-        json.dump(browser, output)
+                "cookies": client.cookies.get_dict(), "session_id": session_id, "job_id": job_id,
+                "configuration": json.loads(os.environ["ACCEPTANCE_CONFIGURATION"])}
+    save_browser(browser, exclusive=True)
     user_id = find_user(username)["id"]
     print(json.dumps({"new_job_id": job_id, "creation_idempotent": True}), flush=True)
-    until = time.monotonic() + 1200
-    while True:
-        job = job_service.get_job_for_user(job_id, user_id)
-        events = job_service.read_events_after(job_id)
-        print(json.dumps({"status": job["status"], "events": len(events),
-                          "event_types": dict(Counter(event["event_type"] for event in events))}), flush=True)
-        if job["status"] in job_service.TERMINAL_STATUSES or job["status"] == "waiting_input":
-            break
-        if time.monotonic() > until:
-            emit({"status": "BLOCKED", "reason": "new_job_wait_timeout", "job_id": job_id})
-            return
-        time.sleep(15)
-    finalize_verification(client, base, job_id, job, events)
+    job, events = wait_for_job(job_id, user_id)
+    finalize_verification(client, base, job_id, job, events, browser["configuration"])
 
 
-def finalize_verification(client, base: str, job_id: str, job: dict, events: list) -> None:
+def finalize_verification(client, base: str, job_id: str, job: dict, events: list, configuration: dict) -> None:
     from app.agent import job_service
 
-    checkpoint = asyncio.run(inspect_checkpoint(job_id))
+    if job["status"] != "succeeded":
+        emit({"status": "BLOCKED", "job_id": job_id, "job_status": job["status"],
+              "reason": "analysis_not_succeeded_no_automatic_approval"})
+    checkpoint = asyncio.run(inspect_checkpoint(job_id, configuration))
     url = base + "/api/agent/jobs/" + job_id + "/events"
     first = client.get(url, timeout=30)
     refresh = client.get(url, timeout=30)
@@ -430,6 +540,7 @@ def finalize_verification(client, base: str, job_id: str, job: dict, events: lis
     report = {"status": "PASS" if job["status"] == "succeeded" else "BLOCKED",
               "verification_scope": "real_model_job_databases_mcp_http_sse",
               "job_id": job_id, "job_status": job["status"], "creation_idempotent": True,
+              "configuration": configuration,
               "frozen_input": bool(job.get("input_file_hash") and job.get("input_object_id")),
               "frozen_input_matches_source": job.get("input_file_hash") == hashlib.sha256(Path("/dataset/input.csv").read_bytes()).hexdigest(),
               **checkpoint, "persisted_events": len(after), "terminal_tool_events": len(terminal_tools),
@@ -446,13 +557,18 @@ def finalize_verification(client, base: str, job_id: str, job: dict, events: lis
     checks = ("parent_projection_matches_fresh", "child_profile_matches_fresh", "quality_fields_preserved",
               "algorithm_tool_messages_once", "event_keys_unique", "sse_refresh_stable", "sse_ids_unique",
               "sse_resume_exact", "sse_read_does_not_append_events", "public_payload_sanitized",
-              "call_result_ledger_bijection", "both_requested_capabilities_terminal",
+              "call_result_ledger_bijection", "requested_capabilities_terminal",
               "tool_message_payloads_match_results", "algorithm_terminal_events_match_calls", "frozen_input_matches_source",
-              "pc_valid_with_verified_raw", "structured_decision_exists",
-              "decision_primary_is_valid_requested_algorithm", "model_response_after_algorithm_results")
-    if not all(report[key] for key in checks) or report["fresh_numeric_columns"] != 11:
+              "valid_results_have_verified_raw", "structured_decision_exists",
+              "decision_selection_consistent", "model_response_after_algorithm_results")
+    if not all(report[key] for key in checks):
         report["status"] = "FAIL"
-    if not checkpoint["both_requested_capabilities_terminal"] or not checkpoint["pc_valid_with_verified_raw"]:
+    if configuration["data_mode"] == "alarm-windowed":
+        report["alarm_assertions"] = (report["fresh_numeric_columns"] == 11
+            and report["pc_valid_with_verified_raw"] and report["decision_primary_is_valid_requested_algorithm"])
+        if not report["alarm_assertions"]:
+            report["status"] = "FAIL"
+    if not checkpoint["requested_capabilities_terminal"]:
         report["status"] = "BLOCKED"
     if report["finalization_status"] != "valid" or report["thread_model_call_count"] < 2:
         report["status"] = "BLOCKED"
@@ -466,7 +582,7 @@ def verify_existing() -> None:
     from app.agent import job_service
     from app.auth.service import find_user
 
-    browser = json.loads((SHARED / os.getenv("ACCEPTANCE_BROWSER_FILENAME", "browser.json")).read_text(encoding="utf-8"))
+    browser = json.loads(browser_path().read_text(encoding="utf-8"))
     client = requests.Session()
     client.cookies.update(browser["cookies"])
     job_id = browser["job_id"]
@@ -474,7 +590,153 @@ def verify_existing() -> None:
     job = job_service.get_job_for_user(job_id, user_id)
     assert job["status"] in job_service.TERMINAL_STATUSES or job["status"] == "waiting_input"
     base = os.getenv("ACCEPTANCE_VERIFY_URL", "http://" + os.environ["ACCEPTANCE_PREFIX"] + "-web:5001")
-    finalize_verification(client, base, job_id, job, job_service.read_events_after(job_id))
+    finalize_verification(client, base, job_id, job, job_service.read_events_after(job_id), browser["configuration"])
+
+
+async def report_snapshot(job: dict, user_id: int) -> dict:
+    """读取正式 checkpoint/上下文/报告；仅返回身份摘要和布尔结论。"""
+    from Agent.causal_agent.postgres_checkpointer import open_checkpoint_pool, build_checkpointer
+    from Agent.causal_agent.analysis_context import build_report_analysis_context, report_primary_result
+    from Agent.deep_agent_tools.identity import build_deep_agent_run_id
+    from Agent.Report.assets import build_causal_graph_model
+    from Database.analysis_contexts import load_context
+
+    async with open_checkpoint_pool() as pool:
+        saver = build_checkpointer(pool)
+        parent = await saver.aget_tuple({"configurable": {"thread_id": job["job_id"], "checkpoint_ns": ""}})
+        child = await saver.aget_tuple({"configurable": {
+            "thread_id": build_deep_agent_run_id(job_id=job["job_id"]), "checkpoint_ns": ""}})
+    state = parent.checkpoint["channel_values"] if parent else {}
+    context_id = job.get("analysis_context_id")
+    context = load_context(user_id, job["session_id"], context_id) if context_id else None
+    summary = (context or {}).get("latest_algorithm_summary") or {}
+    facts = summary.get("analysis_facts") or {}
+    results = facts.get("results") or []
+    decision = facts.get("decision") or {}
+    document = state.get("report_document") or {}
+    document = document.model_dump(mode="json") if hasattr(document, "model_dump") else document
+    primary = report_primary_result(facts)
+    source = "analysis_context" if state.get("report_revision_mode") == "full_regeneration_from_context" else "original"
+    graph = build_causal_graph_model(dict(primary["graph"], graph_semantics=primary.get("graph_semantics")),
+        graph_id="graph_main", algorithm=primary["algorithm"], graph_source=source) if primary else None
+    expected_graphs = {"graph_main": graph.model_dump(mode="json")} if graph else {}
+    actual_graphs = {key: asset for key, asset in document.get("assets", {}).items()
+                     if isinstance(asset, dict) and "graph_id" in asset}
+    def graph_references(blocks):
+        return [block.get("asset_key") for block in blocks if block.get("type") == "causal_graph"] + [
+            key for block in blocks for key in graph_references(block.get("children", []))]
+
+    expected_execution = {"analysis_outcome": decision.get("outcome"), "report_completeness": "complete",
+        "finalization_status": facts.get("finalization_status"),
+        "data_views_differ": (facts.get("data_view_comparison") or {}).get("data_views_differ"),
+        "algorithms": [{"capability_id": result["algorithm"],
+            "public_name": (result.get("method") or {}).get("public_name"), "status": result["status"],
+            "disposition": result.get("disposition"), "sample_count": (result.get("data_view") or {}).get("row_count"),
+            "variable_count": (result.get("data_view") or {}).get("column_count"),
+            "operations": (result.get("data_view") or {}).get("operations", [])} for result in results]}
+    checks = {
+        "facts_recorded": bool(facts.get("schema_version") == "analysis-facts-v1" and results and decision),
+        "method_snapshots_recorded": bool(results) and all(result.get("method") for result in results),
+        "implementation_snapshots_recorded": all(result.get("implementation") for result in results if result["status"] == "valid"),
+        "cdfm_weights_identity_recorded": all(len(((result.get("implementation") or {}).get("weights") or {}).get("sha256") or "") == 64
+            for result in results if result["algorithm"] == "causal.cdfm" and result["status"] == "valid"),
+        "checkpoint_facts_match_saved": bool(facts) and equivalent_json(build_report_analysis_context(state), facts),
+        "report_document_persisted": bool(document) and equivalent_json(document, (job.get("result_json") or {}).get("document")),
+        "report_execution_matches_saved": document.get("execution_summary") == expected_execution,
+        "report_selection_matches_saved": bool(decision) and document.get("analysis_outcome") == decision.get("outcome")
+            and document.get("finalization_status") == facts.get("finalization_status")
+            and (primary is not None if decision.get("outcome") == "algorithm_supported" else facts.get("primary_result_ref") is None),
+        "report_graph_matches_saved": actual_graphs == expected_graphs
+            and graph_references(document.get("blocks", [])) == (["graph_main"] if graph else []),
+        "context_report_id_matches": bool(document.get("report_id"))
+            and document.get("report_id") == (context or {}).get("latest_report_id"),
+    }
+    return {"checks": checks, "context_id": context_id, "report_id": document.get("report_id"),
+            "summary_sha256": json_digest(summary), "facts_sha256": json_digest(facts),
+            "selection_sha256": json_digest(decision),
+            "methods_sha256": json_digest([result.get("method") for result in results]),
+            "implementations_sha256": json_digest([result.get("implementation") for result in results]),
+            "execution_sha256": json_digest(document.get("execution_summary")),
+            "revision_mode": state.get("report_revision_mode"),
+            "no_algorithm_execution": child is None and not state.get("deep_agent_algorithm_results"),
+            "checkpoint_context_matches": (state.get("analysis_context") or {}).get("analysis_context_id") == context_id}
+
+
+def regenerate_report(*, verify_only: bool = False) -> None:
+    """复用 browser.json/report.json；请求键先保存，重试不会再创建新 Job。"""
+    import requests
+    from app.agent import job_service
+    from app.auth.service import find_user
+    from Database.analysis_contexts import load_active_context
+
+    browser = json.loads(browser_path().read_text(encoding="utf-8"))
+    user_id = int(find_user(browser["username"])["id"])
+    original = job_service.get_job_for_user(browser["job_id"], user_id)
+    if original["status"] != "succeeded":
+        emit({"status": "BLOCKED", "reason": "original_analysis_not_succeeded"}, section="regeneration")
+    saved = browser.get("regeneration")
+    if not saved:
+        if verify_only:
+            emit({"status": "BLOCKED", "reason": "regeneration_not_submitted"}, section="regeneration")
+        baseline = asyncio.run(report_snapshot(original, user_id))
+        active = load_active_context(user_id, browser["session_id"]) or {}
+        if (not all(baseline["checks"].values()) or job_service.get_active_jobs(user_id)
+                or active.get("analysis_context_id") != baseline["context_id"]):
+            emit({"status": "BLOCKED", "reason": "baseline_snapshot_or_active_context_not_ready",
+                  "checks": baseline["checks"]}, section="regeneration")
+        saved = {"baseline": baseline, "request_key": str(uuid4()),
+                 "original_job_sha256": json_digest(original),
+                 "original_events_sha256": json_digest(job_service.read_events_after(browser["job_id"]))}
+        browser["regeneration"] = saved
+        save_browser(browser)
+    if not saved.get("job_id"):
+        if verify_only:
+            emit({"status": "BLOCKED", "reason": "submission_incomplete_retry_regenerate"}, section="regeneration")
+        base = "http://" + os.environ["ACCEPTANCE_PREFIX"] + "-web:5001"
+        client = requests.Session()
+        login = client.post(base + "/api/login", json={"username": browser["username"],
+                            "password": browser["password"]}, timeout=10)
+        assert login.status_code == 200
+        client.headers["X-CSRF-Token"] = login.json()["csrf_token"]
+        created = client.post(base + "/api/agent/jobs", json={"session_id": browser["session_id"],
+            "input_user_file_id": original["input_user_file_id"],
+            "message": REGENERATION_PROMPT, "web_search_enabled": False},
+            headers={"Idempotency-Key": saved["request_key"]}, timeout=30)
+        assert created.status_code in {200, 202}
+        saved["job_id"] = created.json()["job_id"]
+        browser["cookies"] = client.cookies.get_dict()
+        save_browser(browser)
+    job_id = saved["job_id"]
+    if verify_only:
+        job = job_service.get_job_for_user(job_id, user_id)
+        events = job_service.read_events_after(job_id)
+    else:
+        job, events = wait_for_job(job_id, user_id, section="regeneration")
+    if job["status"] != "succeeded":
+        emit({"status": "BLOCKED", "job_id": job_id, "job_status": job["status"],
+              "reason": "regeneration_not_succeeded_no_automatic_approval"}, section="regeneration")
+    snapshot = asyncio.run(report_snapshot(job, user_id))
+    baseline = saved["baseline"]
+    checks = {**snapshot["checks"], "same_context": bool(baseline["context_id"])
+              and snapshot["context_id"] == baseline["context_id"] and snapshot["checkpoint_context_matches"],
+        "same_session_and_input": job["session_id"] == original["session_id"]
+              and bool(original.get("input_file_hash"))
+              and job.get("input_file_hash") == original.get("input_file_hash")
+              and job.get("input_object_id") == original.get("input_object_id")
+              and job.get("input_user_file_id") == original.get("input_user_file_id"),
+        "new_report": bool(snapshot["report_id"]) and snapshot["report_id"] != baseline["report_id"],
+        "regeneration_route": snapshot["revision_mode"] == "full_regeneration_from_context",
+        "no_algorithm_execution": snapshot["no_algorithm_execution"]
+              and not any(event["event_type"] in {"tool_call_start", "tool_call_result"} for event in events),
+        "original_job_unchanged": saved["original_job_sha256"] == json_digest(job_service.get_job_for_user(browser["job_id"], user_id)),
+        "original_events_unchanged": saved["original_events_sha256"] == json_digest(job_service.read_events_after(browser["job_id"])),
+        "worker_source_matches": json.loads((SHARED / "worker-source.json").read_text()) == source_fingerprint()}
+    for field in ("summary_sha256", "facts_sha256", "selection_sha256", "methods_sha256", "implementations_sha256", "execution_sha256"):
+        checks[field + "_unchanged"] = snapshot[field] == baseline[field]
+    emit({"status": "PASS" if all(checks.values()) else "FAIL",
+          "verification_scope": "same_context_report_regeneration", "job_id": job_id, "checks": checks,
+          "facts_sha256": snapshot["facts_sha256"], "selection_sha256": snapshot["selection_sha256"],
+          "limitations": ["Report prose was not checked for scientific correctness"]}, section="regeneration")
 
 
 async def verify_fencing() -> None:
@@ -495,7 +757,7 @@ async def verify_fencing() -> None:
     prefix = os.environ["ACCEPTANCE_PREFIX"]
     assert prefix.startswith("profile-job-")
     assert os.environ["MYSQL_HOST"] == prefix + "-mysql"
-    browser = json.loads((SHARED / os.getenv("ACCEPTANCE_BROWSER_FILENAME", "browser.json")).read_text())
+    browser = json.loads(browser_path().read_text())
     user_id = int(find_user(browser["username"])["id"])
     assert not job_service.get_active_jobs(user_id), "refuse_active_user_jobs"
     original = job_service.get_job_by_id(browser["job_id"])
@@ -634,24 +896,41 @@ async def verify_fencing() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("role", choices=["launch", "bootstrap", "mcp", "web", "worker", "run", "verify", "fencing"])
+    parser.add_argument("role", choices=["launch", "bootstrap", "mcp", "web", "worker", "run", "verify",
+                                         "regenerate", "verify-regeneration", "fencing"])
     parser.add_argument("--source-worker", default="causalagent_worker")
     parser.add_argument("--source-app", default="causalagent_app")
     parser.add_argument("--image", default="causalagent-terminal-acceptance:20261020")
-    parser.add_argument("--dataset", default=r"D:\Computer\Projects\CausalAgent\tests\dataset\Alarm-window-counts-300.csv")
+    parser.add_argument("--dataset", help="Existing CSV file; required for launch")
+    parser.add_argument("--data-mode", choices=["generic", "alarm-windowed"], default="generic",
+                        help="Only alarm-windowed asserts 11 numeric columns and valid PC")
+    parser.add_argument("--prompt", help="Analysis request; never rendered in reports (default: PC + CDFM comparison)")
+    parser.add_argument("--expect-capability", action="append",
+                        help="Expected capability ID; repeat for multiple algorithms (default: causal.pc + causal.cdfm)")
+    parser.add_argument("--preflight-only", action="store_true", help="Read-only launch checks; create no resources")
     parser.add_argument("--port", type=int, default=5187)
     parser.add_argument("--cdfm-weights-volume", help="Existing pinned weights volume, mounted read-only")
     args = parser.parse_args()
+    if args.role == "launch" and not args.dataset:
+        parser.error("launch requires --dataset")
+    if args.preflight_only and args.role != "launch":
+        parser.error("--preflight-only requires launch")
     sys.path.insert(0, str(ROOT))
     logging.disable(logging.CRITICAL)
     if args.role == "launch":
         launch(args)
-    elif args.role == "bootstrap":
+        return
+    prefix = os.environ["ACCEPTANCE_PREFIX"]
+    assert prefix.startswith("profile-job-") and os.environ["MYSQL_HOST"] == prefix + "-mysql"
+    assert os.environ["CHECKPOINT_POSTGRES_HOST"] == prefix + "-postgres"
+    if args.role == "bootstrap":
         isolated_bootstrap()
     elif args.role == "run":
         run_job_acceptance()
     elif args.role == "verify":
         verify_existing()
+    elif args.role in {"regenerate", "verify-regeneration"}:
+        regenerate_report(verify_only=args.role == "verify-regeneration")
     elif args.role == "fencing":
         asyncio.run(verify_fencing())
     else:

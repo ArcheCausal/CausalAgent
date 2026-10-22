@@ -379,6 +379,7 @@ def build_report_document(
             raise ReportSchemaError("证据引用了不存在的来源")
 
     seen_block_ids: set[str] = set()
+    graph_block_count = 0
     for block in iter_report_blocks(normalized_blocks):
         if block.id in seen_block_ids:
             raise ReportSchemaError(f"报告块 ID 重复: {block.id}")
@@ -389,6 +390,9 @@ def build_report_document(
             if not isinstance(asset, ChartAsset):
                 raise ReportSchemaError(f"未知的图表资源: {block.asset_key}")
         elif isinstance(block, CausalGraphBlock):
+            graph_block_count += 1
+            if graph_block_count > 1:
+                raise ReportSchemaError("一份报告只能展示一张主因果图")
             asset = available_assets.get(block.asset_key)
             if not isinstance(asset, CausalGraphModel):
                 raise ReportSchemaError(f"未知的因果图资源: {block.asset_key}")
@@ -402,12 +406,8 @@ def build_report_document(
                 )
 
     # 超时是程序事实；即使模型正文省略限制，报告也必须保留这项说明。
-    public_names = {
-        "causal.pc": "PC", "causal.direct_lingam": "DirectLiNGAM",
-        "causal.cdfm": "CDFM", "causal.olc": "OLC",
-    }
     timed_out_names = [
-        public_names.get(item.get("capability_id"), "算法")
+        item.get("public_name") or item.get("capability_id") or "算法"
         for item in (execution_summary or {}).get("algorithms", [])
         if isinstance(item, Mapping) and item.get("status") == "timed_out"
     ]

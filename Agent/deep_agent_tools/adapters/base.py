@@ -156,6 +156,7 @@ class BaseAlgorithmAdapter(ABC):
             capability_id=command.capability_id,
             capability_version=command.capability_version,
             status=status,
+            method=self.spec.method_definition(),
             diagnostics=Diagnostics(
                 summary=summary,
                 safe_error_code=safe_error_code,

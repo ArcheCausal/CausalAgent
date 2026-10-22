@@ -1,4 +1,4 @@
-"""主程序维护的 AlgorithmSpec 单一事实源；默认启用 PC 与 DirectLiNGAM。"""
+"""算法方法定义与工具说明的单一事实源。"""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from typing_extensions import Annotated
 
 from .models import (
     ContractModel,
+    MethodDefinition,
     PREPROCESSING_OPERATION_ORDER,
     PreprocessingOperation,
     PreprocessingPlan,
@@ -206,6 +207,10 @@ class AlgorithmSpec(ContractModel):
     enabled: bool = True
     availability: Availability = "available"
     cost_hint: str | None = None
+    graph_semantics: str = "algorithm_graph"
+    matrix_convention: str = "unspecified"
+    edge_meanings: dict[str, str] = Field(default_factory=dict)
+    limitations: tuple[str, ...] = ()
 
     @field_validator(
         "capability_id",
@@ -296,6 +301,7 @@ class AlgorithmSpec(ContractModel):
             "result_contract": self.result_contract.model_json_schema(),
             "tool_name": self.tool_name,
             "version": self.version,
+            "method": self.method_definition().model_dump(mode="json"),
         }
 
     @property
@@ -334,10 +340,24 @@ class AlgorithmSpec(ContractModel):
                 + "、".join(_PREPROCESSING_LABELS[item] for item in self.allowed_preprocessing)
             )
         requirements.append(f"至少 {self.min_rows} 行、{self.min_columns} 列")
+        method = self.method_definition()
         return (
             f"{self.description}\n数据要求：{'；'.join(requirements)}。"
+            f"\n方法假设：{'；'.join(method.assumptions)}。"
+            f"\n目标图：{method.graph_semantics}；矩阵约定：{method.matrix_convention}。"
+            f"\n边语义：{'；'.join(f'{key}：{value}' for key, value in method.edge_meanings.items())}。"
+            f"\n适用边界：{'；'.join(method.limitations)}。"
             "如果原始数据不满足要求，先调用 request_data_processing 让用户确认"
             "处理方案，再携带同一方案调用本工具；不要自行假设清洗步骤。"
+        )
+
+    def method_definition(self) -> MethodDefinition:
+        return MethodDefinition(
+            capability_id=self.capability_id, public_name=self.public_name,
+            contract_version=self.version, description=self.description,
+            input_requirements=self.data_requirements, assumptions=self.assumptions,
+            graph_semantics=self.graph_semantics, matrix_convention=self.matrix_convention,
+            edge_meanings=dict(self.edge_meanings), limitations=self.limitations,
         )
 
     def categorical_allowed(self) -> bool:
@@ -536,7 +556,15 @@ class AlgorithmSpec(ContractModel):
 
 PC_SPEC = AlgorithmSpec(
     capability_id="causal.pc",
-    version="1.0",
+    version="2.0",
+    graph_semantics="pdag",
+    matrix_convention="causal_learn_endpoints",
+    edge_meanings={"directed": "候选因果方向", "undirected": "方向尚未识别的相邻关系"},
+    limitations=(
+        "条件独立性检验和有限样本会影响结构；具体条件按实际 independence_test 判断",
+        "Fisher-Z 基于偏相关与高斯条件独立关系，不能因 PC 是通用算法就声称本次检验不受线性或分布条件限制",
+        "骨架相近不等于方向得到验证", "不直接估计因果效应",
+    ),
     tool_name="causal_pc",
     public_name="PC 因果发现",
     description=(
@@ -549,6 +577,7 @@ PC_SPEC = AlgorithmSpec(
     produces=frozenset({"standardized_graph", "diagnostics"}),
     assumptions=(
         "条件独立性检验适用于当前数据",
+        "因果马尔可夫性、忠实性和无潜在混杂的因果充分性",
         "数据中的变量名和样本身份已经由外层准入冻结",
     ),
     result_contract=StandardizedGraph,
@@ -579,6 +608,8 @@ PC_SPEC = AlgorithmSpec(
 
 OLC_SPEC = AlgorithmSpec(
     capability_id="causal.olc",
+    graph_semantics="latent_mixed_graph",
+    matrix_convention="runner_edges",
     version="1.0",
     tool_name="causal_olc",
     public_name="OLC 潜在混杂因果发现",
@@ -618,7 +649,11 @@ OLC_SPEC = AlgorithmSpec(
 
 DIRECT_LINGAM_SPEC = AlgorithmSpec(
     capability_id="causal.direct_lingam",
-    version="1.0",
+    version="2.0",
+    graph_semantics="dag_target_to_source",
+    matrix_convention="target_to_source",
+    edge_meanings={"directed": "线性结构方程中的候选直接作用；权重是系数而非置信度"},
+    limitations=("线性、非高斯、误差独立和无潜在混杂须分别检验或保持未检验", "图中系数不是已识别的干预效应"),
     tool_name="causal_direct_lingam",
     public_name="DirectLiNGAM 因果发现",
     description=(
@@ -651,25 +686,30 @@ DIRECT_LINGAM_SPEC = AlgorithmSpec(
 
 CDFM_SPEC = AlgorithmSpec(
     capability_id="causal.cdfm",
-    version="1.0",
+    version="2.0",
+    graph_semantics="acyclic_directed_mixed_graph",
+    matrix_convention="row_to_column_pair_binary",
+    edge_meanings={"directed": "模型推断的候选因果方向", "bidirected": "潜在共同原因候选，不代表已经证实存在共同原因"},
+    limitations=("机制覆盖不保证当前数据上的可识别性或准确率", "阈值可改变结构；边不携带效应量或置信度", "不继承 LiNGAM 的线性、非高斯和无潜在混杂假设"),
     tool_name="causal_cdfm",
     public_name="CDFM 因果发现",
     description=(
-        "用预训练因果发现基础模型 CDFM 在连续数值表格数据上做零样本图推断，"
-        "一次调用返回整张候选有向图。同一个 checkpoint 已覆盖线性、非线性、异方差、"
+        "用预训练因果发现基础模型 CDFM 在数值表格数据上做零样本图推断，"
+        "一次调用返回整张候选混合图。同一个 checkpoint 的训练机制包括线性、非线性、异方差、"
         "有序或离散观测、测量误差与潜在混杂等多类机制，因此机制未知或明显非线性时，"
-        "比依赖单一假设的工具更合适，也可以与 PC、DirectLiNGAM 的结果并行对照。"
+        "可以作为候选方法，并与 PC、DirectLiNGAM 的结果分别对照。"
         "不传 threshold 时由服务端按模型自带校准器自动决定判决边界，传入 0 到 1 的数值可覆盖它。"
-        "缺失值按 NaN/±Inf 掩码传递给模型；当前只接受连续数值列，不接受分类变量。"
+        "缺失值按 NaN/±Inf 掩码传递给模型；当前接收数值存储列，不接受未编码的非数值分类列。"
+        "数值准入不证明测量语义连续，也不保证训练机制适用于当前分布。"
         "输出只有边及其方向，不包含权重和置信度：方向可能随阈值变化，"
-        "不可识别场景下方向证据不足，两条相反方向的边也可能对应潜在混杂，"
+        "不可识别场景下方向证据不足；成对的两个 1 解码为一条双箭头边，表示潜在共同原因候选，"
         "结果不构成准确率或生产能力证明。"
     ),
     model_input_schema=CausalCdfmInput,
     requires=frozenset({"continuous_tabular_dataset"}),
     produces=frozenset({"standardized_graph", "diagnostics"}),
     assumptions=(
-        "输入为连续数值变量",
+        "输入采用数值存储；实际测量语义和分布适用性须依据证据评估",
         "零样本识别以预训练机制覆盖当前数据分布为前提",
         "变量名、样本顺序和冻结输入身份由外层准入固定",
         "CDFM checkpoint 可由 causal-mcp 服务端加载",
@@ -678,7 +718,7 @@ CDFM_SPEC = AlgorithmSpec(
     default_timeout_seconds=600,
     concurrency_key="causal_cdfm",
     default_concurrency=1,
-    analysis_goal="在连续观测数据上生成 CDFM 的有向图推断结果",
+    analysis_goal="在数值观测数据上生成 CDFM 的候选混合图",
     description_source=(
         "用途",
         "机制覆盖",
@@ -688,10 +728,10 @@ CDFM_SPEC = AlgorithmSpec(
         "能力边界",
     ),
     data_requirements=(
-        "continuous_tabular_dataset",
+        "数值型表格数据；存储类型不等同于连续测量语义",
         "至少 2 行数据",
         "至少 2 个变量",
-        "分类变量不适用",
+        "不直接接受未编码的非数值分类列；数值编码不证明统计适用性",
     ),
     requires_numeric_columns=True,
     requires_complete_cases=False,
@@ -707,6 +747,13 @@ DEFAULT_ALGORITHM_SPECS: tuple[AlgorithmSpec, ...] = (
     DIRECT_LINGAM_SPEC,
     CDFM_SPEC,
 )
+
+
+def get_algorithm_spec(capability_id: str) -> AlgorithmSpec:
+    for spec in (*DEFAULT_ALGORITHM_SPECS, OLC_SPEC):
+        if spec.capability_id == capability_id:
+            return spec
+    raise ValueError("unknown algorithm capability")
 
 
 def build_tool_schema_snapshot() -> list[dict[str, Any]]:

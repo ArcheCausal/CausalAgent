@@ -64,7 +64,7 @@ cleanup outbox 在同一次清理中删除父图 Job thread 和独立的 Deep Ag
 
 模型看到的是由本地 `AlgorithmSpec` 生成的 LangChain function tools。当前默认 allowlist 包含 PC、DirectLiNGAM 和 CDFM；OLC 的 Spec、Adapter、runner 和算法代码仍保留，但不进入 worker Registry、MCP runner registry 或旧兼容 MCP 工具面。运行时不会调用远端 `list_tools()` 来动态扩展模型工具。CDFM 工具只公开可选 `threshold`，模型路径、CPU device、标准化和缺失值处理策略由 causal-mcp 固定。
 
-预处理在 `analysis_parameters.data_profile` 保存本次冻结数据的完整画像。`to_deep_agent_input()` 优先校验该字段，只有字段不存在时才读取父 State 顶层 `data_profile`；选中的画像存在但非法时明确失败，不使用其他来源掩盖错误。转换复制全部行列、列顺序、数值列、分类列、缺失、非有限值、空列、常数列、疑似标识符和质量问题，不按 `column_profiles.inferred_type` 重新判断存储类型。两处完整画像都不存在时，历史 `column_profiles`、分析参数和 `file_summary` 只恢复可确认的行列事实，数值与分类类型保持未知。统计标签继续供统计推断、可视化、非线性检测和报告使用，文件摘要继续记录文件身份与基础事实。
+预处理在 `analysis_parameters.data_profile` 保存本次冻结数据的完整画像。`to_deep_agent_input()` 优先校验该字段，只有字段不存在时才读取父 State 顶层 `data_profile`；选中的画像存在但非法时明确失败，不使用其他来源掩盖错误。转换复制全部行列、列顺序、数值列、分类列、缺失、非有限值、空列、常数列和质量问题，不按 `column_profiles.inferred_type` 重新判断存储类型。两处完整画像都不存在时，历史 `column_profiles`、分析参数和 `file_summary` 只恢复可确认的行列事实，数值与分类类型保持未知。数值参与条件来自实际 dtype 和有限值分布，不再由旧 inferred_type 标签决定。文件摘要继续记录文件身份与基础事实。
 
 提供给模型的画像、子图 State、依赖调度器及 AlgorithmTool/Adapter 输入使用同一份转换结果；完整画像的缺失值事实同时决定 `missing_values_present`。完整画像采用顶层兼容来源时，投影后的分析参数也保存同值副本，父图原输入不被修改。工具和调度器不再从文件摘要分别重建画像；父图完成回写保存边界选中的完整画像副本。`continuous_tabular_dataset` 要求画像确认全部真实列名均为数值列，历史输入的未知类型不能满足这一前提。此转换只作用于新进入子图的输入，不修改旧任务已经保存的 checkpoint 或终态。
 
@@ -100,7 +100,43 @@ CDFM v0.1 在 runner 内保持 `directed_graph` 和输入列顺序，按 `adjace
 
 旧 `build_graph()` 的固定 `mcp → rag → web_search` 子图只作为兼容路径保留，不是 worker 当前生产入口。
 
+## 方法定义、图约束与数据画像
+
+[AlgorithmSpec](../../Agent/deep_agent_tools/algorithm_specs.py) 是方法解释的唯一来源，生成工具描述和执行时的 `MethodDefinition` 快照。当前 PC、DirectLiNGAM 和 CDFM 的方法契约版本为 `2.0`。`AlgorithmResult.method` 保存输入要求、假设、目标图类型、矩阵方向、边含义和边界；`implementation` 分开记录 runner、实际包版本、内嵌实现版本及权重身份，不把三者混作同一个版本。CDFM 本地权重记录实际 SHA256；只有本地 manifest 的文件摘要匹配时才采用其 revision，否则 revision 保持未知。
+
+调度器在输入依赖缺失时直接产生的 `not_ready` 等终态也保存已知的 `MethodDefinition`。这些调用没有执行算法，`implementation` 和原始结果保持为空，不能把方法定义误写成实际执行证据。
+
+| 方法 | 图与矩阵 | 解释边界 |
+|---|---|---|
+| PC | `pdag`，causal-learn 端点编码 | 普通有向边是候选方向，无向边尚未识别方向；要求合适的条件独立检验、马尔可夫性、忠实性和因果充分性。本次使用 Fisher-Z 时须说明偏相关与高斯条件独立关系的限制，不能从算法通用性推导本次检验不受分布条件限制 |
+| DirectLiNGAM | `dag_target_to_source`，矩阵行是结果、列是原因 | 线性、非高斯、无潜在混杂等假设；边系数不等于置信度或已识别干预效应 |
+| CDFM | `acyclic_directed_mixed_graph`，二值矩阵行指向列，按变量对解码 | 学习得到的结构候选；不能套用 LiNGAM 的线性、非高斯假设，也不能把候选共同原因写成已证实 |
+
+CDFM 对每对变量读取 `(A[i,j], A[j,i])`：`00` 无边、`10` 为 `i→j`、`01` 为 `j→i`、`11` 为一条 `i↔j`。双箭头表示潜在共同原因候选，不能拆成两条普通有向边。raw artifact 继续保存原始邻接矩阵、变量顺序、logits、probabilities 和实际阈值。编码依据是实际安装包的方向实现及 CDFM 方法约定，不能将没有编码字段的 checkpoint 描述为自行声明了编码。
+
+CDFM 的输入准入检查确认数值存储和可计算性，不将整数列或低基数数值列自动解释为分类语义，也不把数值存储证明为连续测量。内部沿用的 `continuous_tabular_dataset` 能力前提目前只依据数值列画像形成，方法说明单独表达这个边界；训练机制覆盖及当前分布适用性仍是需要证据支持的条件。
+
+[共享结构检查](../../Agent/deep_agent_tools/graph_validation.py) 在标准化与 FinalizationGate 两处执行，检查图类型、边型、自环、重复边、普通有向子图无环性及 CDFM 的 bow-free 约束。无向边和双箭头不进入普通有向环检查；PC 的无向闭合路径不因此失败。违反约束时保留原始图和 raw artifact，将结果记为不可用，禁止成为主结果，不自动删边。`graph_validation.checks_performed` 与 `not_checked` 分别记录结构检查和未检验的统计、识别与边准确性事项。报告资产、前端图模型和上下文文字分别保留 `→`、`—`、`↔`。
+
+`column_profiles` 将三类信息分开保存：
+
+| 字段 | 内容 | 使用边界 |
+|---|---|---|
+| `storage_type` | 实际 pandas dtype | 是否能作为数值输入 |
+| `statistical_features` | 整数性、非负性、基数、基数占比、低频、非有限值 | 统计提示，不决定测量含义 |
+| `measurement_semantics` | kind、source、status、候选含义及证据 | CSV 推断保持 unknown/uncertain；现有 fold 结构化调用摘录可在用户原话定位的声明，记录 user_description/user_stated，不等同额外确认 |
+
+`profile_thresholds` 明确：低基数为不同值数不超过 10；低频为取值频数不超过 5 或占非缺失值比例不超过 1%；高缺失为缺失比例大于 30%。低基数与低频独立计算，可以同时成立，不合并低频数值，不由整数和高唯一比推断标识符。画像不修改原数据。非线性检测依据实际数值 dtype、有限观测和至少 10 个不同值选择变量，不执行时提供原因；并列数值用平均秩分箱。图表对低基数数值使用按数值顺序排列的频数柱图，对其他数值使用直方图；字符串类别单独展示。
+
+两套运行入口从 [analysis_principles.py](../../Agent/analysis_principles.py) 引用通用原则。专用提示词继续分别规定工具执行、预处理、检索与报告契约。结构发现不需要处理变量或结果变量；效应量解释仅适用于实际完成的效应识别和估计，变量名称、整数性与偏态不能自行证明混杂或忠实性违反。
+
 ## 结构化终态与报告
+
+报告节点接收完整父 State，再由 [build_report_analysis_context()](../../Agent/causal_agent/analysis_context.py) 唯一投影为 `analysis-facts-v1`。投影包含各结果的标准图、状态、执行时方法与实现、输入视图、必要诊断、逐结果身份，以及 `result_assessments`、`selection_rationale`、`conflicts`、`confidence_basis`。`edge_counts` 从标准图计算总边数及各边型数量，双箭头只计一条边，并与图一起保存，供报告直接引用。比较输入视图时同时检查行数、列顺序、处理操作、处理摘要及被删行、插补和编码列；runner 内部标准化和缺失策略另列。原始 CSV、原始大数组、完整 Action Ledger、文件身份和运行控制字段不进入该报告上下文。
+
+主图只来自本次通过门禁并明确选择的结果。后处理修订建议不替换算法原图；无合格主结果时说明原因，即使只有一个有效结果也不自动采用，不从旧上下文取图填补失败。报告最多一个因果图块；有主图资源时必须展示一次。新分析将完整精简事实嵌入现有 `latest_algorithm_summary.analysis_facts` JSON；无主结果时也保存 `no_primary` 和本次事实，避免旧图残留。重新生成读取对应保存快照及既有证据摘要，保留原主辅取舍和方法解释，复用既有报告存储事务。没有该快照的历史报告不回填、不修复，也不猜测其主图或选择理由。
+
+`graph_comparisons` 由有效标准图逐变量对计算，区分同一边型与方向、方向相反、边型不同、仅左侧存在和仅右侧存在，保留各侧实际端点。`left_algorithm`、`right_algorithm` 固定左右身份，`relation_counts` 直接计算各类关系数量，避免模型重新计数或按主辅身份猜测左右。它只记录本次候选图差异，不合并结果、不裁定真实方向。`decision.conflicts` 与取舍理由保留为模型评估文本；其中的自然语言若与实际边表冲突，报告以计算比较为准，指出不能由边表支持的表述，不能将另一侧缺边写成方向相反。
 
 Deep Agent 使用 `ToolStrategy(FinalAnalysisDecision)` 生成 `structured_response`。`FinalizationGate` 不调用 LLM，只校验：
 

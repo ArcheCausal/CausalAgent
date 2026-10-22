@@ -16,6 +16,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from Agent.Processing.fold_processing import PROFILE_THRESHOLDS
+
 from Agent.Report.document import (
     ChartAsset,
     CausalGraphEdge,
@@ -30,10 +32,6 @@ from Agent.Report.document import (
 
 CORRELATION_HEATMAP_KEY = "chart_heatmap_correlation"
 
-_CONTINUOUS_TYPES = frozenset({"continuous"})
-_CATEGORICAL_TYPES = frozenset(
-    {"binary", "categorical_numeric", "binary_categorical", "categorical"}
-)
 _MAX_BAR_CATEGORIES = 50
 _MAX_EVIDENCE_DESCRIPTION_CHARS = 400
 
@@ -65,7 +63,7 @@ def build_chart_assets(
     df: pd.DataFrame,
     analysis_parameters: Mapping[str, Any] | None,
 ) -> dict[str, ChartAsset]:
-    """根据数据摘要为报告生成直方图、分类柱状图和相关性热力图资源。"""
+    """按实际 dtype 和有限值基数生成分布图及数值相关性热力图。"""
 
     params = dict(analysis_parameters or {})
     column_profiles = params.get("column_profiles") or {}
@@ -73,23 +71,31 @@ def build_chart_assets(
         return {}
 
     assets: dict[str, ChartAsset] = {}
-    numeric_columns: list[str] = []
+    numeric_series: dict[str, pd.Series] = {}
 
-    for column, profile in column_profiles.items():
-        if column not in df.columns or not isinstance(profile, Mapping):
+    for column in df.columns:
+        profile = column_profiles.get(column, {})
+        if not isinstance(profile, Mapping):
             continue
-        inferred_type = profile.get("inferred_type")
-        if inferred_type in _CONTINUOUS_TYPES:
-            asset = _histogram_asset(df, str(column), profile)
-            if asset is not None:
-                numeric_columns.append(str(column))
-                assets[asset.asset_key] = asset
-        elif inferred_type in _CATEGORICAL_TYPES:
+        series = df[column]
+        if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
+            finite = series.where(np.isfinite(series))
+            distinct_count = int(finite.nunique(dropna=True))
+            if distinct_count > 1:
+                numeric_series[str(column)] = finite
+            if distinct_count <= PROFILE_THRESHOLDS["low_cardinality_max_distinct"]:
+                asset = _bar_asset(df, str(column), profile)
+            else:
+                asset = _histogram_asset(df, str(column), profile)
+        else:
             asset = _bar_asset(df, str(column), profile)
-            if asset is not None:
-                assets[asset.asset_key] = asset
+        if asset is not None:
+            assets[asset.asset_key] = asset
 
-    heatmap = _correlation_heatmap_asset(df, numeric_columns, params)
+    # 仅向热图传入去除非有限值的非常数数值列，保留原索引以成对计算相关性。
+    heatmap = _correlation_heatmap_asset(
+        pd.DataFrame(numeric_series, index=df.index), list(numeric_series), params
+    )
     if heatmap is not None:
         assets[heatmap.asset_key] = heatmap
 
@@ -101,7 +107,10 @@ def _histogram_asset(
     column: str,
     profile: Mapping[str, Any],
 ) -> ChartAsset | None:
-    series = pd.to_numeric(df[column], errors="coerce").dropna()
+    series = df[column]
+    if not pd.api.types.is_numeric_dtype(series):
+        return None
+    series = series[np.isfinite(series)].dropna()
     if series.empty:
         return None
     counts, edges = np.histogram(
@@ -118,7 +127,7 @@ def _histogram_asset(
         metadata={
             "variable": column,
             "sample_count": int(series.shape[0]),
-            "inferred_type": profile.get("inferred_type", ""),
+            "storage_type": str(df[column].dtype),
             "unit": None,
         },
         options={"show_tooltip": True},
@@ -130,19 +139,23 @@ def _bar_asset(
     column: str,
     profile: Mapping[str, Any],
 ) -> ChartAsset | None:
-    unique_count = profile.get("unique_count")
-    if isinstance(unique_count, (int, float)) and not isinstance(unique_count, bool):
-        if int(unique_count) >= _MAX_BAR_CATEGORIES:
-            return None
-
-    series = df[column].dropna().astype(str)
+    series = df[column].dropna()
+    is_numeric = pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)
+    if is_numeric:
+        series = series[np.isfinite(series)]
+    else:
+        series = series.astype(str)
     if series.empty:
         return None
     counts = series.value_counts()
-    if counts.shape[0] >= _MAX_BAR_CATEGORIES:
+    if not is_numeric and counts.shape[0] >= _MAX_BAR_CATEGORIES:
         return None
-    # 同频类别按名称排序，保证同一份数据生成的资源稳定可复现。
-    ordered = sorted(counts.items(), key=lambda item: (-int(item[1]), str(item[0])))
+    if is_numeric:
+        # 数值先按自然顺序排列，再转为标签；每个取值单独保留其频数。
+        ordered = list(counts.sort_index().items())
+    else:
+        # 同频类别按名称排序，保证同一份数据生成的资源稳定可复现。
+        ordered = sorted(counts.items(), key=lambda item: (-int(item[1]), str(item[0])))
     return ChartAsset(
         asset_key=chart_asset_key("bar", column),
         chart_type="bar",
@@ -153,7 +166,8 @@ def _bar_asset(
         metadata={
             "variable": column,
             "sample_count": int(series.shape[0]),
-            "inferred_type": profile.get("inferred_type", ""),
+            "storage_type": str(df[column].dtype),
+            "distribution_kind": "numeric_value_frequency" if is_numeric else "category_frequency",
             "unit": None,
         },
         options={"show_tooltip": True},
@@ -268,10 +282,13 @@ def _vis_edge_type(raw_edge: Mapping[str, Any]) -> str:
         return raw_edge["edge_type"]
     arrows = raw_edge.get("arrows")
     if isinstance(arrows, str):
-        return _VIS_EDGE_TYPE_BY_ARROWS.get(arrows.strip(), "directed")
+        ends = {part.strip() for part in arrows.split(",") if part.strip()}
+        if ends == {"from", "to"}:
+            return "bidirected"
+        return _VIS_EDGE_TYPE_BY_ARROWS.get(arrows.strip(), "partially_directed")
     if raw_edge.get("dashes") is True:
         return "partially_directed"
-    return "directed"
+    return "undirected"
 
 
 def build_causal_graph_model(
@@ -325,6 +342,8 @@ def build_causal_graph_model(
         )
         if source_id is None or target_id is None:
             return None
+        if raw_edge.get("arrows") == "from":
+            source_id, target_id = target_id, source_id
 
         weight = raw_edge.get("weight")
         if not isinstance(weight, (int, float)) or isinstance(weight, bool):
@@ -621,6 +640,7 @@ def describe_chart_asset(asset: ChartAsset) -> str:
     if asset.chart_type == "histogram":
         return f"{variable} 的分布直方图"
     if asset.chart_type == "bar":
-        return f"{variable} 的类别分布柱状图"
+        label = "数值频数" if asset.metadata.get("distribution_kind") == "numeric_value_frequency" else "类别分布"
+        return f"{variable} 的{label}柱状图"
     variables = asset.data.get("variables") or []
     return "变量相关性热力图: " + "、".join(str(item) for item in variables)

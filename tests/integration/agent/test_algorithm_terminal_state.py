@@ -39,7 +39,8 @@ from Agent.deep_agent.graph import _build_message_identity_middleware
 from Agent.deep_agent.state import ProjectDeepAgentState
 from Agent.deep_agent_tools.adapters import build_default_adapters
 from Agent.deep_agent_tools.adapters.normalization import result_from_runner_payload
-from Agent.deep_agent_tools.algorithm_specs import CDFM_SPEC, PC_SPEC
+from Agent.deep_agent_tools.algorithm_specs import CDFM_SPEC, DIRECT_LINGAM_SPEC, PC_SPEC
+from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
 from Agent.deep_agent_tools.dependency_dispatch import (
     AlgorithmDependencyDispatchMiddleware,
     _tool_calls_from_state,
@@ -742,8 +743,10 @@ def test_report_adds_deterministic_cdfm_timeout_limit_and_avoids_nested_block_id
     draft = ReportDraft(title="PC 与 CDFM 分析", blocks=blocks)
     original = draft.model_dump(mode="json")
     summary = {"algorithms": [
-        {"capability_id": "causal.pc", "status": "valid"},
-        {"capability_id": "causal.cdfm", "status": "timed_out"},
+        {"capability_id": PC_SPEC.capability_id, "status": "valid",
+         "public_name": PC_SPEC.method_definition().public_name},
+        {"capability_id": CDFM_SPEC.capability_id, "status": "timed_out",
+         "public_name": CDFM_SPEC.method_definition().public_name},
     ]}
     document = build_report_document(draft, execution_summary=summary)
     limit = document.blocks[-1]
@@ -766,3 +769,47 @@ def test_report_without_timeout_does_not_append_limitation():
         "algorithms": [{"capability_id": "causal.pc", "status": "valid"}],
     })
     assert document.blocks == draft.blocks
+
+
+@pytest.mark.parametrize("spec,blocked_by", [
+    (PC_SPEC, "row_count"),
+    (DIRECT_LINGAM_SPEC, "row_count"),
+    (CDFM_SPEC, "row_count"),
+    (DIRECT_LINGAM_SPEC, "numeric_columns"),
+    (CDFM_SPEC, "numeric_columns"),
+])
+def test_real_toolnode_rejection_preserves_method_snapshot(context, registry, spec, blocked_by):
+    """真实调度器拒绝未满足依赖的输入，不执行算法或使用执行器替身。"""
+    profile = DataProfile(
+        row_count=1 if blocked_by == "row_count" else 3,
+        column_count=2, column_names=("A", "B"),
+        numeric_columns=("A", "B") if blocked_by == "row_count" else ("B",),
+        categorical_columns=() if blocked_by == "row_count" else ("A",),
+    )
+    tools = [item.to_langchain_tool() for item in build_algorithm_tools(
+        registry, runtime_context=context, data_profile=profile,
+    )]
+    dispatch = AlgorithmDependencyDispatchMiddleware(registry=registry)
+    builder = StateGraph(ProjectDeepAgentState, context_schema=AgentRunContext)
+    builder.add_node("tools", ToolNode(
+        tools, handle_tool_errors=False, awrap_tool_call=dispatch.awrap_tool_call,
+    ))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+    state = asyncio.run(builder.compile().ainvoke({
+        "messages": [AIMessage(content="", tool_calls=[{
+            "id": "rejected-call", "name": spec.tool_name, "args": {},
+        }])],
+        "message_execution_id": "rejected-response",
+        "data_profile": profile, "algorithm_results": {}, "action_ledger": {},
+    }, context=context))
+    result, = state["algorithm_results"].values()
+    assert result.status == "not_ready"
+    assert result.method == spec.method_definition()
+    assert result.implementation is None
+    assert result.standardized_graph is None and result.raw_result_ref is None
+    record, = state["action_ledger"].values()
+    assert record.final_status == "not_ready" and record.result_ref == result.result_ref
+    message, = [item for item in state["messages"] if isinstance(item, ToolMessage)]
+    restored = AlgorithmResult.model_validate_json(message.content)
+    assert restored.method == result.method

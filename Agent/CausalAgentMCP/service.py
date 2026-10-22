@@ -13,6 +13,10 @@ import time
 from typing import Any, Callable, Mapping
 
 from Agent.deep_agent_tools.error_codes import SafeErrorCode
+from Agent.deep_agent_tools.algorithm_specs import DEFAULT_ALGORITHM_SPECS
+from Agent.deep_agent_tools.normalization import (
+    result_from_runner_payload, runner_method_metadata, standardize_runner_graph,
+)
 from Agent.deep_agent_tools.identity import build_result_ref
 from Agent.deep_agent_tools.models import (
     AlgorithmExecutionCommand,
@@ -20,10 +24,8 @@ from Agent.deep_agent_tools.models import (
     AlgorithmResultProvenance,
     DataViewSummary,
     Diagnostics,
-    GraphEdge,
     McpInvocationContext,
     StandardizedGraph,
-    build_diagnostics_from_runner_payload,
     canonical_json_bytes,
 )
 from Agent.deep_agent_tools.preprocessing import (
@@ -132,55 +134,8 @@ def _validate_csv_limits(csv_data: str, config: McpServerConfig) -> None:
             raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID)
 
 
-def _graph_semantics(capability_id: str) -> str:
-    return {
-        "causal.pc": "partially_directed_graph",
-        "causal.olc": "latent_partially_directed_graph",
-        "causal.direct_lingam": "dag",
-        "causal.cdfm": "directed_graph",
-    }.get(capability_id, "causal_graph")
-
-
 def _standardized_graph(raw_result: Mapping[str, Any], capability_id: str) -> StandardizedGraph:
-    data = raw_result.get("data")
-    if not isinstance(data, Mapping):
-        raise ValueError("result data is not a mapping")
-    raw_nodes = data.get("nodes")
-    raw_edges = data.get("edges")
-    if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
-        raise ValueError("result graph shape is invalid")
-    nodes: list[str] = []
-    for node in raw_nodes:
-        value = node.get("id") if isinstance(node, Mapping) else node
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError("result node is invalid")
-        nodes.append(value)
-    edges: list[GraphEdge] = []
-    for edge in raw_edges:
-        if not isinstance(edge, Mapping):
-            raise ValueError("result edge is invalid")
-        source = edge.get("from", edge.get("source"))
-        target = edge.get("to", edge.get("target"))
-        if not isinstance(source, str) or not isinstance(target, str):
-            raise ValueError("result edge endpoint is invalid")
-        arrows = edge.get("arrows")
-        edge_type = "undirected" if not arrows or edge.get("dashes") else "directed"
-        weight = edge.get("weight")
-        if weight is not None and not isinstance(weight, (int, float)):
-            raise ValueError("result edge weight is invalid")
-        edges.append(
-            GraphEdge(
-                source=source,
-                target=target,
-                edge_type=edge_type,
-                weight=float(weight) if weight is not None else None,
-            )
-        )
-    return StandardizedGraph(
-        graph_semantics=_graph_semantics(capability_id),
-        nodes=nodes,
-        edges=edges,
-    )
+    return standardize_runner_graph(raw_result, capability_id=capability_id)
 
 
 def _failure_status(code: SafeErrorCode) -> str:
@@ -270,6 +225,7 @@ def _error_result(
     code: SafeErrorCode,
     capability_version: str,
 ) -> AlgorithmResult:
+    spec = next((spec for spec in DEFAULT_ALGORITHM_SPECS if spec.capability_id == command.capability_id), None)
     return AlgorithmResult(
         result_ref=build_result_ref(
             invocation_id=command.invocation_id,
@@ -280,6 +236,7 @@ def _error_result(
         capability_id=command.capability_id,
         capability_version=capability_version,
         status=_failure_status(code),
+        method=spec.method_definition() if spec is not None and spec.version == capability_version else None,
         diagnostics=Diagnostics(
             summary="算法调用未产出可用结果。",
             safe_error_code=code,
@@ -293,7 +250,7 @@ def _error_result(
             invocation_id=command.invocation_id,
             capability_id=command.capability_id,
             capability_version=capability_version,
-            algorithm_runner_version="causalachieve-v1",
+            algorithm_runner_version=None,
         ),
     )
 
@@ -810,9 +767,14 @@ class CausalMcpService:
                 code=code,
                 capability_version=entry.version,
             )
+            result = result.model_copy(update=runner_method_metadata(raw_result, command.capability_id))
         else:
             try:
-                graph = _standardized_graph(raw_result, command.capability_id)
+                normalized = result_from_runner_payload(
+                    raw_result, command=command, context=context,
+                    capability_version=entry.version,
+                    runner_version=str(raw_result.get("runner_version") or "causalachieve-v2"),
+                )
                 result = AlgorithmResult(
                     result_ref=build_result_ref(
                         invocation_id=command.invocation_id,
@@ -822,11 +784,13 @@ class CausalMcpService:
                     provider_call_id=command.provider_call_id,
                     capability_id=command.capability_id,
                     capability_version=entry.version,
-                    status="valid",
-                    standardized_graph=graph,
+                    status=normalized.status,
+                    **runner_method_metadata(raw_result, command.capability_id),
+                    standardized_graph=normalized.standardized_graph,
+                    graph_validation=normalized.graph_validation,
                     summary="算法调用完成。",
                     data_view=data_view,
-                    diagnostics=build_diagnostics_from_runner_payload(raw_result),
+                    diagnostics=normalized.diagnostics,
                     input_identity=command.input_identity,
                     provenance=AlgorithmResultProvenance(
                         job_id=context.job_id,
@@ -843,7 +807,7 @@ class CausalMcpService:
                             else None
                         ),
                         algorithm_runner_version=str(
-                            raw_result.get("runner_version") or "causalachieve-v1"
+                            raw_result.get("runner_version") or ""
                         ),
                     ),
                 )
@@ -884,7 +848,7 @@ class CausalMcpService:
                 },
             )
         response = {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
-        if result.status == "valid":
+        if isinstance(raw_result, Mapping):
             response["raw_payload"] = dict(raw_result)
         return response
 
