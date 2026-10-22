@@ -276,6 +276,14 @@ passed/skipped/failed；历史通过数量不能代替当前工作树证据。`t
 
 ## causal-mcp 纵向验证
 
+算法工具和 Gate 的执行回归分别位于 `tests/unit/agent/test_runtime_tool_state_updates.py` 与 `tests/unit/agent/test_final_analysis_decision.py`。其中算法路径使用 `tests/support/local_algorithm_execution.py`，通过正式 MCP 服务、真实进程池和 causal-learn PC 执行进程内冻结 CSV；`ToolRuntime.state` 必须携带从该 CSV 转换的 `data_profile`。成功、两行样本导致的真实执行失败、处理方案绑定、工具结果及终态 Ledger 和 Gate 校验分别断言。这些文件中其他既有用例仍按其各自依赖边界解释，不能把整个文件的通过数量当作真实外部服务验收。
+
+`tests/unit/agent/test_direct_lingam_analysis.py::test_direct_lingam_returns_structured_success_result` 使用真实 DirectLiNGAM，校验方法快照、安装版本以及邻接矩阵与公开边的方向、权重。CDFM 诊断测试只调用实际诊断和失败封装函数，使用真实文件读取异常与字典访问异常检查来源字段及消息截断；不证明 CDFM 模块加载或模型推理。`tests/integration/agent/test_cdfm_load_failure.py` 在真实 CDFM 依赖存在时，用空本地权重目录和离线设置验证加载失败的公开封装；缺少依赖时明确跳过，也不证明成功推理。MCP 缺省 runner 版本由 `tests/unit/agent/test_runner_method_metadata.py` 检查元数据与来源模型之间的契约，必须保持未知，不能通过填写虚构版本满足校验。MCP 的成功结果与慢调用日志用例运行真实 PC 进程，日志用例通过正式 JSON formatter 读取事件和关联字段；慢调用包含排队耗时，因此不要求告警晚于取得执行槽的 accepted 事件。上述本地组件证据均不包含 HTTP、MySQL 权威读取、PostgreSQL 恢复、真实模型或完整 Job。
+
+```bash
+python -m pytest -p no:cacheprovider tests/unit/agent/test_final_analysis_decision.py tests/unit/agent/test_runtime_tool_state_updates.py tests/unit/agent/test_cdfm_failure_diagnostics.py tests/unit/agent/test_direct_lingam_analysis.py tests/unit/agent/test_agent_state_routing.py tests/unit/agent/test_job_recovery.py tests/unit/agent/test_mcp_v2_contract.py tests/unit/agent/test_runner_method_metadata.py tests/integration/agent/test_cdfm_load_failure.py
+```
+
 `causal-mcp` 的代码级验证覆盖固定 capability/spec digest、Bearer/HMAC 时窗与命令绑定、结果规范化、进程池容量/迟到结果、N×K 客户端池、owner task 清理和 `AlgorithmExecutor` 结构化结果。使用仓库测试镜像执行：
 
 ```bash

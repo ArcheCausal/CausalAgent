@@ -110,6 +110,8 @@ CDFM v0.1 在 runner 内保持 `directed_graph` 和输入列顺序，按 `adjace
 
 [AlgorithmSpec](../../Agent/deep_agent_tools/algorithm_specs.py) 是方法解释的唯一来源，生成工具描述和执行时的 `MethodDefinition` 快照。当前 PC、DirectLiNGAM 和 CDFM 的方法契约版本为 `2.0`。`AlgorithmResult.method` 保存输入要求、假设、目标图类型、矩阵方向、边含义和边界；`implementation` 分开记录 runner、实际包版本、内嵌实现版本及权重身份，不把三者混作同一个版本。CDFM 本地权重记录实际 SHA256；只有本地 manifest 的文件摘要匹配时才采用其 revision，否则 revision 保持未知。
 
+MCP 成功结果使用同一次解析得到的方法和实现元数据。runner 没有提供有效版本时，`implementation.runner_version` 和 `provenance.algorithm_runner_version` 均保持 `None`；不推断版本，也不把未知值转为空字符串而触发结果契约错误。
+
 调度器在输入依赖缺失时直接产生的 `not_ready` 等终态也保存已知的 `MethodDefinition`。这些调用没有执行算法，`implementation` 和原始结果保持为空，不能把方法定义误写成实际执行证据。
 
 | 方法 | 图与矩阵 | 解释边界 |
