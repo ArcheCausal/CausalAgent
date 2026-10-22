@@ -770,10 +770,11 @@ class CausalMcpService:
             result = result.model_copy(update=runner_method_metadata(raw_result, command.capability_id))
         else:
             try:
+                metadata = runner_method_metadata(raw_result, command.capability_id)
                 normalized = result_from_runner_payload(
                     raw_result, command=command, context=context,
                     capability_version=entry.version,
-                    runner_version=str(raw_result.get("runner_version") or "causalachieve-v2"),
+                    runner_version=metadata["implementation"].runner_version,
                 )
                 result = AlgorithmResult(
                     result_ref=build_result_ref(
@@ -785,7 +786,7 @@ class CausalMcpService:
                     capability_id=command.capability_id,
                     capability_version=entry.version,
                     status=normalized.status,
-                    **runner_method_metadata(raw_result, command.capability_id),
+                    **metadata,
                     standardized_graph=normalized.standardized_graph,
                     graph_validation=normalized.graph_validation,
                     summary="算法调用完成。",
@@ -806,9 +807,7 @@ class CausalMcpService:
                             if command.preprocessing is not None
                             else None
                         ),
-                        algorithm_runner_version=str(
-                            raw_result.get("runner_version") or ""
-                        ),
+                        algorithm_runner_version=normalized.provenance.algorithm_runner_version,
                     ),
                 )
             except Exception:
