@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -30,9 +31,20 @@ STAGE_ORDER = [
 
 
 def latest_runs(runs_dir: Path) -> dict[str, Path]:
-    """按档位选出最近一次运行目录。"""
+    """兼容入口：只接受清单或明确 run_id，禁止跨轮自动选择最近档位。"""
+    manifest = os.environ.get("LOADTEST_ROUND_MANIFEST")
+    if manifest:
+        from runner.rounds import selected_runs
+        return selected_runs(runs_dir, manifest)
+    explicit = os.environ.get("LOADTEST_RUN_ID")
+    if not explicit:
+        raise ValueError("请指定 LOADTEST_ROUND_MANIFEST 或 LOADTEST_RUN_ID，禁止自动选择最近同名档位")
+    if Path(explicit).name != explicit or explicit in {".", ".."}:
+        raise ValueError("run_id 必须是单一目录名")
     selected: dict[str, Path] = {}
     for path in sorted(runs_dir.iterdir()):
+        if path.name != explicit:
+            continue
         if not path.is_dir():
             continue
         summary = path / "summary.json"
@@ -61,6 +73,8 @@ def attach_server_baseline(
             continue
         target = path / "summary.json"
         summary = json.loads(target.read_text(encoding="utf-8"))
+        if payload.get("run_id") != summary.get("run_id"):
+            raise ValueError("服务器证据必须属于相同 run_id")
         summary["server_baseline"] = payload
         target.write_text(
             json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -395,14 +409,14 @@ def build_evidence(runs_dir: Path, evidence_dir: Path) -> tuple[Path, list[Path]
     sections: list[str] = [
         "# staging 压测证据汇总",
         "",
-        f"- 生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- 生成时间（UTC）：{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
         f"- 入口：{config.base_url()}",
         "- 数据来源：本报告只使用 local/runs/ 下本轮各档运行摘要、"
         "local/evidence/ 的日志核查与本轮服务器只读采集；没有采集的项按未采集写明。",
         "",
     ]
     sections.extend(_summary_table(selected))
-    preflight = _render_preflight(runs_dir)
+    preflight = []  # 预检必须由轮次清单明确引用，不能自动取其他轮次的最近产物。
     if preflight:
         sections.extend(preflight)
     logchecks = _load_logchecks(evidence_dir, selected)
@@ -454,8 +468,8 @@ def _report_date(selected: dict[str, Path]) -> str:
         if summary.get("started_at")
     ]
     if not started:
-        return time.strftime("%Y%m%d")
-    return time.strftime("%Y%m%d", time.localtime(min(started)))
+        return time.strftime("%Y%m%d", time.gmtime())
+    return time.strftime("%Y%m%d", time.gmtime(min(started)))
 
 
 def _render_job_db_all(selected: dict[str, Path]) -> list[str]:

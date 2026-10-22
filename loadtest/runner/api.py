@@ -101,6 +101,10 @@ class UserClient:
         started = time.monotonic()
         started_at = time.time()
         kwargs.setdefault("timeout", HTTP_TIMEOUT_SECONDS)
+        headers = dict(kwargs.pop("headers", None) or {})
+        client_request_id = str(uuid.uuid4())
+        headers["X-Request-ID"] = client_request_id
+        kwargs["headers"] = headers
         error = ""
         try:
             response = self.client.request(method, path, **kwargs)
@@ -119,6 +123,10 @@ class UserClient:
                 error=error,
                 started_at=started_at,
                 finished_at=time.time(),
+                request_id=(response.headers.get("X-Request-ID") if response is not None else None) or client_request_id,
+                client_request_id=client_request_id,
+                response_request_id=response.headers.get("X-Request-ID") if response is not None else None,
+                run_id=self.recorder.run_id,
             )
         )
         if response is None:

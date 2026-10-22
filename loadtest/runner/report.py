@@ -30,6 +30,10 @@ def _fmt(value, unit: str = "") -> str:
     return f"{value}{unit}"
 
 
+def _throughput(value) -> str:
+    return "未采集" if value is None else f"{value:.3f}"
+
+
 def _timestamp(value) -> str:
     if value is None or value == "" or value == 0:
         return "未采集"
@@ -63,56 +67,137 @@ def _sse_states_section(sse: dict) -> list[str]:
 
 def _capacity_section(summary: dict) -> list[str]:
     capacity = summary.get("capacity") or {}
-    lines = ["## 容量口径 v2", "",
-             "| 指标 | 分母 | 已观测数量 | 比率 / 覆盖率 |",
+    lines = ["## 容量口径 v2", "", "| 指标 | 分母 | 已观测数量 | 比率 / 覆盖率 |",
              "| --- | --- | --- | --- |"]
+    orchestration = summary.get("orchestration") or {}
+    cleanup = (capacity.get("evidence_boundary") or {}).get("cleanup") or {}
+    lines[2:2] = [f"场景检查：{_value((orchestration.get('scenario') or {}).get('status'))}；"
+                   f"采集完整性：{_value((orchestration.get('evidence') or {}).get('status'))}。", "",
+                   f"严格清理核对：业务活动清空={_value(cleanup.get('business_active_cleared'))}；"
+                   f"执行释放={_value(cleanup.get('execution_released'))}；"
+                   f"释放证据未知 Job={_value(cleanup.get('release_unknown_jobs'))}。旧编排通过记录不能替代严格核对。", ""]
     fields = (
         ("admission", "新 Job 接纳", ("accepted", "replays", "conflicts", "unknown"), ("rate",)),
-        ("db_success", "主库成功", ("checked", "succeeded"), ("rate", "coverage")),
-        ("completion_120s", "120 秒内完成", ("completed", "unknown"), ("rate",)),
-        ("completion_300s", "300 秒内完成", ("completed", "unknown"), ("rate",)),
-        ("client_terminal", "客户端终态", ("realtime", "after_db"), ("coverage",)),
-        ("sse_integrity", "SSE 全量事件集合核对", ("checked", "missing_events"), ("coverage",)),
+        ("db_success", "全部接纳 Job 主库成功", ("checked", "succeeded", "unidentified_accepted"), ("rate", "coverage")),
+        ("client_terminal", "全部接纳 Job 客户端终态", ("realtime", "after_db"), ("coverage",)),
+        ("continuous_client_terminal", "预声明持续观察客户端终态", ("realtime",), ("coverage",)),
+        ("sse_integrity", "要求完整 SSE 的全量事件集合核对", ("checked", "missing_events", "unexpected_events"), ("coverage",)),
+        ("truncated_sse", "主动截断 / 部分流的集合差（不计漏事件）", ("checked", "unobserved_events"), ("coverage",)),
     )
     for key, label, counts, rates in fields:
         data = capacity.get(key) or {}
-        count_text = "；".join(f"{name}={_value(data.get(name))}" for name in counts)
-        rate_text = "；".join(f"{name}={_rate(data.get(name))}" for name in rates)
-        lines.append(f"| {label} | {_value(data.get('denominator'))} | {count_text} | {rate_text} |")
+        lines.append(f"| {label} | {_value(data.get('denominator'))} | "
+                     + "；".join(f"{name}={_value(data.get(name))}" for name in counts) + " | "
+                     + "；".join(f"{name}={_rate(data.get(name))}" for name in rates) + " |")
     admission = capacity.get("admission") or {}
-    lines.append(f"| 请求回执率 | {_value(admission.get('denominator'))} | 与新 Job 接纳分别统计 | "
+    lines.append(f"| 请求回执率 | {_value(admission.get('denominator'))} | 包含幂等重放的有效请求回执 | "
                  f"{_rate(admission.get('request_receipt_rate'))} |")
-    lines.extend(["", "新 Job 接纳按有效逻辑请求口径统计，accepted 为唯一新 Job，幂等重放不增加接纳数；请求回执率单列。主库成功率与核对覆盖率分别报告；"
-                  "120/300 秒完成率保留未知样本，未核对事件集合时 missing_events 为未采集。", "",
-                  "### 延迟分组", "",
-                  "| group | 样本数 | 接纳数 | 仅完成样本 p95（字段单位 ms） |",
-                  "| --- | --- | --- | --- |"])
+    observation = capacity.get("observation") or {}
+    lines.extend(["", f"- 全部接纳：{_value(observation.get('all_accepted'))}；预声明持续观察："
+                  f"{_value(observation.get('continuous_denominator'))}；主动截断："
+                  f"{_value(observation.get('truncated_denominator'))}；缺少预声明观察策略："
+                  f"{_value(observation.get('unknown_policy'))}。",
+                  f"- 要求完整 SSE：{_value(observation.get('full_stream_denominator'))}；部分流："
+                  f"{_value(observation.get('partial_stream_denominator'))}；缺少流策略："
+                  f"{_value(observation.get('unknown_stream_policy'))}。",
+                  "新 Job 接纳按有效逻辑请求统计，幂等重放不增加唯一 Job 数。持续观察分母只读取请求预声明的 requires_terminal；"
+                  "完整 SSE 分母只读取 requires_full_stream。未知策略仍保留在全部接纳分母中，不能按最终结果排除。",
+                  "主库成功率的分母是全部接纳 Job，覆盖不足时观测成功数只是下界。实时终态与事后主库终态分别统计。",
+                  "", "### deadline 终态率与成功率", "",
+                  "| 观察口径 | 期限 | 分母 | 终态数 | 成功数 | 终态未知 | 成功未知 | 终态率 | 成功率 |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"])
+    for prefix, label in (("completion", "全部接纳 / 主库"), ("continuous_completion", "预声明持续观察 / 客户端")):
+        for seconds in (120, 300):
+            data = capacity.get(f"{prefix}_{seconds}s") or {}
+            values = [_value(data.get(key)) for key in ("denominator", "terminal", "succeeded", "unknown", "success_unknown")]
+            lines.append(f"| {label} | {seconds} s | " + " | ".join(values)
+                         + f" | {_rate(data.get('terminal_rate'))} | {_rate(data.get('success_rate'))} |")
+    lines.extend(["", "终态包含 succeeded、failed、canceled；成功只包含 succeeded。主库期限从创建计时，客户端期限从创建请求发出计时。"
+                  "未取得该 Job 自己的观察时刻时不能由整轮采集结束时间证明它已经超期；null 不补成 0。",
+                  "", "### 业务终态分布总表", "",
+                  "| 业务类别 | 全部接纳 | 主库覆盖 | succeeded | failed | canceled | queued / running / waiting_input | 未知 | 终态率 | 成功率 |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"] )
+    for name in ("total", "ordinary", "cancellation", "unknown"):
+        data = (capacity.get("business_results") or {}).get(name) or {}
+        counts = data.get("status_counts") or {}
+        lines.append(f"| {name} | {_value(data.get('denominator'))} | {_value(data.get('checked'))} / {_rate(data.get('coverage'))} | "
+                     f"{_value(counts.get('succeeded'))} | {_value(counts.get('failed'))} | {_value(counts.get('canceled'))} | "
+                     f"{_value(counts.get('queued'))} / {_value(counts.get('running'))} / {_value(counts.get('waiting_input'))} | "
+                     f"{_value(data.get('unknown'))} | {_rate(data.get('terminal_rate'))} | {_rate(data.get('success_rate'))} |")
+    lines.extend(["", "ordinary、cancellation、unknown 为互斥业务类别，分母不随终态变化；缺少声明的旧专项不按最终 canceled 状态反推取消分组。",
+                  f"观察结束原因：{_value(observation.get('end_reasons'))}。",
+                  "", "### 业务分类与延迟分组", "",
+                  "| group | 主库终态样本数 | 接纳数 | 状态 / 观察组 | 仅完成样本 p95（ms） |",
+                  "| --- | --- | --- | --- | --- |"])
     groups = capacity.get("latency_groups") or {}
     for group, data in groups.items():
-        values = "；".join(f"{key}={_fmt(value, ' ms')}" for key, value in data.items()
-                           if key.startswith("completed_sample_p95_") and key.endswith("_ms"))
-        group_label = group if isinstance(summary.get("requests"), list) else "未采集（旧产物未记录 group）"
-        lines.append(f"| {_cell(group_label)} | {_value(data.get('sample_count'))} | "
-                     f"{_value(data.get('accepted'))} | {values or '未采集'} |")
+        values = "；".join(f"{key}={_fmt(value, ' ms')}" for key, value in data.items() if key.startswith("completed_sample_p95_"))
+        states = json.dumps({"db": data.get("db_status_counts"), "observation": data.get("observation_groups")}, ensure_ascii=False)
+        lines.append(f"| {_cell(group)} | {_value(data.get('sample_count'))} | {_value(data.get('accepted'))} | {_cell(states)} | {values or '未采集'} |")
     if not groups:
-        lines.append("| 未采集 | 未采集 | 未采集 | 未采集 |")
-    lines.extend(["", "仅完成样本 p95 排除观察结束时仍未完成的请求，不能代替全量用户等待分布。", ""])
-    requests = summary.get("requests")
-    if isinstance(requests, list):
-        bounds = [row["wait_lower_bound_ms"] for row in summary.get("job", {}).get("samples", [])
-                  if row.get("terminal_received_at") is None and row.get("wait_lower_bound_ms") is not None]
-        lines.append(f"- 未收到终态且有等待下界的唯一 Job：{len(bounds)}；等待下界范围："
-                     f"{_fmt(min(bounds) if bounds else None, ' ms')} ~ "
-                     f"{_fmt(max(bounds) if bounds else None, ' ms')}")
+        lines.append("| 未采集 | 未采集 | 未采集 | 未采集 | 未采集 |")
+    lines.extend(["", "业务分类保留原声明，并独立标记恢复、等待输入、重试与取消；同一 Job 可以进入多个业务分组，不能将分组数量相加。"
+                  "仅完成样本 p95 排除未完成请求，不能代替全量用户等待分布。", ""])
+    multi = capacity.get("multi_session") or {}
+    lines.extend(["### 多会话归属与重叠核查", "",
+                  f"- 状态：{_value(multi.get('status'))}；归属与活动重叠核心状态：{_value(multi.get('core_status'))}；缺口：{_value(multi.get('reason'))}",
+                  "", "| Job / 会话 | 归属核查 | activity_overlap | running 状态重叠 | execution_overlap | 执行交叠 ms | 依据 / 缺口 |",
+                  "| --- | --- | --- | --- | --- | --- | --- |"] )
+    multi_notes = []
+    for pair in multi.get("pairs") or []:
+        lines.append(f"| {_cell(pair.get('job_ids'))} / {_cell(pair.get('session_ids'))} | {_value(pair.get('ownership_verified'))} | "
+                     f"{_value(pair.get('activity_overlap'))} | {_value(pair.get('running_status_overlap'))} | "
+                     f"{_value(pair.get('execution_overlap'))} | {_fmt(pair.get('execution_overlap_ms'))} | "
+                     f"{_cell(pair.get('execution_overlap_source'))} / {_cell(pair.get('reasons'))} |")
+        multi_notes.append(f"- 活动共同快照时刻：{_timestamp(pair.get('activity_overlap_at'))}；主库单次执行区间：{_cell(pair.get('execution_intervals'))}。")
+    if not multi.get("pairs"):
+        lines.append("| 未采集 | 未验证 | 未验证 | 未验证 | 未验证 | 未采集 | 缺少 multi_session_evidence |")
+    lines.extend([""] + multi_notes)
+    lines.extend(["", "两个 Job 接纳不证明活动重叠；running 状态重叠不证明执行区间重叠。执行区间只采用主库可靠的 first_started_at / finished_at，"
+                  "且必须为单次 attempt、无 resume/recovery；区间相交也不等于 CPU 同时执行。缺少历史专项身份或时间证据时保持未验证。", ""])
+    bounds = [row["wait_lower_bound_ms"] for row in capacity.get("samples", [])
+              if row.get("terminal_received_at") is None and row.get("wait_lower_bound_ms") is not None]
+    lines.append(f"- 未收到终态且有等待下界的唯一 Job：{len(bounds)}；等待下界范围："
+                 f"{_fmt(min(bounds) if bounds else None, ' ms')} ~ {_fmt(max(bounds) if bounds else None, ' ms')}")
+    cancel = capacity.get("cancellation") or {}
+    lines.extend(["", "### 取消专项分组", "",
+                  f"- 接纳 Job：{_value(cancel.get('denominator'))}；取消 API 尝试：{_value(cancel.get('api_attempts'))}；结果：{_value(cancel.get('api_outcomes'))}",
+                  f"- 主库已核对：{_value(cancel.get('db_checked'))}；业务取消：{_value(cancel.get('business_canceled'))}；"
+                  f"执行释放已核对：{_value(cancel.get('execution_release_checked'))}；已释放：{_value(cancel.get('execution_released'))}",
+                  f"- 算法进程终止：{_value(cancel.get('process_termination'))}；真实浏览器证据：{_value(cancel.get('browser_evidence'))}",
+                  "取消 API 响应、业务取消、执行释放、算法进程终止与前端阶段分别判定。", "", "### CDFM", ""])
     cdfm = capacity.get("cdfm") or {}
-    lines.extend(["", "### CDFM", "", f"- 状态：{_value(cdfm.get('status'))}"])
+    lines.extend([f"- 状态：{_value(cdfm.get('status'))}",
+                  f"- CDFM 调用成功率：{_rate(cdfm.get('final_success_rate'))}；逻辑调用成功：{_value(cdfm.get('succeeded'))} / {_value(cdfm.get('logical_calls'))}。",
+                  f"- CDFM 证据覆盖率：{_rate(cdfm.get('job_coverage'))}；已完整核查 Job：{_value(cdfm.get('covered_jobs'))} / {_value(cdfm.get('job_denominator'))}。",
+                  f"- CDFM 算法准确率：{_rate(cdfm.get('accuracy'))}（缺少真实基准答案及评价证据，保留未知）。"])
     for key, value in cdfm.items():
-        if key != "status":
+        if key not in {"status", "accuracy", "final_success_rate", "job_coverage", "records", "attempt_records", "outcomes", "source_reconciliation"}:
             lines.append(f"- {key}：{_value(value)}")
-    lines.append("CDFM 场景名称或 Job 成功均不能证明 CDFM 已执行；必须有归属到本轮 Job 的 invocation、"
-                 "attempt/retry 和最终结果证据。调用统计不等于模型准确率、进程终止或完整验收通过。")
-    if summary.get("db_checked_at") is None:
-        lines.append("主库核对待完成：当前摘要只包含已采集的客户端证据，主库成功率与服务器计时尚不能定论。")
+    lines.extend(["", "逻辑调用终态分布（仅已识别 job + invocation；身份不完整时保留已观察终态，不确认最终 attempt）：",
+                  f"- {_value(cdfm.get('outcomes'))}", "",
+                  "| Job | invocation | 观察结果 | 最终身份已验证 | 已观察终态 | 来源 |",
+                  "| --- | --- | --- | --- | --- | --- |"])
+    for row in cdfm.get("records") or []:
+        lines.append(f"| {row['job_id']} | {row['invocation_id']} | {row['outcome']} | {row['final_identity_verified']} | {_value(row['observed_terminal_statuses'])} | {_value(row['sources'])} |")
+    lines.extend(["", "| Job | invocation | worker attempt | MCP retry | 身份状态 | 状态证据 | 来源 |",
+                  "| --- | --- | --- | --- | --- | --- | --- |"])
+    for row in cdfm.get("attempt_records") or []:
+        lines.append(f"| {row['job_id']} | {row['invocation_id']} | {_value(row['worker_attempt'])} | {_value(row['mcp_retry'])} | {row['identity_status']} | {_value(row['source_statuses'])} | {_value(row['sources'])} |")
+    lines.extend(["", "| 跨来源身份层级 | 核对状态 | intersection | events only | logs only |",
+                  "| --- | --- | --- | --- | --- |"])
+    reconciliation = cdfm.get("source_reconciliation") or {}
+    for level in ("logical", "attempt"):
+        row = reconciliation.get(level) or {}
+        lines.append(f"| {level} | {_value(row.get('status'))} | {_value(row.get('intersection'))} | {_value(row.get('events_only'))} | {_value(row.get('logs_only'))} |")
+    lines.append(f"- 共同完整采集 Job：{_value(reconciliation.get('both_collected_jobs'))}；单侧未采集时差异保持未知。身份差异不代表算法结果错误。")
+    lines.append("CDFM 按 job_id / invocation_id / worker attempt / MCP retry 身份归并，重复日志与 received/finished 事件不增加调用数。"
+                 "缺少任一层身份时完整尝试数和最终成功率保留未知；worker 重新执行不算 MCP retry。调用成功及证据覆盖均不代表算法准确率、进程终止或专项验收通过。")
+    if summary.get("db_checked_at") is None and capacity.get("db_checked_at") is None:
+        lines.append("主库核对待完成：当前摘要未保存主库核对时间。")
+    lines.extend(["", "### 能力与证据边界", "",
+                  "结构化摘要见 capacity.evidence_boundary。结构检查、证据覆盖与产品验收分别判断；客户端终态时间仅来自原客户端记录。",
+                  "算法准确率、PID 终止、真实浏览器行为及未预声明门槛的性能验收保持未知。"])
     return lines + [""]
 
 
@@ -120,21 +205,50 @@ def _timing_section(summary: dict) -> list[str]:
     lines = ["## 计时与分阶段吞吐", "",
              f"- 停止提交 stop_submitting_at：{_timestamp(summary.get('stop_submitting_at'))}",
              f"- 观察结束 observation_ended_at：{_timestamp(summary.get('observation_ended_at'))}",
-             f"- 主库核对 db_checked_at：{_timestamp(summary.get('db_checked_at'))}",
-             "", "| 阶段 | HTTP 请求数 | HTTP RPS | 客户端完成数 | 客户端完成吞吐（个/s） | 主库完成数 | 主库完成吞吐（个/s） | 仅完成样本排队 p95（ms） |",
-             "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+             f"- 主库核对 db_checked_at：{_timestamp((summary.get('capacity') or {}).get('db_checked_at') or summary.get('db_checked_at'))}",
+             "", "| 阶段 | HTTP 请求数 | HTTP RPS | 客户端成功数 / 吞吐 | 客户端全部终态数 / 吞吐 | 主库成功数 / 吞吐 | 主库全部终态数 / 吞吐 | 主库覆盖率 | 仅完成样本排队 p95（ms） |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     phases = summary.get("phases") or (summary.get("capacity") or {}).get("phases") or {}
+    phase_notes = []
     for name in ("load", "drain"):
         data = phases.get(name) or {}
-        lines.append(f"| {name} | {_value(data.get('http_requests'))} | {_fmt(data.get('http_rps'))} | "
-                     f"{_value(data.get('client_completions'))} | {_fmt(data.get('client_completion_throughput'))} | "
-                     f"{_value(data.get('server_completions'))} | {_fmt(data.get('server_completion_throughput'))} | "
-                     f"{_fmt(data.get('completed_sample_queue_p95_ms'))} |")
-    for name in ("load", "drain"):
-        data = phases.get(name) or {}
+        lines.append(f"| {name} | {_value(data.get('http_requests'))} | {_throughput(data.get('http_rps'))} | "
+                     f"{_value(data.get('client_successes'))} / {_throughput(data.get('client_success_throughput'))} | "
+                     f"{_value(data.get('client_completions'))} / {_throughput(data.get('client_completion_throughput'))} | "
+                     f"{_value(data.get('server_successes'))} / {_throughput(data.get('server_success_throughput'))} | "
+                     f"{_value(data.get('server_completions'))} / {_throughput(data.get('server_completion_throughput'))} | "
+                     f"{_rate(data.get('server_coverage'))} | {_fmt(data.get('completed_sample_queue_p95_ms'), ' ms')} |")
         if data.get("queue_phase_basis"):
-            lines.extend(["", f"{name} 排队分位按 {data['queue_phase_basis']} 所在阶段分组；已完成样本数 "
-                          f"{_value(data.get('queue_samples'))}。"])
+            phase_notes.extend(["", f"{name} 客户端窗口：{_timestamp(data.get('started_at'))} 至 {_timestamp(data.get('client_finished_at'))}；"
+                          f"时长 {_fmt(data.get('client_duration_ms'), ' ms')}。",
+                          f"{name} 服务器窗口：{_timestamp(data.get('started_at'))} 至 {_timestamp(data.get('server_finished_at'))}；"
+                          f"时长 {_fmt(data.get('server_duration_ms'), ' ms')}；结束依据 {_value(data.get('server_end_source'))}。",
+                          f"服务器确认释放时刻：{_timestamp(data.get('server_execution_released_at'))}；"
+                          f"服务器实际采集结束：{_timestamp(data.get('server_observed_until'))}。"] )
+            phase_notes.extend(["", f"{name} 排队分位按 {data['queue_phase_basis']} 所在阶段分组；已完成样本数 "
+                          f"{_value(data.get('queue_samples'))}。主库终态缺少 finished_at 的数量："
+                          f"{_value(data.get('server_finished_timestamp_unknown'))}。"])
+    lines.extend(phase_notes)
+    lines.extend(["", "所有吞吐单位为个/s，至少保留三位小数。全部终态包含失败和取消；成功吞吐只计 succeeded。"
+                  "主库覆盖不足时仅报告已核对子集，不能解释为服务器全量吞吐。"])
+    submission = (summary.get("capacity") or {}).get("submission") or {}
+    lines.extend(["", "### 提交前等待与发送统计", "",
+                  "| 请求组 | 意图数 / 有意图时间戳 | 实际发送 | 未发送 | 发送未知 | scheduler_lag_ms 样本数 / p50 / p95 | pre_submit_wait_ms 样本数 / p50 / p95 | 未发送原因 |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- |"] )
+    submission_rows = [("total", submission.get("summary") or {})] + list((submission.get("groups") or {}).items())
+    submission_notes = []
+    for name, data in submission_rows:
+        lag = f"{_value(data.get('scheduler_lag_ms_samples'))} / {_fmt(data.get('scheduler_lag_ms_p50'))} / {_fmt(data.get('scheduler_lag_ms_p95'))}"
+        wait = f"{_value(data.get('pre_submit_wait_ms_samples'))} / {_fmt(data.get('pre_submit_wait_ms_p50'))} / {_fmt(data.get('pre_submit_wait_ms_p95'))}"
+        lines.append(f"| {_cell(name)} | {_value(data.get('intents'))} / {_value(data.get('intent_timestamp_known'))} | "
+                     f"{_value(data.get('actual_sent'))} | {_value(data.get('not_sent'))} | {_value(data.get('send_unknown'))} | "
+                     f"{lag} | {wait} | {_cell(data.get('not_sent_reasons'))} |")
+        submission_notes.append(f"- {name} 尚未发送的等待下界：样本数 {_value(data.get('wait_lower_bound_ms_samples'))}，"
+                     f"p50 / p95：{_fmt(data.get('wait_lower_bound_ms_p50'), ' ms')} / {_fmt(data.get('wait_lower_bound_ms_p95'), ' ms')}；"
+                     f"not_sent 却带发送时间戳的原始记录：{_value(data.get('not_sent_with_send_timestamp'))}。")
+    lines.extend([""] + submission_notes)
+    lines.extend(["", "意图时间采用到达率 scheduled_at 或普通请求 intent_created_at；实际发送采用首次 created_request_at。"
+                  "pre_submit_wait_ms 包含会话和 Job 配额等待。scheduler_lag_ms 保留采集值；未发送下界单列，旧记录缺时间戳或耗时字段时不补零。"] )
     drain = summary.get("drain") or {}
     checkpoint = drain.get("checkpoint") or {}
     lines.extend(["",
@@ -149,7 +263,8 @@ def _timing_section(summary: dict) -> list[str]:
                   f"- 业务活动已清空 business_active_cleared：{_value(drain.get('business_active_cleared'))}；"
                   f"执行释放 execution_released：{_value(drain.get('execution_released'))}",
                   f"- 主库核对当时已排空 server_drained_at_check：{_value(drain.get('server_drained_at_check'))}",
-                  "客户端没有待观察 Job 只表示客户端观察结束；业务活动清空与执行释放分别以同轮主库覆盖和释放证据判定，unknown 表示尚不能判断。"])
+                  "客户端没有待观察 Job 只表示客户端观察结束；业务活动清空与执行释放分别以同轮主库覆盖和释放证据判定，unknown 表示尚不能判断。",
+                  "空 execution_state 不能独立证明执行释放；曾执行任务须有 worker_confirmed 与释放时间。终态且 attempt_count=0、started_at 为空的任务单列为从未领取；lease_expired 不证明实际执行已停止。"])
     lines.extend(["", "user_wait_ms 从创建请求发出计至客户端收到终态；history_check_ms 单独统计历史核对耗时。"
                   "未收到终态时只给 wait_lower_bound_ms。主库核对发生在观察结束之后时，不能回填成实时收到终态。",
                   "普通 HTTP 默认 30 秒，SSE 空闲读取默认 45 秒，单 Job 总观察默认 1800 秒；"
@@ -343,9 +458,7 @@ def _mcp_section(logcheck: dict | None, summary: dict) -> list[str]:
     lines = [
         f"- 日志证据状态：{_value(logcheck.get('status'))}；scope：{_value(logcheck.get('scope'))}",
         f"- 日志 run_id：{_value(logcheck.get('run_id'))}；逐 Job/服务覆盖：{_value(logcheck.get('coverage'))}",
-        "- 日志核查文件：local/evidence/logcheck-"
-        + str(logcheck.get("stage") or summary.get("stage", ""))
-        + ".json",
+        "- 按 run_id 保存的日志核查：logcheck.json；能力表表示日志记录数，不表示逻辑调用次数。",
         "",
         "| 能力 | 收到 | 完成 | 失败 | 慢调用 |",
         "| --- | --- | --- | --- | --- |",
@@ -357,6 +470,31 @@ def _mcp_section(logcheck: dict | None, summary: dict) -> list[str]:
         )
     lines.append("")
     lines.append("- 各服务各级别条数：" + json.dumps(logcheck.get("counts") or {}, ensure_ascii=False))
+    job_failures = [event for job in (logcheck.get("job_lifecycle") or {}).get("jobs", [])
+                    for event in job.get("events", []) if event.get("event_code") == "worker.job.failed"]
+    lines.extend(["", "Job 失败诊断（仅受控字段）：", "",
+        "| Job | 异常类型 | 失败阶段 | 类别 | 原因码 | 供应商状态码 | 执行累计耗时 ms | 清理后栈顶 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |"])
+    for event in job_failures:
+        details = event.get("details") or {}
+        cells = [event.get("job_id"), event.get("exception_type"), details.get("failure_phase"),
+                 details.get("error_category"), details.get("reason_code"), details.get("status_code"),
+                 details.get("duration_ms"), event.get("stack_top")]
+        lines.append("| " + " | ".join(str(_value(value)) for value in cells) + " |")
+    if not job_failures:
+        lines.append("未取得 worker.job.failed 记录；这不证明没有失败，须结合主库结果和日志覆盖。")
+    request_evidence = logcheck.get("request_evidence") or {}
+    lines.extend(["", f"读取请求关联诊断：{_value(request_evidence.get('status'))}。", "",
+        "| 客户端 request ID | HTTP | 网关 | 应用 | 上游状态 | 上游响应秒 | 关联结果 |",
+        "| --- | --- | --- | --- | --- | --- | --- |"])
+    for record in request_evidence.get("records", []):
+        client = record.get("client") or {}
+        gateway = record.get("gateway") or []
+        cells = [client.get("request_id") or client.get("client_request_id"), client.get("status"),
+                 record.get("gateway_status"), record.get("web_status"),
+                 [row.get("upstream_status") for row in gateway] if gateway else None,
+                 [row.get("upstream_response_time") for row in gateway] if gateway else None, record.get("status")]
+        lines.append("| " + " | ".join(str(_value(value)) for value in cells) + " |")
     failures = logcheck.get("web_failures") or []
     if failures:
         lines.extend(["", "web 请求失败："])
@@ -383,11 +521,8 @@ def render_stage_report(summary: dict, logcheck: dict | None = None) -> str:
     字段缺失时按“未采集”渲染，兼容早期运行产生的摘要。传入该档的日志核查
     结果时，报告会补上模型与 MCP 错误一节；没有日志核查时按未执行说明。
     """
-    if (logcheck and summary.get("run_id") and logcheck.get("run_id") == summary.get("run_id")
-            and logcheck.get("scope") == "run" and isinstance(logcheck.get("cdfm"), dict)):
-        summary = {**summary, "cdfm_log_evidence": {**logcheck["cdfm"],
-                   "run_id": logcheck["run_id"], "scope": "run"}}
-    summary = enrich_summary(summary)
+    logcheck = logcheck if logcheck is not None else summary.get("logcheck")
+    summary = enrich_summary(summary, logcheck)
     http = summary.get("http", {})
     job = summary.get("job", {})
     sse = summary.get("sse", {})
@@ -425,7 +560,7 @@ def render_stage_report(summary: dict, logcheck: dict | None = None) -> str:
         f"- 压测客户端规格和网络位置：{json.dumps(client, ensure_ascii=False)}",
         f"- 虚拟账号数：{summary['users']}，每账号真实会话数："
         f"{load_value(summary.get('peak_sessions_per_user'))}",
-        f"- 全观察窗口 HTTP RPS：{_fmt(http.get('rps'))}",
+        f"- 全观察窗口 HTTP RPS：{_throughput(http.get('rps'))}",
         f"- 实际活动 Job 峰值：{load_value(summary.get('peak_active_jobs'))}",
         f"- 单账号活动 Job 峰值：{load_value(summary.get('peak_active_jobs_per_account'))}",
         f"- 客户端 SSE 峰值：{load_value(summary.get('peak_sse'))}",
@@ -511,6 +646,7 @@ def render_stage_report(summary: dict, logcheck: dict | None = None) -> str:
             f"{json.dumps(stats.get('status_counts', {}), ensure_ascii=False)} | "
             f"{_value(stats.get('errors'))} |"
         )
+    lines.extend(_http_identity_section(summary))
     lines.extend(["", "## 模型与 MCP 错误", ""])
     lines.extend(_mcp_section(logcheck, summary))
     checks = summary.get("checks")
@@ -558,4 +694,22 @@ def _client_from_notes(summary: dict) -> dict:
             except json.JSONDecodeError:
                 return {}
     return {}
+
+
+
+
+def _http_identity_section(summary: dict) -> list[str]:
+    """HTTP 失败即使尚无 Job，也保留客户端与响应请求身份供同轮核查。"""
+    failures = [row for row in (summary.get("http") or {}).get("samples", [])
+                if isinstance(row, dict) and (row.get("error") or isinstance(row.get("status"), int) and row["status"] >= 500)]
+    lines = ["", "## HTTP 失败请求身份", "",
+             "| 状态 | run_id | request_id | client_request_id | response_request_id |",
+             "| --- | --- | --- | --- | --- |"]
+    for row in failures:
+        lines.append("| " + " | ".join(_cell(row.get(key)) for key in ("status", "run_id", "request_id", "client_request_id", "response_request_id")) + " |")
+    if not failures:
+        samples = (summary.get("http") or {}).get("samples")
+        lines.append("| 无已记录失败 | 未采集 | 未采集 | 未采集 | 未采集 |" if isinstance(samples, list) else "| 未采集 | 未采集 | 未采集 | 未采集 | 未采集 |")
+    lines.extend(["", "创建请求返回 502 或传输失败且没有 job_id 时，按真实请求身份核查，不能因此从接纳未知请求中移除。", ""])
+    return lines
 

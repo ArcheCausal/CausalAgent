@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -28,6 +29,8 @@ from runner.verify_packet import build_verify_packet
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="runner", description="staging 压测客户端")
     parser.add_argument("--base-url", default=config.base_url())
+    parser.add_argument("--round-manifest", help="明确采用的轮次清单")
+    parser.add_argument("--selected-run-id", help="证据附加、日志与单档报告的精确运行标识")
     parser.add_argument(
         "--server-json",
         default="",
@@ -101,6 +104,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.round_manifest:
+        os.environ["LOADTEST_ROUND_MANIFEST"] = str(Path(args.round_manifest).resolve())
+    selected_run_id = args.selected_run_id or getattr(args, "run_id", None)
+    if selected_run_id:
+        os.environ["LOADTEST_RUN_ID"] = selected_run_id
     server_baseline = _load_server_json(args.server_json)
     if args.command == "preflight":
         return _cmd_preflight(args.base_url)
@@ -247,6 +255,8 @@ def _cmd_attach_after(path: str, stage: str = "") -> int:
             continue
         target = run / "summary.json"
         data = json.loads(target.read_text(encoding="utf-8"))
+        if payload.get("run_id") != data.get("run_id"):
+            raise ValueError("收尾快照必须属于相同 run_id")
         merged = dict(payload)
         merged["drain_seconds"] = (data.get("server_after") or {}).get("drain_seconds")
         data["server_after"] = merged
@@ -273,6 +283,8 @@ def _cmd_attach_sample(stage: str, path: str) -> int:
         return 1
     summary_file = target / "summary.json"
     payload = json.loads(summary_file.read_text(encoding="utf-8"))
+    if sample.get("run_id") != payload.get("run_id"):
+        raise ValueError("资源采样必须属于相同 run_id")
     payload["resource_curve"] = summary
     summary_file.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -363,6 +375,7 @@ def _cmd_accounts(base_url: str, count: int, verify: bool) -> int:
 
 
 def _cmd_stage(args, server_baseline: dict | None) -> int:
+    from runner.rounds import apply_declared_spec, declared_parameters
     spec = dict(config.STAGES[args.stage])
     cdfm = spec["mode"] in ("cdfm_fixed", "cdfm_rate")
     if args.users < 0 or not math.isfinite(args.duration) or args.duration < 0:
@@ -394,6 +407,7 @@ def _cmd_stage(args, server_baseline: dict | None) -> int:
         spec["duration"] = args.duration
         if not cdfm:
             spec["mode"] = "mixed"
+    spec = apply_declared_spec(spec, declared_parameters(args.stage, args.run_id or None))
     config.STAGES[args.stage] = spec
     accounts = load_accounts()
     if len(accounts) < spec["users"]:
@@ -411,6 +425,13 @@ def _cmd_stage(args, server_baseline: dict | None) -> int:
     print(f"运行产物目录: {run_dir}")
     if summary.get("db_checked_at") is None:
         print("主库核对待完成：请按本轮 run_id 导出 job_id，采集后 attach-job-db，再生成最终报告。")
+    if args.stage == "multi_session_smoke":
+        checks = summary.get("multi_session_evidence") or []
+        if not checks or any(row.get("ownership_verified") is not True
+                or row.get("activity_overlap") is not True
+                or len(set(row.get("session_ids") or [])) != 2 for row in checks):
+            print("多会话专项未取得完整归属与活动重叠证据（退出码 3）。")
+            return 3
     return 0
 
 
