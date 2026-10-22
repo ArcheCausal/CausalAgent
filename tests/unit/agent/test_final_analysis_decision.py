@@ -3,17 +3,14 @@
 import asyncio
 from datetime import datetime, timezone
 import pytest
+from langgraph.prebuilt import ToolRuntime
 
 from Agent.deep_agent import AgentRunContext, FinalizationGate, TrustedJobIdentity
 from Agent.deep_agent.memory import build_in_memory_backend
-from Agent.deep_agent_tools import (
-    DataProfile,
-    SafeErrorCode,
-    build_default_registry,
-)
+from Agent.deep_agent_tools import build_default_registry
 from Agent.deep_agent_tools.adapters import build_default_adapters
 from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
-from Agent.deep_agent_tools.fake_algorithm_executor import FakeAlgorithmExecutor
+from tests.support.local_algorithm_execution import LocalAlgorithmExecutor, PC_CSV, PC_INSUFFICIENT_SAMPLE_CSV
 
 from Agent.deep_agent.finalization import (
     FinalizationRetryController,
@@ -75,11 +72,7 @@ def _algorithm_execution(*, failure: bool = False):
         worker_id="worker-1",
         input_identity="input-sha",
     )
-    executor = FakeAlgorithmExecutor(
-        failures={"causal.pc": SafeErrorCode.ALGORITHM_EXECUTION_FAILED}
-        if failure
-        else {}
-    )
+    executor = LocalAlgorithmExecutor(PC_INSUFFICIENT_SAMPLE_CSV if failure else PC_CSV)
     backend = build_in_memory_backend(user_id=7)
     context = AgentRunContext(
         execution_guard=None,
@@ -95,26 +88,20 @@ def _algorithm_execution(*, failure: bool = False):
         for item in build_algorithm_tools(
             registry,
             runtime_context=context,
-            data_profile=DataProfile(
-                row_count=100,
-                column_count=2,
-                column_names=("x", "y"),
-                numeric_columns=("x", "y"),
-            ),
+            data_profile=executor.data_profile,
         )
         if item.name == "causal_pc"
     ).to_langchain_tool()
     command = asyncio.run(
         tool.coroutine(
-            runtime=type(
-                "Runtime",
-                (),
-                {
-                    "tool_call_id": "gate-call-1",
-                    "state": {"message_execution_id": "gate-response-1"},
-                    "context": context,
+            runtime=ToolRuntime(
+                tool_call_id="gate-call-1",
+                state={
+                    "message_execution_id": "gate-response-1",
+                    "data_profile": executor.data_profile,
                 },
-            )(),
+                context=context, config={}, stream_writer=[].append, store=None,
+            ),
             alpha=0.05,
         )
     )

@@ -5,23 +5,18 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt import ToolNode, ToolRuntime
 
 from Agent.deep_agent import AgentRunContext, TrustedJobIdentity
 from Agent.deep_agent.state import ProjectDeepAgentState
 from Agent.deep_agent.memory import build_in_memory_backend
-from Agent.deep_agent_tools import (
-    DataProfile,
-    SafeErrorCode,
-    build_default_registry,
-)
+from Agent.deep_agent_tools import build_default_registry
 from Agent.deep_agent_tools.adapters import build_default_adapters
 from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
-from Agent.deep_agent_tools.fake_algorithm_executor import FakeAlgorithmExecutor
+from tests.support.local_algorithm_execution import LocalAlgorithmExecutor, PC_INSUFFICIENT_SAMPLE_CSV
 from Agent.deep_agent_tools.interaction import build_option_id
 from Agent.deep_agent_tools.models import PreprocessingApproval, PreprocessingPlan, PreprocessingStep
 from Agent.deep_agent_tools.rag_evidence_tool import RagEvidenceTool
@@ -43,19 +38,26 @@ def _context(executor=None) -> AgentRunContext:
     return AgentRunContext(
         execution_guard=None,
         trusted_identity=IDENTITY,
-        algorithm_executor=executor or FakeAlgorithmExecutor(),
+        algorithm_executor=executor or LocalAlgorithmExecutor(),
     )
 
 
 def _runtime(context: AgentRunContext, *, call_id: str):
-    return SimpleNamespace(
+    return ToolRuntime(
         tool_call_id=call_id,
-        state={"message_execution_id": "message-execution-1"},
+        state={
+            "message_execution_id": "message-execution-1",
+            "data_profile": (
+                context.algorithm_executor.data_profile
+                if context.algorithm_executor is not None else None
+            ),
+        },
         context=context,
+        config={}, stream_writer=[].append, store=None,
     )
 
 
-def _algorithm_tool(*, executor: FakeAlgorithmExecutor):
+def _algorithm_tool(*, executor: LocalAlgorithmExecutor):
     context = _context(executor)
     registry = build_default_registry(
         build_default_adapters(
@@ -66,12 +68,7 @@ def _algorithm_tool(*, executor: FakeAlgorithmExecutor):
     tools = build_algorithm_tools(
         registry,
         runtime_context=context,
-        data_profile=DataProfile(
-            row_count=100,
-            column_count=2,
-            column_names=("x", "y"),
-            numeric_columns=("x", "y"),
-        ),
+        data_profile=executor.data_profile,
     )
     wrapped = next(tool for tool in tools if tool.name == "causal_pc").to_langchain_tool()
     return context, wrapped
@@ -97,7 +94,7 @@ def _approved_plan_state(
 
 
 def test_algorithm_langchain_tool_writes_result_and_terminal_ledger() -> None:
-    context, tool = _algorithm_tool(executor=FakeAlgorithmExecutor())
+    context, tool = _algorithm_tool(executor=LocalAlgorithmExecutor())
 
     command = asyncio.run(
         tool.coroutine(
@@ -122,7 +119,7 @@ def test_algorithm_langchain_tool_writes_result_and_terminal_ledger() -> None:
 def test_algorithm_tool_executes_the_plan_resolved_for_this_call() -> None:
     """核对方案与实际传给 Adapter 的方案必须是同一次解析结果。"""
 
-    executor = FakeAlgorithmExecutor()
+    executor = LocalAlgorithmExecutor()
     context, tool = _algorithm_tool(executor=executor)
     older = PreprocessingPlan(
         steps=(PreprocessingStep(operation="drop_rows", columns=("x",)),)
@@ -150,7 +147,7 @@ def test_algorithm_tool_executes_the_plan_resolved_for_this_call() -> None:
 
 
 def test_algorithm_tool_requires_explicit_plan_when_multiple_are_approved() -> None:
-    executor = FakeAlgorithmExecutor()
+    executor = LocalAlgorithmExecutor()
     context, tool = _algorithm_tool(executor=executor)
     plans = (
         PreprocessingPlan(
@@ -178,7 +175,7 @@ def test_algorithm_tool_requires_explicit_plan_when_multiple_are_approved() -> N
 
 
 def test_algorithm_public_decision_is_emitted_and_removed_before_execution() -> None:
-    executor = FakeAlgorithmExecutor()
+    executor = LocalAlgorithmExecutor()
     events = []
     context, tool = _algorithm_tool(executor=executor)
     context = replace(
@@ -195,12 +192,7 @@ def test_algorithm_public_decision_is_emitted_and_removed_before_execution() -> 
                 )
             ),
             runtime_context=context,
-            data_profile=DataProfile(
-                row_count=100,
-                column_count=2,
-                column_names=("x", "y"),
-                numeric_columns=("x", "y"),
-            ),
+            data_profile=executor.data_profile,
         )
         if item.name == "causal_pc"
     ).to_langchain_tool()
@@ -227,7 +219,7 @@ def test_algorithm_public_decision_is_emitted_and_removed_before_execution() -> 
 
 
 def test_invalid_public_decision_does_not_block_algorithm_execution() -> None:
-    executor = FakeAlgorithmExecutor()
+    executor = LocalAlgorithmExecutor()
     events = []
     context, tool = _algorithm_tool(executor=executor)
     context = replace(
@@ -244,7 +236,7 @@ def test_invalid_public_decision_does_not_block_algorithm_execution() -> None:
                 )
             ),
             runtime_context=context,
-            data_profile=DataProfile(row_count=100, column_count=2),
+            data_profile=executor.data_profile,
         )
         if item.name == "causal_pc"
     ).to_langchain_tool()
@@ -265,7 +257,7 @@ def test_invalid_public_decision_does_not_block_algorithm_execution() -> None:
 
 
 def test_tool_node_injects_runtime_and_reducers_commit_command_update() -> None:
-    context, tool = _algorithm_tool(executor=FakeAlgorithmExecutor())
+    context, tool = _algorithm_tool(executor=LocalAlgorithmExecutor())
     builder = StateGraph(ProjectDeepAgentState, context_schema=AgentRunContext)
     builder.add_node("tools", ToolNode([tool], handle_tool_errors=False))
     builder.add_edge(START, "tools")
@@ -289,6 +281,7 @@ def test_tool_node_injects_runtime_and_reducers_commit_command_update() -> None:
                     )
                 ],
                 "message_execution_id": "message-execution-1",
+                "data_profile": context.algorithm_executor.data_profile,
                 "algorithm_results": {},
                 "action_ledger": {},
                 "rag_evidence": {},
@@ -308,9 +301,7 @@ def test_tool_node_injects_runtime_and_reducers_commit_command_update() -> None:
 
 
 def test_algorithm_execution_failed_is_returned_and_recorded() -> None:
-    executor = FakeAlgorithmExecutor(
-        failures={"causal.pc": SafeErrorCode.ALGORITHM_EXECUTION_FAILED}
-    )
+    executor = LocalAlgorithmExecutor(PC_INSUFFICIENT_SAMPLE_CSV)
     context, tool = _algorithm_tool(executor=executor)
 
     command = asyncio.run(
@@ -689,7 +680,7 @@ def test_evidence_unavailable_is_recorded_without_leaking_exception() -> None:
     context = AgentRunContext(
         execution_guard=None,
         trusted_identity=IDENTITY,
-        algorithm_executor=FakeAlgorithmExecutor(),
+        algorithm_executor=LocalAlgorithmExecutor(),
         event_sink=sink,
     )
 
@@ -715,12 +706,8 @@ def test_evidence_unavailable_is_recorded_without_leaking_exception() -> None:
 
 
 def test_runtime_identity_has_no_static_fallback() -> None:
-    context, tool = _algorithm_tool(executor=FakeAlgorithmExecutor())
-    runtime = SimpleNamespace(
-        tool_call_id=None,
-        state={"message_execution_id": "message-execution-1"},
-        context=context,
-    )
+    context, tool = _algorithm_tool(executor=LocalAlgorithmExecutor())
+    runtime = _runtime(context, call_id=None)
 
     try:
         asyncio.run(tool.coroutine(runtime=runtime, alpha=0.05))

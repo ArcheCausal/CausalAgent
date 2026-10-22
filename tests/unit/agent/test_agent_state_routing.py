@@ -522,29 +522,29 @@ def test_explicit_direct_lingam_mcp_stage_parses_and_routes_to_rag():
 
 
 def test_direct_lingam_report_context_includes_assumptions_and_versions():
-    """报告上下文必须明确 DirectLiNGAM 的版本、参数、方向和解释边界。"""
+    """报告按 results 读取执行快照，并保留各方法的版本、方向和解释边界。"""
+    from Agent.deep_agent_tools.algorithm_specs import DIRECT_LINGAM_SPEC
+    from Agent.deep_agent_tools.models import MethodImplementation
+
+    method = DIRECT_LINGAM_SPEC.method_definition().model_dump(mode="json")
+    implementation = MethodImplementation(
+        runner_version="causalachieve-v2", package="causal-learn",
+        package_version="0.1.4.7", embedded_version="1.5.4",
+    ).model_dump(mode="json")
     context = nodes._causal_method_context_for_report(
-        {
-            "success": True,
-            "algorithm": "direct_lingam",
-            "implementation": {
-                "version": "0.1.4.7",
-                "embedded_version": "1.5.4",
-            },
-            "parameters": {"measure": "pwling"},
-            "matrix_convention": "target_to_source",
-            "raw_results": {"causal_order_names": ["A", "B"]},
-            "diagnostics": {"n_samples": 200, "n_features": 2},
-        }
+        {"results": [{
+            "algorithm": "direct_lingam", "method": method,
+            "implementation": implementation, "data_view": None,
+        }]}
     )
 
-    assert "causal-learn 0.1.4.7" in context
-    assert "measure=pwling" in context
-    assert "B[target, source]" in context
-    assert "linear structural equation model" in context
-    assert "non-Gaussian" in context
-    assert "latent confounders" in context
-    assert "candidate causal relations" in context
+    snapshot = json.loads(context)[0]
+    assert snapshot["method"] == method
+    assert snapshot["implementation"] == implementation
+    assert snapshot["method"]["matrix_convention"] == "target_to_source"
+    assert "因果机制近似线性且噪声非高斯" in snapshot["method"]["assumptions"]
+    assert "误差独立并且不存在潜在混杂" in snapshot["method"]["assumptions"]
+    assert "图中系数不是已识别的干预效应" in snapshot["method"]["limitations"]
 
 
 @pytest.mark.parametrize(

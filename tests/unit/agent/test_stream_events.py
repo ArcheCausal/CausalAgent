@@ -356,7 +356,7 @@ class StreamEventAdapterTests(unittest.TestCase):
                     "type": "progress",
                     "node_name": "deep_agent",
                     "step_id": retry_step["step_id"],
-                    "summary": "正在按校验要求修正最终决策：沿用已有工具结果，不重复调用工具。",
+                    "summary": "正在按校验要求修正最终决策：复用已有结果，并补齐校验要求的步骤。",
                     "_event_key": f"deep-agent-retry:0:{retry_step['step_id']}",
                 },
             }

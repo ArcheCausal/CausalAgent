@@ -15,7 +15,6 @@ from Agent.deep_agent.state import (
 from Agent.deep_agent_tools.models import DataProfile
 from Agent.deep_agent.prompts import (
     MANDATORY_ALGORITHM_INSTRUCTION,
-    MANDATORY_WEB_INSTRUCTION,
 )
 
 
@@ -53,28 +52,17 @@ def test_non_analysis_route_has_no_algorithm_requirement() -> None:
     ]
 
 
-def test_enabled_web_search_requires_a_web_evidence_call() -> None:
-    """开启联网搜索的分析运行必须把 Web 检索合同注入 Deep Agent。"""
+def test_web_switch_does_not_change_projected_messages() -> None:
+    """Web 规则固定在系统提示中，父 State 的开关不再追加运行提示。"""
 
-    projected = to_deep_agent_input(
-        {**ANALYSIS_PARENT, "route_decision": "fold", "web_search_enabled": True}
-    )
-
-    assert MANDATORY_WEB_INSTRUCTION in [
-        message["content"] for message in projected["messages"]
+    projections = [
+        to_deep_agent_input(
+            {**ANALYSIS_PARENT, "route_decision": "fold", "web_search_enabled": enabled}
+        )
+        for enabled in (True, False, None)
     ]
-
-
-def test_disabled_web_search_has_no_web_requirement() -> None:
-    """关闭联网搜索时不向模型注入必须联网的约束。"""
-
-    projected = to_deep_agent_input(
-        {**ANALYSIS_PARENT, "route_decision": "fold", "web_search_enabled": False}
-    )
-
-    assert MANDATORY_WEB_INSTRUCTION not in [
-        message["content"] for message in projected["messages"]
-    ]
+    assert projections[0]["messages"] == projections[1]["messages"]
+    assert projections[1]["messages"] == projections[2]["messages"]
 
 
 def test_state_always_has_empty_ledger_and_independent_reducers() -> None:

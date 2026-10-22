@@ -140,6 +140,26 @@ docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p
 
 ## Deep Agent 定向验证
 
+### 工具可见性与 Web 开关
+
+新增验证只使用真实规则函数、领域对象和框架组件，不生成模型、算法或搜索的替代返回：
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps unit-test python -B -m pytest -p no:cacheprovider tests/unit/agent/test_tool_visibility.py tests/unit/agent/test_deep_agent_state.py tests/integration/agent/test_tool_visibility_runtime.py -q
+```
+
+纯函数用例验证只有明确的 `True` 保留 Web 工具，`False`、`None` 和其他值隐藏，其他工具及原列表不变、顺序不变、不同 Context 独立，已移除工具不被重新加入。真实框架用例通过生产 `build_deep_agent()`、Registry、算法/RAG/Web/文件工具和 Responses API 序列化生成 HTTP 请求，在发送前由请求钩子显式中止，不返回模拟模型响应；分别核对并发开关、工具返回后下一轮、Gate 修正和 `FinalAnalysisDecision` schema 仍在载荷中。这只证明框架与载荷，不证明真实模型成功调用或完成结构化输出。
+
+生产 ToolNode 用例执行关闭搜索的真实入口，核对 `disabled`、`WEB_SEARCH_DISABLED` 和 terminal Ledger；算法空数据前置拒绝也来自真实工具检查，不运行 MCP 算法。使用这些实际拒绝记录验证 Gate 复用同 attempt 的完整记录、拒绝未完成/终态不一致记录，以及旧 attempt 的 Web 记录不能满足当前检查。该用例保持 Gate 现有终态规则，不能解释成搜索或算法已经执行，也不能代替真实 Worker 接管和 PostgreSQL 恢复。
+
+真实模型和搜索的显式入口见 [`tool_visibility_model_smoke.py`](../../tests/smoke/tool_visibility_model_smoke.py)，在已经配置生产格式非敏感环境变量及密钥文件的进程中运行：
+
+```powershell
+python -B tests/smoke/tool_visibility_model_smoke.py
+```
+
+该入口并发运行启用和关闭搜索的全新内存图调用，记录实际发出的工具名，并校验真实模型的 `FinalAnalysisDecision` 与 Web ToolMessage/终态 Ledger。仅 `available` 或 `no_results` 证明检索调用成功；`unavailable`、`protocol_error` 如实报告，不能算 SearXNG 成功。它不创建 MySQL Job，不连接 PostgreSQL；完整 Job、同 attempt Gate 修正、Worker 新 attempt 和 PostgreSQL 恢复仍需在更新后新建 Job 上逐项验收。模型、搜索、Job、恢复的证据必须分别报告，环境阻塞或未执行不可算通过。
+
 ### 分析事实的一致性验收
 
 方法定义、混合图、画像、报告投影和保存后的恢复使用真实纯函数及领域模型检查，不替代算法或模型执行结果：
@@ -255,6 +275,14 @@ passed/skipped/failed；历史通过数量不能代替当前工作树证据。`t
 链路已验收的证据。
 
 ## causal-mcp 纵向验证
+
+算法工具和 Gate 的执行回归分别位于 `tests/unit/agent/test_runtime_tool_state_updates.py` 与 `tests/unit/agent/test_final_analysis_decision.py`。其中算法路径使用 `tests/support/local_algorithm_execution.py`，通过正式 MCP 服务、真实进程池和 causal-learn PC 执行进程内冻结 CSV；`ToolRuntime.state` 必须携带从该 CSV 转换的 `data_profile`。成功、两行样本导致的真实执行失败、处理方案绑定、工具结果及终态 Ledger 和 Gate 校验分别断言。这些文件中其他既有用例仍按其各自依赖边界解释，不能把整个文件的通过数量当作真实外部服务验收。
+
+`tests/unit/agent/test_direct_lingam_analysis.py::test_direct_lingam_returns_structured_success_result` 使用真实 DirectLiNGAM，校验方法快照、安装版本以及邻接矩阵与公开边的方向、权重。CDFM 诊断测试只调用实际诊断和失败封装函数，使用真实文件读取异常与字典访问异常检查来源字段及消息截断；不证明 CDFM 模块加载或模型推理。`tests/integration/agent/test_cdfm_load_failure.py` 在真实 CDFM 依赖存在时，用空本地权重目录和离线设置验证加载失败的公开封装；缺少依赖时明确跳过，也不证明成功推理。MCP 缺省 runner 版本由 `tests/unit/agent/test_runner_method_metadata.py` 检查元数据与来源模型之间的契约，必须保持未知，不能通过填写虚构版本满足校验。MCP 的成功结果与慢调用日志用例运行真实 PC 进程，日志用例通过正式 JSON formatter 读取事件和关联字段；慢调用包含排队耗时，因此不要求告警晚于取得执行槽的 accepted 事件。上述本地组件证据均不包含 HTTP、MySQL 权威读取、PostgreSQL 恢复、真实模型或完整 Job。
+
+```bash
+python -m pytest -p no:cacheprovider tests/unit/agent/test_final_analysis_decision.py tests/unit/agent/test_runtime_tool_state_updates.py tests/unit/agent/test_cdfm_failure_diagnostics.py tests/unit/agent/test_direct_lingam_analysis.py tests/unit/agent/test_agent_state_routing.py tests/unit/agent/test_job_recovery.py tests/unit/agent/test_mcp_v2_contract.py tests/unit/agent/test_runner_method_metadata.py tests/integration/agent/test_cdfm_load_failure.py
+```
 
 `causal-mcp` 的代码级验证覆盖固定 capability/spec digest、Bearer/HMAC 时窗与命令绑定、结果规范化、进程池容量/迟到结果、N×K 客户端池、owner task 清理和 `AlgorithmExecutor` 结构化结果。使用仓库测试镜像执行：
 

@@ -269,7 +269,15 @@ class JobRecoveryTests(unittest.TestCase):
         self.assertTrue(
             any(values and "terminal:canceled" in values for values in parameter_sets)
         )
-        self.assertTrue(any("SET status = 'canceled'" in statement for statement in sql))
+        cancel_updates = [
+            statement for statement in sql
+            if "UPDATE analysis_jobs" in statement and "cancel_idempotency_key = %s" in statement
+        ]
+        self.assertEqual(len(cancel_updates), 1)
+        assignments = cancel_updates[0].split("SET", 1)[1].split("WHERE", 1)[0]
+        self.assertTrue(assignments.rstrip().endswith("status = 'canceled'"))
+        self.assertIn("active_session_key = NULL", assignments)
+        self.assertIn("WHEN status = 'running' THEN 'draining'", assignments)
         self.assertTrue(any("active_session_key = NULL" in statement for statement in sql))
 
     def test_cancel_running_job_keeps_draining_execution_ownership(self):
