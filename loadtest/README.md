@@ -23,6 +23,104 @@ py -3.12 -m venv .venv
 
 ## 常用命令
 
+### 固定轮次与客户端版本
+
+新一轮必须先保存部署白名单标识，并建立 `loadtest.round.v1` 清单。清单逐项声明
+`stage`、独立 `run_id`、`parameters` 和 `disposition`（planned/adopted/failed/interrupted/invalidated）。
+失败、中断和作废项继续保留，不按最近一次同名档位替换。重复档位逐 run_id 出报告。
+时间字段使用 UTC epoch 或带偏移的 ISO 时间，报告明确使用 UTC；历史目录名时区不据名称推算。
+
+```powershell
+$env:PYTHONIOENCODING = 'utf-8'
+# 可复用现有本地凭据文件；不复制到证据包。
+$env:LOADTEST_ACCOUNTS_PATH = 'D:/Computer/Projects/CausalAgent/loadtest/local/accounts.local.json'
+$python = (Resolve-Path .venv/Scripts/python.exe).Path
+$frozen = & $python ops/prepare_round.py --scope targeted --manifest local/round-manifest.json
+# 开始运行前核对清单中的任务量、到达率、观察期限和资源保护参数。
+$env:LOADTEST_ROUND_MANIFEST = (Resolve-Path local/round-manifest.json).Path
+# 在源码副本运行编排，产物仍写入原 local/。
+$env:LOADTEST_LOCAL_DIR = (Resolve-Path local).Path
+Push-Location $frozen
+& $python ops/run_stages.py multi_session_smoke recovery
+Pop-Location
+& $python -m runner.rounds render --manifest local/round-manifest.json --output local/evidence/round-report
+```
+
+冻结客户端副本包含逐文件 SHA256、聚合源码 SHA256、Git 基点、Python 与依赖版本；
+未提交的源码也参与 hash。部署标识独立记录 app/worker/MCP/gateway 镜像 digest、
+revision、worker/Web/MCP 参数与模型名称；不采集密钥、连接串、提示词或文件正文。
+每次实际上传的 CSV 另外记录行列数、seed、字节数和 SHA256。历史缺失 hash 保持未知。
+整轮采用同一源码副本，服务器部署在每档前后核对，发生漂移则停止后续运行。
+
+证据、日志、导出与 attach 命令须设置 `LOADTEST_ROUND_MANIFEST` 或
+`LOADTEST_RUN_ID`，也可用全局 `--round-manifest` / `--selected-run-id`。
+未指定身份时不会自动选择最近档位。附加服务器采集必须与摘要的 run_id 相同。
+`runner.rounds render` 只读原摘要，写独立 derived JSON、逐 run_id 报告、
+`round-result.json`、`round-report.md` 和直接从结构化结果生成的 `analysis-summary.md`。
+旧报告重算应先复制归档并保存原始 hash；新报表不能覆盖旧摘要。
+
+`ops/prepare_round.py` 默认只声明双会话和 Recovery，准备命令本身不提交业务请求。
+完整轮次须显式使用 `ops/prepare_round.py --scope full --manifest local/<本轮清单>.json`，一次声明定向专项、
+原有十二档、CDFM 固定量和五级到达率，并返回冻结副本目录。默认保护条件为 CPU 连续
+三个采样区间达到 98%、可用内存不高于 512 MiB、queued 不低于 128 或数据库连接数
+不低于 200；开始前可在清单中明确修改。启动方式与上例相同，不传档位时按清单顺序续跑
+planned 项。已有文件不覆盖。定向验证完成后使用同一清单继续，禁止另取历史同名档位。
+边界附近需要复测时，先运行 `python -m runner.rounds repeat --manifest <清单>
+--source-run-id <已采用运行> --count 2`，再执行编排；追加计划完整复制原档参数，报告按
+相同参数比较重复运行，不能把不同到达率合并成一组。
+
+### 观察、专项与诊断
+
+请求发送前声明 `requires_terminal`、`requires_full_stream` 和 `observation_reason`。
+全部接纳 Job、声明持续观察的 Job 和声明完整事件流的 Job 分别保存固定分母。
+主动取消与提前关闭观察均不移出全部接纳清单。完整订阅的事件集合与主动截断集合分别核对，
+截断后未观察到的事件不是“零丢失”。观察结束保存实际时间与原因，区分主动结束、空闲超时、
+总期限到达、传输错误和内部异常。客户端终态时间只由客户端接收记录产生。
+
+多会话 smoke 使用同一账号的两个不同会话，在首 Job 活动时提交第二个，分别核对
+会话归属、活动交叠和执行区间交叠。两个请求接纳不能代替交叠证据。Recovery 分开记录
+主动断开次数、重连尝试/成功次数、重连段事件数、目标终态及同 Job 集合差异；
+queued/running 取消先观察真实目标状态，幂等和跨账号专项分别清理实际创建的资源。
+未触发 waiting_input 保持未验证。取消 API 回执、主库业务终态、执行释放、算法 PID
+终止与浏览器行为分别判断。
+空的 `execution_state` 不能证明释放：已执行任务需要 `worker_confirmed` 和有效释放时间；
+终态、attempt_count=0 且 started_at 明确为空时单列为从未领取。lease_expired 和缺失释放字段保持未知。
+
+客户端为每个请求生成 `X-Request-ID`，同时保留响应 ID。网关只对白名单只读 API
+记录固定路由标签、状态、上游状态及连接/响应/请求耗时，不记录 query、资源正文或凭据。
+`ops/enable_gateway_diagnostics.py --output <local/evidence/file.json>` 在实际配置上
+增补诊断，先检查候选，备份旧文件，再检查并 reload；该命令不修改并发和超时参数。
+没有 Job ID 的读取错误按 request ID 查询；历史没有保存 request ID 时，不能按时间
+邻近推定请求关联。异常诊断只保留允许的类型、类别、阶段与状态码，不保存原始异常正文。
+
+CDFM 按 `(job_id, invocation_id)` 识别逻辑调用，再分别核对 worker attempt 和 MCP
+retry；缺失任一身份保留未知。日志与持久化事件按身份关联，事件条数不能作为调用次数。
+已识别调用成功、全部调用覆盖和算法准确率是三项独立结论；本程序不凭 Job 成功
+或场景名称推断算法执行，也不在没有独立标准数据集时给出准确率。
+
+### 分阶段统计与安全续跑
+
+报告同时保存 120/300 秒终态率和成功率，分开普通负载与主动取消专项，提供
+提交前调度等待、首次排队、执行跨度、服务器总耗时和客户端等待。吞吐至少保留
+三位小数，HTTP、成功 Job 与全部终态 Job 分别统计。资源按负载、排空和额外观察
+窗口统计；每个窗口明确起止时间，不使用整轮峰值替代分阶段采样。
+
+编排分别记录场景检查、证据完整性和任务清理。未触发恢复分支可以不完整；只有
+主库覆盖充分、接纳未知已解析、业务活动清空且执行释放确认后才允许下一档。
+300 秒检查点和最长 1800 秒边界保留目标、实际采集与延迟。300 秒已证实释放时
+可以提前结束服务器额外观察，1800 秒明确记为未到达，不声称观察了完整 1800 秒。
+客户端可以先关闭，采样和主库核对独立完成。
+重启编排时会重新核对清单中所有已执行前档的主库终态和严格释放证据；失败项不会因
+只选择后续 planned 项而被跳过。清单中的任务上限、会话、客户端 SSE/活动额度及到达调度
+参数全部传入执行器。Recovery 也读取资源停止信号；信号触发后只收尾，不再创建后续任务。
+保护指标缺失保持 unknown；开始前等待完整样本，运行期间丢失指标则停止新提交。
+
+到达率场景独立安排每次请求，不等待前任务结束。客户端额度耗尽、到达超时或保护
+条件触发后，未发送意图保留原因和调度延迟。每档清单预设任务量或任务保护上限、
+计划到达率、观察期限与资源上限；保护触发只停止新提交，继续有界收尾。
+没有既定业务性能门槛时，结论只描述成功吞吐、期限内成功率、等待、队列、排空和
+重复运行差异，不输出任意的“性能达标”结论。
+
 ~~~
 # 第一阶段：网络与入口预检
 .venv\Scripts\python.exe -m runner preflight
@@ -108,7 +206,7 @@ CDFM 未采集或证据不足状态。调用成功率、模型准确率和进程
 | db_checked_at | 同 run_id 的主库核对时间；为空时最终主库摘要待核对 |
 
 普通 HTTP 默认超时 30 秒，SSE 空闲读取默认 45 秒，单 Job 总观察默认 1800 秒。
-停止提交后的 300 秒是排空检查点，最终排空观察默认最多 1800 秒，不能在检查点就停止
+停止提交后的 300 秒是排空检查点，最终排空观察默认最多 1800 秒；只有主库充分覆盖并确认业务终态和执行释放后才可提前停止
 全部观察。覆盖参数见 `runner/config.py`；专项流使用同样的总期限，持续心跳不会延长它。
 
 `phases.load` 和 `phases.drain` 分别保存 `http_requests`、`http_rps`、
@@ -248,7 +346,7 @@ stop_submitting_at，不能猜时间。手工运行须并行启动采样和客�
 .venv\Scripts\python.exe -m runner evidence
 ~~~
 
-使用 attach 前确认该档最新运行就是指定 run_id；不同轮次的证据不得混入同一摘要。
+使用 attach 前设置精确的 `LOADTEST_RUN_ID`，并核对采集文件的 run_id；不同轮次的证据不得混入同一摘要。
 采集只读，不输出密钥、提示词或文件正文。缺少数据时保留 missing/error/unknown 和
 null，不能用 0 冒充采集成功。
 

@@ -66,25 +66,30 @@
 | 取消后阶段列表仍显示进行中 | 复测确认：Job 终态与 thinking_after.status 均为 canceled，但被取消时正在执行的阶段只有 node_start、没有 node_end，前端按“时长缺失即进行中”渲染，因此该阶段仍显示“进行中”。典型样本：阶段“预处理数据” | P2 |
 
 
-## 2026-10-20 至 2026-10-21 第三轮（镜像 76f6a63f）
+## 2026-10-20 至 2026-10-21 第三轮重算（镜像 76f6a63f）
 
-入口 http://203.195.194.205:8088；app digest 为 ghcr.io/archecausal/causalagent-app@sha256:b70b70521f9900b89c0d933226db3bdbe4070c8ea129e1ea8f59ea21e78f4d2c（revision 76f6a63f），causal-mcp 为 ghcr.io/archecausal/causalagent-mcp@sha256:db36e31e301ac399abd66ad995856935494847f95931c834c1093230771ebe47。12 个档位全部执行完毕，主库核对覆盖率均为 100%，全部排空。
+本轮清单为 `loadtest/local/evidence/history-20261020-21-recalculated/round-manifest.json`。其中 12 次采用、4 次作废、3 次中断，原始 238 个文件已复制归档并逐文件核对 SHA256。目录名的原时区未核验，以下时间直接由真实 epoch 展示为 UTC。
 
-| 档位 | run_id | 测试时间 | 归档位置 | 结论 |
-| --- | --- | --- | --- | --- |
-| smoke | 20261020T225813-smoke | 2026-10-20 22:58 | local/evidence/loadtest-report-20261021.md | 1/1 成功，无 4xx/5xx |
-| baseline | 20261020T232946-baseline | 2026-10-20 23:29 | local/evidence/loadtest-report-20261021.md | 4/4 成功，120 秒完成率 100% |
-| low | 20261021T000344-low | 2026-10-21 00:03 | local/evidence/loadtest-report-20261021.md | 9/9 成功，无 4xx/5xx |
-| mid_low | 20261021T003927-mid_low | 2026-10-21 00:39 | local/evidence/loadtest-report-20261021.md | 46 个 Job，45 成功，120 秒完成率 100% |
-| mid | 20261021T012025-mid | 2026-10-21 01:20 | local/evidence/loadtest-report-20261021.md | 96 个 Job，95 成功，1 次 load_session 连接超时 |
-| stability | 20261021T020132-stability | 2026-10-21 02:01 | local/evidence/loadtest-report-20261021.md | 30 分钟 410 个 Job，407 成功，CPU 峰值 63.4% |
-| recovery | 20261021T111044-recovery | 2026-10-21 11:10 | local/evidence/loadtest-report-20261021.md | API 专项通过；waiting_input、进程终止与前端证据缺口保留 |
-| burst | 20261021T114930-burst | 2026-10-21 11:49 | local/evidence/loadtest-report-20261021.md | 67 个 Job，63 成功，活动 Job 峰值 4 |
-| burst_ungated | 20261021T123023-burst_ungated | 2026-10-21 12:30 | local/evidence/loadtest-report-20261021.md | 78 个 Job，活动峰值 20，120 秒完成率 50%，6 个只读接口 502 |
-| queue_pressure | 20261021T131741-queue_pressure | 2026-10-21 13:17 | local/evidence/loadtest-report-20261021.md | 45 个 Job，排队 p95 313 秒，120 秒完成率 8.9% |
-| multi_session_smoke | 20261021T142148-multi_session_smoke | 2026-10-21 14:21 | local/evidence/loadtest-report-20261021.md | 同账号两会话并发可用，2 个 Job 均接纳 |
-| multi_session_pressure | 20261021T153757-multi_session_pressure | 2026-10-21 15:37 | local/evidence/loadtest-report-20261021.md | 82 个 Job，78 成功，120 秒完成率 62.2% |
+app digest：`ghcr.io/archecausal/causalagent-app@sha256:b70b70521f9900b89c0d933226db3bdbe4070c8ea129e1ea8f59ea21e78f4d2c`；MCP digest：`ghcr.io/archecausal/causalagent-mcp@sha256:db36e31e301ac399abd66ad995856935494847f95931c834c1093230771ebe47`。历史客户端源码 hash 与输入 hash 缺失，保持未知。
 
-本轮共同结论：全部档位 HTTP 429 为 0；主库 19 个 Job 失败，15 次 node_error/internal_error、2 次 unexpected_error、2 次 provider_error，没有限流类失败；SSE 断流 34 次全部重连恢复；三个因果能力 causal.cdfm、causal.pc、causal.direct_lingam 共 181/176/46 次调用全部完成。cdfm_fixed 与 cdfm_rate 专项未执行。
+| 档位 | run_id | 开始时间（UTC） | 唯一接纳 | 成功 / 失败 / 取消 | 120 秒终态率 / 成功率 | 归档位置 |
+| --- | --- | --- | --- | --- | --- | --- |
+| smoke | 20261020T225813-smoke | 2026-10-20 14:58:29 | 1 | 1 / 0 / 0 | 100.00% / 100.00% | local/evidence/history-20261020-21-recalculated/reports/20261020T225813-smoke-report.md |
+| baseline | 20261020T232946-baseline | 2026-10-20 15:30:02 | 4 | 4 / 0 / 0 | 100.00% / 100.00% | local/evidence/history-20261020-21-recalculated/reports/20261020T232946-baseline-report.md |
+| low | 20261021T000344-low | 2026-10-20 16:04:00 | 9 | 9 / 0 / 0 | 100.00% / 100.00% | local/evidence/history-20261020-21-recalculated/reports/20261021T000344-low-report.md |
+| mid_low | 20261021T003927-mid_low | 2026-10-20 16:39:51 | 46 | 45 / 1 / 0 | 100.00% / 97.83% | local/evidence/history-20261020-21-recalculated/reports/20261021T003927-mid_low-report.md |
+| mid | 20261021T012025-mid | 2026-10-20 17:20:48 | 96 | 95 / 1 / 0 | 100.00% / 98.96% | local/evidence/history-20261020-21-recalculated/reports/20261021T012025-mid-report.md |
+| stability | 20261021T020132-stability | 2026-10-20 18:01:40 | 410 | 407 / 3 / 0 | 100.00% / 99.27% | local/evidence/history-20261020-21-recalculated/reports/20261021T020132-stability-report.md |
+| recovery | 20261021T111044-recovery | 2026-10-21 03:10:59 | 7 | 2 / 0 / 5 | 100.00% / 28.57% | local/evidence/history-20261020-21-recalculated/reports/20261021T111044-recovery-report.md |
+| burst | 20261021T114930-burst | 2026-10-21 03:49:45 | 67 | 63 / 4 / 0 | 100.00% / 94.03% | local/evidence/history-20261020-21-recalculated/reports/20261021T114930-burst-report.md |
+| burst_ungated | 20261021T123023-burst_ungated | 2026-10-21 04:30:39 | 78 | 75 / 3 / 0 | 50.00% / 50.00% | local/evidence/history-20261020-21-recalculated/reports/20261021T123023-burst_ungated-report.md |
+| queue_pressure | 20261021T131741-queue_pressure | 2026-10-21 05:17:57 | 45 | 43 / 2 / 0 | 8.89% / 8.89% | local/evidence/history-20261020-21-recalculated/reports/20261021T131741-queue_pressure-report.md |
+| multi_session_smoke | 20261021T142148-multi_session_smoke | 2026-10-21 06:22:04 | 2 | 1 / 1 / 0 | 100.00% / 50.00% | local/evidence/history-20261020-21-recalculated/reports/20261021T142148-multi_session_smoke-report.md |
+| multi_session_pressure | 20261021T153757-multi_session_pressure | 2026-10-21 07:38:14 | 82 | 78 / 4 / 0 | 62.20% / 59.76% | local/evidence/history-20261020-21-recalculated/reports/20261021T153757-multi_session_pressure-report.md |
 
-压测采集器修复三项：主库核对 SQL 排序规则冲突（D1）、SSH 回执超时误判（D2）、从库复制状态查询缺密码（D6），均在分支 fix(loadtest)--fix-loadtest-bugs 的提交 252005c3 及后续补丁中处理。
+主库业务分类合计：成功 823、失败 19、取消 5；取消专项与普通负载在逐档报告中分别统计。已确认 19 个失败 Job 和 6 个只读接口 502，旧客户端缺少对应 request ID，不能给出完整请求关联结论。
+
+多会话 smoke 缺少不同会话的活动交叠记录，专项保持未验证。历史观察策略缺失，完整流与主动截断不能按新分母追认，SSE 不作零丢失结论。CDFM 部分调用缺少 worker attempt 或其他身份，不能将事件条数等同逻辑调用，也不能判定全部调用覆盖或算法准确率。CDFM 固定量和独立到达率在该历史轮均未执行。
+
+派生总报告：`loadtest/local/evidence/history-20261020-21-recalculated/reports/round-report.md`；结构化结果：同目录 `round-result.json`；直接生成的统计摘要：`analysis-summary.md`；完整原始副本：归档下 `raw/`；原始 hash：`original-hashes.json`。原运行摘要与原始采集均未改写。
+

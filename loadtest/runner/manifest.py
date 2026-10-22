@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import platform
+import ctypes
+import hashlib
+import importlib.metadata
+import os
 import socket
+import subprocess
 import sys
+from pathlib import Path
 
 
 def collect_client_manifest() -> dict:
@@ -17,22 +23,17 @@ def collect_client_manifest() -> dict:
         "total_memory_gib": _total_memory_gib(),
         "hostname": socket.gethostname(),
         "local_ip": _local_ip(),
+        "source": collect_source_manifest(),
+        "dependencies": {name: importlib.metadata.version(name) for name in ("httpx",)},
     }
 
 
 def _cpu_count() -> int | None:
-    try:
-        import os
-
-        return os.cpu_count()
-    except Exception:
-        return None
+    return os.cpu_count()
 
 
 def _total_memory_gib() -> float | None:
     try:
-        import ctypes
-
         class MemoryStatus(ctypes.Structure):
             _fields_ = [
                 ("dwLength", ctypes.c_ulong),
@@ -52,6 +53,20 @@ def _total_memory_gib() -> float | None:
         return round(status.ullTotalPhys / (1024 ** 3), 2)
     except Exception:
         return None
+
+
+def collect_source_manifest() -> dict:
+    """逐文件摘要包含未提交的客户端与采集器改动，不读取本地产物或凭据。"""
+    root = Path(__file__).resolve().parents[1]
+    paths = sorted(path for directory in ("runner", "ops")
+                   for path in (root / directory).rglob("*.py")
+                   if "__pycache__" not in path.parts)
+    paths += sorted(root.glob("*.sh")) + [root / "requirements.txt", root / "verify_report.py"]
+    files = {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+             for path in paths}
+    aggregate = hashlib.sha256("\n".join(f"{name}:{digest}" for name, digest in sorted(files.items())).encode()).hexdigest()
+    revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True).stdout.strip()
+    return {"git_revision": revision, "source_sha256": aggregate, "files": files}
 
 
 def _local_ip() -> str | None:

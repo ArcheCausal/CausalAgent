@@ -160,6 +160,10 @@ class VirtualUser:
                                    int(self.spec.get("seed", config.CDFM_SEED)))
                     if self.scenario.startswith("cdfm") else build_csv(context.index))
         self.message = config.CDFM_MESSAGE if self.scenario.startswith("cdfm") else MESSAGE
+        recorder.record_input(self.csv,
+            rows=int(self.spec.get("rows", config.CDFM_ROWS)) if self.scenario.startswith("cdfm") else 40,
+            columns=5, seed=int(self.spec.get("seed", config.CDFM_SEED)) if self.scenario.startswith("cdfm") else 1000 + context.index,
+            user_index=context.index, scenario=self.scenario)
         self.sse_gate = context.client.sse_gate
         self._session_lock = threading.Lock()
         self._prepare_lock = threading.Lock()
@@ -288,6 +292,10 @@ class VirtualUser:
         self._load_deadline = time.monotonic() + duration_seconds
         self.prepare()
         while self._can_submit():
+            task_budget = self.recorder.scenario.get("task_budget")
+            if task_budget is not None and self.recorder.task_budget_used >= task_budget:
+                self.stop.trip("task_budget_exhausted")
+                return
             if not self._has_budget():
                 self._think()
                 continue
@@ -305,6 +313,62 @@ class VirtualUser:
             except ApiError as exc:
                 self.recorder.note(f"虚拟用户 {self.ctx.username} 操作失败: {type(exc).__name__}")
             self._think()
+
+    def run_multi_session_smoke(self, duration_seconds: float) -> None:
+        """先确认首个 Job 活动，再向同账号另一真实会话提交。"""
+        self.set_submission_deadline(time.monotonic() + duration_seconds)
+        evidence = {"username": self.ctx.username, "session_ids": [], "job_ids": [],
+                    "ownership_verified": None, "second_submitted_while_first_active": None,
+                    "activity_overlap": None, "running_status_overlap": None,
+                    "execution_overlap": None, "execution_overlap_source": None,
+                    "active_snapshots": [], "reason": None}
+        self.recorder.multi_session_evidence.append(evidence)
+        self.prepare()
+        slots = self.ctx.sessions[:2]
+        evidence["session_ids"] = [s.session_id for s in slots]
+        if len(slots) != 2 or slots[0].session_id == slots[1].session_id:
+            evidence["reason"] = "distinct_sessions_unavailable"
+            return
+        # load_session 使用 strong read，避免会话列表副本延迟影响归属检查。
+        owned = [self.ctx.client.load_session(slot.session_id) for slot in slots]
+        evidence["ownership_verified"] = all(payload.get("success") is True for payload in owned)
+        first = self._submit_job(slot=slots[0])
+        if first is None:
+            evidence["reason"] = "first_not_accepted"
+            return
+        evidence["job_ids"].append(first)
+        active = self.ctx.client.active_jobs(slots[0].session_id)
+        observed = next((j for j in active if str(j.get("job_id")) == first), None)
+        evidence["first_active_observed_at"] = time.time() if observed else None
+        if observed is None or observed.get("status") not in {"queued", "running", "waiting_input"}:
+            evidence["reason"] = "first_activity_not_observed"
+            return
+        evidence["second_submission_started_at"] = time.time()
+        second = self._submit_job(slot=slots[1])
+        if second is None:
+            evidence["reason"] = "second_not_accepted"
+            return
+        evidence["job_ids"].append(second)
+        while self._can_submit():
+            snapshot = self.ctx.client.active_jobs()
+            matched = [dict(job_id=str(j.get("job_id")), session_id=j.get("session_id"),
+                            status=j.get("status")) for j in snapshot
+                       if str(j.get("job_id")) in {first, second}]
+            evidence["active_snapshots"].append({"at": time.time(), "jobs": matched})
+            if len(matched) == 2:
+                evidence["activity_overlap"] = True
+                evidence["second_submitted_while_first_active"] = True
+                evidence["ownership_verified"] = evidence["ownership_verified"] and all(
+                    j["session_id"] == slots[int(j["job_id"] == second)].session_id for j in matched)
+                if all(j["status"] == "running" for j in matched):
+                    evidence["running_status_overlap"] = True
+                    # running 摘要不能证明执行 attempt 的真实时间区间交叠。
+                    evidence["reason"] = "execution_intervals_require_primary_db"
+                    break
+            if len(matched) < 2:
+                evidence["reason"] = "pair_no_longer_jointly_active"
+                break
+            self.recorder.observation_stop.wait(min(.2, max(0, self._load_deadline - time.monotonic())))
 
     def wait_observers(self, deadline_seconds: float) -> None:
         deadline = time.monotonic() + deadline_seconds
@@ -360,7 +424,9 @@ class VirtualUser:
         else:
             self.recorder.register_request(logical, username=self.ctx.username,
                                            user_index=self.ctx.index, scenario=self.scenario,
-                                           group="ordinary",
+                                           group=self.spec.get("score_group") or ("multi_session" if self.recorder.stage == "multi_session_smoke" else "ordinary"),
+                                           requires_terminal=True, requires_full_stream=True,
+                                           observation_reason=self.scenario,
                                            subscription_started_at=None, quota_acquired_at=None,
                                            quota_wait_ms=None, sse_headers_at=None,
                                            sse_headers_status=None, first_event_at=None,
@@ -374,6 +440,9 @@ class VirtualUser:
                        created_request_at=None)
         self.recorder.lifecycle(logical, event="not_sent", admission="not_sent",
                                 not_sent_reason=reason,
+                                protection_triggered=reason in {"create_budget", "task_budget", "client_observer_capacity"},
+                                stop_reasons=list(self.stop.reasons),
+                                observation_end_reason="not_sent", observation_finished_at=time.time(),
                                 scheduler_lag_ms=(max(0, time.time() - scheduled) * 1000
                                                   if scheduled is not None else None), **fields)
 
@@ -381,6 +450,7 @@ class VirtualUser:
                     logical_request_id: str | None = None, arrival: bool = False,
                     **fields) -> str | None:
         logical = logical_request_id or new_idempotency_key()
+        self._register(logical)
         if not self.ctx.occupy_budget():
             self.recorder.bump("job_submissions_over_budget")
             self._not_sent(logical, "create_budget", **fields)
@@ -404,6 +474,10 @@ class VirtualUser:
                 self._not_sent(logical, "job_quota_or_deadline", **fields)
                 return None
             gate_acquired = True
+            if not self.recorder.reserve_submission():
+                self.stop.trip("task_budget_exhausted")
+                self._not_sent(logical, "task_budget", **fields)
+                return None
             job_id = self._create_job(slot, logical, arrival=arrival, **fields)
             accepted = job_id is not None
             return job_id
@@ -435,13 +509,16 @@ class VirtualUser:
         client = self.ctx.client
         key = new_idempotency_key()
         started, started_at = time.monotonic(), time.time()
+        intended_at = scheduled_at if scheduled_at is not None else self.recorder.requests[logical].get("intent_created_at")
         slot.logical_request_id, slot.idempotency_key = logical, key
         self._register(logical, session_id=slot.session_id, idempotency_key=key,
                        created_request_at=started_at, scheduled_at=scheduled_at,
                        supplied_created_request_at=created_request_at,
                        dispatch_lag_ms=dispatch_lag_ms,
-                       scheduler_lag_ms=(max(0, started_at - scheduled_at) * 1000
-                                         if scheduled_at is not None else None))
+                       scheduler_lag_ms=(max(0, started_at - intended_at) * 1000
+                                         if intended_at is not None else None),
+                       pre_submit_wait_ms=(max(0, started_at - intended_at) * 1000
+                                           if intended_at is not None else None))
         errors, uncertain = [], False
         status, payload = 0, {}
         self.recorder.bump("job_create_attempts")
@@ -473,7 +550,7 @@ class VirtualUser:
                     break
             except ApiError as exc:
                 uncertain = True
-                errors.append({"attempt": attempt, "error": str(exc)})
+                errors.append({"attempt": attempt, "error": type(exc).__name__})
                 self.recorder.lifecycle(logical, event="create_error", create_errors=list(errors))
             if attempt < config.CREATE_MAX_ATTEMPTS:
                 self.recorder.lifecycle(logical, event="create_retry")
@@ -485,6 +562,9 @@ class VirtualUser:
             slot.admission = admission
             self.recorder.lifecycle(logical, event="admission", admission=admission,
                                     created_status=status, create_errors=errors,
+                                    observation_finished_at=time.time(),
+                                    observation_end_reason=("transport_error" if admission == "unknown"
+                                        else "not_sent" if admission == "not_sent" else "intentional_stop"),
                                     not_sent_reason="submission_deadline" if admission == "not_sent" else None)
             if admission != "unknown":
                 slot.ready.set()
@@ -517,10 +597,13 @@ class VirtualUser:
         terminal = terminal_at = None
         history_ok = None
         ids, errors = [], []
-        cursor, group = 0, "ordinary"
+        cursor = 0
+        end_reason = "total_deadline"
         final_status, observation = "unfinished", "observation_timeout"
         elapsed = None
         resources_released = False
+        self.recorder.lifecycle(job_id=job_id, event="observation_started",
+                                observation_started_at=time.time())
         try:
             while not self.recorder.observation_stop.is_set() and time.monotonic() < min(
                     deadline, self.recorder.observation_deadline):
@@ -533,21 +616,20 @@ class VirtualUser:
                 self.recorder.lifecycle(job_id=job_id, event="events_received",
                                         received_event_ids=list(ids), sse_errors=list(errors))
                 terminal, terminal_at = outcome.terminal_event, outcome.terminal_received_at
+                end_reason = outcome.sample.observation_end_reason or "internal_error"
                 if terminal is not None:
                     final_status, observation = _final_status(terminal, ""), "terminal"
                     break
                 if outcome.interrupt_payload is None:
                     break
-                group = "waiting_input"
-                self.recorder.lifecycle(job_id=job_id, event="waiting_input", group=group,
+                self.recorder.lifecycle(job_id=job_id, event="waiting_input",
                                         interrupted_at=time.time(), waiting_input=True)
                 if not self._answer_interrupt(job_id, outcome.interrupt_payload, deadline):
                     final_status = "waiting_input"
                     # 恢复失败或接纳未知时继续从 interrupt 后订阅，等待服务端终态，
                     # 不把等待输入当成完成，也不重放同一个问题。
                     continue
-                group = "resumed"
-                self.recorder.lifecycle(job_id=job_id, event="resumed", group=group,
+                self.recorder.lifecycle(job_id=job_id, event="resumed",
                                         resumed=True, waiting_input=False)
             elapsed = (time.monotonic() - created_at) * 1000
             self.stop.check_sse(0, _duplicates(ids), _out_of_order(ids))
@@ -567,19 +649,29 @@ class VirtualUser:
                                             history_check_ms=(time.monotonic() - history_started) * 1000)
                 except ApiError as exc:
                     self.recorder.lifecycle(job_id=job_id, event="history_error",
-                                            history_consistent=None, history_error=str(exc),
+                                            history_consistent=None, history_error=type(exc).__name__,
                                             history_check_ms=(time.monotonic() - history_started) * 1000)
         except Exception as exc:
+            if terminal is None:
+                end_reason = "internal_error"
             errors.append(type(exc).__name__)
             self.recorder.lifecycle(job_id=job_id, event="observer_error", observer_error=type(exc).__name__)
         finally:
             elapsed = elapsed if elapsed is not None else (time.monotonic() - created_at) * 1000
+            if terminal is None and time.monotonic() >= min(deadline, self.recorder.observation_deadline):
+                end_reason = "total_deadline"
+            elif terminal is None and self.recorder.observation_stop.is_set():
+                end_reason = "intentional_stop"
             if terminal is None:
+                observation = "observation_timeout" if end_reason in {"idle_timeout", "total_deadline"} else end_reason
+            if observation == "observation_timeout":
                 self.recorder.bump("job_observation_timeouts")
             self.recorder.lifecycle(job_id=job_id, event="observation_finished",
                                     final_status=final_status, observation=observation,
                                     observed_wait_ms=elapsed, received_event_ids=list(ids),
                                     sse_errors=errors, observation_finished_at=time.time())
+            self.recorder.lifecycle(job_id=job_id, event="observation_end_reason",
+                                    observation_end_reason=end_reason)
             self.recorder.record_job(JobSample(
                 job_id=job_id, created_status=created_status, final_status=final_status,
                 queue_seconds=None, execution_seconds=None, total_seconds=elapsed / 1000,
@@ -636,7 +728,7 @@ class VirtualUser:
                     self.recorder.lifecycle(job_id=job_id, event="resume_error", resume_errors=errors)
                     return False
             except ApiError as exc:
-                errors.append({"attempt": attempt, "error": str(exc)})
+                errors.append({"attempt": attempt, "error": type(exc).__name__})
             self.recorder.lifecycle(job_id=job_id, event="resume_error", resume_errors=list(errors))
             self.recorder.observation_stop.wait(0.5)
         return False

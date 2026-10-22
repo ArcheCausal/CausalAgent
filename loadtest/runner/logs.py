@@ -15,6 +15,7 @@ import httpx
 
 from runner import config
 from runner.evidence import _job_ids, latest_runs
+from ops.server_evidence import diagnostic_fields, request_samples, safe_token
 
 DEPLOY_ENV_CANDIDATES = ("../.env.staging", ".env.staging")
 
@@ -250,20 +251,12 @@ def _parse_job_row(row: dict, allowed: set[str]) -> dict | None:
         return None
     if not isinstance(payload, dict) or str(payload.get("job_id") or "") not in allowed:
         return None
-    details = payload.get("details")
-    details = details if isinstance(details, dict) else {}
-    keys = ("capability", "attempt", "retry", "retry_ordinal", "status", "duration_ms",
-            "claim_kind", "reason_code", "status_code", "method",
-            "failure_phase", "error_category", "cause_code")
-    result = {"timestamp": payload.get("timestamp") or row.get("timestamp"),
-              "loki_timestamp_ns": row.get("timestamp"), "job_id": str(payload["job_id"]),
-              "event_code": payload.get("event_code"), "level": payload.get("level"),
-              "request_id": payload.get("request_id"),
-              "invocation_id": payload.get("invocation_id") or details.get("invocation_id")}
-    result["exception_type"] = payload.get("exception_type")
+    result = diagnostic_fields(payload)
+    result["loki_timestamp_ns"] = row.get("timestamp")
     stack = payload.get("stack")
-    result["stack_top"] = stack[-1] if isinstance(stack, list) and stack else None
-    result["details"] = {key: details[key] for key in keys if key in details}
+    frame = stack[-1] if isinstance(stack, list) and stack else None
+    # 兼容既有字段，但只允许共享运行时的清理后代码帧，不接纳异常正文。
+    result["stack_top"] = frame if isinstance(frame, str) and re.fullmatch(r"[A-Za-z0-9_./<>-]+:[0-9]+:[A-Za-z0-9_<>]+", frame) else None
     return result
 
 
@@ -300,8 +293,57 @@ def _scoped_logs(client: GrafanaLoki, job_ids: list[str], start_ns: int, end_ns:
     return events, coverage
 
 
+def _request_logs(client: GrafanaLoki, ids: list[str], start_ns: int, end_ns: int) -> tuple[list[dict], dict]:
+    events, coverage = [], {}
+    limit = 5000
+    for request_id in ids:
+        try:
+            rows = client.query_range(f'{{service_name="web"}} |= {json.dumps(request_id)}', start_ns, end_ns, limit)
+        except (httpx.HTTPError, ValueError, TypeError):
+            coverage[f"{request_id}/web"] = {"status": "unknown", "reason": "query_failed"}
+            continue
+        found = []
+        for row in rows:
+            try:
+                payload = json.loads(row["line"])
+            except (ValueError, TypeError, KeyError):
+                continue
+            if isinstance(payload, dict) and payload.get("request_id") == request_id:
+                found.append({"service": "web", **diagnostic_fields(payload), "loki_timestamp_ns": row.get("timestamp")})
+        events.extend(found)
+        coverage[f"{request_id}/web"] = {"status": "collected" if found and len(rows) < limit else "unknown",
+            "matched_rows": len(found), "reason": "limit_reached" if len(rows) >= limit else (None if found else "missing_request_logs")}
+    return events, coverage
+
+
+def correlate_requests(summary: dict, events: list[dict], coverage: dict) -> dict:
+    samples = request_samples(summary)
+    db = summary.get("job_db_check") or {}
+    scoped = db.get("scope") == "run" and db.get("run_id") == summary.get("run_id")
+    server = (db.get("request_evidence") or {}) if scoped else {}
+    records = []
+    for sample in samples:
+        ids = {sample[key] for key in ("request_id", "client_request_id", "response_request_id") if sample.get(key)}
+        gateway = [row for row in server.get("gateway", []) if row.get("request_id") in ids]
+        web = [row for row in events if row.get("service") == "web" and row.get("request_id") in ids]
+        if not web:
+            web = [row for row in server.get("web", []) if row.get("request_id") in ids]
+        gateway_ok = bool(gateway) and all(server.get("coverage", {}).get(f"{row['request_id']}/gateway", {}).get("status") == "collected" for row in gateway)
+        web_ok = bool(web) and all(coverage.get(f"{row['request_id']}/web",
+            server.get("coverage", {}).get(f"{row['request_id']}/web", {})).get("status") == "collected" for row in web)
+        upstream_ok = bool(gateway) and all(all(row.get(key) is not None for key in (
+            "upstream_status", "upstream_response_time", "upstream_connect_time", "upstream_header_time", "request_time")) for row in gateway)
+        records.append({"client": sample, "gateway": gateway, "web": web,
+            "status": "collected" if ids and gateway_ok and web_ok and upstream_ok else "unknown",
+            "gateway_status": "collected" if gateway_ok else "unknown",
+            "web_status": "collected" if web_ok else "unknown",
+            "upstream_fields_status": "collected" if upstream_ok else "unknown"})
+    return {"status": ("collected" if all(row["status"] == "collected" for row in records) else "unknown") if records else "not_applicable",
+            "records": records, "scope": "run", "run_id": summary.get("run_id"), "coverage": coverage}
+
+
 def cdfm_log_evidence(events: list[dict], coverage: dict, job_ids: list[str]) -> dict:
-    """MCP invocation + retry 是日志中真实存在的尝试身份，不推测 worker attempt。"""
+    """按 Job/invocation/attempt/retry 去重；缺失身份时保留未知。"""
     statuses = {"mcp.request.received": "received", "mcp.tool.finished": "succeeded",
                 "mcp.tool.failed": "failed", "mcp.tool.canceled": "canceled"}
     attempts, unidentified = {}, []
@@ -312,17 +354,19 @@ def cdfm_log_evidence(events: list[dict], coverage: dict, job_ids: list[str]) ->
                 or "cdfm" not in str(details.get("capability") or "").lower()
                 or event.get("event_code") not in statuses):
             continue
-        retry = details.get("retry_ordinal")
+        retry = details.get("retry_ordinal") if details.get("retry_ordinal") is not None else details.get("retry")
         record = {"source": "mcp_logs", "job_id": event["job_id"],
                   "invocation_id": event.get("invocation_id"), "attempt": details.get("attempt"),
                   "retry": retry, "retry_ordinal": retry, "status": statuses[event["event_code"]],
                   "duration_ms": details.get("duration_ms"), "event_id": None,
                   "log_timestamp_ns": event.get("loki_timestamp_ns"),
                   "request_id": event.get("request_id"), "event_codes": [event["event_code"]]}
-        if not record["invocation_id"] or not isinstance(retry, int) or isinstance(retry, bool) or retry < 0:
+        attempt = record["attempt"]
+        if (not record["invocation_id"] or not isinstance(retry, int) or isinstance(retry, bool) or retry < 0
+                or not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0):
             unidentified.append(record)
             continue
-        key = (record["job_id"], record["invocation_id"], retry)
+        key = (record["job_id"], record["invocation_id"], attempt, retry)
         prior = attempts.get(key)
         if prior is None:
             attempts[key] = record
@@ -336,21 +380,25 @@ def cdfm_log_evidence(events: list[dict], coverage: dict, job_ids: list[str]) ->
     records = list(attempts.values()) + unidentified
     mcp_coverage = {job_id: coverage.get(f"{job_id}/mcp", {"status": "unknown"}) for job_id in job_ids}
     complete = bool(job_ids) and all(row.get("status") == "collected" for row in mcp_coverage.values())
-    logical = {(row["job_id"], row["invocation_id"]) for row in attempts.values()}
-    return {"source": "mcp_logs", "status": "collected" if complete and not unidentified else "missing",
+    logical = {(row["job_id"], row["invocation_id"]) for row in records if row["invocation_id"]}
+    identified = bool(records) and not unidentified
+    return {"source": "mcp_logs", "status": "collected" if complete and identified else "missing",
             "records": records, "coverage": mcp_coverage, "job_ids": job_ids,
-            "logical_calls": len(logical) if complete and not unidentified else None,
-            "actual_attempts": len(attempts) if complete and not unidentified else None,
+            "logical_calls": len(logical) if complete and records and all(row["invocation_id"] for row in records) else None,
+            "actual_attempts": len(attempts) if complete and identified else None,
             "known_logical_calls": len(logical), "known_actual_attempts": len(attempts),
             "unidentified_records": len(unidentified)}
 
 
-def logcheck(stage: str, base_url: str) -> dict:
+def logcheck(stage: str, base_url: str, *, summary: dict | None = None) -> dict:
     """仅按本轮已知和主库核对恢复出的 Job 统计，不查询七天全局历史。"""
-    path = latest_runs(config.RUNS_DIR).get(stage)
-    if path is None:
-        raise RuntimeError(f"找不到 {stage} 的运行窗口")
-    summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
+    if summary is None:
+        path = latest_runs(config.RUNS_DIR).get(stage)
+        if path is None:
+            raise RuntimeError(f"找不到 {stage} 的运行窗口")
+        summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
+    if summary.get("stage") != stage or not summary.get("run_id"):
+        raise ValueError("日志采集摘要身份无效")
     window = resolve_run_window(stage, summary)
     if window is None:
         raise RuntimeError(f"找不到 {stage} 的运行窗口")
@@ -364,8 +412,11 @@ def logcheck(stage: str, base_url: str) -> dict:
               "request_id_propagation": {}, "capability": {}, "event_codes": {},
               "web_failures": [], "worker_degraded": [],
               "mcp_failure_history": {}, "coverage": {}, "cdfm": {"status": "missing"}}
-    if not ids:
-        result["reason"] = "missing_run_job_ids"
+    requests = request_samples(summary)
+    request_ids = sorted({row[key] for row in requests for key in ("request_id", "client_request_id", "response_request_id") if row.get(key)})
+    result["request_evidence"] = correlate_requests(summary, [], {})
+    if not ids and not request_ids:
+        result["reason"] = "missing_run_job_and_request_ids"
         return result
     client = None
     try:
@@ -373,6 +424,10 @@ def logcheck(stage: str, base_url: str) -> dict:
         client.login()
         client.pick_loki()
         events, coverage = _scoped_logs(client, ids, *window)
+        request_events, request_coverage = _request_logs(client, request_ids, *window)
+        result["request_evidence"] = correlate_requests(summary, request_events, request_coverage)
+        seen = {(row.get("service"), row.get("loki_timestamp_ns"), row.get("event_code"), row.get("request_id")) for row in events}
+        events.extend(row for row in request_events if (row.get("service"), row.get("loki_timestamp_ns"), row.get("event_code"), row.get("request_id")) not in seen)
     except (httpx.HTTPError, RuntimeError, ValueError):
         result["reason"] = "log_source_unavailable"
         return result
@@ -380,7 +435,8 @@ def logcheck(stage: str, base_url: str) -> dict:
         if client is not None:
             client.close()
     result["coverage"] = coverage
-    complete = bool(coverage) and all(row["status"] == "collected" for row in coverage.values())
+    complete = ((bool(coverage) and all(row["status"] == "collected" for row in coverage.values())) if ids else True)
+    complete = complete and result["request_evidence"]["status"] in {"collected", "not_applicable"}
     result["status"] = "collected" if complete else "unknown"
     for service in ("web", "worker", "mcp"):
         own = [row for row in events if row["service"] == service]
@@ -394,7 +450,7 @@ def logcheck(stage: str, base_url: str) -> dict:
             counter[code] = counter.get(code, 0) + 1
     lifecycles, propagation = [], []
     for job_id in ids:
-        own = [row for row in events if row["job_id"] == job_id]
+        own = [row for row in events if row.get("job_id") == job_id]
         lifecycles.append({"job_id": job_id, "event_count": len(own), "events": own,
                            "status": "collected" if own else "missing"})
         web_ids = {row["request_id"] for row in own if row["service"] == "web" and row.get("request_id")}
@@ -402,8 +458,8 @@ def logcheck(stage: str, base_url: str) -> dict:
         propagation.append({"job_id": job_id, "gateway_entry_request_ids": sorted(web_ids),
                             "worker_request_ids": sorted(worker_ids), "shared_request_ids": sorted(web_ids & worker_ids),
                             "propagated": bool(web_ids & worker_ids) if web_ids and worker_ids else None})
-    result["job_lifecycle"] = {**lifecycles[0], "jobs": lifecycles}
-    result["request_id_propagation"] = {**propagation[0], "jobs": propagation}
+    result["job_lifecycle"] = {**(lifecycles[0] if lifecycles else {}), "jobs": lifecycles}
+    result["request_id_propagation"] = {**(propagation[0] if propagation else {}), "jobs": propagation}
     codes = {"mcp.request.received": "received", "mcp.tool.finished": "finished",
              "mcp.tool.failed": "failed", "mcp.tool.slow": "slow"}
     for row in events:

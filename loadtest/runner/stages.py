@@ -3,24 +3,27 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import random
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from datetime import datetime, timezone
 
 from runner import config
 from runner.accounts import Account
-from runner.api import UserClient
+from runner.api import ApiError, UserClient
 from runner.flows import StopController, UserContext, VirtualUser
-from runner.metrics import HttpSample, Recorder
+from runner.metrics import Recorder
 from runner.manifest import collect_client_manifest
 
 
 def make_run_id(stage: str) -> str:
     """生成一次运行的标识。"""
-    return f"{time.strftime('%Y%m%dT%H%M%S')}-{stage}"
+    return f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')}-{stage}"
 
 
 class CountingGate:
@@ -74,7 +77,8 @@ def run_stage(
     run_id 可由编排脚本预先固定，使负载前的服务器采集与本次运行使用同一个标识；
     不传时按开始时间自行生成。
     """
-    spec = config.STAGES[stage]
+    from runner.rounds import apply_declared_spec, declared_parameters
+    spec = apply_declared_spec(config.STAGES[stage], declared_parameters(stage, run_id))
     users = min(int(spec["users"]), len(accounts))
     sessions_per_user = max(1, int(spec.get("sessions_per_user", 1)))
     if users < 1:
@@ -90,6 +94,29 @@ def run_stage(
     recorder.users = users
     recorder.server_baseline = server_baseline
     recorder.scenario = dict(spec)
+    if "tasks" in spec:
+        task_budget = int(spec["tasks"])
+    elif stage == "multi_session_smoke":
+        task_budget = 2
+    elif spec["mode"] == "full_flow":
+        task_budget = users * int(spec["flows"])
+    else:
+        task_budget = math.ceil(users * float(spec["duration"]) / 2.0)
+    recorder.scenario.update(task_budget=int(spec.get("task_budget", task_budget)),
+        task_budget_kind="fixed_tasks" if spec["mode"] in {"full_flow", "cdfm_fixed", "cdfm_rate"}
+            or stage == "multi_session_smoke" else "protection_limit")
+    recorder.scenario["client_protection"] = {"sse_capacity": int(spec["sse"]),
+        "job_capacity": spec.get("active_jobs"), "create_budget_per_account": spec.get("create_budget"),
+        "stop_file_configured": bool(os.environ.get("LOADTEST_STOP_FILE"))}
+    if stage == "multi_session_smoke":
+        sessions_per_user = 2
+        recorder.scenario.update(mode="multi_session_smoke", sessions_per_user=2)
+    if spec["mode"] == "cdfm_rate":
+        recorder.scenario["client_protection"].update({
+            "submit_workers_per_account": int(spec.get("arrival_workers", config.ARRIVAL_WORKERS)),
+            "pending_observers_per_account": int(spec.get("arrival_pending", config.ARRIVAL_PENDING)),
+            "sse_capacity": int(spec["sse"]), "job_capacity": spec.get("active_jobs"),
+            "create_budget_per_account": spec.get("create_budget")})
     if spec["mode"] == "cdfm_rate":
         def start_arrivals():
             recorder.arrival_started_monotonic = time.monotonic()
@@ -141,6 +168,9 @@ def run_stage(
         args=(contexts[0], recorder, stop),
         daemon=True,
     )
+    protection_monitor = threading.Thread(target=_monitor_stop_file, name="loadtest-protection",
+        args=(recorder, stop), daemon=True)
+    protection_monitor.start()
     for thread in threads:
         thread.start()
     monitor.start()
@@ -154,8 +184,9 @@ def run_stage(
     }), encoding="utf-8")
     stop.trip("负载结束")
     monitor.join()
+    protection_monitor.join()
     recorder.peak_active_jobs = job_gate.peak
-    recorder.peak_sessions_per_user = sessions_per_user
+    recorder.peak_sessions_per_user = max((len(context.sessions) for context in contexts), default=0)
     recorder.peak_active_jobs_per_account = max(
         (context.peak_active_jobs for context in contexts), default=0
     )
@@ -180,6 +211,30 @@ def run_stage(
     return recorder.summary()
 
 
+def _monitor_stop_file(recorder: Recorder, stop: StopController) -> None:
+    """独立于 HTTP 与到达调度读取本轮保护信号，格式错误不推断为停止。"""
+    configured = os.environ.get("LOADTEST_STOP_FILE")
+    if not configured:
+        return
+    path = Path(configured)
+    last_error = None
+    while not stop.triggered:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else None
+            if isinstance(payload, dict) and payload.get("run_id") == recorder.run_id and payload.get("stop_submitting") is True:
+                reason = payload.get("reason")
+                reason = reason[:160] if isinstance(reason, str) else "controlled"
+                recorder.scenario["protection_stop"] = {"at": time.time(), "reason": reason, "source": "stop_file"}
+                stop.trip(f"resource_protection:{reason}")
+                return
+        except (OSError, ValueError) as exc:
+            error = type(exc).__name__
+            if error != last_error:
+                recorder.note(f"资源保护文件暂不可读：{error}")
+                last_error = error
+        time.sleep(.2)
+
+
 def _run_user(
     context: UserContext,
     recorder: Recorder,
@@ -195,7 +250,9 @@ def _run_user(
         context, recorder, job_gate, stop, rng, sessions_per_user=sessions_per_user
     )
     try:
-        if spec["mode"] == "full_flow":
+        if recorder.stage == "multi_session_smoke":
+            user.run_multi_session_smoke(float(spec["duration"]))
+        elif spec["mode"] == "full_flow":
             user.run_full_flow(int(spec["flows"]))
         elif spec["mode"] == "cdfm_fixed":
             total = int(spec.get("tasks", 4))
@@ -208,34 +265,19 @@ def _run_user(
     except Exception as exc:  # 单个账号失败不应中断整档负载
         if spec["mode"] == "cdfm_rate":
             recorder.arrival_barrier.abort()
-        recorder.note(f"虚拟账号 {context.username} 异常退出: {type(exc).__name__}: {exc}")
+        recorder.note(f"虚拟账号 {context.username} 异常退出: {type(exc).__name__}")
 
 
 def _monitor(probe: UserContext, recorder: Recorder, stop: StopController) -> None:
     """每 5 秒用一个轻量请求探测网关与主库，记录延迟并判断停止条件。"""
     client = probe.client
     while not stop.triggered:
-        started = time.monotonic()
-        started_at = time.time()
         status = 0
-        error = ""
         try:
-            response = client.raw_request("GET", "/api/check_auth")
+            response = client.request("GET", "/api/check_auth")
             status = response.status_code
-        except Exception as exc:
-            error = type(exc).__name__
-        duration_ms = (time.monotonic() - started) * 1000
-        recorder.record_http(
-            HttpSample(
-                method="GET",
-                path="/health/probe",
-                status=status,
-                duration_ms=duration_ms,
-                error=error,
-                started_at=started_at,
-                finished_at=time.time(),
-            )
-        )
+        except ApiError:
+            pass
         if status >= 500:
             stop.trip(f"健康探测出现 {status}")
         for _ in range(50):
@@ -250,7 +292,9 @@ def _run_arrivals(user: VirtualUser, recorder: Recorder, stop: StopController, s
     if rate <= 0:
         raise ValueError("arrival_rate 必须大于零")
     duration = float(spec["duration"])
-    workers = int(spec.get("arrival_workers", 4))
+    workers = int(spec.get("arrival_workers", config.ARRIVAL_WORKERS))
+    if workers < 1:
+        raise ValueError("arrival_workers 必须大于零")
     total = int(spec["tasks"])
     plan = [(str(uuid.uuid4()), ordinal)
             for ordinal in range(user.ctx.index - 1, total, recorder.users)]
@@ -258,6 +302,8 @@ def _run_arrivals(user: VirtualUser, recorder: Recorder, stop: StopController, s
     for logical, ordinal in plan:
         recorder.register_request(logical, username=user.ctx.username,
             user_index=user.ctx.index, scenario="cdfm_rate", arrival_ordinal=ordinal,
+            group="cdfm_rate", requires_terminal=True, requires_full_stream=True,
+            observation_reason="cdfm_rate",
             scheduled_at=None, admission="pending")
     tick = 0
     started_at = None
@@ -293,6 +339,8 @@ def _run_arrivals(user: VirtualUser, recorder: Recorder, stop: StopController, s
                 if len(pending) >= workers:
                     _arrival_not_sent(recorder, logical, "client_submit_capacity", scheduled_at)
                 else:
+                    recorder.lifecycle(logical, event="arrival_dispatched",
+                        dispatched_at=time.time(), dispatch_lag_ms=max(0, now - scheduled) * 1000)
                     pending.add(pool.submit(_arrival, user, recorder, logical,
                                             scheduled, scheduled_at, deadline))
                 tick += 1
@@ -313,6 +361,8 @@ def _run_arrivals(user: VirtualUser, recorder: Recorder, stop: StopController, s
 def _arrival_not_sent(recorder: Recorder, logical: str, reason: str,
                       scheduled_at: float | None) -> None:
     recorder.lifecycle(logical, event="not_sent", admission="not_sent",
+        observation_end_reason="not_sent", observation_finished_at=time.time(),
+        protection_triggered=reason in {"client_submit_capacity", "client_observer_capacity", "task_budget"},
         reason=reason, not_sent_reason=reason, scheduled_at=scheduled_at,
         scheduler_lag_ms=(None if scheduled_at is None else
                           max(0, time.time() - scheduled_at) * 1000))

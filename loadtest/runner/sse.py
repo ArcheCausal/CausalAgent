@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 
 import httpx
 
@@ -44,11 +45,15 @@ async def iter_events(response):
 async def subscribe(owner, job_id, after, reconnect, deadline, stop_event, audit=False):
     recorder = owner.recorder
     started = time.monotonic()
+    started_at = time.time()
     cursor = after
     ids, errors = [], []
     first_ms = terminal_ms = terminal_at = None
     terminal = interrupt = None
     disconnects = reconnects = 0
+    reconnect_attempts = reconnect_event_count = 0
+    connection_attempts = intentional_disconnects = 0
+    end_reason = None
     state = None
     acquired = False
 
@@ -79,10 +84,12 @@ async def subscribe(owner, job_id, after, reconnect, deadline, stop_event, audit
     async def consume():
         nonlocal acquired, cursor, first_ms, terminal_ms, terminal_at
         nonlocal terminal, interrupt, disconnects, reconnects
+        nonlocal reconnect_attempts, reconnect_event_count, end_reason
+        nonlocal connection_attempts, intentional_disconnects
         transition("waiting_quota")
         if not audit:
             recorder.lifecycle(job_id=job_id, event="subscription_started",
-                               subscription_started_at=time.time())
+                               subscription_started_at=started_at)
         if owner.sse_gate is not None:
             while not owner.sse_gate.acquire(blocking=False):
                 await asyncio.sleep(config.OBSERVATION_CHECK_INTERVAL_SECONDS)
@@ -100,11 +107,17 @@ async def subscribe(owner, job_id, after, reconnect, deadline, stop_event, audit
         ) as client:
             while True:
                 transition("waiting_headers")
-                headers = {"Accept": "text/event-stream"}
+                request_id = str(uuid.uuid4())
+                headers = {"Accept": "text/event-stream", "X-Request-ID": request_id}
+                is_reconnect = connection_attempts > 0
+                connection_attempts += 1
+                if is_reconnect:
+                    reconnect_attempts += 1
                 if cursor:
                     headers["Last-Event-ID"] = str(cursor)
                 at, mono = time.time(), time.monotonic()
                 headers_recorded = False
+                established = False
                 retryable = True
                 try:
                     async with client.stream("GET", f"/api/agent/jobs/{job_id}/events",
@@ -112,20 +125,27 @@ async def subscribe(owner, job_id, after, reconnect, deadline, stop_event, audit
                         recorder.record_http(HttpSample(
                             "GET", "/api/agent/jobs/<id>/events", response.status_code,
                             (time.monotonic() - mono) * 1000,
-                            started_at=at, finished_at=time.time()))
+                            started_at=at, finished_at=time.time(), request_id=request_id,
+                            client_request_id=request_id, response_request_id=response.headers.get("X-Request-ID"),
+                            run_id=recorder.run_id))
                         headers_recorded = True
                         if not audit:
                             recorder.lifecycle(job_id=job_id, event="sse_headers",
                                                sse_headers_at=time.time(),
                                                sse_headers_status=response.status_code)
                         if response.status_code != 200:
+                            end_reason = "transport_error"
                             failure(f"http_{response.status_code}")
                             retryable = response.status_code in (502, 503, 504)
                         elif not response.headers.get("content-type", "").startswith("text/event-stream"):
+                            end_reason = "transport_error"
                             failure("invalid_event_stream_content_type")
                             retryable = False
                         else:
+                            established = True
                             transition("established")
+                            if is_reconnect:
+                                reconnects += 1
                             if not audit:
                                 recorder.lifecycle(job_id=job_id, event="sse_established",
                                                    sse_established_at=time.time())
@@ -133,6 +153,8 @@ async def subscribe(owner, job_id, after, reconnect, deadline, stop_event, audit
                                 if event_id is not None:
                                     ids.append(event_id)
                                     cursor = max(cursor, event_id)
+                                    if is_reconnect:
+                                        reconnect_event_count += 1
                                 if first_ms is None and event in PROGRESS_EVENTS | TERMINAL_EVENTS:
                                     first_ms = (time.monotonic() - started) * 1000
                                     if not audit:
@@ -149,6 +171,7 @@ async def subscribe(owner, job_id, after, reconnect, deadline, stop_event, audit
                                                            cdfm_observed=True,
                                                            cdfm_status=payload.get("status"))
                                 if event in TERMINAL_EVENTS:
+                                    end_reason = "terminal"
                                     terminal, terminal_at = event, time.time()
                                     terminal_ms = (time.monotonic() - started) * 1000
                                     if not audit:
@@ -165,24 +188,32 @@ async def subscribe(owner, job_id, after, reconnect, deadline, stop_event, audit
                                     return
                                 if event == "interrupt":
                                     interrupt = payload
+                                    end_reason = "interrupt"
                                     return
                             failure("stream_closed_without_terminal")
+                            end_reason = "transport_error"
                 except httpx.HTTPError as exc:
+                    end_reason = "idle_timeout" if established and isinstance(exc, httpx.ReadTimeout) else "transport_error"
                     failure(type(exc).__name__)
                     if not headers_recorded:
                         recorder.record_http(HttpSample(
                             "GET", "/api/agent/jobs/<id>/events", 0,
-                            (time.monotonic() - mono) * 1000, type(exc).__name__, at, time.time()))
+                            (time.monotonic() - mono) * 1000, type(exc).__name__, at, time.time(),
+                            request_id=request_id, client_request_id=request_id, run_id=recorder.run_id))
                 except asyncio.CancelledError:
+                    if established:
+                        disconnects += 1
+                        intentional_disconnects += int(end_reason == "intentional_stop")
                     if not headers_recorded:
                         recorder.record_http(HttpSample(
                             "GET", "/api/agent/jobs/<id>/events", 0,
-                            (time.monotonic() - mono) * 1000, "observation_canceled", at, time.time()))
+                            (time.monotonic() - mono) * 1000, "observation_canceled", at, time.time(),
+                            request_id=request_id, client_request_id=request_id, run_id=recorder.run_id))
                     raise
-                disconnects += 1
-                if not retryable or not reconnect or reconnects >= config.SSE_MAX_RECONNECTS:
+                disconnects += int(established)
+                end_reason = end_reason or "transport_error"
+                if not retryable or not reconnect or reconnect_attempts >= config.SSE_MAX_RECONNECTS:
                     return
-                reconnects += 1
                 transition("reconnect")
                 await asyncio.sleep(config.SSE_RECONNECT_DELAY_SECONDS)
 
@@ -190,7 +221,9 @@ async def subscribe(owner, job_id, after, reconnect, deadline, stop_event, audit
     try:
         while not task.done():
             if stopped() or expired():
-                failure("observation_stopped" if stopped() else "observation_deadline")
+                end_reason = "total_deadline" if expired() else "intentional_stop"
+                if end_reason == "total_deadline":
+                    failure("observation_deadline")
                 task.cancel()
                 break
             await asyncio.wait({task}, timeout=config.OBSERVATION_CHECK_INTERVAL_SECONDS)
@@ -198,6 +231,9 @@ async def subscribe(owner, job_id, after, reconnect, deadline, stop_event, audit
             await task
         except asyncio.CancelledError:
             pass
+        except Exception as exc:
+            end_reason = "internal_error"
+            failure(type(exc).__name__)
     finally:
         if not task.done():
             task.cancel()
@@ -207,7 +243,10 @@ async def subscribe(owner, job_id, after, reconnect, deadline, stop_event, audit
         transition("closed")
         transition(None)
     sample = SseSample(job_id, first_ms, terminal_ms, terminal, cursor, disconnects,
-                       reconnects, ids, ";".join(errors))
+                       reconnects, ids, ";".join(errors),
+                       observation_end_reason=end_reason, started_at=started_at, finished_at=time.time(),
+                       intentional_disconnects=intentional_disconnects, connection_attempts=connection_attempts,
+                       reconnect_attempts=reconnect_attempts, reconnect_event_count=reconnect_event_count)
     if not audit:
         recorder.record_sse(sample)
     return {"sample": sample, "terminal_event": terminal, "interrupt_payload": interrupt,
