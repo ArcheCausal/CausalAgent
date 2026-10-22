@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import math
 import os
 import re
@@ -16,129 +15,6 @@ import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-
-
-def collector_provenance() -> dict:
-    root = Path(__file__).resolve().parent.parent
-    files = {}
-    for name in ("ops/server_evidence.py", "stage_resource_sample.sh", "job_db_check.sh", "server_side_collect.sh"):
-        try:
-            files[name] = hashlib.sha256((root / name).read_bytes()).hexdigest()
-        except OSError:
-            files[name] = None
-    return {"schema_version": "loadtest-collector-v1", "sha256": files}
-
-
-def safe_token(value, limit=128):
-    return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1," + str(limit) + r"}", value) else None
-
-
-def safe_number(value):
-    return value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0 else None
-
-
-def diagnostic_fields(payload: dict) -> dict:
-    """仅保留受控类别、状态和耗时；异常值、堆栈和消息均不进入产物。"""
-    details = payload.get("details")
-    details = details if isinstance(details, dict) else {}
-    tokens = ("capability", "claim_kind", "reason_code", "failure_phase",
-              "error_category", "cause_code", "method", "failure_kind", "safe_error_code")
-    numbers = ("attempt", "retry", "retry_ordinal", "duration_ms", "status_code",
-               "connect_ms", "header_ms", "request_ms", "response_ms", "queue_ms", "execution_ms")
-    selected = {key: safe_token(details[key]) for key in tokens if key in details}
-    selected.update({key: safe_number(details[key]) for key in numbers if key in details})
-    if "status" in details:
-        selected["status"] = safe_number(details["status"]) if isinstance(details["status"], (int, float)) else safe_token(details["status"])
-    return {"timestamp": payload.get("timestamp") if epoch(payload.get("timestamp")) is not None else None,
-            "job_id": safe_token(payload.get("job_id")),
-            "request_id": safe_token(payload.get("request_id"), 64),
-            "invocation_id": safe_token(payload.get("invocation_id") or details.get("invocation_id")),
-            "event_code": safe_token(payload.get("event_code")),
-            "level": safe_token(payload.get("level")),
-            "exception_type": safe_token(payload.get("exception_type")), "details": selected}
-
-
-def request_samples(summary: dict) -> list[dict]:
-    """按客户端真实 ID 导出失败请求，支持没有 job_id 的只读 502。"""
-    fields = ("request_id", "client_request_id", "response_request_id", "method",
-              "status", "duration_ms", "started_at", "finished_at", "exception_type", "failure_phase")
-    output = []
-    for row in (summary.get("http") or {}).get("samples", []):
-        status = row.get("status")
-        if (row.get("run_id") not in (None, summary.get("run_id")) or row.get("method") != "GET"
-                or not ((isinstance(status, int) and status >= 500) or status in (None, 0))):
-            continue
-        sample = {key: row.get(key) for key in fields}
-        sample["run_id"] = summary.get("run_id")
-        for key in ("status", "duration_ms"):
-            sample[key] = safe_number(sample[key])
-        for key in ("started_at", "finished_at"):
-            sample[key] = epoch(sample[key])
-        # 不导出 path/query/error；客户端字段不存在时保持空值。
-        for key in ("request_id", "client_request_id", "response_request_id", "method", "exception_type", "failure_phase"):
-            sample[key] = safe_token(sample[key], 64)
-        output.append(sample)
-    return output
-
-
-def collect_request_evidence(db, listing: dict) -> dict:
-    samples = listing.get("http_samples") or []
-    ids = {value for row in samples for key in ("request_id", "client_request_id", "response_request_id")
-           if (value := safe_token(row.get(key), 64))}
-    result = {"status": "unknown", "request_ids": sorted(ids), "gateway": [], "web": [], "coverage": {}}
-    if not ids:
-        result["status"] = "unknown" if samples else "not_applicable"
-        result["reason"] = "missing_client_request_ids" if samples else "no_failed_read_requests"
-        return result
-    limit = 50000
-    starts = [epoch(row.get("started_at")) for row in samples]
-    since = min((value for value in starts if value is not None), default=None)
-    # 读取有界日志尾部，只按结构化 request_id 归属；缺失和截断不能证明通过。
-    for service in ("gateway", "web"):
-        container = f"{db.project}-{'app' if service == 'web' else service}-1"
-        args = [*db.docker, "logs", "--tail", str(limit)]
-        if since is not None:
-            args.extend(("--since", datetime.fromtimestamp(since, timezone.utc).isoformat()))
-        args.append(container)
-        try:
-            pulled = subprocess.run(args, capture_output=True, text=True, timeout=45)
-            raw = pulled.stdout + (pulled.stderr if service == "web" and pulled.returncode == 0 else "")
-        except (OSError, subprocess.TimeoutExpired):
-            pulled, raw = None, ""
-        lines = raw.splitlines()
-        for line in lines:
-            try:
-                row = json.loads(line)
-            except (ValueError, TypeError):
-                continue
-            if not isinstance(row, dict) or row.get("request_id") not in ids:
-                continue
-            if service == "web":
-                result[service].append(diagnostic_fields(row))
-            else:
-                selected = {"timestamp": row.get("timestamp") if epoch(row.get("timestamp")) is not None else None,
-                            "request_id": safe_token(row.get("request_id"), 64),
-                            "method": safe_token(row.get("method")), "status": safe_number(row.get("status"))}
-                route = row.get("route")
-                selected["route"] = route if route in DIAGNOSTIC_ROUTES else None
-                for key in ("upstream_status", "upstream_response_time", "upstream_connect_time", "upstream_header_time", "request_time"):
-                    value = row.get(key)
-                    selected[key] = value if isinstance(value, str) and re.fullmatch(r"[0-9., :\-]{1,256}", value) else None
-                result[service].append(selected)
-        for request_id in ids:
-            found = [row for row in result[service] if row.get("request_id") == request_id]
-            fields_ok = (service != "gateway" or all(all(row.get(key) is not None for key in (
-                "route", "status", "upstream_status", "upstream_response_time",
-                "upstream_connect_time", "upstream_header_time", "request_time")) for row in found))
-            ok = pulled is not None and pulled.returncode == 0 and len(lines) < limit and bool(found) and fields_ok
-            result["coverage"][f"{request_id}/{service}"] = {"status": "collected" if ok else "unknown",
-                "matched_rows": len(found), "limit": limit, "reason": None if ok else "unavailable_truncated_or_missing"}
-    result["status"] = "collected" if all(row["status"] == "collected" for row in result["coverage"].values()) else "unknown"
-    return result
-
-
-DIAGNOSTIC_ROUTES = {"/api/check_auth", "/api/load_session", "/api/agent/jobs/active", "/api/files", "/api/sessions",
-                     "/api/agent/jobs/*/events", "/api/agent/jobs/*"}
 
 
 def utc_now() -> str:
@@ -186,66 +62,32 @@ class Primary:
         values = {}
         for line in content.splitlines():
             key, separator, value = line.partition("=")
-            if separator and key in {"MYSQL_READ_USER", "MYSQL_WRITE_USER", "MYSQL_USER", "MYSQL_DATABASE"}:
+            if separator and key in {"MYSQL_USER", "MYSQL_DATABASE"}:
                 values[key] = value.strip().strip("\"'")
-        # 按部署声明选择一次；认证失败不切换账号或尝试其他密钥。
-        if "MYSQL_READ_USER" in values:
-            self.user, self.password_key, self.credential_source = values["MYSQL_READ_USER"], "MYSQL_READ_PASSWORD", "read"
-        elif "MYSQL_WRITE_USER" in values:
-            self.user, self.password_key, self.credential_source = values["MYSQL_WRITE_USER"], "MYSQL_WRITE_PASSWORD", "write"
-        else:
-            self.user, self.password_key, self.credential_source = values.get("MYSQL_USER"), "MYSQL_PASSWORD", "legacy"
+        self.user = values.get("MYSQL_USER")
         self.database = values.get("MYSQL_DATABASE", "rag_eval_staging")
         self.ready = bool(self.user and re.fullmatch(r"[A-Za-z0-9_]+", self.database))
-        self.last_error = None
-        self.errors = []
 
-    def query(self, sql, *, result_format="json"):
-        self.last_error = None
+    def query(self, sql):
         if not self.ready:
-            self._error("missing_database_configuration")
             return None
         # 每次采集使用主库只读事务，mysql 失败与成功查空严格区分。
         # 密码仅在容器内从统一密钥文件读取，不经过宿主命令参数。
         command = ('. /opt/causalagent/secret-env.sh; '
-                   'password_key=$1; shift; '
-                   'MYSQL_PWD="$(secret_value "$password_key")" || exit 1; '
-                   'MYSQL_PWD="${MYSQL_PWD%"$(printf \'\\r\')"}"; '
+                   'MYSQL_PWD="$(secret_value MYSQL_PASSWORD)" || exit 1; '
                    'export MYSQL_PWD; exec mysql "$@"')
-        args = [*self.docker, "exec", f"{self.project}-mysql-primary-1",
-                       "sh", "-c", command, "_", self.password_key, f"-u{self.user}",
+        raw = execute([*self.docker, "exec", f"{self.project}-mysql-primary-1",
+                       "sh", "-c", command, "_", f"-u{self.user}",
                        "--default-character-set=utf8mb4", "-N", "-B", "--raw",
                        self.database, "-e",
                        "SET time_zone='+00:00'; SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ; "
-                       "START TRANSACTION READ ONLY; " + sql + "; COMMIT;"]
-        try:
-            result = subprocess.run(args, capture_output=True, text=True, timeout=45)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            self._error(type(exc).__name__)
-            return None
-        if result.returncode:
-            match = re.search(r"(?m)^ERROR ([0-9]{4,5})(?:[ (:]|$)", result.stderr)
-            self._error("mysql_error" if match else "mysql_command_failed",
-                        int(match.group(1)) if match else None, result.returncode)
+                       "START TRANSACTION READ ONLY; " + sql + "; COMMIT;"])
+        if raw is None:
             return None
         try:
-            if result_format == "status":
-                return [dict(zip(("name", "value"), line.split("\t", 1)))
-                        for line in result.stdout.splitlines() if line.strip() and "\t" in line]
-            return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
-        except (ValueError, TypeError):
-            self._error("invalid_mysql_output")
+            return [json.loads(line) for line in raw.splitlines() if line.strip()]
+        except json.JSONDecodeError:
             return None
-
-    def _error(self, reason, code=None, exit_code=None):
-        self.last_error = {"reason": reason, "mysql_error_code": code, "exit_code": exit_code,
-                           "credential_source": self.credential_source}
-        self.errors.append(self.last_error)
-
-    def status(self):
-        # READ 账号无需新增 performance_schema.global_status 表权限。
-        return self.query("SHOW GLOBAL STATUS WHERE Variable_name IN "
-            "('Threads_connected','Threads_running','Threads_created','Aborted_connects','Uptime')", result_format="status")
 
 
 def literal(value) -> str:
@@ -280,46 +122,30 @@ def cdfm_evidence(events: list[dict] | None) -> dict:
     unidentified = 0
     for item in records:
         invocation = item.get("invocation_id")
-        job_id = item.get("job_id")
-        if invocation and job_id:
-            calls.add((job_id, invocation))
+        if invocation:
+            calls.add(invocation)
         retry = item.get("retry")
         if retry is None:
             retry = item.get("retry_ordinal")
         attempt = item.get("attempt")
-        if (invocation and job_id and isinstance(attempt, int) and not isinstance(attempt, bool) and attempt >= 0
-                and isinstance(retry, int) and not isinstance(retry, bool) and retry >= 0):
-            attempts.add((job_id, invocation, attempt, retry))
+        if invocation and attempt is not None and retry is not None:
+            attempts.add((invocation, attempt, retry))
         else:
             unidentified += 1
-    return {"status": "collected" if records and not unidentified else "missing",
+    return {"status": "collected" if not unidentified else "missing",
             "source": "analysis_job_events.tool_call",
-            "logical_calls": len(calls) if records and all(r.get("invocation_id") and r.get("job_id") for r in records) else None,
-            "actual_attempts": len(attempts) if records and not unidentified else None,
+            "logical_calls": len(calls) if all(r.get("invocation_id") for r in records) else None,
+            "actual_attempts": len(attempts) if not unidentified else None,
             "known_logical_calls": len(calls), "known_actual_attempts": len(attempts),
             "unidentified_records": unidentified, "records": records}
 
 
 def lifecycle(row: dict, events: list[dict] | None, inputs: list[dict] | None) -> dict:
     row = dict(row)
-    if events is not None:
-        events = [{**event, "job_id": row.get("job_id")} for event in events]
     row["business_terminal"] = row.get("status") in {"succeeded", "failed", "canceled"}
     state = row.get("execution_state")
-    row["execution_released"] = None
-    row["execution_release_source"] = "insufficient_evidence"
-    if state in ("leased", "draining"):
-        row["execution_released"] = False
-        row["execution_release_source"] = "primary_db_occupied"
-    elif "execution_state" in row and state is None:
-        if (row.get("attempt_count") == 0 and "started_at" in row and row["started_at"] is None
-                and row["business_terminal"]):
-            row["execution_released"] = True
-            row["execution_release_source"] = "never_claimed"
-        elif (epoch(row.get("execution_released_at")) is not None
-                and row.get("execution_release_reason") == "worker_confirmed"):
-            row["execution_released"] = True
-            row["execution_release_source"] = "worker_confirmed"
+    row["execution_released"] = (state is None if "execution_state" in row
+                                 and state in (None, "leased", "draining") else None)
     row["execution_release_status"] = ("released" if row["execution_released"] is True else
                                        "occupied" if row["execution_released"] is False else "unknown")
     row["db_started_at"] = row.get("started_at")
@@ -340,14 +166,9 @@ def lifecycle(row: dict, events: list[dict] | None, inputs: list[dict] | None) -
     row["group"] = {"attempt_count": row.get("attempt_count"), "waiting_input": row["waiting_input"],
                     "resume": row["resume"], "recovery_count": row.get("recovery_count")}
     row["input_groups"] = inputs
-    row["lifecycle_events"] = [{**{key: event.get(key) for key in ("event_id", "event_type", "created_at")},
-        "diagnostics": diagnostic_fields({"details": event, "exception_type": event.get("exception_type")})}
+    row["lifecycle_events"] = [{key: event.get(key) for key in ("event_id", "event_type", "created_at")}
         for event in events if event.get("event_type") in {"interrupt", "final_result", "error", "canceled"}] if events is not None else None
     row["inputs_status"] = "collected" if inputs is not None else "missing"
-    diagnostics = [item["diagnostics"] for item in row.get("lifecycle_events") or []
-                   if item.get("event_type") == "error" and (item["diagnostics"].get("exception_type")
-                       or any(value is not None for value in item["diagnostics"]["details"].values()))]
-    row["failure_diagnostics"] = {"status": "collected" if diagnostics else "missing", "records": diagnostics}
     row["cdfm"] = cdfm_evidence(events)
     row["missing_fields"] = [key for key in ("first_started_at", "started_at", "initial_queue_ms",
         "execution_span_ms", "server_total_ms", "persisted_event_ids", "input_groups") if row.get(key) is None]
@@ -359,14 +180,13 @@ def collect_jobs(run_id: str, path: str) -> dict:
               "status": "unknown", "scope": "run", "jobs": [], "requests": [],
               "by_status_all_time": {}, "by_status_last_3h": {}, "failed_jobs": [],
               "source": "mysql-primary/read-only", "db_check_started_at": utc_now(),
-              "snapshot_kind": "per_job_readonly_transactions", "collector": collector_provenance()}
+              "snapshot_kind": "per_job_readonly_transactions"}
     try:
         listing = manifest(path, run_id)
     except (OSError, ValueError, TypeError):
         result.update(reason="missing_or_invalid_manifest", db_checked_at=utc_now(), collected_at=utc_now())
         return result
     db = Primary()
-    result["request_evidence"] = collect_request_evidence(db, listing)
     job_ids = list(dict.fromkeys(str(j) for j in listing.get("job_ids", []) if j))
     associations = {}
     resolution_ok = True
@@ -413,8 +233,7 @@ def collect_jobs(run_id: str, path: str) -> dict:
                   "execution_release_reason", "execution_released_at")
         pairs = ",".join(f"'{field}',j.{field}" for field in fields)
         # row/events/inputs 在同一主库只读事务的快照内读取。
-        event_keys = ("tool_name", "capability", "invocation_id", "attempt", "retry", "retry_ordinal", "status", "duration_ms",
-                      "exception_type", "failure_phase", "error_category", "reason_code", "cause_code", "status_code", "safe_error_code")
+        event_keys = ("tool_name", "capability", "invocation_id", "attempt", "retry", "retry_ordinal", "status", "duration_ms")
         event_pairs = ",".join(f"'{key}',JSON_EXTRACT(payload_json,'$.{key}')" for key in event_keys)
         rows = db.query(f"SELECT JSON_OBJECT('kind','job',{pairs},'session_owner_match',"
             f"EXISTS(SELECT 1 FROM sessions s WHERE s.id=j.session_id AND s.user_id=j.user_id)) "
@@ -452,10 +271,6 @@ def collect_jobs(run_id: str, path: str) -> dict:
         j.get("evidence_status") == "collected" and j.get("session_owner_match") in (True, 1)
         for j in result["jobs"])
     result.update(status="collected" if complete else "unknown", db_checked_at=utc_now(), collected_at=utc_now())
-    result["admission_resolution"] = {"status": "collected" if resolution_ok else "unknown",
-        "expected_requests": len(listing.get("requests", [])), "resolved_requests": len(result["requests"]),
-        "unknown_requests": sum(r.get("admission") == "unknown" or r.get("identity_match") is False
-            or (r.get("admission") == "replay" and r.get("db_admission") == "unknown") for r in result["requests"])}
     result["by_status_run"] = dict(Counter(j["status"] for j in result["jobs"]))
     result["failed_jobs"] = [j for j in result["jobs"] if j.get("status") == "failed"]
     result["business_drained"] = all(j.get("business_terminal") is True for j in result["jobs"]) if complete else None
@@ -468,7 +283,6 @@ def collect_jobs(run_id: str, path: str) -> dict:
         j.get("execution_release_reason") or "missing" for j in result["jobs"]))
     result["drained"] = (False if result["business_drained"] is False or result["execution_drained"] is False else
         True if result["business_drained"] is True and result["execution_drained"] is True else None)
-    result["database"] = {"credential_source": db.credential_source, "errors": db.errors}
     return result
 
 
@@ -493,7 +307,6 @@ def host_sample() -> dict:
 
 
 def resource_sample(db: Primary) -> dict:
-    started_at = utc_now()
     stats = execute([*db.docker, "stats", "--no-stream", "--format", "{{json .}}"])
     states = execute([*db.docker, "ps", "-a", "--format", "{{.Names}}={{.State}}/{{.Status}}"])
     containers = {"status": "unknown", "stats": [], "container_states": None, "exited_containers": None}
@@ -512,53 +325,21 @@ def resource_sample(db: Primary) -> dict:
     queue = db.query("SELECT JSON_OBJECT('total',COUNT(*),'queued',COALESCE(SUM(status='queued'),0),"
         "'running',COALESCE(SUM(status='running'),0),'waiting_input',COALESCE(SUM(status='waiting_input'),0),"
         "'draining',COALESCE(SUM(execution_state='draining'),0)) FROM analysis_jobs")
-    queue_error = db.last_error
-    connections = db.status()
-    connection_error = db.last_error
+    connections = db.query("SELECT JSON_OBJECT('name',VARIABLE_NAME,'value',VARIABLE_VALUE) "
+        "FROM performance_schema.global_status WHERE VARIABLE_NAME IN "
+        "('Threads_connected','Threads_running','Aborted_connects','Uptime')")
     connection_data = {"status": "unknown"}
     if connections is not None:
         values = {str(row["name"]).lower(): row["value"] for row in connections}
         keys = {"threads_connected": "threads_connected", "threads_running": "threads_running",
-                "threads_created": "threads_created", "aborted_connects": "aborted_connects", "uptime_seconds": "uptime"}
+                "aborted_connects": "aborted_connects", "uptime_seconds": "uptime"}
         connection_data.update({key: int(values[source]) if str(values.get(source, "")).isdigit() else None
                                 for key, source in keys.items()})
         if all(connection_data.get(key) is not None for key in keys):
             connection_data["status"] = "collected"
-    if connection_error:
-        connection_data["error"] = connection_error
-    return {"sampling_started_at": started_at, "sampling_finished_at": utc_now(),
-            "database": {"credential_source": db.credential_source},
-            "host": host_sample(), "containers": containers,
-            "queue": {"status": "collected", "scope": "database_background", **queue[0]} if queue else {"status": "unknown", "error": queue_error},
+    return {"host": host_sample(), "containers": containers,
+            "queue": {"status": "collected", "scope": "database_background", **queue[0]} if queue else {"status": "unknown"},
             "connections": connection_data}
-
-
-def preflight(run_id: str) -> dict:
-    db = Primary()
-    probe = db.query("SELECT JSON_OBJECT('probe',1,'authenticated_user',CURRENT_USER())")
-    probe_error = db.last_error
-    sample = resource_sample(db)
-    healthy = (bool(probe) and probe[0].get("probe") == 1 and
-               all(sample[key].get("status") == "collected" for key in ("host", "containers", "queue", "connections")))
-    return {"schema_version": "loadtest-collector-preflight-v1", "run_id": run_id,
-            "status": "collected" if healthy else "unknown", "collected_at": utc_now(),
-            "source": "mysql-primary/read-only", "collector": collector_provenance(),
-            "credential_source": db.credential_source, "probe": probe, "probe_error": probe_error,
-            "errors": db.errors, "sample": sample}
-
-
-def primary_snapshot() -> dict:
-    payload = preflight("snapshot")
-    sample = payload["sample"]
-    mysql = {**sample["connections"], "credential_source": payload["credential_source"],
-             "authentication_status": "collected" if payload["probe"] and payload["probe"][0].get("probe") == 1 else "unknown",
-             "errors": payload["errors"]}
-    if mysql["authentication_status"] != "collected":
-        mysql["status"] = "unknown"
-    queue = sample["queue"]
-    queue = {**queue, "counts": " ".join(f"{key}={queue[key]}" for key in
-        ("total", "queued", "running", "waiting_input", "draining")) if queue["status"] == "collected" else None}
-    return {"mysql": mysql, "job_queue": queue}
 
 
 def sample_window(run_id, duration, interval=10, label=None, marker=None, final_limit=None):
@@ -570,12 +351,12 @@ def sample_window(run_id, duration, interval=10, label=None, marker=None, final_
     payload = {"schema_version": "loadtest-server-sample-v2", "run_id": run_id, "label": label or run_id,
                "started_at": utc_now(), "interval_seconds": interval, "cpu_count": os.cpu_count(), "samples": [],
                "submission_stopped_at": None, "load_started_at": None, "observation_limit_seconds": final_limit,
-               "checkpoints": {}, "status": "unknown", "collector": collector_provenance()}
+               "checkpoints": {}, "status": "unknown"}
     if final_limit < 300:
         payload["checkpoints"]["300"] = {"status": "missing", "reason": "observation_limit_before_checkpoint"}
     db = Primary()
     while True:
-        if marker:
+        if marker and payload["submission_stopped_at"] is None:
             try:
                 boundary = json.loads(Path(marker).read_text(encoding="utf-8"))
                 stopped = epoch(boundary.get("stop_submitting_at") or boundary.get("submission_stopped_at"))
@@ -583,11 +364,6 @@ def sample_window(run_id, duration, interval=10, label=None, marker=None, final_
                     payload["submission_stopped_at"] = stopped
                     payload["load_started_at"] = epoch(boundary.get("started_at"))
                     deadline = time.monotonic() + max(0, stopped + final_limit - time.time())
-                    if (boundary.get("final_release_confirmed") is True
-                            and epoch(boundary.get("release_checked_at")) is not None
-                            and epoch(boundary["release_checked_at"]) >= stopped + 300
-                            and epoch(boundary.get("observation_ended_at")) is not None):
-                        payload["early_release_confirmed_at"] = epoch(boundary["observation_ended_at"])
             except (OSError, ValueError, TypeError):
                 pass
         sample = resource_sample(db)
@@ -596,30 +372,13 @@ def sample_window(run_id, duration, interval=10, label=None, marker=None, final_
         sample["phase"] = "observation" if stopped is not None and observed >= stopped else "load"
         sample["seconds_after_submission_stop"] = observed - stopped if stopped is not None else None
         payload["samples"].append(sample)
-        if marker:
-            target = Path(marker).parent / "resource-latest.json"
-            temporary = target.with_suffix(".tmp")
-            try:
-                temporary.write_text(json.dumps({"run_id": run_id, "observed_at": observed,
-                    "interval_seconds": interval, "samples": payload["samples"][-4:]}, ensure_ascii=False), encoding="utf-8")
-                temporary.replace(target)
-                payload["realtime_snapshot_status"] = "collected"
-            except OSError:
-                payload["realtime_snapshot_status"] = "unknown"
         if stopped is not None:
             for seconds in sorted({300, final_limit}):
                 key = format(seconds, "g")
                 if observed >= stopped + seconds and key not in payload["checkpoints"]:
                     payload["checkpoints"][key] = {"status": "collected", "target_at": stopped + seconds,
-                        "actual_at": observed, "sample_finished_at": utc_now(),
                         "observed_at": observed, "delay_seconds": observed - stopped - seconds,
                         "sample_index": len(payload["samples"]) - 1}
-        if (payload.get("early_release_confirmed_at") is not None
-                and payload["checkpoints"].get("300", {}).get("status") == "collected"):
-            payload["checkpoints"].setdefault("1800", {"status": "not_reached",
-                "reason": "early_release_confirmed", "target_at": stopped + 1800,
-                "actual_at": None, "delay_seconds": None})
-            break
         if time.monotonic() >= deadline:
             break
         wait = min(interval, max(0, deadline - time.monotonic()))
@@ -629,8 +388,6 @@ def sample_window(run_id, duration, interval=10, label=None, marker=None, final_
     payload["finished_at"] = utc_now()
     covered = all(payload["checkpoints"].get(format(seconds, "g"), {}).get("status") == "collected"
                   for seconds in (300, final_limit))
-    covered = covered or (payload.get("early_release_confirmed_at") is not None
-                         and payload["checkpoints"].get("300", {}).get("status") == "collected")
     healthy = all(section.get("status") == "collected" for sample in payload["samples"]
                   for section in (sample["host"], sample["containers"], sample["queue"], sample["connections"]))
     payload["status"] = "collected" if healthy and (covered or not marker) else "unknown"
@@ -639,13 +396,6 @@ def sample_window(run_id, duration, interval=10, label=None, marker=None, final_
 
 
 def main():
-    if len(sys.argv) >= 2 and sys.argv[1] == "snapshot-db":
-        print(json.dumps(primary_snapshot(), ensure_ascii=False))
-        return 0
-    if len(sys.argv) >= 3 and sys.argv[1] == "preflight":
-        payload = preflight(sys.argv[2])
-        print(json.dumps(payload, ensure_ascii=False))
-        return 0 if payload["status"] == "collected" else 1
     if len(sys.argv) >= 3 and sys.argv[1] == "db":
         payload = collect_jobs(sys.argv[2], sys.argv[3] if len(sys.argv) >= 4 else "")
         print(json.dumps(payload, ensure_ascii=False))

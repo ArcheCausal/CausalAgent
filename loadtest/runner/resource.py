@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -17,7 +16,7 @@ def load_sample(path: Path) -> dict | None:
     if not path.exists():
         return None
     try:
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return None
     return payload if isinstance(payload, dict) else None
@@ -66,9 +65,7 @@ def _host_field(sample: dict, name: str):
     """读取一次采样的主机字段，同时兼容旧的扁平格式与新的 host 嵌套格式。"""
     host = sample.get("host")
     if isinstance(host, dict):
-        if host.get("status") in {"missing", "error", "unknown"}:
-            return None
-        return host.get(name, sample.get(name))
+        return host.get(name)
     return sample.get(name)
 
 
@@ -115,8 +112,7 @@ def summarize(sample: dict, *, _with_phases: bool = True) -> dict:
         "finished_at": sample.get("finished_at"),
         "interval_seconds": sample.get("interval_seconds"),
         "cpu_count": sample.get("cpu_count"),
-        "sample_count": len(samples) if isinstance(sample.get("samples"), list) else None,
-        "cpu_interval_count": len(cpu_rates),
+        "sample_count": len(samples),
         "cpu_percent_avg": round(sum(cpu_rates) / len(cpu_rates), 1) if cpu_rates else None,
         "cpu_percent_max": max(cpu_rates) if cpu_rates else None,
         "load1_avg": round(sum(loads) / len(loads), 2) if loads else None,
@@ -132,47 +128,30 @@ def summarize(sample: dict, *, _with_phases: bool = True) -> dict:
         "exited_containers_last": _last_field(samples, "exited_containers"),
     }
     if _with_phases:
-        from runner.capacity import epoch
+        from ops.server_evidence import epoch
 
         stopped = epoch(sample.get("stop_submitting_at") or sample.get("submission_stopped_at"))
         load_started = epoch(sample.get("load_started_at"))
         ended = epoch(sample.get("observation_ended_at"))
-        released = epoch(sample.get("server_drained_at"))
-        finished = epoch(sample.get("finished_at"))
-        boundary = released if released is not None else ended
-        basis = "server_drained_at" if released is not None else "client_observation_ended_at"
         summary.update(stop_submitting_at=stopped, load_started_at=load_started, observation_ended_at=ended,
-                       server_drained_at=released, phase_boundary_at=boundary, phase_boundary_basis=basis,
                        checkpoints=sample.get("checkpoints") or {}, phases={})
-        buckets = {"load": [], "drain": [], "extra": []}
-        valid_boundaries = stopped is not None and load_started is not None and load_started <= stopped
-        complete_boundaries = valid_boundaries and boundary is not None and stopped <= boundary
-        unknown_timestamps = 0
-        for item in samples:
-            at = epoch(_host_field(item, "timestamp"))
-            if at is None:
-                unknown_timestamps += 1
-            elif valid_boundaries and load_started <= at <= stopped:
-                buckets["load"].append(item)
-            elif complete_boundaries and stopped < at <= boundary:
-                buckets["drain"].append(item)
-            elif complete_boundaries and at > boundary:
-                buckets["extra"].append(item)
-        summary["samples_without_timestamp"] = unknown_timestamps
-        summary["phases"] = {}
-        for name, rows in buckets.items():
-            known = valid_boundaries if name == "load" else complete_boundaries
-            phase = summarize({"samples": rows}, _with_phases=False) if known else None
-            if phase is not None:
-                phase["status"] = "collected" if rows else "missing"
-                phase["started_at"] = load_started if name == "load" else stopped if name == "drain" else boundary
-                phase["finished_at"] = stopped if name == "load" else boundary if name == "drain" else finished
-                phase["boundary_basis"] = "stop_submitting_at" if name == "load" else basis
-            summary["phases"][name] = phase
-        # 保留旧读取方的键名；三个新阶段互斥，不把排空重复算入额外观察。
-        summary["phases"]["client_drain"] = summary["phases"]["drain"]
-        summary["phases"]["server_observation"] = summary["phases"]["extra"]
-        summary["server_observation_seconds"] = finished - stopped if finished is not None and stopped is not None and finished >= stopped else None
+        if stopped is not None:
+            buckets = {"load": [], "observation": [], "client_drain": [], "server_observation": []}
+            for item in samples:
+                at = epoch(_host_field(item, "timestamp"))
+                if at is None:
+                    continue
+                if at > stopped:
+                    buckets["observation"].append(item)
+                elif load_started is not None and load_started <= at:
+                    buckets["load"].append(item)
+                if ended is not None and stopped < at <= ended:
+                    buckets["client_drain"].append(item)
+                if ended is not None and at > max(stopped, ended):
+                    buckets["server_observation"].append(item)
+            summary["phases"] = {name: summarize({"samples": rows}, _with_phases=False)
+                                 for name, rows in buckets.items()}
+            summary["server_observation_seconds"] = max(0, (epoch(sample.get("finished_at")) or stopped) - stopped)
     return summary
 
 
@@ -189,12 +168,12 @@ def render(summary: dict | None) -> list[str]:
         f"- 采样文件：{summary.get('schema_version')}（run_id {summary.get('run_id')}）",
         f"- 服务器采样窗口：{summary.get('started_at')} 至 {summary.get('finished_at')}"
         f"（每 {summary.get('interval_seconds')} 秒采样，共 {summary.get('sample_count')} 次）",
-        f"- 全窗口 CPU 使用率（{_show(summary.get('cpu_count'))} 核）：均值 {_show(summary.get('cpu_percent_avg'))}%，"
-        f"峰值 {_show(summary.get('cpu_percent_max'))}%",
-        f"- 1 分钟负载均值：均值 {_show(summary.get('load1_avg'))}，峰值 {_show(summary.get('load1_max'))}",
-        f"- 可用内存最低值 {_show(summary.get('mem_available_mb_min'))} MB"
-        f"（均值 {_show(summary.get('mem_available_mb_avg'))} MB），"
-        f"swap 空闲最低值 {_show(summary.get('swap_free_mb_min'))} MB",
+        f"- 全窗口 CPU 使用率（{summary.get('cpu_count')} 核）：均值 {summary.get('cpu_percent_avg')}%，"
+        f"峰值 {summary.get('cpu_percent_max')}%",
+        f"- 1 分钟负载均值：均值 {summary.get('load1_avg')}，峰值 {summary.get('load1_max')}",
+        f"- 可用内存最低值 {summary.get('mem_available_mb_min')} MB"
+        f"（均值 {summary.get('mem_available_mb_avg')} MB），"
+        f"swap 空闲最低值 {summary.get('swap_free_mb_min')} MB",
         f"- 队列深度峰值：排队 {_show(summary.get('queued_max'))}，运行 "
         f"{_show(summary.get('running_max'))}，draining {_show(summary.get('draining_max'))}",
         f"- 主库连接数峰值：{_show(summary.get('threads_connected_max'))}",
@@ -203,18 +182,11 @@ def render(summary: dict | None) -> list[str]:
     lines.extend(["", "| 资源阶段 | 样本数 | CPU 均值/峰值 % | 可用内存最低 MB | 排队峰值 | 连接峰值 |",
                   "| --- | --- | --- | --- | --- | --- |"])
     phases = summary.get("phases") or {}
-    boundary = summary.get("phase_boundary_at", summary.get("observation_ended_at"))
-    server_boundary = summary.get("phase_boundary_basis") == "server_drained_at"
-    boundary_notes = []
-    for key, legacy, label in (("load", "load", "load 负载"), ("drain", "client_drain", "drain 客户端排空"),
-                               ("extra", "server_observation", "extra 额外服务器观察")):
-        phase = phases.get(key, phases.get(legacy))
-        if key == "drain":
-            label = "drain 服务器确认排空" if server_boundary else "drain 客户端观察窗口"
-        elif key == "extra":
-            label = "extra 确认排空后观察" if server_boundary else "extra 客户端结束后服务器窗口（未证明排空）"
+    for key, label in (("load", "负载"), ("client_drain", "客户端排空"),
+                       ("server_observation", "额外服务器观察")):
+        phase = phases.get(key)
         boundary_missing = summary.get("stop_submitting_at") is None or (
-            key != "load" and boundary is None) or (
+            key != "load" and summary.get("observation_ended_at") is None) or (
             key == "load" and summary.get("load_started_at") is None)
         if boundary_missing or not phase or not phase.get("sample_count"):
             lines.append(f"| {label} | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 |")
@@ -223,22 +195,7 @@ def render(summary: dict | None) -> list[str]:
                          f"{_show(phase.get('cpu_percent_avg'))}/{_show(phase.get('cpu_percent_max'))} | "
                          f"{_show(phase.get('mem_available_mb_min'))} | {_show(phase.get('queued_max'))} | "
                          f"{_show(phase.get('threads_connected_max'))} |")
-        phase_start = summary.get("load_started_at") if key == "load" else summary.get("stop_submitting_at") if key == "drain" else boundary
-        phase_end = summary.get("stop_submitting_at") if key == "load" else boundary if key == "drain" else summary.get("finished_at")
-        boundary_notes.append(f"- {key} 资源边界：{_time(phase_start)} 至 {_time(phase_end)}；依据："
-                     f"{'stop_submitting_at' if key == 'load' else summary.get('phase_boundary_basis', 'client_observation_ended_at')}。")
-    lines.extend([""] + boundary_notes)
-    lines.extend(["", "load 从负载开始至停止提交（含停止边界）；drain/extra 按上述显式边界分段。"
-                  "若依据为客户端观察结束，extra 仍可能包含服务器实际执行，不能解释为服务器已经排空。"
-                  "各阶段的 CPU 使用率仅由阶段内相邻采样计算；缺少边界或有效采样时保留未采集。资源采样本身不证明 Job 执行已释放。",
-                  f"无时间戳样本数：{_show(summary.get('samples_without_timestamp'))}。"] )
     return lines
-
-
-def _time(value) -> str:
-    if value is None:
-        return "未采集"
-    return datetime.fromtimestamp(value, timezone.utc).isoformat() if isinstance(value, (int, float)) else str(value)
 
 
 def _show(value) -> str:

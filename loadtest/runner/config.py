@@ -8,11 +8,11 @@ from pathlib import Path
 PACKAGE_DIR = Path(__file__).resolve().parent
 LOADTEST_DIR = PACKAGE_DIR.parent
 # 本地凭据与运行产物统一收在 local/ 下，该目录整体加入 .gitignore。
-LOCAL_DIR = Path(os.environ.get("LOADTEST_LOCAL_DIR", str(LOADTEST_DIR / "local"))).resolve()
+LOCAL_DIR = LOADTEST_DIR / "local"
 DATA_DIR = LOCAL_DIR / "data"
 RUNS_DIR = LOCAL_DIR / "runs"
 EVIDENCE_DIR = LOCAL_DIR / "evidence"
-ACCOUNTS_PATH = Path(os.environ.get("LOADTEST_ACCOUNTS_PATH", str(LOCAL_DIR / "accounts.local.json"))).resolve()
+ACCOUNTS_PATH = LOCAL_DIR / "accounts.local.json"
 
 DEFAULT_BASE_URL = "http://203.195.194.205:8088"
 ACCOUNT_PREFIX = os.environ.get("LOADTEST_ACCOUNT_PREFIX", "loadtest_")
