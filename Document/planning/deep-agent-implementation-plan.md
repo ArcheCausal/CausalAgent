@@ -1038,7 +1038,7 @@ Web 使用真实 SearXNG 验证三来源、snippet、上限、关闭开关、网
 
 ### 12.2 CHANGELOG
 
-只有完整功能实现并完成相应验收后，才在 `CHANGELOG.md` 文件末尾按实际完成日期追加记录。不得改写历史正文，也不得把未执行的真实模型、Docker、数据库或 RAG 验收写成完成。
+只有完整功能实现并完成相应验收后，才按 Asia/Shanghai 的实际完成日期在 `changelog/YYYY/YYYY-MM.md` 追加记录，当天内容合并至当天段落；新建月份文件时更新根 `CHANGELOG.md` 索引。日志只说明功能变化，验证情况在交付答复中单独说明；不得改写历史正文，也不得把未执行的真实模型、Docker、数据库或 RAG 验收写成完成。归档和查询规则见根 `AGENTS.md` 与 [`../documentation.md`](../documentation.md#开发日志)。
 
 建议日志结构：
 
@@ -1050,7 +1050,6 @@ y.m.d
   - 【MCP v2 算法服务】：...
   - 【证据工具与最终报告】：...
   - 【恢复、事件与长期记忆】：...
-  - 【验证】：已执行 ...；未执行 ...
 ```
 
 ### 12.3 文档验证
@@ -1063,7 +1062,7 @@ y.m.d
 - README/README_EN 命令、服务名、目录和架构一致；
 - `git diff --check`；
 - `git diff -- README.md README_EN.md` 人工对照；
-- `git diff -- CHANGELOG.md` 只包含末尾追加；
+- `git diff -- CHANGELOG.md` 只包含月份导航、主题关键词或已确认发布关联的更新；月日志只追加新记录或补充当天段落，归档迁移另须逐段核对正文完整性、月份归属与同月原有顺序；
 - 不提交 `.env`、secret、日志、用户文件正文或 `.bkp`。
 
 ---
