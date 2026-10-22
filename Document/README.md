@@ -10,6 +10,8 @@
 
 执行规则见根目录 [`AGENTS.md`](../AGENTS.md) 以及各实现目录的局部规则文件。文档职责与修改边界见 [`documentation.md`](documentation.md)。
 
+开发变化按月份从 [`../CHANGELOG.md`](../CHANGELOG.md) 索引查询，详细记录位于 `changelog/YYYY/YYYY-MM.md`；历史日志不替代当前技术事实。
+
 ## 文档导航
 
 ### 架构
