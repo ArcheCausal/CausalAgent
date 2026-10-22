@@ -82,10 +82,14 @@ def run_stage(
     chosen_run_id = run_id or make_run_id(stage)
     if Path(chosen_run_id).name != chosen_run_id or chosen_run_id in {".", ".."}:
         raise ValueError("run_id 必须是单一目录名")
-    output_dir = config.RUNS_DIR / chosen_run_id
+    # 原始产物按 run_id 日期前缀归档，编排脚本与客户端因此得到同一目录。
+    run_parent, _evidence_parent = config.run_dir_for(chosen_run_id)
+    output_dir = run_parent / chosen_run_id
     if (output_dir / "jobs.jsonl").exists() or (output_dir / "summary.json").exists():
         raise ValueError("run_id 已有运行产物，请使用新的 run_id")
-    recorder = Recorder(run_id=chosen_run_id, output_dir=output_dir)
+    recorder = Recorder(
+        run_id=chosen_run_id, output_dir=output_dir, date_dir=run_parent.name
+    )
     recorder.stage = stage
     recorder.users = users
     recorder.server_baseline = server_baseline

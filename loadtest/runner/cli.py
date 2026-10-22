@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
+import time
 from pathlib import Path
 
 from runner import config
@@ -16,6 +18,7 @@ from runner.evidence import (
     build_evidence,
     export_job_id_lists,
     latest_runs,
+    select_run,
 )
 from runner import resource
 from runner.preflight import render_preflight, run_preflight
@@ -32,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--server-json",
         default="",
         help="服务器侧只读采集结果 JSON 路径；缺少时报告标注未采集",
+    )
+    parser.add_argument(
+        "--selected-run-id",
+        default="",
+        help="证据附加、日志与报告使用的精确 run_id；缺省时取最近一个有运行的日期目录",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -61,7 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="固定本次运行的 run_id；编排脚本在负载前采集服务器快照时需要预先确定",
     )
-    sub.add_parser("evidence", help="整理 local/runs/ 为归档到 local/evidence/ 的报告")
+    sub.add_parser(
+        "evidence",
+        help="整理 local/runs/<date>/ 为归档到 local/evidence/<date>/ 的报告",
+    )
     attach = sub.add_parser(
         "attach-server",
         help="把服务器侧只读采集结果写入各档运行摘要，供报告引用",
@@ -84,7 +95,14 @@ def build_parser() -> argparse.ArgumentParser:
         "export-job-ids",
         help="把各档本轮创建的 job_id 导出为清单文件，供服务器上逐 Job 主库核对",
     )
-    export.add_argument("--out", default="", help="输出目录；默认为 local/runs/job-ids")
+    export.add_argument("--out", default="", help="输出目录；默认为 local/runs/<date>/job-ids")
+    migrate = sub.add_parser(
+        "migrate-artifacts",
+        help="把旧版平铺的运行产物移动到按日期分组的目录；默认只预览",
+    )
+    migrate.add_argument(
+        "--apply", action="store_true", help="实际执行移动；缺省时只输出计划"
+    )
     job_db = sub.add_parser(
         "attach-job-db",
         help="把 job_db_check.sh 的逐 Job 主库核对结果写入各档运行摘要",
@@ -101,6 +119,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.selected_run_id:
+        os.environ["LOADTEST_RUN_ID"] = args.selected_run_id
     server_baseline = _load_server_json(args.server_json)
     if args.command == "preflight":
         return _cmd_preflight(args.base_url)
@@ -113,19 +133,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "evidence":
         return _cmd_evidence()
     if args.command == "verify-packet":
-        target = build_verify_packet(config.RUNS_DIR, config.EVIDENCE_DIR)
+        runs_dir, evidence_dir = _command_date_dirs(args.selected_run_id)
+        target = build_verify_packet(runs_dir, evidence_dir)
         print(f"已写入 {target}")
         return 0
     if args.command == "attach-after":
-        return _cmd_attach_after(args.after_from, args.stage)
+        return _cmd_attach_after(args.after_from, args.stage, args.selected_run_id)
     if args.command == "export-job-ids":
         return _cmd_export_job_ids(args.out)
+    if args.command == "migrate-artifacts":
+        return _cmd_migrate_artifacts(args.apply)
     if args.command == "attach-job-db":
-        return _cmd_attach_job_db(args.job_db_from, args.stage)
+        return _cmd_attach_job_db(args.job_db_from, args.stage, args.selected_run_id)
     if args.command == "attach-server":
-        return _cmd_attach_server(args.server_from, args.stage)
+        return _cmd_attach_server(args.server_from, args.stage, args.selected_run_id)
     if args.command == "attach-sample":
-        return _cmd_attach_sample(args.stage, args.sample_from)
+        return _cmd_attach_sample(args.stage, args.sample_from, args.selected_run_id)
     if args.command == "logs":
         from runner.logs import main as logs_main
 
@@ -135,11 +158,37 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
+def _command_date_dirs(run_id: str | None) -> tuple[Path, Path]:
+    """为附加、日志与报告命令确定日期目录。
+
+    给出 run_id 时按该运行所在日期取目录；否则使用最近一个有运行的日期目录，
+    没有历史运行时使用当天日期。实际写入的摘要仍按 run_id 核对。
+    """
+    if run_id:
+        _run_dir, day_dir = select_run(run_id)
+        return day_dir, config.EVIDENCE_DIR / day_dir.name
+    day = config.latest_run_date()
+    if day is None:
+        return config.run_artifacts_dir(time.time())
+    return config.RUNS_DIR / day, config.EVIDENCE_DIR / day
+
+
+def _run_output_dir(summary: dict) -> Path:
+    """返回一次运行的产物目录，优先使用摘要登记的日期目录。"""
+    if summary.get("date_dir"):
+        return config.RUNS_DIR / summary["date_dir"] / summary["run_id"]
+    runs_dir, _evidence_dir = config.run_dir_for(
+        summary["run_id"], summary.get("started_at")
+    )
+    return runs_dir / summary["run_id"]
+
+
 def _cmd_logcheck(base_url: str, stage: str) -> int:
     from runner.logs import logcheck
 
     result = logcheck(stage, base_url)
-    target = config.EVIDENCE_DIR / f"logcheck-{stage}.json"
+    _runs_dir, evidence_dir = _command_date_dirs(result["run_id"])
+    target = evidence_dir / f"logcheck-{stage}.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
         json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -230,7 +279,7 @@ def render_logcheck(result: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _cmd_attach_after(path: str, stage: str = "") -> int:
+def _cmd_attach_after(path: str, stage: str = "", run_id: str | None = None) -> int:
     """把负载结束后的服务器采集写入档位运行摘要的 server_after。
 
     传入 stage 时只写该档，否则写入全部已有档位。
@@ -242,7 +291,8 @@ def _cmd_attach_after(path: str, stage: str = "") -> int:
     summary = dict(payload)
     summary.pop("collected_at", None)
     updated: list[str] = []
-    for stage_name, run in sorted(latest_runs(config.RUNS_DIR).items()):
+    runs_dir, _evidence_dir = _command_date_dirs(run_id)
+    for stage_name, run in sorted(latest_runs(runs_dir).items()):
         if stage and stage_name != stage:
             continue
         target = run / "summary.json"
@@ -260,14 +310,15 @@ def _cmd_attach_after(path: str, stage: str = "") -> int:
     return 0
 
 
-def _cmd_attach_sample(stage: str, path: str) -> int:
+def _cmd_attach_sample(stage: str, path: str, run_id: str | None = None) -> int:
     """把一次资源采样写入指定档位的运行摘要。"""
     sample = resource.load_sample(Path(path))
     if sample is None:
         print(f"无法读取资源采样文件：{path}")
         return 1
     summary = resource.summarize(sample)
-    target = latest_runs(config.RUNS_DIR).get(stage)
+    runs_dir, _evidence_dir = _command_date_dirs(run_id)
+    target = latest_runs(runs_dir).get(stage)
     if target is None:
         print(f"找不到 {stage} 的运行记录")
         return 1
@@ -283,13 +334,14 @@ def _cmd_attach_sample(stage: str, path: str) -> int:
     return 0
 
 
-def _cmd_attach_server(path: str, stage: str = "") -> int:
+def _cmd_attach_server(path: str, stage: str = "", run_id: str | None = None) -> int:
     """把服务器侧采集 JSON 写入档位运行摘要。"""
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         print("服务器侧采集文件必须是 JSON 对象。")
         return 1
-    updated = attach_server_baseline(config.RUNS_DIR, payload, stage)
+    runs_dir, _evidence_dir = _command_date_dirs(run_id)
+    updated = attach_server_baseline(runs_dir, payload, stage)
     for item in updated:
         print(f"已写入服务器侧基线: {item}")
     print(f"共更新 {len(updated)} 个档位运行摘要")
@@ -297,7 +349,8 @@ def _cmd_attach_server(path: str, stage: str = "") -> int:
 
 
 def _cmd_evidence() -> int:
-    combined, written = build_evidence(config.RUNS_DIR, config.EVIDENCE_DIR)
+    runs_dir, evidence_dir = _command_date_dirs(os.environ.get("LOADTEST_RUN_ID"))
+    combined, written = build_evidence(runs_dir, evidence_dir)
     for path in written:
         print(f"已写入 {path}")
     print(f"合并报告: {combined}")
@@ -305,9 +358,14 @@ def _cmd_evidence() -> int:
 
 
 def _cmd_export_job_ids(out: str) -> int:
-    """导出各档本轮 job_id 清单，供服务器上的逐 Job 主库核对使用。"""
-    target_dir = Path(out) if out else config.RUNS_DIR / "job-ids"
-    written = export_job_id_lists(config.RUNS_DIR, target_dir)
+    """导出各档本轮 job_id 清单，供服务器上的逐 Job 主库核对使用。
+
+    输出默认落在所用的日期目录；同一 run_id 的请求身份与 job_id 不会被别的日期
+    覆盖。
+    """
+    runs_dir, _evidence_dir = _command_date_dirs(os.environ.get("LOADTEST_RUN_ID"))
+    target_dir = Path(out) if out else runs_dir / "job-ids"
+    written = export_job_id_lists(runs_dir, target_dir)
     total = 0
     for path in written:
         count = len([line for line in path.read_text(encoding="utf-8").splitlines() if line])
@@ -325,13 +383,32 @@ def _cmd_export_job_ids(out: str) -> int:
     return 0
 
 
-def _cmd_attach_job_db(path: str, stage: str = "") -> int:
+def _cmd_migrate_artifacts(apply: bool) -> int:
+    """把旧版平铺运行目录移动到日期目录；默认只打印计划。"""
+    from runner.artifacts import apply_migration, plan_migration
+
+    moves = plan_migration()
+    if not moves:
+        print("没有需要移动的旧版运行目录。")
+        return 0
+    for source, target in moves:
+        print(f"{source} -> {target}")
+    if not apply:
+        print(f"共 {len(moves)} 项待移动；确认后加 --apply 执行。")
+        return 0
+    for line in apply_migration(moves):
+        print(line)
+    return 0
+
+
+def _cmd_attach_job_db(path: str, stage: str = "", run_id: str | None = None) -> int:
     """把逐 Job 主库核对结果写入档位运行摘要。"""
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         print("主库核对文件必须是 JSON 对象。")
         return 1
-    updated = attach_job_db_check(config.RUNS_DIR, payload, stage)
+    runs_dir, _evidence_dir = _command_date_dirs(run_id)
+    updated = attach_job_db_check(runs_dir, payload, stage)
     for item in updated:
         print(f"已写入逐 Job 主库核对: {item}")
     print(f"共更新 {len(updated)} 个档位运行摘要")
@@ -341,7 +418,8 @@ def _cmd_attach_job_db(path: str, stage: str = "") -> int:
 def _cmd_preflight(base_url: str) -> int:
     result = run_preflight(base_url)
     print(render_preflight(result))
-    target = config.RUNS_DIR / f"{make_run_id('preflight')}-preflight.json"
+    runs_dir, _evidence_dir = config.run_artifacts_dir(time.time())
+    target = runs_dir / f"{make_run_id('preflight')}-preflight.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"预检结果已写入 {target}")
@@ -405,7 +483,7 @@ def _cmd_stage(args, server_baseline: dict | None) -> int:
     summary = run_stage(
         args.stage, accounts, args.base_url, server_baseline, run_id=args.run_id or None
     )
-    run_dir = config.RUNS_DIR / summary["run_id"]
+    run_dir = _run_output_dir(summary)
     write_run_outputs(summary, run_dir)
     print(render_stage_report(summary))
     print(f"运行产物目录: {run_dir}")
@@ -422,7 +500,7 @@ def _cmd_recovery(
         print("专项检查至少需要 2 个测试账号，先运行 accounts 命令。")
         return 1
     summary = run_recovery_suite(base_url, accounts, server_baseline, run_id=run_id)
-    run_dir = config.RUNS_DIR / summary["run_id"]
+    run_dir = _run_output_dir(summary)
     write_run_outputs(summary, run_dir)
     print(render_stage_report(summary))
     print(f"运行产物目录: {run_dir}")

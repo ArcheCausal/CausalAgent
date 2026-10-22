@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -30,8 +31,26 @@ STAGE_ORDER = [
 
 
 def latest_runs(runs_dir: Path) -> dict[str, Path]:
-    """按档位选出最近一次运行目录。"""
+    """在指定日期目录下按档位取出本次运行的目录。
+
+    证据附加、日志核查和报告整理必须只读当天目录，跨日运行不能互相覆盖或自动
+    取最近同名档位：调用方传入 local/runs/<date>，并用 LOADTEST_RUN_ID 精确选择。
+    """
+    if not runs_dir.is_dir():
+        raise ValueError(
+            f"运行产物目录不存在：{runs_dir}；旧版平铺产物请先运行 "
+            "python -m runner migrate-artifacts 预览并按提示迁移"
+        )
+    explicit = os.environ.get("LOADTEST_RUN_ID")
+    if explicit:
+        run_dir, _day_dir = select_run(explicit)
+        if run_dir.parent.resolve() != runs_dir.resolve():
+            raise ValueError(
+                f"run_id {explicit} 属于 {run_dir.parent.name}，"
+                f"不在当前日期目录 {runs_dir.name}"
+            )
     selected: dict[str, Path] = {}
+    candidates: list[tuple[str, Path, float]] = []
     for path in sorted(runs_dir.iterdir()):
         if not path.is_dir():
             continue
@@ -44,8 +63,69 @@ def latest_runs(runs_dir: Path) -> dict[str, Path]:
             continue
         stage = payload.get("stage", "")
         if stage:
-            selected[stage] = path
+            if explicit and path.name != explicit:
+                continue
+            candidates.append((stage, path, float(payload.get("started_at") or 0)))
+    # 同一日期内重复运行同一档位时取开始时间最晚的一次；完整历史由 runs_in_date 输出。
+    for stage, path, started in sorted(candidates, key=lambda row: (row[2], row[1].name)):
+        selected[stage] = path
     return selected
+
+
+def select_run(run_id: str) -> tuple[Path, Path]:
+    """按 run_id 在全部日期目录中定位一次运行，返回运行目录与日期目录。
+
+    run_id 必须唯一定位；同一 run_id 出现在多个日期目录、或目录里缺少与 run_id
+    一致的摘要时直接报错，不接受按时间窗口猜归属。
+    """
+    if Path(run_id).name != run_id or run_id in {".", ".."}:
+        raise ValueError("run_id 必须是单一目录名")
+    matches: list[tuple[Path, Path]] = []
+    if not config.RUNS_DIR.is_dir():
+        raise ValueError(f"找不到 run_id 为 {run_id} 的运行产物")
+    for day_dir in sorted(
+        p for p in config.RUNS_DIR.iterdir() if p.is_dir() and p.name.isdigit()
+    ):
+        run_dir = day_dir / run_id
+        summary = run_dir / "summary.json"
+        if summary.exists():
+            matches.append((run_dir, day_dir))
+    if not matches:
+        raise ValueError(f"找不到 run_id 为 {run_id} 的运行产物")
+    if len(matches) > 1:
+        raise ValueError(f"run_id {run_id} 在多个日期目录中出现，请人工确认归属")
+    return matches[0]
+
+
+def runs_in_date(runs_dir: Path) -> list[Path]:
+    """列出日期目录内全部有效运行，按 run_id 排序。"""
+    result: list[Path] = []
+    if not runs_dir.is_dir():
+        return result
+    for path in sorted(runs_dir.iterdir()):
+        if not path.is_dir():
+            continue
+        summary = path / "summary.json"
+        if not summary.exists():
+            continue
+        try:
+            payload = json.loads(summary.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(payload, dict) and payload.get("stage") and "http" in payload:
+            result.append(path)
+    return result
+
+
+def evidence_dir_for(runs_dir: Path) -> Path:
+    """返回与运行目录对应的证据目录。
+
+    日期目录的对应关系是 local/runs/<date>/ 对 local/evidence/<date>/；旧版平铺
+    目录 local/runs/ 仍对应 local/evidence/，便于重新渲染历史产物。
+    """
+    if runs_dir.name == "runs":
+        return config.EVIDENCE_DIR
+    return config.EVIDENCE_DIR / runs_dir.name
 
 
 def attach_server_baseline(
@@ -61,6 +141,8 @@ def attach_server_baseline(
             continue
         target = path / "summary.json"
         summary = json.loads(target.read_text(encoding="utf-8"))
+        if payload.get("run_id") != summary.get("run_id"):
+            raise ValueError("服务器证据必须属于相同 run_id")
         summary["server_baseline"] = payload
         target.write_text(
             json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -198,10 +280,12 @@ def _job_ids(summary: dict) -> list[str]:
     return list(dict.fromkeys(ids))
 
 def _load_logchecks(evidence_dir: Path, selected: dict[str, Path] | None = None) -> dict:
-    """按档位读取日志核查结果，供逐档报告补齐模型与 MCP 错误一节。"""
+    """按档位读取日志核查结果，供逐次运行报告补齐模型与 MCP 错误一节。
+
+    只接受声明 scope=run 且带 run_id 的日志核查；同 stage 的旧产物由调用方
+    再按 run_id 比对，不能只凭目录位置认定属于本轮。
+    """
     result: dict = {}
-    if not selected:
-        return result
     for path in sorted(evidence_dir.glob("logcheck-*.json")):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -225,14 +309,24 @@ def _render_logcheck(evidence_dir: Path, selected: dict[str, Path] | None = None
 
     logcheck 由 runner logcheck 生成；缺少结果时明确写成未执行，不用摘要补齐。
     """
-    payloads = list(_load_logchecks(evidence_dir, selected).values())
+    all_logchecks = _load_logchecks(evidence_dir)
+    if selected:
+        payloads = [
+            row for stage, row in all_logchecks.items()
+            if stage in selected
+            and row.get("run_id") == json.loads(
+                (selected[stage] / "summary.json").read_text(encoding="utf-8")
+            ).get("run_id")
+        ]
+    else:
+        payloads = list(all_logchecks.values())
     if not payloads:
         return []
     lines = [
         "## 第六阶段：日志侧核查（Grafana / Loki）",
         "",
         "日志核查只使用有本轮结构化 job_id 归属的事件；查询失败、缺失或截断时保持未知。"
-        "逐档状态与覆盖范围见 evidence/logcheck-<档位>.json。",
+        "逐档状态与覆盖范围见 local/evidence/<date>/logcheck-<档位>.json。",
         "",
         "### MCP 按算法能力统计",
         "",
@@ -298,7 +392,7 @@ def _logcheck_conclusions(payloads: list[dict]) -> list[str]:
         verdict = "均已沿用" if len(propagated) == len(checked) else "部分沿用"
         lines.append(
             f"- request_id 沿用：可核查的 {len(checked)} 个档位（{'、'.join(checked)}）中 "
-            f"{verdict}，逐档明细见 evidence/logcheck-<档位>.json 的 "
+            f"{verdict}，逐档明细见 local/evidence/<date>/logcheck-<档位>.json 的 "
             "request_id_propagation 字段。"
         )
     else:
@@ -388,24 +482,38 @@ def _seconds(value: float | None) -> str:
 
 
 def build_evidence(runs_dir: Path, evidence_dir: Path) -> tuple[Path, list[Path]]:
-    """生成合并报告与每档独立报告，返回合并报告路径与文件清单。"""
+    """生成合并报告与逐次运行报告，返回合并报告路径与文件清单。"""
+    runs_dir, evidence_dir = _resolve_date_dirs(runs_dir, evidence_dir)
     selected = latest_runs(runs_dir)
     evidence_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
+    logchecks = _load_logchecks(evidence_dir)
+    # 同一天可能重复运行同一档位；逐次运行单独出报告，文件名带 run_id。
+    for run in runs_in_date(runs_dir):
+        summary = json.loads((run / "summary.json").read_text(encoding="utf-8"))
+        scoped = logchecks.get(str(summary.get("stage")))
+        if scoped and scoped.get("run_id") != summary.get("run_id"):
+            scoped = None
+        stage_file = evidence_dir / f"{summary['run_id']}-report.md"
+        stage_file.write_text(render_stage_report(summary, scoped), encoding="utf-8")
+        written.append(stage_file)
     sections: list[str] = [
         "# staging 压测证据汇总",
         "",
         f"- 生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"- 入口：{config.base_url()}",
-        "- 数据来源：本报告只使用 local/runs/ 下本轮各档运行摘要、"
-        "local/evidence/ 的日志核查与本轮服务器只读采集；没有采集的项按未采集写明。",
+        f"- 数据来源：本报告只使用 local/runs/{runs_dir.name}/ 下各档运行摘要、"
+        f"local/evidence/{evidence_dir.name}/ 的日志核查与本轮服务器只读采集；"
+        "没有采集的项按未采集写明。",
         "",
     ]
     sections.extend(_summary_table(selected))
+    repeats = _render_repeat_runs(runs_dir)
+    if repeats:
+        sections.extend(repeats)
     preflight = _render_preflight(runs_dir)
     if preflight:
         sections.extend(preflight)
-    logchecks = _load_logchecks(evidence_dir, selected)
     for stage in STAGE_ORDER:
         path = selected.get(stage)
         if path is None:
@@ -413,12 +521,11 @@ def build_evidence(runs_dir: Path, evidence_dir: Path) -> tuple[Path, list[Path]
             continue
         summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
         scoped_log = logchecks.get(stage)
+        if scoped_log and scoped_log.get("run_id") != summary.get("run_id"):
+            scoped_log = None
         if scoped_log and scoped_log.get("scope") == "run" and scoped_log.get("run_id") == summary.get("run_id"):
             summary = merge_logcheck(summary, scoped_log)
-        body = render_stage_report(summary, logchecks.get(stage))
-        stage_file = evidence_dir / f"{stage}-report.md"
-        stage_file.write_text(body, encoding="utf-8")
-        written.append(stage_file)
+        body = render_stage_report(summary, scoped_log)
         sections.extend(body.splitlines())
         sections.append("")
     logcheck = _render_logcheck(evidence_dir, selected)
@@ -430,32 +537,69 @@ def build_evidence(runs_dir: Path, evidence_dir: Path) -> tuple[Path, list[Path]
     unobserved = _render_unobserved_jobs(evidence_dir, selected)
     if unobserved:
         sections.extend(unobserved)
-    # 合并报告按生成日期命名，便于跨轮次区分；日期取最新一次运行的开始时间。
-    combined = evidence_dir / f"loadtest-report-{_report_date(selected)}.md"
+    # 合并报告以所在日期目录命名，同一天的全部档位始终落在同一份报告里。
+    combined = evidence_dir / f"loadtest-report-{runs_dir.name}.md"
     sections.extend(_limitations(selected))
     combined.write_text("\n".join(sections), encoding="utf-8")
     written.append(combined)
     return combined, written
 
 
-def _report_date(selected: dict[str, Path]) -> str:
-    """返回合并报告文件名使用的日期；没有运行记录时退回当天。
-
-    取全部档位里最早一次的运行开始时间。一轮压测可能跨过午夜，也可能在全部档位
-    跑完后补跑个别档位；用最早时间可以让同一轮的结果始终落在同一个报告文件里，
-    不会因为补跑一档就分裂出第二份报告。
-    """
-    started = [
-        summary["started_at"]
-        for summary in (
-            json.loads((path / "summary.json").read_text(encoding="utf-8"))
-            for path in selected.values()
+def _resolve_date_dirs(runs_dir: Path, evidence_dir: Path) -> tuple[Path, Path]:
+    """确认运行摘要与报告落在同一天日期目录；跨日整理时明确报错。"""
+    if runs_dir.parent.name != "runs":
+        raise ValueError(
+            f"运行摘要目录必须位于 local/runs/<date>/，当前为 {runs_dir}；"
+            "旧版平铺产物请先运行 python -m runner migrate-artifacts"
         )
-        if summary.get("started_at")
+    evidence_root = evidence_dir_for(runs_dir)
+    try:
+        evidence_dir.resolve().relative_to(evidence_root.resolve())
+    except ValueError as exc:
+        raise ValueError(
+            f"证据目录必须位于 {evidence_root} 下，当前为 {evidence_dir}"
+        ) from exc
+    if not runs_dir.name.isdigit():
+        raise ValueError(
+            f"运行摘要目录 {runs_dir.name} 不是 YYYYMMDD 日期目录；"
+            "跨日运行按 run_id 前缀归入起始日期，不能合并到另一天的报告"
+        )
+    return runs_dir, evidence_dir
+
+
+def _render_repeat_runs(runs_dir: Path) -> list[str]:
+    """列出同一天重复运行的档位；合并报告只展示最新一次，历史运行单独成节。
+
+    同一日期目录里重复执行同一档位时，合并报告按档位只取最新一次运行；
+    其余运行已在 evidence/<date>/<run_id>-report.md 保留完整报告，这里给出索引，
+    避免读者误以为当天只运行过一次。
+    """
+    runs = runs_in_date(runs_dir)
+    if not runs:
+        return []
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for run in runs:
+        payload = json.loads((run / "summary.json").read_text(encoding="utf-8"))
+        grouped.setdefault(str(payload.get("stage")), []).append(
+            (run.name, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(payload.get("started_at") or 0)))
+        )
+    repeated = {stage: rows for stage, rows in grouped.items() if len(rows) > 1}
+    if not repeated:
+        return []
+    lines = [
+        "## 同日重复运行的档位",
+        "",
+        "同一天内同一档位执行了多次时，合并报告按档位展示最新一次运行；"
+        "其余运行保留独立报告，逐次结果见下表和同目录的 <run_id>-report.md。",
+        "",
+        "| 档位 | 运行次数 | 各次 run_id 与开始时间 |",
+        "| --- | --- | --- |",
     ]
-    if not started:
-        return time.strftime("%Y%m%d")
-    return time.strftime("%Y%m%d", time.localtime(min(started)))
+    for stage, rows in repeated.items():
+        detail = "；".join(f"{run_id}（{started}）" for run_id, started in rows)
+        lines.append(f"| {stage} | {len(rows)} | {detail} |")
+    lines.append("")
+    return lines
 
 
 def _render_job_db_all(selected: dict[str, Path]) -> list[str]:

@@ -1,6 +1,6 @@
 """只用真实运行摘要和真实服务器/主库产物检查报告，不构造运行样本。
 
-用法：python verify_report.py --run-summary local/runs/<run_id>/summary.json
+用法：python verify_report.py --run-summary local/runs/<date>/<run_id>/summary.json
 可选：--server-json <before.json> --after-json <after.json> --job-db-json <job-db.json>
 日志：--logcheck-json <logcheck.json>，必须属于同 run_id 且 scope=run。
 原来的两个位置参数仍可表示 server/db，但必须同时提供 --run-summary。
@@ -96,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--after-json", help="同 run_id 的真实观察结束后采集")
     parser.add_argument("--job-db-json", help="同 run_id 的真实逐 Job 主库核对")
     parser.add_argument("--logcheck-json", help="同 run_id、scope=run 的真实日志核查")
-    parser.add_argument("--output", help="可选报告输出路径，推荐 local/evidence/ 下")
+    parser.add_argument("--output", help="可选报告输出路径，推荐 local/evidence/<date>/ 下")
     return parser
 
 
