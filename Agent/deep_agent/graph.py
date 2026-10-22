@@ -31,6 +31,7 @@ from .profile import DeepAgentBudget, DeepAgentProfile, build_filesystem_permiss
 from .prompts import build_deep_agent_system_prompt
 from .state import ProjectDeepAgentState
 from .tool_call_protocol import ToolCallProtocolMiddleware
+from .tool_visibility import ToolVisibilityMiddleware
 
 
 class DeepAgentDependencyError(RuntimeError):
@@ -404,6 +405,9 @@ def build_deep_agent(
             )
         )
         middleware.append(InteractionTurnGuardMiddleware())
+    # 放在会修改工具集合的项目 middleware 之后；框架后续的 MemoryMiddleware
+    # 只修改提示词，ToolStrategy 单独追加结构化输出，不重新加入领域工具。
+    middleware.append(ToolVisibilityMiddleware())
     # after_model 按注册的反序执行：先持久化 identity/queued，再写 running，
     # 协议钩子最后补齐无效 JSON 调用，随后才进入工具路由。各 hook 有独立边界。
     middleware.append(_build_message_identity_middleware(registry=registry))

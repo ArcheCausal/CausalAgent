@@ -21,7 +21,6 @@ from Agent.causal_agent.state import CausalAgentState
 from Agent.deep_agent.context import AgentRunContext, TrustedJobIdentity
 from Agent.deep_agent.state import ProjectDeepAgentState
 from Agent.deep_agent.finalization import StructuredResponseError
-from Agent.deep_agent.prompts import MANDATORY_WEB_INSTRUCTION
 from Agent.deep_agent_tools.identity import (
     build_deep_agent_execution_scope,
     build_deep_agent_analysis_scope,
@@ -174,9 +173,10 @@ def test_parent_node_uses_stable_child_thread_id_and_minimal_projection() -> Non
     assert update["deep_agent_status"] == "completed"
     assert calls[0][1]["configurable"]["thread_id"] == expected
     assert "execution_guard" not in calls[0][0]
-    assert MANDATORY_WEB_INSTRUCTION in [
-        message["content"] for message in calls[0][0]["messages"]
-    ]
+    assert all(
+        "本次运行已开启联网搜索" not in message["content"]
+        for message in calls[0][0]["messages"]
+    )
 
 
 def test_parent_node_reads_matching_child_checkpoint_instead_of_projecting_messages() -> None:
@@ -407,4 +407,4 @@ def test_retry_path_emits_public_progress_notices() -> None:
     assert events[0]["node_name"] == "deep_agent"
     assert events[0]["step_id"] == expected_step_id
     assert events[0]["_event_key"] == f"deep-agent-retry:2:{expected_step_id}"
-    assert "不重复调用工具" in events[0]["summary"]
+    assert "复用已有结果，并补齐校验要求的步骤" in events[0]["summary"]

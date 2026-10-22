@@ -140,6 +140,26 @@ docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p
 
 ## Deep Agent 定向验证
 
+### 工具可见性与 Web 开关
+
+新增验证只使用真实规则函数、领域对象和框架组件，不生成模型、算法或搜索的替代返回：
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps unit-test python -B -m pytest -p no:cacheprovider tests/unit/agent/test_tool_visibility.py tests/unit/agent/test_deep_agent_state.py tests/integration/agent/test_tool_visibility_runtime.py -q
+```
+
+纯函数用例验证只有明确的 `True` 保留 Web 工具，`False`、`None` 和其他值隐藏，其他工具及原列表不变、顺序不变、不同 Context 独立，已移除工具不被重新加入。真实框架用例通过生产 `build_deep_agent()`、Registry、算法/RAG/Web/文件工具和 Responses API 序列化生成 HTTP 请求，在发送前由请求钩子显式中止，不返回模拟模型响应；分别核对并发开关、工具返回后下一轮、Gate 修正和 `FinalAnalysisDecision` schema 仍在载荷中。这只证明框架与载荷，不证明真实模型成功调用或完成结构化输出。
+
+生产 ToolNode 用例执行关闭搜索的真实入口，核对 `disabled`、`WEB_SEARCH_DISABLED` 和 terminal Ledger；算法空数据前置拒绝也来自真实工具检查，不运行 MCP 算法。使用这些实际拒绝记录验证 Gate 复用同 attempt 的完整记录、拒绝未完成/终态不一致记录，以及旧 attempt 的 Web 记录不能满足当前检查。该用例保持 Gate 现有终态规则，不能解释成搜索或算法已经执行，也不能代替真实 Worker 接管和 PostgreSQL 恢复。
+
+真实模型和搜索的显式入口见 [`tool_visibility_model_smoke.py`](../../tests/smoke/tool_visibility_model_smoke.py)，在已经配置生产格式非敏感环境变量及密钥文件的进程中运行：
+
+```powershell
+python -B tests/smoke/tool_visibility_model_smoke.py
+```
+
+该入口并发运行启用和关闭搜索的全新内存图调用，记录实际发出的工具名，并校验真实模型的 `FinalAnalysisDecision` 与 Web ToolMessage/终态 Ledger。仅 `available` 或 `no_results` 证明检索调用成功；`unavailable`、`protocol_error` 如实报告，不能算 SearXNG 成功。它不创建 MySQL Job，不连接 PostgreSQL；完整 Job、同 attempt Gate 修正、Worker 新 attempt 和 PostgreSQL 恢复仍需在更新后新建 Job 上逐项验收。模型、搜索、Job、恢复的证据必须分别报告，环境阻塞或未执行不可算通过。
+
 ### 分析事实的一致性验收
 
 方法定义、混合图、画像、报告投影和保存后的恢复使用真实纯函数及领域模型检查，不替代算法或模型执行结果：

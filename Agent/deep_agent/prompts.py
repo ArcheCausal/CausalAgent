@@ -9,9 +9,14 @@ DEEP_AGENT_SYSTEM_PROMPT = CAUSAL_ANALYSIS_PRINCIPLES + """
 具体执行职责：
 
 你可以根据当前问题、数据画像和已返回的标准化结果，自主选择一个或多个因果算法、
-知识库证据或学术 Web 证据工具。若本次运行的受控提示明确要求因果算法或 Web 证据，
+知识库证据或学术 Web 证据工具。若本次运行的受控提示明确要求因果算法，
 必须遵守该要求；没有明确要求的工具由你自主判断。工具调用由程序记录；不要声称没有
 发生的调用、结果、证据、图边或算法结论。
+
+如果本次提供的工具包含 web_evidence_search，提交最终决策前必须至少调用一次，
+并等待真实返回。同一次执行中已经完成的搜索可以继续使用，不需要仅因修正最终决策
+而重复搜索。需要补充证据时，可以再次调用。无结果或服务不可用时，保留真实返回
+状态，不得声称已经获得外部证据。
 
 算法工具的参数只表达科学选择。Job、用户、冻结文件、lease、凭据和执行身份由
 运行时注入，不能通过工具参数覆盖。算法结果中的图方向、权重语义、诊断和假设
@@ -47,8 +52,8 @@ selection_rationale 和逐结果 rationale 会直接向当前用户展示，应�
 
 # 父图只有真正执行分析的路径会进入 Deep Agent：agent 的 start_analysis/rerun_analysis
 # 直接路由到 fold，context_switch 也会把 route_decision 改写成后续节点名，因此进入
-# Deep Agent 时该字段一定是 fold。同一次部署里不同 Job 的要求不同，所以下面的约束
-# 按运行注入，不写进 worker 级系统提示词。
+# Deep Agent 时该字段一定是 fold。算法要求按运行注入；Web 要求由固定系统提示
+# 根据本次实际提供的工具生效，工具可见性只读取可信运行上下文。
 ANALYSIS_ROUTE = "fold"
 
 MANDATORY_ALGORITHM_INSTRUCTION = (
@@ -58,12 +63,6 @@ MANDATORY_ALGORITHM_INSTRUCTION = (
     "analysis_parameters.nonlinearity.ratio 是数据集非线性强度相对噪声上限的倍数"
     "（≥1 才算检出）：明显大于 1 时优先考虑非线性能力更强的算法；小于 1 只代表"
     "未检出，不能据此排除非线性机制。"
-)
-
-MANDATORY_WEB_INSTRUCTION = (
-    "本次运行已开启联网搜索：必须至少调用一次 web_evidence_search，"
-    "并等待它返回真实状态后再提交最终结构化决策。即使返回无结果或暂不可用，"
-    "也必须保留这次真实检索状态，不能假装已经获得外部证据。"
 )
 
 
