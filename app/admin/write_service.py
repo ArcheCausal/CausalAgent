@@ -869,6 +869,12 @@ def _user_impact(cursor, user: dict[str, Any]) -> dict[str, Any]:
             (SELECT COUNT(*) FROM analysis_jobs WHERE user_id = %s) AS jobs,
             (
                 SELECT COUNT(*)
+                FROM analysis_job_datasets AS d
+                JOIN analysis_jobs AS j ON j.job_id = d.job_id
+                WHERE j.user_id = %s
+            ) AS datasets,
+            (
+                SELECT COUNT(*)
                 FROM analysis_job_events AS e
                 JOIN analysis_jobs AS j ON j.job_id = e.job_id
                 WHERE j.user_id = %s
@@ -895,7 +901,7 @@ def _user_impact(cursor, user: dict[str, Any]) -> dict[str, Any]:
                   )
             ) AS active_jobs
         """,
-        (user_id,) * 10,
+        (user_id,) * 11,
     )
     counts = {
         key: int(value or 0)
@@ -907,6 +913,7 @@ def _user_impact(cursor, user: dict[str, Any]) -> dict[str, Any]:
         "attachments",
         "files",
         "jobs",
+        "datasets",
         "events",
         "archived_sessions",
     ]
@@ -1131,11 +1138,28 @@ def delete_user(
         object_ids = [int(row["id"]) for row in cursor.fetchall()]
         cursor.execute("DELETE FROM user_files WHERE user_id = %s", (user_id,))
         deleted_user_files = cursor.rowcount
+        cursor.execute(
+            """
+            DELETE d
+            FROM analysis_job_datasets AS d
+            JOIN analysis_jobs AS j ON j.job_id = d.job_id
+            WHERE j.user_id = %s
+            """,
+            (user_id,),
+        )
+        deleted_analysis_job_datasets = cursor.rowcount
         deleted_file_objects = 0
         for object_id in object_ids:
             cursor.execute(
-                "SELECT COUNT(*) AS reference_count FROM user_files WHERE object_id = %s",
-                (object_id,),
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM user_files WHERE object_id = %s)
+                    +
+                    (SELECT COUNT(*) FROM analysis_job_datasets
+                     WHERE data_object_id = %s OR script_object_id = %s)
+                    AS reference_count
+                """,
+                (object_id, object_id, object_id),
             )
             if int((cursor.fetchone() or {}).get("reference_count") or 0) == 0:
                 cursor.execute("DELETE FROM file_objects WHERE id = %s", (object_id,))
@@ -1158,6 +1182,7 @@ def delete_user(
             "deleted": True,
             "deleted_archived_sessions": deleted_archives,
             "deleted_user_files": deleted_user_files,
+            "deleted_analysis_job_datasets": deleted_analysis_job_datasets,
             "deleted_file_objects": deleted_file_objects,
             **persistence_cleanup,
         }
@@ -1296,8 +1321,12 @@ def get_file_delete_impact(file_id: int) -> dict[str, Any]:
                    o.content_hash AS file_hash, f.mime_type, f.file_size,
                    f.uploaded_at AS upload_timestamp,
                    f.last_accessed_at, f.access_count,
-                   (SELECT COUNT(*) FROM user_files AS refs
-                    WHERE refs.object_id = f.object_id) AS object_reference_count
+                    (SELECT COUNT(*) FROM user_files AS refs
+                     WHERE refs.object_id = f.object_id)
+                    +
+                    (SELECT COUNT(*) FROM analysis_job_datasets AS d
+                     WHERE d.data_object_id = f.object_id
+                        OR d.script_object_id = f.object_id) AS object_reference_count
             FROM user_files AS f
             JOIN file_objects AS o ON o.id = f.object_id
             JOIN users AS u ON u.id = f.user_id
@@ -1479,8 +1508,15 @@ def delete_file(
         if cursor.rowcount != 1:
             raise RuntimeError("文件删除影响行数异常")
         cursor.execute(
-            "SELECT COUNT(*) AS reference_count FROM user_files WHERE object_id = %s",
-            (file_row["object_id"],),
+            """
+            SELECT
+                (SELECT COUNT(*) FROM user_files WHERE object_id = %s)
+                +
+                (SELECT COUNT(*) FROM analysis_job_datasets
+                 WHERE data_object_id = %s OR script_object_id = %s)
+                AS reference_count
+            """,
+            (file_row["object_id"], file_row["object_id"], file_row["object_id"]),
         )
         reference_count = int((cursor.fetchone() or {}).get("reference_count") or 0)
         blob_deleted = False

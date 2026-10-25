@@ -159,10 +159,14 @@ def _activate_context(
     cursor.execute(
         """
         UPDATE analysis_jobs
-        SET analysis_context_id = %s
+        SET prepared_dataset_id = CASE
+                WHEN analysis_context_id = %s THEN prepared_dataset_id
+                ELSE NULL
+            END,
+            analysis_context_id = %s
         WHERE job_id = %s
         """,
-        (context_id, job_id),
+        (context_id, context_id, job_id),
     )
     cursor.execute(
         """
@@ -617,7 +621,8 @@ def _refreeze_job_input(cursor, *, job: dict[str, Any], snapshot: dict[str, Any]
         """
         UPDATE analysis_jobs
         SET input_user_file_id = %s, input_object_id = %s,
-            input_file_hash = %s, input_filename = %s
+            input_file_hash = %s, input_filename = %s,
+            prepared_dataset_id = NULL
         WHERE job_id = %s
         """,
         (
