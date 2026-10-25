@@ -632,18 +632,12 @@ EXPECTED_FOREIGN_KEYS = (
         "fk_analysis_job_datasets_script_object",
         (("script_object_id", "file_objects", "id"),),
     ),
-    (
-        "analysis_sandbox_leases",
-        "fk_analysis_sandbox_leases_job",
-        (("job_id", "analysis_jobs", "job_id"),),
-    ),
 )
 
 EXPECTED_FOREIGN_KEY_DELETE_RULES = (
     ("analysis_job_datasets", "fk_analysis_job_datasets_job", "CASCADE"),
     ("analysis_job_datasets", "fk_analysis_job_datasets_data_object", "RESTRICT"),
     ("analysis_job_datasets", "fk_analysis_job_datasets_script_object", "RESTRICT"),
-    ("analysis_sandbox_leases", "fk_analysis_sandbox_leases_job", "CASCADE"),
 )
 
 EXPECTED_UNIQUE_INDEXES = (
@@ -697,8 +691,9 @@ EXPECTED_UNIQUE_INDEXES = (
         "uq_analysis_job_datasets_job_id",
         ("job_id", "id"),
     ),
-    ("analysis_sandbox_leases", "uq_analysis_sandbox_leases_job", ("job_id",)),
-    ("analysis_sandbox_leases", "uq_analysis_sandbox_leases_token", ("lease_token",)),
+    ("analysis_sandbox_sessions", "uq_analysis_sandbox_sessions_request", ("request_id",)),
+    ("analysis_sandbox_sessions", "uq_analysis_sandbox_sessions_remote", ("remote_sandbox_id",)),
+    ("analysis_sandbox_sessions", "uq_analysis_sandbox_sessions_open_job", ("open_job_id",)),
 )
 
 
@@ -859,6 +854,18 @@ def _operational_integrity_definitions(timeout_ms: int) -> list[dict[str, Any]]:
         for table_name, index_name, columns in EXPECTED_UNIQUE_INDEXES
     ])
     definitions.extend([
+        {
+            "key": "constraint_sandbox_lifecycle_independent",
+            "label": "沙盒生命周期记录独立保留",
+            "severity": "blocking",
+            "healthy_when": "zero",
+            "description": "确认沙盒记录没有业务外键，业务删除后仍可核查并清理资源。",
+            "failure_warning": "沙盒生命周期记录存在可能阻止删除或使记录丢失的业务外键",
+            "sql": f"""SELECT {hint} COUNT(*) AS count_value
+                FROM information_schema.referential_constraints
+                WHERE constraint_schema = DATABASE()
+                  AND table_name = 'analysis_sandbox_sessions'""",
+        },
         {
             "key": "constraint_chat_attachment_type_enum",
             "label": "约束 chat_attachments.attachment_type ENUM",

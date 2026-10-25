@@ -92,10 +92,13 @@ EXPECTED_COLUMNS = {
         "data_object_id", "script_object_id", "data_hash", "script_hash",
         "status", "metadata", "validation_report", "created_at", "validated_at",
     },
-    "analysis_sandbox_capacity": {"id", "max_active_sandboxes"},
-    "analysis_sandbox_leases": {
-        "id", "job_id", "worker_id", "lease_epoch", "lease_token",
-        "expires_at", "created_at",
+    "analysis_sandbox_sessions": {
+        "id", "request_id", "request_digest", "source_hash",
+        "job_id", "worker_id", "attempt_count", "lease_epoch",
+        "remote_sandbox_id", "status", "metadata", "operation_id",
+        "operation_type", "operation_digest", "operation_status", "operation_result",
+        "heartbeat_at", "expires_at", "max_expires_at", "next_retry_at", "version",
+        "created_at", "updated_at", "closed_at", "open_job_id",
     },
     "database_monitor_snapshots": {
         "snapshot_key", "payload_json", "observed_at",
@@ -152,10 +155,11 @@ EXPECTED_INDEXES = {
         "idx_analysis_job_datasets_objects",
         "idx_analysis_job_datasets_job_status",
     },
-    "analysis_sandbox_capacity": {"PRIMARY"},
-    "analysis_sandbox_leases": {
-        "PRIMARY", "uq_analysis_sandbox_leases_job",
-        "uq_analysis_sandbox_leases_token", "idx_analysis_sandbox_leases_expiry",
+    "analysis_sandbox_sessions": {
+        "PRIMARY", "uq_analysis_sandbox_sessions_request",
+        "uq_analysis_sandbox_sessions_remote", "uq_analysis_sandbox_sessions_open_job",
+        "idx_analysis_sandbox_sessions_expiry", "idx_analysis_sandbox_sessions_reconcile",
+        "idx_analysis_sandbox_sessions_job",
     },
     "file_objects": {
         "PRIMARY", "uq_file_objects_owner_hash", "idx_file_objects_owner_created",
@@ -211,14 +215,12 @@ EXPECTED_FOREIGN_KEYS = {
     "fk_analysis_job_datasets_job",
     "fk_analysis_job_datasets_data_object",
     "fk_analysis_job_datasets_script_object",
-    "fk_analysis_sandbox_leases_job",
 }
 
 EXPECTED_FOREIGN_KEY_DELETE_RULES = {
     ("analysis_job_datasets", "fk_analysis_job_datasets_job"): "CASCADE",
     ("analysis_job_datasets", "fk_analysis_job_datasets_data_object"): "RESTRICT",
     ("analysis_job_datasets", "fk_analysis_job_datasets_script_object"): "RESTRICT",
-    ("analysis_sandbox_leases", "fk_analysis_sandbox_leases_job"): "CASCADE",
 }
 
 
@@ -361,11 +363,16 @@ def _schema_check() -> dict[str, Any]:
         for (table, constraint), expected_rule in EXPECTED_FOREIGN_KEY_DELETE_RULES.items()
         if actual_foreign_key_delete_rules.get((table, constraint)) != expected_rule
     }
+    unexpected_sandbox_foreign_keys = sorted(
+        row["constraint_name"] for row in foreign_key_rows
+        if row["table_name"] == "analysis_sandbox_sessions"
+    )
     healthy = (
         not missing_columns
         and not missing_indexes
         and not missing_foreign_keys
         and not invalid_foreign_key_delete_rules
+        and not unexpected_sandbox_foreign_keys
     )
     return _check(
         "schema",
@@ -377,6 +384,7 @@ def _schema_check() -> dict[str, Any]:
             "missing_indexes": missing_indexes,
             "missing_foreign_keys": missing_foreign_keys,
             "invalid_foreign_key_delete_rules": invalid_foreign_key_delete_rules,
+            "unexpected_sandbox_foreign_keys": unexpected_sandbox_foreign_keys,
         },
     )
 

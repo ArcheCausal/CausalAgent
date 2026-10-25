@@ -21,6 +21,7 @@ from langgraph._internal._constants import (
 from langgraph.errors import GraphBubbleUp, GraphInterrupt
 
 from Agent.deep_agent.context import AgentRunContext, AnalysisInputRef
+from Agent.causal_agent.analysis_context import rebuild_context_index
 from Agent.deep_agent_tools.identity import build_data_processing_run_id
 from Agent.deep_agent_tools.interaction import (
     DATA_PROCESSING_PLAN_CONFIRMATION_TYPE,
@@ -30,11 +31,17 @@ from Agent.deep_agent_tools.interaction import (
 )
 from Agent.deep_agent_tools.models import canonical_json_bytes
 from Agent.data_processing.persistence import (
+    require_candidate_parameters,
     bind_candidate,
     read_bound_dataset_identity,
     read_candidate,
     record_validation,
 )
+from Agent.data_processing.parameters import (
+    PROCESSING_STATE_VERSION, ParameterContractError, parameter_identity,
+    research_parameters, validate_parameter_history,
+)
+from Database.analysis_contexts import apply_final_parameters_context
 from Agent.data_processing.validation import validate_candidate
 from Agent.execution_control import JobExecutionRevoked
 
@@ -114,16 +121,8 @@ def _specification_briefs(registry: Any) -> list[dict[str, Any]]:
 
 
 def _analysis_goal(state: Mapping[str, Any]) -> str:
-    parameters = state.get("analysis_parameters")
-    if not isinstance(parameters, Mapping):
-        parameters = {}
     return json.dumps(
-        {
-            "analysis_question": parameters.get("analysis_question", ""),
-            "target": parameters.get("target"),
-            "treatment": parameters.get("treatment"),
-            "measurement_semantics": parameters.get("measurement_semantics", []),
-        },
+        research_parameters(state.get("analysis_parameters") or {}),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -185,12 +184,40 @@ async def run_data_processing_child(
     snapshot = await agent.aget_state(child_config)
     await context.check_after_call()
     values = getattr(snapshot, "values", None)
+    if initial_input.get("data_processing_state_version") == PROCESSING_STATE_VERSION:
+        if isinstance(values, Mapping) and values:
+            if (values.get("data_processing_state_version") != PROCESSING_STATE_VERSION
+                    or values.get("data_processing_run_id") != run_id):
+                raise ParameterContractError("legacy or mismatched active processing checkpoint")
+            validate_parameter_history(
+                values.get("analysis_parameters"), values.get("analysis_parameter_changes"), job_id=job_id,
+            )
+        else:
+            # Old goal-dependent namespaces must not be silently abandoned.
+            async for saved in checkpointer.alist({"configurable": {"thread_id": str(job_id)}}):
+                namespace = saved.config["configurable"].get("checkpoint_ns", "")
+                if namespace.startswith(DATA_PROCESSING_CHECKPOINT_NAMESPACE + ":") and (
+                    saved.checkpoint.get("channel_values", {}).get("data_processing_state_version")
+                    != PROCESSING_STATE_VERSION
+                ):
+                    raise ParameterContractError("legacy active processing checkpoint requires explicit restart")
     if _interrupts(snapshot):
         # The parent Command(resume=...) reaches the child through its inherited
         # scratchpad/resume map. A second manual interrupt would consume it twice.
         child_input = None
     elif isinstance(values, Mapping) and values:
-        child_input = retry_input
+        protected = {"analysis_parameters", "analysis_parameter_changes",
+                     "data_processing_semantic_identity", "data_processing_confirmed_plan_version",
+                     "data_processing_state_version", "data_processing_run_id",
+                     "data_processing_answer_receipts"}
+        if retry_input and protected.intersection(retry_input):
+            raise ParameterContractError("retry input cannot overwrite persisted child parameters")
+        if getattr(snapshot, "next", ()):
+            child_input = None
+        elif retry_input is None:
+            return values
+        else:
+            child_input = retry_input
     else:
         child_input = initial_input
     try:
@@ -223,15 +250,29 @@ async def data_processing_parent_node(
     await context.ensure_active()
     identity = context.trusted_identity
     source_hash = identity.source_input_identity()
+    run_id = build_data_processing_run_id(job_id=identity.job_id, source_input_identity=source_hash)
 
     bound = await asyncio.to_thread(read_bound_dataset_identity, identity)
     if bound is not None:
+        await context.check_after_call()
+        plan_binding = bound["metadata"]["processing_plan_identity"]
         return {
+            "analysis_parameters": bound["analysis_parameters"],
+            "analysis_parameter_changes": bound["analysis_parameter_changes"],
+            "analysis_context": bound["analysis_context"],
+            "analysis_context_index": rebuild_context_index(
+                state.get("analysis_context_index"), state.get("analysis_context"),
+                bound["analysis_context"]["analysis_context_id"],
+            ),
+            "context_resolution": {"status": "final_parameters_restored",
+                "analysis_context_id": bound["analysis_context"]["analysis_context_id"]},
+            "data_processing_semantic_identity": plan_binding["semantic_identity"],
+            "data_processing_confirmed_plan_version": plan_binding["plan_version"],
             "prepared_dataset_id": int(bound["dataset_id"]),
             "prepared_dataset_hash": str(bound["data_hash"]),
             "data_processing_candidate_id": int(bound["dataset_id"]),
             "dataset_validation_status": "accepted",
-            "data_processing_run_id": state.get("data_processing_run_id"),
+            "data_processing_run_id": run_id,
         }
 
     goal = _analysis_goal(state)
@@ -244,14 +285,16 @@ async def data_processing_parent_node(
         context,
         data_processing_goal_identity=semantic_identity,
     )
-    run_id = build_data_processing_run_id(
-        job_id=identity.job_id,
-        source_input_identity=source_hash,
-        semantic_identity=semantic_identity,
-    )
     from Agent.data_processing.agent import build_initial_message
 
     initial_input = {
+        "analysis_parameters": research_parameters(state.get("analysis_parameters") or {}),
+        "analysis_parameter_changes": list(state.get("analysis_parameter_changes") or []),
+        "data_processing_state_version": PROCESSING_STATE_VERSION,
+        "data_processing_run_id": run_id,
+        "data_processing_answer_receipts": {},
+        "data_processing_parameter_clarification_required": False,
+        "data_processing_parameter_clarification_question": "",
         "messages": [
             HumanMessage(content=build_initial_message(goal=goal, specifications=specs))
         ],
@@ -288,9 +331,12 @@ async def data_processing_parent_node(
             ]
         }
 
+    progress_task_id = (config or {}).get("configurable", {}).get(CONFIG_KEY_TASK_ID)
+    if not progress_task_id:
+        raise RuntimeError("data-processing child must run inside a parent graph task")
     _emit_progress(
         runtime,
-        key=f"data-processing-start:{run_id}",
+        key=f"data-processing-start:{run_id}:{identity.attempt_count}:{progress_task_id}",
         summary="正在检查原始数据并准备经过独立校验的分析数据集。",
     )
 
@@ -304,7 +350,7 @@ async def data_processing_parent_node(
             initial_input=initial_input,
             retry_input=retry_input,
         )
-    except (JobExecutionRevoked, GraphBubbleUp):
+    except (JobExecutionRevoked, GraphBubbleUp, ParameterContractError):
         raise
     except Exception as exc:
         code = "sandbox_unavailable" if "sandbox" in type(exc).__name__.lower() else "processing_failed"
@@ -321,7 +367,43 @@ async def data_processing_parent_node(
             "data_processing_failure_code": "candidate_missing",
             "data_processing_retry_report": None,
         }
+    parameters = child_state.get("analysis_parameters")
+    changes = validate_parameter_history(
+        parameters, child_state.get("analysis_parameter_changes"), job_id=str(identity.job_id),
+    )
+    if child_state.get("data_processing_parameter_clarification_required"):
+        raise ParameterContractError("processing completed with unresolved parameter ambiguity")
+    candidate = await asyncio.to_thread(
+        read_candidate, identity, dataset_id=candidate_id, source_hash=source_hash,
+    )
+    require_candidate_parameters(
+        candidate["metadata"], job_id=str(identity.job_id), parameters=parameters, changes=changes,
+    )
+    binding = candidate["metadata"]["processing_plan_identity"]
+    if (binding["semantic_identity"] != child_state.get("data_processing_semantic_identity")
+            or binding["plan_version"] != child_state.get("data_processing_confirmed_plan_version")):
+        raise ParameterContractError("candidate belongs to an earlier processing plan")
+    result = await asyncio.to_thread(
+        apply_final_parameters_context, user_id=identity.user_id, session_id=str(identity.session_id),
+        job_id=str(identity.job_id), worker_id=identity.worker_id,
+        attempt_count=identity.attempt_count, lease_epoch=identity.lease_epoch,
+        analysis_parameters=parameters, dataset_id=candidate_id,
+    )
+    await context.check_after_call()
+    if result is None:
+        raise ParameterContractError("final parameters require a frozen input context")
     return {
+        "analysis_parameters": dict(parameters),
+        "analysis_parameter_changes": changes,
+        "analysis_context": result["context"],
+        "analysis_context_index": rebuild_context_index(
+            state.get("analysis_context_index"), state.get("analysis_context"), result["analysis_context_id"],
+        ),
+        "context_resolution": {"status": "final_parameters_bound",
+                               "analysis_context_id": result["analysis_context_id"],
+                               "action": result["action"]},
+        "data_processing_semantic_identity": binding["semantic_identity"],
+        "data_processing_confirmed_plan_version": binding["plan_version"],
         "data_processing_run_id": run_id,
         "data_processing_candidate_id": candidate_id,
         "data_processing_candidate_revision": int(
@@ -350,6 +432,11 @@ async def validate_dataset_node(
         bound = await asyncio.to_thread(read_bound_dataset_identity, identity)
         if bound is None or int(bound["dataset_id"]) != int(state["prepared_dataset_id"]):
             raise RuntimeError("checkpoint dataset binding does not match MySQL")
+        require_candidate_parameters(
+            bound["metadata"], job_id=str(identity.job_id),
+            parameters=state.get("analysis_parameters"), changes=state.get("analysis_parameter_changes"),
+        )
+        await context.check_after_call()
         return {
             "dataset_validation_status": "accepted",
             "dataset_validation_report": state.get("dataset_validation_report") or {},
@@ -371,6 +458,15 @@ async def validate_dataset_node(
         dataset_id=dataset_id,
         source_hash=identity.source_input_identity(),
     )
+    require_candidate_parameters(
+        candidate["metadata"], job_id=str(identity.job_id),
+        parameters=state.get("analysis_parameters"), changes=state.get("analysis_parameter_changes"),
+    )
+    if (candidate["metadata"]["processing_plan_identity"]["semantic_identity"]
+            != state.get("data_processing_semantic_identity") or
+            candidate["metadata"]["processing_plan_identity"]["plan_version"]
+            != state.get("data_processing_confirmed_plan_version")):
+        raise ParameterContractError("candidate processing plan differs from the final parent state")
     provider_settings = getattr(context.sandbox_provider, "settings", None)
     max_bytes = int(getattr(provider_settings, "max_output_file_bytes", 64 * 1024 * 1024))
     specifications = registry.specs if registry is not None else ()
@@ -381,6 +477,7 @@ async def validate_dataset_node(
         analysis_parameters=state.get("analysis_parameters") or {},
         specifications=specifications,
         max_bytes=max_bytes,
+        expected_parameter_identity=parameter_identity(state["analysis_parameters"]),
     )
     await context.check_after_call()
     await asyncio.to_thread(
@@ -445,6 +542,8 @@ async def bind_dataset_node(
         identity,
         dataset_id=dataset_id,
         source_hash=identity.source_input_identity(),
+        analysis_parameters=state["analysis_parameters"],
+        analysis_parameter_changes=state["analysis_parameter_changes"],
     )
     await context.check_after_call()
     rebound = await asyncio.to_thread(read_bound_dataset_identity, identity)

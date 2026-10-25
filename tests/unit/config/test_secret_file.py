@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,7 @@ from config.secret_file import (
     REQUIRED_SECRET_KEYS,
     SECRET_KEYS,
     SecretFileError,
+    get_secret,
     load_secrets,
     require_secret,
     reset_secret_cache,
@@ -103,6 +106,33 @@ def test_unknown_key_is_rejected(tmp_path):
     assert "NOT_A_DECLARED_SECRET" in str(excinfo.value)
 
 
+def test_upstream_sandbox_key_is_not_part_of_shared_schema(tmp_path):
+    assert "CAUSALAGENT_SANDBOX_API_KEY" not in SECRET_KEYS
+    assert "CAUSALAGENT_SANDBOX_API_KEY" not in REQUIRED_SECRET_KEYS
+    path = _write(
+        tmp_path / "causalagent.env",
+        _complete_lines(CAUSALAGENT_SANDBOX_API_KEY="retired-upstream-key"),
+    )
+
+    with pytest.raises(SecretFileError, match="未定义的键"):
+        load_secrets(path=path)
+
+
+def test_upstream_sandbox_key_cannot_be_read_from_shared_secret_api():
+    with pytest.raises(SecretFileError, match="不是已声明的密钥键"):
+        require_secret("CAUSALAGENT_SANDBOX_API_KEY")
+
+
+def test_upstream_sandbox_environment_key_is_removed_even_with_cached_file(tmp_path, monkeypatch):
+    path = _write(tmp_path / "causalagent.env", _complete_lines())
+    load_secrets(path=path)
+    monkeypatch.setenv("CAUSALAGENT_SANDBOX_API_KEY", "retired-upstream-key")
+
+    load_secrets(path=path)
+
+    assert "CAUSALAGENT_SANDBOX_API_KEY" not in os.environ
+
+
 def test_duplicate_key_is_rejected(tmp_path):
     lines = _complete_lines()
     lines.append("SECRET_KEY=duplicate")
@@ -188,3 +218,118 @@ def test_require_secret_rejects_undeclared_key(tmp_path):
 
     with pytest.raises(SecretFileError):
         require_secret("NOT_DECLARED")
+
+
+_DATABASE_SECRET_KEYS = ("MYSQL_PASSWORD", "MYSQL_WRITE_PASSWORD", "MYSQL_READ_PASSWORD")
+
+
+def _database_file(tmp_path):
+    return _write(tmp_path / "database.env", [f"{name}=database-{index}" for index, name in enumerate(_DATABASE_SECRET_KEYS)])
+
+
+def test_database_secret_subset_does_not_satisfy_default_app_requirements(tmp_path):
+    path = _database_file(tmp_path)
+
+    assert set(load_secrets(path=path, required_keys=_DATABASE_SECRET_KEYS)) == set(_DATABASE_SECRET_KEYS)
+
+    with pytest.raises(SecretFileError, match="API_KEY"):
+        load_secrets(path=path)
+
+
+def test_cached_database_secrets_are_rechecked_for_explicit_required_key(tmp_path):
+    path = _database_file(tmp_path)
+    load_secrets(path=path, required_keys=())
+
+    with pytest.raises(SecretFileError, match="SECRET_KEY"):
+        load_secrets(path=path, required_keys=("SECRET_KEY",))
+
+
+@pytest.mark.parametrize("warm_cache", [False, True])
+def test_required_keys_reject_unknown_schema_keys(tmp_path, warm_cache):
+    path = _database_file(tmp_path)
+    if warm_cache:
+        load_secrets(path=path, required_keys=())
+
+    with pytest.raises(SecretFileError, match="未声明的键"):
+        load_secrets(path=path, required_keys=("NOT_DECLARED",))
+
+
+def test_get_secret_reads_only_requested_key_without_weakening_app_validation(tmp_path, monkeypatch):
+    path = _database_file(tmp_path)
+    monkeypatch.setenv("CAUSALAGENT_SECRET_FILE", str(path))
+
+    assert get_secret("MYSQL_PASSWORD") == "database-0"
+    assert get_secret("MYSQL_REPLICA_STATUS_PASSWORD") is None
+    assert get_secret("MYSQL_REPLICA_STATUS_PASSWORD", default="optional-default") == "optional-default"
+    with pytest.raises(SecretFileError, match="API_KEY"):
+        require_secret("API_KEY")
+    with pytest.raises(SecretFileError, match="API_KEY"):
+        load_secrets()
+
+
+@pytest.mark.parametrize("required_keys", [(), _DATABASE_SECRET_KEYS])
+def test_partial_load_still_rejects_retired_upstream_key(tmp_path, required_keys):
+    path = _database_file(tmp_path)
+    with path.open("a", encoding="utf-8") as output:
+        output.write("CAUSALAGENT_SANDBOX_API_KEY=retired-upstream-key\n")
+
+    with pytest.raises(SecretFileError, match="未定义的键"):
+        load_secrets(path=path, required_keys=required_keys)
+
+
+def _run_configuration_import(path: Path, source: str, **overrides: str):
+    environment = os.environ.copy()
+    for name in (*SECRET_KEYS, "BASE_URL", "MODEL", "DEEP_AGENT_BASE_URL", "DEEP_AGENT_MODEL"):
+        environment.pop(name, None)
+    environment.update({
+        "CAUSALAGENT_SECRET_FILE": str(path),
+        "MYSQL_HOST": "127.0.0.1", "MYSQL_WRITE_HOST": "127.0.0.1", "MYSQL_READ_HOSTS": "",
+        "MYSQL_USER": "configuration_user", "MYSQL_WRITE_USER": "configuration_writer",
+        "MYSQL_READ_USER": "configuration_reader", "MYSQL_DATABASE": "configuration_test",
+    })
+    environment.update(overrides)
+    return subprocess.run(
+        [sys.executable, "-c", source], cwd=Path(__file__).resolve().parents[3],
+        env=environment, capture_output=True, text=True, timeout=60,
+    )
+
+
+def test_controller_imports_with_only_three_database_secrets_and_no_model_configuration(tmp_path):
+    result = _run_configuration_import(
+        _database_file(tmp_path),
+        "import sys; import sandbox_controller.__main__; "
+        "from config.database_settings import database_settings; "
+        "assert database_settings.MYSQL_PASSWORD; "
+        "assert database_settings.MYSQL_WRITE_PASSWORD; "
+        "assert database_settings.MYSQL_READ_PASSWORD; "
+        "assert database_settings.MYSQL_REPLICA_STATUS_PASSWORD is None; "
+        "assert 'config.settings' not in sys.modules; print('controller-imported')",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "controller-imported" in result.stdout
+
+
+def test_app_import_rejects_database_only_file_after_controller_import(tmp_path):
+    result = _run_configuration_import(
+        _database_file(tmp_path),
+        "import sandbox_controller.__main__; print('controller-imported', flush=True); import config.settings",
+    )
+
+    assert "controller-imported" in result.stdout
+    assert result.returncode != 0
+    assert "SecretFileError" in result.stderr
+    assert "API_KEY" in result.stderr
+
+
+@pytest.mark.parametrize("missing", ["BASE_URL", "MODEL"])
+def test_app_import_still_rejects_missing_model_configuration_with_complete_secrets(tmp_path, missing):
+    path = _write(tmp_path / "application.env", _complete_lines())
+    options = {"BASE_URL": "https://model.example.invalid", "MODEL": "configuration-model"}
+    options.pop(missing)
+
+    result = _run_configuration_import(path, "import config.settings", **options)
+
+    assert result.returncode != 0
+    assert "ValueError" in result.stderr
+    assert missing in result.stderr

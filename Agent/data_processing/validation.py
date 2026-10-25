@@ -12,6 +12,7 @@ import pandas as pd
 from Agent.deep_agent_tools.algorithm_specs import AlgorithmSpec
 from Agent.deep_agent_tools.preprocessing import build_data_profile
 from Agent.measurement_semantics import normalize_measurement_semantics
+from Agent.data_processing.parameters import PARAMETER_BINDING_KEY, parameter_identity
 
 
 class DatasetValidationError(ValueError):
@@ -36,6 +37,7 @@ def validate_candidate(
     max_rows: int = 100_000,
     max_columns: int = 1_000,
     max_cells: int = MAX_DATASET_CELLS,
+    expected_parameter_identity: str | None = None,
 ) -> dict[str, Any]:
     """校验 MySQL 中候选产物本身，并报告各算法对实际输入的兼容性。
 
@@ -44,6 +46,12 @@ def validate_candidate(
     """
 
     errors: list[dict[str, str]] = []
+    if expected_parameter_identity is not None:
+        binding = metadata.get(PARAMETER_BINDING_KEY) if isinstance(metadata, Mapping) else None
+        if (not isinstance(binding, dict) or binding.get("identity") != expected_parameter_identity
+                or parameter_identity(analysis_parameters) != expected_parameter_identity
+                or parameter_identity(binding.get("parameters")) != expected_parameter_identity):
+            return _report(errors=[_issue("parameter_identity_mismatch", "候选研究参数与父节点最终参数不一致")])
     if not isinstance(data_bytes, bytes) or not data_bytes:
         return _report(errors=[_issue("empty_file", "候选 CSV 文件为空")])
     if len(data_bytes) > max_bytes:
@@ -112,7 +120,7 @@ def validate_candidate(
     parameters = analysis_parameters if isinstance(analysis_parameters, Mapping) else {}
     try:
         semantic_kinds = normalize_measurement_semantics(
-            parameters.get("measurement_semantics", []), columns=columns,
+            parameters.get("measurement_semantics") or [], columns=columns,
         )
     except ValueError:
         semantic_kinds = {}

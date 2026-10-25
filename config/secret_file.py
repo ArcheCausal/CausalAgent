@@ -38,7 +38,6 @@ SECRET_KEYS: tuple[str, ...] = (
     "SECRET_KEY",
     "API_KEY",
     "DEEP_AGENT_API_KEY",
-    "CAUSALAGENT_SANDBOX_API_KEY",
     "VISION_API_KEY",
     "EMBEDDING_API_KEY",
     "LANGCHAIN_API_KEY",
@@ -49,7 +48,7 @@ SECRET_KEYS: tuple[str, ...] = (
     "CAUSAL_MCP_SIGNING_KEY_PREVIOUS",
 )
 
-# 所有调用 load_secrets() 的应用进程都需要的基础密钥。
+# 应用入口默认需要的基础密钥；独立服务必须显式声明自己的必需键。
 RUNTIME_REQUIRED_SECRET_KEYS: tuple[str, ...] = (
     "MYSQL_ROOT_PASSWORD",
     "MYSQL_PASSWORD",
@@ -65,12 +64,8 @@ RUNTIME_REQUIRED_SECRET_KEYS: tuple[str, ...] = (
     "GRAFANA_ADMIN_PASSWORD",
 )
 
-# 发布包需要的完整密钥集合。沙盒 key 只由 Worker 通过 require_secret() 按需读取，
-# 但发布校验必须确保部署文件已经配置该 key。
-REQUIRED_SECRET_KEYS: tuple[str, ...] = (
-    *RUNTIME_REQUIRED_SECRET_KEYS,
-    "CAUSALAGENT_SANDBOX_API_KEY",
-)
+# 上游沙盒密钥由控制服务独立挂载，禁止出现在应用共享密钥文件中。
+REQUIRED_SECRET_KEYS: tuple[str, ...] = RUNTIME_REQUIRED_SECRET_KEYS
 
 SECRET_SCHEMA_VERSION = "v1"
 
@@ -142,13 +137,29 @@ def _parse_secret_file(text: str, *, path: Path) -> dict[str, str]:
     return values
 
 
-def load_secrets(*, path: Path | None = None, reload: bool = False) -> dict[str, str]:
-    """读取并缓存密钥文件，不把密钥值写入进程环境变量。"""
+def _validate_required_keys(values: dict[str, str], required_keys: tuple[str, ...]) -> None:
+    unknown = sorted(set(required_keys) - set(SECRET_KEYS))
+    if unknown:
+        raise SecretFileError(f"必需密钥包含未声明的键: {', '.join(unknown)}。")
+    missing = [name for name in required_keys if name not in values]
+    if missing:
+        raise SecretFileError(f"密钥文件缺少必需键: {', '.join(missing)}。")
+
+
+def load_secrets(
+    *,
+    path: Path | None = None,
+    reload: bool = False,
+    required_keys: tuple[str, ...] = RUNTIME_REQUIRED_SECRET_KEYS,
+) -> dict[str, str]:
+    """读取并缓存文件；每次调用均校验显式必需键，默认校验应用完整集合。"""
     global _cached_path, _cached_values
 
     resolved = Path(path) if path is not None else resolve_secret_file_path()
     with _lock:
+        os.environ.pop("CAUSALAGENT_SANDBOX_API_KEY", None)
         if not reload and _cached_values is not None and _cached_path == resolved:
+            _validate_required_keys(_cached_values, required_keys)
             return dict(_cached_values)
         for name in SECRET_KEYS:
             os.environ.pop(name, None)
@@ -163,9 +174,7 @@ def load_secrets(*, path: Path | None = None, reload: bool = False) -> dict[str,
         except OSError as exc:
             raise SecretFileError(f"密钥文件不可读: {resolved}") from exc
         values = _parse_secret_file(text, path=resolved)
-        missing = [name for name in RUNTIME_REQUIRED_SECRET_KEYS if name not in values]
-        if missing:
-            raise SecretFileError(f"密钥文件缺少必需键: {', '.join(missing)}。")
+        _validate_required_keys(values, required_keys)
         _cached_path = resolved
         _cached_values = dict(values)
         return dict(_cached_values)
@@ -175,7 +184,7 @@ def get_secret(name: str, *, default: str | None = None) -> str | None:
     """按键读取一个密钥；键不在 SECRET_KEYS 中时抛出配置错误。"""
     if name not in SECRET_KEYS:
         raise SecretFileError(f"{name} 不是已声明的密钥键。")
-    return load_secrets().get(name, default)
+    return load_secrets(required_keys=()).get(name, default)
 
 
 def require_secret(name: str) -> str:

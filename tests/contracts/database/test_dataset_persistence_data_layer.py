@@ -64,8 +64,7 @@ def test_readiness_requires_dataset_and_sandbox_schema() -> None:
 
     assert {
         "analysis_job_datasets",
-        "analysis_sandbox_capacity",
-        "analysis_sandbox_leases",
+        "analysis_sandbox_sessions",
     } <= required_tables
     assert "'prepared_dataset_id'" in source
     assert "idx_analysis_jobs_prepared_dataset" in source
@@ -74,13 +73,16 @@ def test_readiness_requires_dataset_and_sandbox_schema() -> None:
     assert "uq_analysis_job_datasets_job_id" in source
     assert "idx_analysis_job_datasets_objects" in source
     assert "idx_analysis_job_datasets_job_status" in source
-    assert "uq_analysis_sandbox_leases_job" in source
-    assert "uq_analysis_sandbox_leases_token" in source
-    assert "idx_analysis_sandbox_leases_expiry" in source
-    assert "WHERE id = 1 AND max_active_sandboxes > 0" in source
+    assert "uq_analysis_sandbox_sessions_request" in source
+    assert "uq_analysis_sandbox_sessions_remote" in source
+    assert "uq_analysis_sandbox_sessions_open_job" in source
+    assert "idx_analysis_sandbox_sessions_expiry" in source
+    assert "idx_analysis_sandbox_sessions_reconcile" in source
+    assert "analysis_sandbox_capacity" not in source
+    assert "analysis_sandbox_leases" not in source
     assert ("analysis_job_datasets", "idx_analysis_job_datasets_objects") in required_indexes
     assert ("analysis_job_datasets", "idx_analysis_job_datasets_job_status") in required_indexes
-    assert ("analysis_sandbox_leases", "idx_analysis_sandbox_leases_expiry") in required_indexes
+    assert ("analysis_sandbox_sessions", "idx_analysis_sandbox_sessions_expiry") in required_indexes
     assert ("analysis_jobs", "idx_analysis_jobs_prepared_dataset") in required_indexes
 
 
@@ -104,19 +106,24 @@ def test_deep_audit_requires_dataset_columns_indexes_and_foreign_keys() -> None:
         "metadata",
         "validation_report",
     } <= columns["analysis_job_datasets"]
-    assert columns["analysis_sandbox_capacity"] == {"id", "max_active_sandboxes"}
-    assert {"job_id", "worker_id", "lease_epoch", "lease_token", "expires_at"} <= (
-        columns["analysis_sandbox_leases"]
+    assert "analysis_sandbox_capacity" not in columns
+    assert "analysis_sandbox_leases" not in columns
+    assert {"request_id", "request_digest", "source_hash", "job_id", "worker_id",
+            "attempt_count", "lease_epoch", "remote_sandbox_id", "status", "metadata",
+            "operation_id", "operation_digest", "operation_type", "operation_status",
+            "operation_result", "heartbeat_at", "expires_at", "max_expires_at",
+            "next_retry_at", "version", "created_at", "updated_at", "closed_at"} <= (
+        columns["analysis_sandbox_sessions"]
     )
     assert "idx_analysis_jobs_prepared_dataset" in indexes["analysis_jobs"]
     assert "uq_analysis_job_datasets_job_revision" in indexes["analysis_job_datasets"]
-    assert "idx_analysis_sandbox_leases_expiry" in indexes["analysis_sandbox_leases"]
+    assert "idx_analysis_sandbox_sessions_expiry" in indexes["analysis_sandbox_sessions"]
     assert {
         "fk_analysis_job_datasets_job",
         "fk_analysis_job_datasets_data_object",
         "fk_analysis_job_datasets_script_object",
-        "fk_analysis_sandbox_leases_job",
     } <= foreign_keys
+    assert not any("sandbox" in name for name in foreign_keys)
     assert (
         delete_rules[("analysis_job_datasets", "fk_analysis_job_datasets_data_object")]
         == "RESTRICT"

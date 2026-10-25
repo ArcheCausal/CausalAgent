@@ -503,8 +503,7 @@ def check_database_readiness():
                 "analysis_job_events",
                 "analysis_job_inputs",
                 "analysis_job_datasets",
-                "analysis_sandbox_capacity",
-                "analysis_sandbox_leases",
+                "analysis_sandbox_sessions",
                 "database_monitor_snapshots",
                 "database_monitor_settings",
                 "admin_audit_events",
@@ -660,14 +659,15 @@ def check_database_readiness():
                       )
                     )
                     OR (
-                      table_name = 'analysis_sandbox_capacity'
-                      AND column_name IN ('id', 'max_active_sandboxes')
-                    )
-                    OR (
-                      table_name = 'analysis_sandbox_leases'
+                      table_name = 'analysis_sandbox_sessions'
                       AND column_name IN (
-                        'id', 'job_id', 'worker_id', 'lease_epoch',
-                        'lease_token', 'expires_at', 'created_at'
+                        'id', 'request_id', 'request_digest', 'source_hash',
+                        'job_id', 'worker_id', 'attempt_count', 'lease_epoch',
+                        'remote_sandbox_id', 'status', 'metadata', 'operation_id',
+                        'operation_type', 'operation_digest', 'operation_status',
+                        'operation_result', 'heartbeat_at', 'expires_at',
+                        'max_expires_at', 'next_retry_at', 'version',
+                        'created_at', 'updated_at', 'closed_at', 'open_job_id'
                       )
                     )
                   )
@@ -683,13 +683,15 @@ def check_database_readiness():
                     "status", "metadata", "validation_report", "created_at", "validated_at",
                 )
             } | {
-                ("analysis_sandbox_capacity", name)
-                for name in ("id", "max_active_sandboxes")
-            } | {
-                ("analysis_sandbox_leases", name)
+                ("analysis_sandbox_sessions", name)
                 for name in (
-                    "id", "job_id", "worker_id", "lease_epoch",
-                    "lease_token", "expires_at", "created_at",
+                    "id", "request_id", "request_digest", "source_hash",
+                    "job_id", "worker_id", "attempt_count", "lease_epoch",
+                    "remote_sandbox_id", "status", "metadata", "operation_id",
+                    "operation_type", "operation_digest", "operation_status",
+                    "operation_result", "heartbeat_at", "expires_at",
+                    "max_expires_at", "next_retry_at", "version",
+                    "created_at", "updated_at", "closed_at", "open_job_id",
                 )
             }
             missing_dataset_schema_columns = (
@@ -705,16 +707,13 @@ def check_database_readiness():
 
             cursor.execute(
                 """
-                SELECT max_active_sandboxes
-                FROM analysis_sandbox_capacity
-                WHERE id = 1 AND max_active_sandboxes > 0
-                """
+                SELECT COUNT(*) FROM information_schema.referential_constraints
+                WHERE constraint_schema = %s AND table_name = 'analysis_sandbox_sessions'
+                """,
+                (database_settings.MYSQL_DATABASE,),
             )
-            if cursor.fetchone() is None:
-                raise RuntimeError(
-                    "数据库沙盒容量配置缺失或无效: analysis_sandbox_capacity.id=1。"
-                    "请先运行 'python -m Database.bootstrap'。"
-                )
+            if int(cursor.fetchone()[0]) != 0:
+                raise RuntimeError("沙盒生命周期记录不得依赖业务外键，必须在业务删除后保留。")
 
             cursor.execute(
                 """
@@ -868,18 +867,27 @@ def check_database_readiness():
                       AND index_name = 'idx_analysis_job_datasets_job_status'
                     )
                     OR (
-                      table_name = 'analysis_sandbox_leases'
-                      AND index_name = 'uq_analysis_sandbox_leases_job'
+                      table_name = 'analysis_sandbox_sessions'
+                      AND index_name = 'uq_analysis_sandbox_sessions_request'
                       AND non_unique = 0
                     )
                     OR (
-                      table_name = 'analysis_sandbox_leases'
-                      AND index_name = 'uq_analysis_sandbox_leases_token'
+                      table_name = 'analysis_sandbox_sessions'
+                      AND index_name = 'uq_analysis_sandbox_sessions_remote'
                       AND non_unique = 0
                     )
                     OR (
-                      table_name = 'analysis_sandbox_leases'
-                      AND index_name = 'idx_analysis_sandbox_leases_expiry'
+                      table_name = 'analysis_sandbox_sessions'
+                      AND index_name = 'uq_analysis_sandbox_sessions_open_job'
+                      AND non_unique = 0
+                    )
+                    OR (
+                      table_name = 'analysis_sandbox_sessions'
+                      AND index_name IN (
+                        'idx_analysis_sandbox_sessions_expiry',
+                        'idx_analysis_sandbox_sessions_reconcile',
+                        'idx_analysis_sandbox_sessions_job'
+                      )
                     )
                     OR (
                       table_name = 'analysis_jobs'
@@ -966,9 +974,12 @@ def check_database_readiness():
                 ("analysis_job_datasets", "uq_analysis_job_datasets_job_id"),
                 ("analysis_job_datasets", "idx_analysis_job_datasets_objects"),
                 ("analysis_job_datasets", "idx_analysis_job_datasets_job_status"),
-                ("analysis_sandbox_leases", "uq_analysis_sandbox_leases_job"),
-                ("analysis_sandbox_leases", "uq_analysis_sandbox_leases_token"),
-                ("analysis_sandbox_leases", "idx_analysis_sandbox_leases_expiry"),
+                ("analysis_sandbox_sessions", "uq_analysis_sandbox_sessions_request"),
+                ("analysis_sandbox_sessions", "uq_analysis_sandbox_sessions_remote"),
+                ("analysis_sandbox_sessions", "uq_analysis_sandbox_sessions_open_job"),
+                ("analysis_sandbox_sessions", "idx_analysis_sandbox_sessions_expiry"),
+                ("analysis_sandbox_sessions", "idx_analysis_sandbox_sessions_reconcile"),
+                ("analysis_sandbox_sessions", "idx_analysis_sandbox_sessions_job"),
                 ("analysis_jobs", "idx_analysis_jobs_prepared_dataset"),
                 ("analysis_job_events", "uq_analysis_job_events_event_key"),
                 ("chat_messages", "uq_chat_messages_source_event"),

@@ -96,6 +96,9 @@ class CausalAgentState(TypedDict):
     tool_call_request: Optional[bool]
 
     analysis_parameters: Optional[dict]
+    analysis_parameter_changes: NotRequired[list[dict[str, Any]]]
+    data_processing_semantic_identity: NotRequired[str]
+    data_processing_confirmed_plan_version: NotRequired[str | None]
 
     # Agent 的结构化意图判断结果；只保留意图、上下文提示和澄清问题，
     # 数据库 ID、文件 ID 和最终路由都由后端解析后写入。

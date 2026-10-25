@@ -30,7 +30,7 @@ def test_question_uses_the_existing_job_interaction_payload() -> None:
     }
 
 
-def test_processing_checkpoint_identity_changes_with_source_or_goal() -> None:
+def test_processing_checkpoint_identity_changes_only_with_source() -> None:
     first = build_data_processing_run_id(
         job_id=JOB_ID,
         source_input_identity=SOURCE_HASH,
@@ -47,7 +47,7 @@ def test_processing_checkpoint_identity_changes_with_source_or_goal() -> None:
         source_input_identity="c" * 64,
         semantic_identity=SEMANTIC_HASH,
     )
-    assert first != build_data_processing_run_id(
+    assert first == build_data_processing_run_id(
         job_id=JOB_ID,
         source_input_identity=SOURCE_HASH,
         semantic_identity="d" * 64,

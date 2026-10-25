@@ -6,7 +6,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Literal, Optional, Any, List, Tuple, Dict
 import logging
 import json
@@ -20,13 +20,14 @@ from langgraph.func import task
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 from Agent.llm_structured_output import StructuredOutputError, ainvoke_structured
+from Agent.measurement_semantics import normalize_measurement_semantics
 from .fault_tolerance import (
     RAG_DEGRADATION_SUMMARY,
     build_rag_degradation_result,
 )
 from .analysis_context import (
-    MAX_CONTEXT_QUESTION_CHARS,
     build_context_index,
+    rebuild_context_index as _rebuild_context_index,
     build_report_analysis_context,
     report_primary_result,
     report_data_metadata,
@@ -83,7 +84,6 @@ from Agent.causal_agent.web_search_node import (
 
 # 数据库
 from Database.analysis_contexts import (
-    apply_fold_context,
     create_context_for_new_file,
     find_user_file_by_name,
     switch_to_context,
@@ -539,30 +539,6 @@ def _context_candidates_text(candidates: list) -> str:
     return "\n".join(f"- {line}" for line in lines)
 
 
-def _rebuild_context_index(
-    previous_index: Any,
-    previous_context: Any,
-    switched_to_id: Optional[str],
-    *,
-    limit: int = 8,
-) -> list:
-    """切换后用内存中的旧索引与旧当前上下文重建历史索引，不额外读库。"""
-    entries: list = []
-    if isinstance(previous_context, dict) and previous_context.get("analysis_context_id"):
-        entries.extend(build_context_index([previous_context]))
-    if isinstance(previous_index, list):
-        entries.extend(entry for entry in previous_index if isinstance(entry, dict))
-    unique: list = []
-    seen: set = set()
-    for entry in entries:
-        context_id = entry.get("analysis_context_id")
-        if not context_id or context_id in seen or context_id == switched_to_id:
-            continue
-        seen.add(context_id)
-        unique.append(entry)
-    return unique[: max(0, int(limit))]
-
-
 def _switched_context_state(
     *,
     context_row: dict,
@@ -588,6 +564,7 @@ def _switched_context_state(
             AIMessage(content="决策：已切换分析上下文。", name="context_switch")
         ],
         "analysis_parameters": None,
+        "analysis_parameter_changes": [],
         "causal_analysis_result": None,
         "knowledge_base_result": None,
         "web_search_result": None,
@@ -795,53 +772,6 @@ async def context_switch_node(
             )
     return _clarification_update(question=None, status="no_match")
 
-async def _bind_analysis_context(
-    state: CausalAgentState,
-    runtime: Any,
-    *,
-    target: Optional[str],
-    treatment: Optional[str],
-) -> dict:
-    """fold 确定参数后把 Job 绑定到正确的分析上下文。
-
-    绑定上下文还没有参数时回填；参数与绑定上下文不同时优先复用同一文件上参数一致的
-    历史上下文，没有才新建并切换 active 指针。没有可信 Job 身份时不做任何写入。
-    """
-    identity = getattr(getattr(runtime, "context", None), "trusted_identity", None)
-    if identity is None:
-        return {}
-    question = _latest_human_text(state).strip()
-    result = await asyncio.to_thread(
-        apply_fold_context,
-        user_id=int(identity.user_id),
-        session_id=str(identity.session_id),
-        job_id=str(identity.job_id),
-        worker_id=identity.worker_id,
-        attempt_count=int(identity.attempt_count),
-        lease_epoch=int(identity.lease_epoch),
-        target=target,
-        treatment=treatment,
-        analysis_question=question[:MAX_CONTEXT_QUESTION_CHARS] or None,
-    )
-    if not result:
-        return {}
-    update: dict = {
-        "context_resolution": {
-            "status": "fold_bound",
-            "analysis_context_id": result.get("analysis_context_id"),
-            "action": result.get("action"),
-        },
-        "analysis_context_index": _rebuild_context_index(
-            state.get("analysis_context_index"),
-            state.get("analysis_context"),
-            result.get("analysis_context_id"),
-        ),
-    }
-    context = result.get("context")
-    if isinstance(context, dict):
-        update["analysis_context"] = context
-    return update
-
 class MeasurementDeclaration(BaseModel):
     column: str
     kind: Literal["count", "ordinal", "category", "continuous", "binary", "unknown"]
@@ -859,6 +789,13 @@ class foldQuery(BaseModel):
         description="从用户对话中识别出的处理变量(treatment)或干预变量(intervention)。如果未提及，则留空。"
     )
     measurement_semantics: list[MeasurementDeclaration] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_measurement_declarations(self):
+        normalize_measurement_semantics([item.model_dump() for item in self.measurement_semantics])
+        if any(not item.evidence.strip() for item in self.measurement_semantics):
+            raise ValueError("measurement evidence must be non-blank")
+        return self
 
 ## fold节点用到的函数
 from Agent.Processing.fold_processing import get_data_summary, apply_measurement_semantics
@@ -904,7 +841,7 @@ async def fold_node(
     *,
     runtime: Any = None,
 ) -> dict:
-    """提取研究目标并绑定原始输入；CSV 读取和约束检查交给数据处理阶段。"""
+    """提取初始研究参数；最终上下文在数据处理父节点中绑定。"""
     file_summary = state.get("file_summary") or {}
     input_user_file_id = file_summary.get("user_file_id")
     input_object_id = file_summary.get("object_id")
@@ -977,13 +914,11 @@ async def fold_node(
             )
         ],
         "analysis_parameters": analysis_parameters,
+        "analysis_parameter_changes": [],
         "file_summary": file_summary,
         "tool_call_request": False,
         "fold_decision": "preprocess",
     }
-    update.update(await _bind_analysis_context(
-        state, runtime, target=target, treatment=treatment,
-    ))
     return update
 
 async def preprocess_node(
@@ -1000,8 +935,6 @@ async def preprocess_node(
     3.  调用 LLM 对数据摘要进行自然语言总结。
     4.  将图表和总结存入状态，然后直接进入下一步。
     """
-    analysis_parameters = state.get("analysis_parameters", {})
-
     from Agent.deep_agent_tools.preprocessing import build_data_profile
     from Agent.data_processing.persistence import (
         read_bound_dataset,
@@ -1050,12 +983,13 @@ async def preprocess_node(
     from Agent.Processing.fold_verify import validate_analysis
     from Agent.Processing.nonlinearity import measure_nonlinearity
 
-    source_parameters = dict(analysis_parameters or {})
+    source_parameters = dict(bound_identity["analysis_parameters"])
     prepared_metadata = bound_data["metadata"]
     summary = get_data_summary(df)
     declarations = source_parameters.get("measurement_semantics") or []
-    user_text = str(source_parameters.get("analysis_question") or "")
-    apply_measurement_semantics(summary, declarations, user_text=user_text)
+    apply_measurement_semantics(
+        summary, declarations, user_text=bound_identity["parameter_evidence_text"],
+    )
     validation_code, validation_issues, recommendations = validate_analysis(
         summary,
         target=source_parameters.get("target"),
@@ -1065,11 +999,7 @@ async def preprocess_node(
         raise RuntimeError("目标变量或处理变量未映射到经过校验的数据集。")
     summary.update(
         {
-            "target": source_parameters.get("target"),
-            "treatment": source_parameters.get("treatment"),
-            "analysis_question": user_text,
-            "measurement_semantics": declarations,
-            "observation_unit": prepared_metadata.get("observation_unit"),
+            **source_parameters,
             "transformations": prepared_metadata.get("transformations", []),
             "variable_semantics": prepared_metadata.get("variable_semantics", {}),
             "processing_summary": prepared_metadata.get("summary", ""),
@@ -1157,6 +1087,7 @@ async def preprocess_node(
         "preprocess_summary": state["preprocess_summary"],
         "chart_assets": state.get("chart_assets", {}),
         "analysis_parameters": summary,
+        "analysis_parameter_changes": bound_identity["analysis_parameter_changes"],
         "data_profile": profile,
         "prepared_dataset_id": int(bound_data["dataset_id"]),
         "prepared_dataset_hash": str(bound_data["data_hash"]),

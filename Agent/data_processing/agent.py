@@ -12,6 +12,7 @@ from deepagents import create_deep_agent
 from deepagents.middleware import FilesystemMiddleware
 from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command, interrupt
 from pydantic import Field
@@ -32,9 +33,15 @@ from Agent.deep_agent_tools.interaction import (
 )
 from Agent.deep_agent_tools.models import ContractModel
 from Agent.data_processing.persistence import (
+    read_parameter_answer,
     require_current_plan_confirmation,
     save_candidate,
 )
+from Agent.data_processing.parameters import (
+    ParameterExtraction, apply_parameter_patch, extraction_patch,
+    parameter_identity, sandbox_request_id,
+)
+from Agent.llm_structured_output import ainvoke_structured
 from Agent.data_processing.plans import (
     build_processing_plan_version,
     extend_data_processing_semantic_identity,
@@ -195,7 +202,69 @@ def _description_tool() -> Any:
     )
 
 
-def _question_tool() -> Any:
+async def _apply_user_answer(
+    runtime: Any, *, model: Any, question_id: str, question: str, answer: Any,
+) -> dict[str, Any]:
+    """两个答复入口共用同一结构化提取及确定性提交边界。"""
+    context = _context(runtime)
+    state = runtime.state
+    identity = context.trusted_identity
+    trusted = await asyncio.to_thread(
+        read_parameter_answer, context, question_id=question_id, answer=answer,
+    )
+    await context.check_after_call()
+    source_input_id = trusted["source_input_id"]
+    answer_text = trusted["answer"]
+    if not isinstance(answer_text, str):
+        answer_text = json.dumps(answer_text, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    answer_digest = hashlib.sha256(answer_text.encode("utf-8")).hexdigest()
+    receipts = dict(state.get("data_processing_answer_receipts") or {})
+    receipt_key = str(source_input_id)
+    if receipt_key in receipts:
+        if receipts[receipt_key]["answer_digest"] != answer_digest:
+            raise RuntimeError("replayed parameter answer conflicts with its trusted input")
+        return {}
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "你只提取用户此次明确补充或修正的研究参数。未提及字段不要输出；明确清空时 value 为 null。"
+         "measurement_semantics 只输出用户明确修订的列声明，代码会保留其他列；每条声明包含 column、kind、evidence，kind 只能为 count/ordinal/category/continuous/binary/unknown。"
+         "每项 evidence 必须逐字摘自本次答复。不要根据字段名推测语义。观察单位、时间范围、聚合范围分别写入 observation_unit、time_window、aggregation_scope。"
+         "如有歧义，设置 needs_clarification 和具体问题，不提交猜测。仅在处理含义或范围改变时设置 processing_scope_changed，脚本实现修正不改变范围。"),
+        ("human", "当前参数：{parameters}\n当前问题：{question}\n用户答复：{answer}"),
+    ])
+    extracted = await ainvoke_structured(
+        llm=model, schema=ParameterExtraction, prompt=prompt,
+        inputs={"parameters": json.dumps(state["analysis_parameters"], ensure_ascii=False),
+                "question": question, "answer": answer_text},
+        node_name="data_processing_parameter_extraction",
+    )
+    await context.check_after_call()
+    patch = extraction_patch(
+        extracted, answer_text=answer_text, current_parameters=state["analysis_parameters"],
+    )
+    parameters, history = apply_parameter_patch(
+        state["analysis_parameters"], state["analysis_parameter_changes"], patch=patch,
+        job_id=str(identity.job_id), source_input_id=source_input_id,
+    )
+    semantic_identity = _semantic_identity(context, state)
+    changed = parameter_identity(parameters) != parameter_identity(state["analysis_parameters"])
+    if changed or extracted.processing_scope_changed:
+        semantic_identity = extend_data_processing_semantic_identity(
+            semantic_identity, {"source_input_id": source_input_id, "parameters": parameter_identity(parameters),
+                                "scope_answer_digest": answer_digest},
+        )
+    receipts[receipt_key] = {"answer_digest": answer_digest}
+    return {
+        "analysis_parameters": parameters, "analysis_parameter_changes": history,
+        "data_processing_semantic_identity": semantic_identity,
+        "data_processing_confirmed_plan_version": (None if changed or extracted.processing_scope_changed
+            or extracted.needs_clarification else state.get("data_processing_confirmed_plan_version")),
+        "data_processing_parameter_clarification_required": extracted.needs_clarification,
+        "data_processing_parameter_clarification_question": extracted.clarification_question,
+        "data_processing_answer_receipts": receipts,
+    }
+
+
+def _question_tool(*, model: Any) -> Any:
     async def call(runtime: Any, **kwargs: Any) -> Any:
         payload = QuestionInput.model_validate(kwargs)
         context = _context(runtime)
@@ -218,9 +287,8 @@ def _question_tool() -> Any:
         state = getattr(runtime, "state", None)
         if not isinstance(state, dict):
             raise RuntimeError("data-processing Agent State is unavailable")
-        semantic_identity = extend_data_processing_semantic_identity(
-            _semantic_identity(context, state),
-            answer,
+        parameter_update = await _apply_user_answer(
+            runtime, model=model, question_id=call_id, question=payload.question, answer=answer,
         )
         return Command(
             update={
@@ -229,13 +297,13 @@ def _question_tool() -> Any:
                         runtime,
                         name="ask_data_processing_question",
                         content=json.dumps(
-                            {"status": "answered", "answer": answer_text[:4000]},
+                            {"status": "answered", "answer": answer_text[:4000],
+                             "clarification_question": parameter_update.get("data_processing_parameter_clarification_question", "")},
                             ensure_ascii=False,
                         ),
                     )
                 ],
-                "data_processing_semantic_identity": semantic_identity,
-                "data_processing_confirmed_plan_version": None,
+                **parameter_update,
             }
         )
 
@@ -255,7 +323,7 @@ def _question_tool() -> Any:
     )
 
 
-def _plan_confirmation_tool() -> Any:
+def _plan_confirmation_tool(*, model: Any) -> Any:
     async def call(runtime: Any, **_: Any) -> Any:
         context = _context(runtime)
         await context.ensure_active()
@@ -263,6 +331,10 @@ def _plan_confirmation_tool() -> Any:
         state = getattr(runtime, "state", None)
         if identity is None or not isinstance(state, dict):
             raise RuntimeError("data-processing plan state is unavailable")
+        if state.get("data_processing_parameter_clarification_required"):
+            return _tool_message(runtime, name="request_data_processing_plan_confirmation",
+                                 content="请先使用 ask_data_processing_question 澄清：" +
+                                 state.get("data_processing_parameter_clarification_question", "研究语义不明确"))
         script = state.get("data_processing_draft_script")
         metadata = state.get("data_processing_metadata")
         if not isinstance(script, str) or not script.strip() or not isinstance(metadata, dict):
@@ -311,10 +383,10 @@ def _plan_confirmation_tool() -> Any:
             status = "revision_requested"
             confirmation = None
         semantic_identity = _semantic_identity(context, state)
+        parameter_update = {}
         if matches is None:
-            semantic_identity = extend_data_processing_semantic_identity(
-                semantic_identity,
-                answer,
+            parameter_update = await _apply_user_answer(
+                runtime, model=model, question_id=call_id, question=request.prompt, answer=answer,
             )
         return Command(
             update={
@@ -323,12 +395,14 @@ def _plan_confirmation_tool() -> Any:
                         runtime,
                         name="request_data_processing_plan_confirmation",
                         content=json.dumps(
-                            {"status": status, "answer": answer_text[:4000]},
+                            {"status": status, "answer": answer_text[:4000],
+                             "clarification_question": parameter_update.get("data_processing_parameter_clarification_question", "")},
                             ensure_ascii=False,
                         ),
                     )
                 ],
                 "data_processing_semantic_identity": semantic_identity,
+                **parameter_update,
                 "data_processing_confirmed_plan_version": confirmation,
             }
         )
@@ -361,6 +435,12 @@ def _inspect_input_tool() -> Any:
         async with context.sandbox_provider.open_session(
             job_id=str(identity.job_id),
             worker_id=identity.worker_id,
+            attempt_count=identity.attempt_count,
+            source_hash=identity.source_input_identity(),
+            request_id=sandbox_request_id(
+                tool_call_id=str(runtime.tool_call_id or ""), job_id=str(identity.job_id),
+                source_hash=identity.source_input_identity(), purpose="inspect",
+            ),
             lease_epoch=identity.lease_epoch,
             execution_guard=context.execution_guard,
             original_csv=source,
@@ -430,7 +510,7 @@ def _execute_script_tool() -> Any:
             semantic_identity=semantic_identity,
             metadata=metadata,
         )
-        if state.get("data_processing_confirmed_plan_version") != plan_version:
+        if state.get("data_processing_parameter_clarification_required") or state.get("data_processing_confirmed_plan_version") != plan_version:
             return _tool_message(
                 runtime,
                 name="execute_processing_script",
@@ -452,6 +532,13 @@ def _execute_script_tool() -> Any:
         async with context.sandbox_provider.open_session(
             job_id=str(identity.job_id),
             worker_id=identity.worker_id,
+            attempt_count=identity.attempt_count,
+            source_hash=identity.source_input_identity(),
+            request_id=sandbox_request_id(
+                tool_call_id=str(runtime.tool_call_id or ""), job_id=str(identity.job_id),
+                source_hash=identity.source_input_identity(), purpose="execute",
+            ),
+            plan_version=plan_version,
             lease_epoch=identity.lease_epoch,
             execution_guard=context.execution_guard,
             original_csv=source,
@@ -482,6 +569,8 @@ def _execute_script_tool() -> Any:
             metadata=metadata,
             plan_version=plan_version,
             semantic_identity=semantic_identity,
+            analysis_parameters=state["analysis_parameters"],
+            analysis_parameter_changes=state["analysis_parameter_changes"],
         )
         summary = {
             "status": "candidate_saved",
@@ -551,8 +640,8 @@ def build_data_processing_agent(
             _inspect_input_tool(),
             _write_script_tool(),
             _description_tool(),
-            _question_tool(),
-            _plan_confirmation_tool(),
+            _question_tool(model=model),
+            _plan_confirmation_tool(model=model),
             _execute_script_tool(),
         ],
         subagents=[],

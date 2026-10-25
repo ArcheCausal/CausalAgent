@@ -63,39 +63,51 @@ def upgrade() -> None:
     )
     op.execute(
         """
-        CREATE TABLE analysis_sandbox_capacity (
-            id TINYINT NOT NULL PRIMARY KEY,
-            max_active_sandboxes INT NOT NULL,
-            CONSTRAINT ck_analysis_sandbox_capacity_positive
-                CHECK (max_active_sandboxes > 0)
-        ) ENGINE=InnoDB
-        """
-    )
-    op.execute(
-        "INSERT INTO analysis_sandbox_capacity (id, max_active_sandboxes) VALUES (1, 4)"
-    )
-    op.execute(
-        """
-        CREATE TABLE analysis_sandbox_leases (
+        CREATE TABLE analysis_sandbox_sessions (
             id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            job_id VARCHAR(36) NOT NULL,
-            worker_id VARCHAR(128) NOT NULL,
+            request_id VARCHAR(128) COLLATE utf8mb4_bin NOT NULL,
+            request_digest CHAR(64) COLLATE utf8mb4_bin NOT NULL,
+            source_hash CHAR(64) COLLATE utf8mb4_bin NOT NULL,
+            job_id VARCHAR(36) COLLATE utf8mb4_bin NOT NULL,
+            worker_id VARCHAR(128) COLLATE utf8mb4_bin NOT NULL,
+            attempt_count INT NOT NULL,
             lease_epoch BIGINT NOT NULL,
-            lease_token CHAR(36) NOT NULL,
+            remote_sandbox_id VARCHAR(255) COLLATE utf8mb4_bin DEFAULT NULL,
+            status ENUM('creating', 'active', 'deleting', 'uncertain', 'closed')
+                NOT NULL DEFAULT 'creating',
+            metadata JSON NOT NULL,
+            operation_id VARCHAR(128) COLLATE utf8mb4_bin DEFAULT NULL,
+            operation_type VARCHAR(32) DEFAULT NULL,
+            operation_digest CHAR(64) COLLATE utf8mb4_bin DEFAULT NULL,
+            operation_status ENUM('pending', 'succeeded', 'uncertain') DEFAULT NULL,
+            operation_result JSON DEFAULT NULL,
+            heartbeat_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
             expires_at DATETIME(6) NOT NULL,
+            max_expires_at DATETIME(6) NOT NULL,
+            next_retry_at DATETIME(6) DEFAULT NULL,
+            version BIGINT NOT NULL DEFAULT 1,
             created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-            UNIQUE KEY uq_analysis_sandbox_leases_job (job_id),
-            UNIQUE KEY uq_analysis_sandbox_leases_token (lease_token),
-            INDEX idx_analysis_sandbox_leases_expiry (expires_at),
-            CONSTRAINT fk_analysis_sandbox_leases_job
-                FOREIGN KEY (job_id) REFERENCES analysis_jobs(job_id) ON DELETE CASCADE
+            updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+            closed_at DATETIME(6) DEFAULT NULL,
+            open_job_id VARCHAR(36) COLLATE utf8mb4_bin
+                GENERATED ALWAYS AS (CASE WHEN status <> 'closed' THEN job_id END) STORED,
+            UNIQUE KEY uq_analysis_sandbox_sessions_request (request_id),
+            UNIQUE KEY uq_analysis_sandbox_sessions_remote (remote_sandbox_id),
+            UNIQUE KEY uq_analysis_sandbox_sessions_open_job (open_job_id),
+            INDEX idx_analysis_sandbox_sessions_reconcile (status, next_retry_at, id),
+            INDEX idx_analysis_sandbox_sessions_expiry (status, expires_at),
+            INDEX idx_analysis_sandbox_sessions_job (job_id),
+            CONSTRAINT ck_analysis_sandbox_sessions_deadline
+                CHECK (expires_at <= max_expires_at),
+            CONSTRAINT ck_analysis_sandbox_sessions_identity
+                CHECK (attempt_count > 0 AND lease_epoch > 0 AND version > 0)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """
     )
 
 
 def downgrade() -> None:
-    """Refuse to drop persisted artifacts or active leases."""
+    """Refuse to drop persisted artifacts or lifecycle records, including closed rows."""
     connection = op.get_bind()
     artifact_count = connection.exec_driver_sql(
         "SELECT COUNT(*) FROM analysis_job_datasets"
@@ -104,12 +116,12 @@ def downgrade() -> None:
         raise RuntimeError(
             "analysis_job_datasets contains persisted artifacts; archive them before downgrade"
         )
-    lease_count = connection.exec_driver_sql(
-        "SELECT COUNT(*) FROM analysis_sandbox_leases"
+    session_count = connection.exec_driver_sql(
+        "SELECT COUNT(*) FROM analysis_sandbox_sessions"
     ).scalar_one()
-    if lease_count:
+    if session_count:
         raise RuntimeError(
-            "analysis_sandbox_leases is not empty; stop sandbox work before downgrade"
+            "analysis_sandbox_sessions is not empty; archive lifecycle records before downgrade"
         )
     op.execute(
         """
@@ -118,6 +130,5 @@ def downgrade() -> None:
             DROP COLUMN prepared_dataset_id
         """
     )
-    op.execute("DROP TABLE analysis_sandbox_leases")
-    op.execute("DROP TABLE analysis_sandbox_capacity")
+    op.execute("DROP TABLE analysis_sandbox_sessions")
     op.execute("DROP TABLE analysis_job_datasets")

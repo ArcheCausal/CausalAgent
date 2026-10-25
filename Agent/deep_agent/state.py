@@ -30,6 +30,12 @@ class DeepAgentState(_OfficialDeepAgentState, total=False):
     data_profile: DataProfile
     analysis_question: str
     analysis_parameters: dict[str, Any]
+    analysis_parameter_changes: list[dict[str, Any]]
+    data_processing_state_version: int
+    data_processing_run_id: str
+    data_processing_answer_receipts: dict[str, dict[str, Any]]
+    data_processing_parameter_clarification_required: bool
+    data_processing_parameter_clarification_question: str
     file_summary: dict[str, Any]
     missing_values_present: bool
     message_execution_id: str

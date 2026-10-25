@@ -33,10 +33,9 @@ from Agent.deep_agent_tools.rag_evidence_tool import build_default_rag_evidence_
 from Agent.deep_agent_tools.registry import build_default_registry
 from Agent.deep_agent_tools.web_evidence_tool import build_default_web_evidence_tool
 from Agent.data_processing.agent import build_data_processing_agent
-from Agent.data_processing import leases as sandbox_leases
-from Agent.data_processing.opensandbox_runtime import (
-    OpenSandboxProvider,
-    OpenSandboxSettings,
+from Agent.data_processing.sandbox_client import (
+    SandboxControllerProvider,
+    SandboxControllerSettings,
 )
 from app.agent.worker.mcp_client_pool import McpClientPool, McpClientPoolConfig
 from config.secret_file import load_secrets, require_secret
@@ -343,13 +342,8 @@ async def initialize_production_runtime(
         model_name=os.getenv("DEEP_AGENT_MODEL", "deepseek-v4-flash"),
         context_window_tokens=context_window_tokens,
     )
-    sandbox_settings = OpenSandboxSettings.from_environment(
-        api_key=require_secret("CAUSALAGENT_SANDBOX_API_KEY").strip(),
-    )
-    sandbox_provider = OpenSandboxProvider(
-        sandbox_settings,
-        lease_manager=sandbox_leases,
-    )
+    sandbox_settings = SandboxControllerSettings.from_environment()
+    sandbox_provider = SandboxControllerProvider(sandbox_settings)
     data_processing_agent = build_data_processing_agent(
         model=deep_model,
         checkpointer=checkpointer,

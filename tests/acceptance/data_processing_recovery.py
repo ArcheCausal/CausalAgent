@@ -29,6 +29,10 @@ ARTIFACTS = Path('/tmp/data-processing-recovery')
 
 
 class ChildRecoveryState(TypedDict, total=False):
+    analysis_parameters: dict
+    analysis_parameter_changes: list
+    data_processing_state_version: int
+    data_processing_run_id: str
     first_answer: str
     confirmed_answer: dict
     complete: bool
@@ -111,7 +115,7 @@ async def verify(report):
     from Agent.deep_agent_tools.interaction import DataProcessingPlanConfirmationRequest
     from Agent.deep_agent_tools.adapters import build_default_adapters
     from Agent.deep_agent_tools.registry import build_default_registry
-    from Database.analysis_contexts import apply_fold_context, switch_to_context
+    from Database.analysis_contexts import apply_final_parameters_context, create_context_for_new_file, switch_to_context
     from app.agent import job_service
     from app.auth.service import find_user
     from app.db import get_read_connection
@@ -139,12 +143,8 @@ async def verify(report):
     original_identity = identity_for(job)
     fields = dict(user_id=user_id, session_id=session_id, job_id=job['job_id'], worker_id=job['worker_id'],
         attempt_count=job['attempt_count'], lease_epoch=job['lease_epoch'])
-    first = apply_fold_context(**fields, target='x', treatment=None, analysis_question='first research target')
-    revised = apply_fold_context(**fields, target='y', treatment=None, analysis_question='revised before preparation')
-    require(first['analysis_context_id'] != revised['analysis_context_id'], 'target_change_did_not_select_context')
     require(job_service.get_job_by_id(job['job_id'])['prepared_dataset_id'] is None, 'pointer_present_before_preparation')
     report['registered_login_session_file_job'] = True
-    report['target_context_selected_before_preparation'] = True
     report['job_id'] = job['job_id']
 
     metadata = dict(summary='Preserve numeric measurements and declared binary flag.', observation_unit='one observation',
@@ -153,7 +153,11 @@ async def verify(report):
     semantic_identity = hashlib.sha256(b'recovery-acceptance-semantic-goal').hexdigest()
     version = build_processing_plan_version(job_id=job['job_id'], source_hash=source_hash, semantic_identity=semantic_identity, metadata=metadata)
     script = b'from pathlib import Path\nPath("/workspace/output/prepared.csv").write_bytes(Path("/workspace/raw/original.csv").read_bytes())\n'
-    save_kwargs = dict(source_hash=source_hash, data_bytes=source, script_bytes=script, metadata=metadata, plan_version=version, semantic_identity=semantic_identity)
+    parameters = {'target': 'y', 'treatment': None, 'analysis_question': 'isolated recovery acceptance',
+        'measurement_semantics': [{'column': 'flag', 'kind': 'binary', 'evidence': 'binary event indicator'}]}
+    save_kwargs = dict(source_hash=source_hash, data_bytes=source, script_bytes=script, metadata=metadata,
+        plan_version=version, semantic_identity=semantic_identity, analysis_parameters=parameters,
+        analysis_parameter_changes=[])
     try:
         persistence.save_candidate(original_identity, **save_kwargs)
     except persistence.DatasetPersistenceError:
@@ -199,7 +203,10 @@ async def verify(report):
         saved = await asyncio.to_thread(persistence.read_candidate, runtime.context.trusted_identity,
             dataset_id=candidate['dataset_id'], source_hash=source_hash)
         require(saved['status'] == 'pending_validation', 'unbound_parent_candidate_not_pending')
-        return {'data_processing_candidate_id': saved['dataset_id'], 'data_processing_candidate_revision': candidate['revision']}
+        return {**child_state, 'data_processing_candidate_id': saved['dataset_id'],
+            'data_processing_candidate_revision': candidate['revision'],
+            'data_processing_semantic_identity': saved['metadata']['processing_plan_identity']['semantic_identity'],
+            'data_processing_confirmed_plan_version': saved['metadata']['processing_plan_identity']['plan_version']}
     load_saved_candidate.__annotations__['runtime'] = Runtime[AgentRunContext]
     async with open_checkpoint_pool() as pool:
         saver = build_checkpointer(pool)
@@ -216,14 +223,15 @@ async def verify(report):
         parent_builder.add_edge(START, 'data_processing')
         parent_builder.add_edge('data_processing', END)
         parent = parent_builder.compile(checkpointer=saver)
-        unbound = await parent.ainvoke({'analysis_parameters': {'target': 'y'}},
+        unbound = await parent.ainvoke({'analysis_parameters': parameters, 'analysis_parameter_changes': []},
             {'configurable': {'thread_id': job['job_id']}}, context=context_for(identity), durability='sync')
         require(unbound.get('data_processing_candidate_id') == candidate['dataset_id'], 'unbound_parent_registry_path_failed')
         require(job_service.get_job_by_id(job['job_id'])['prepared_dataset_id'] is None, 'unbound_parent_bound_candidate_early')
     report['unbound_parent_registry_branch'] = {'status': 'PASS',
         'real_registry_and_postgres_graphs': True, 'child_reads_actual_pending_candidate': True, 'model_execution': False}
-    state = {'data_processing_candidate_id': candidate['dataset_id'], 'analysis_parameters': {'target': 'y',
-        'measurement_semantics': [{'column': 'flag', 'kind': 'binary', 'evidence': 'binary event indicator'}]}}
+    revised = unbound['analysis_context']
+    report['final_parameters_context_bound_after_child'] = True
+    state = {**unbound, 'data_processing_candidate_id': candidate['dataset_id']}
     runtime = Runtime(context=context_for(identity))
     validation = await validate_dataset_node(state, runtime=runtime, registry=registry)
     require(validation['dataset_validation_status'] == 'accepted', 'real_candidate_validation_rejected')
@@ -268,13 +276,17 @@ async def verify(report):
     report['mcp'] = await verify_mcp(fresh_identity, source.decode())
     report['active_test'] = 'same_context_preserves_different_context_clears'
     fields.update(worker_id=job['worker_id'], attempt_count=job['attempt_count'], lease_epoch=job['lease_epoch'])
-    same = apply_fold_context(**fields, target='y', treatment=None, analysis_question='same target replay')
+    same = apply_final_parameters_context(**fields, analysis_parameters=parameters, dataset_id=candidate['dataset_id'])
     require(same['analysis_context_id'] == revised['analysis_context_id'], 'same_context_changed')
     require(job_service.get_job_by_id(job['job_id'])['prepared_dataset_id'] == candidate['dataset_id'], 'same_context_lost_prepared_pointer')
     switch_to_context(**fields, context_id=revised['analysis_context_id'])
     require(job_service.get_job_by_id(job['job_id'])['prepared_dataset_id'] == candidate['dataset_id'], 'switch_to_same_context_lost_pointer')
-    switch_to_context(**fields, context_id=first['analysis_context_id'])
+    other_upload = client.post('/api/upload_file', data={'file': (BytesIO(source + b'0,21,2\n'), 'other.csv', 'text/csv')})
+    require(other_upload.status_code == 200 and other_upload.json['success'], 'second_file_upload_failed')
+    other = create_context_for_new_file(**fields, user_file_id=other_upload.json['user_file_id'])
+    require(other['analysis_context_id'] != revised['analysis_context_id'], 'different_file_context_not_created')
     require(job_service.get_job_by_id(job['job_id'])['prepared_dataset_id'] is None, 'different_context_retained_prepared_pointer')
+    switch_to_context(**fields, context_id=revised['analysis_context_id'])
     report['same_context_preserves_different_context_clears'] = True
     report['active_test'] = 'old_lease_save_validate_bind_rejected'
     for stale in (original_identity,):
@@ -292,7 +304,8 @@ async def verify(report):
         else:
             raise AssertionError('old_lease_recorded_validation')
         try:
-            persistence.bind_candidate(stale, dataset_id=candidate['dataset_id'], source_hash=source_hash)
+            persistence.bind_candidate(stale, dataset_id=candidate['dataset_id'], source_hash=source_hash,
+                analysis_parameters=parameters, analysis_parameter_changes=[])
         except persistence.DatasetPersistenceError:
             pass
         else:
@@ -343,11 +356,14 @@ async def verify_child_recovery(report):
     from langgraph.runtime import Runtime
     from Agent.causal_agent.postgres_checkpointer import open_checkpoint_pool, build_checkpointer
     from Agent.data_processing.graph import run_data_processing_child
+    from Agent.data_processing.parameters import PROCESSING_STATE_VERSION
     from Agent.deep_agent.context import AgentRunContext
     from Agent.deep_agent_tools.interaction import DataProcessingQuestionRequest, DataProcessingPlanConfirmationRequest
 
     thread_id = str(uuid4())
     run_id = 'data-processing:' + uuid4().hex
+    initial_state = {'complete': False, 'analysis_parameters': {}, 'analysis_parameter_changes': [],
+        'data_processing_state_version': PROCESSING_STATE_VERSION, 'data_processing_run_id': run_id}
     context = AgentRunContext(execution_guard=None)
     version = hashlib.sha256(b'child-reconnect-plan').hexdigest()
     expiry = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
@@ -377,7 +393,7 @@ async def verify_child_recovery(report):
 
         async def call_child(state, config, runtime):
             return await run_data_processing_child(child, config=config, job_id=thread_id,
-                run_id=run_id, context=runtime.context, initial_input={'complete': False})
+                run_id=run_id, context=runtime.context, initial_input=initial_state)
         call_child.__annotations__['runtime'] = Runtime[AgentRunContext]
         parent = StateGraph(ChildRecoveryState, context_schema=AgentRunContext)
         parent.add_node('processing_child', call_child)
@@ -387,7 +403,7 @@ async def verify_child_recovery(report):
 
     config = {'configurable': {'thread_id': thread_id}}
     interrupt_ids = []
-    inputs = [{'complete': False}, Command(resume='one observation'),
+    inputs = [initial_state, Command(resume='one observation'),
         Command(resume={'action': 'confirm', 'plan_version': version})]
     for index, value in enumerate(inputs):
         async with open_checkpoint_pool() as pool:
@@ -460,7 +476,7 @@ def main():
             hashlib.sha256((ROOT / name).read_bytes()).hexdigest() == digest
             for name, digest in report['source_sha256'].items())
         names = ('first_run_empty_databases', 'formal_alembic_head_and_postgres_setup',
-            'registered_login_session_file_job', 'target_context_selected_before_preparation',
+            'registered_login_session_file_job', 'final_parameters_context_bound_after_child',
             'unconfirmed_candidate_rejected', 'plan_confirmation_and_input_ledger',
             'candidate_replay_tuple_and_json_lists', 'real_validation_record_and_binding',
             'new_identity_and_postgres_pool_recovery', 'mcp',

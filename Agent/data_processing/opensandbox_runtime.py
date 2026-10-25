@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
-from contextlib import aclosing, asynccontextmanager
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import timedelta
 import errno
@@ -16,22 +16,15 @@ from pathlib import PurePosixPath
 import re
 from typing import Any, AsyncIterator, Mapping
 from urllib.parse import urlsplit
-from uuid import uuid4
 
 from opensandbox import Sandbox
 from opensandbox.config import ConnectionConfig
 from opensandbox.models.execd import ExecutionHandlers, RunCommandOpts
-from opensandbox.models.sandboxes import (
-    NetworkPolicy,
-    SandboxImageSpec,
-)
 
 
 WORKSPACE_ROOT = PurePosixPath("/workspace")
 RAW_INPUT_PATH = WORKSPACE_ROOT / "raw" / "original.csv"
 NETWORK_PROBE_PATH = WORKSPACE_ROOT / ".causalagent-network-probe.py"
-SANDBOX_LEASE_HEARTBEAT_SECONDS = 20
-SANDBOX_LEASE_MIN_SECONDS = 60
 _SAFE_RELATIVE_PATH = re.compile(r"[A-Za-z0-9._/-]{1,240}\Z")
 _IMMUTABLE_IMAGE_REFERENCE = re.compile(r".+@sha256:[0-9a-f]{64}\Z")
 _NETWORK_PROBE = """
@@ -59,7 +52,10 @@ for name, family, address in targets:
     except OSError as error:
         results.append({
             "family": name,
-            "blocked": error.errno in blocked_errors or isinstance(error, TimeoutError),
+            "blocked": (
+                error.errno in blocked_errors or isinstance(error, TimeoutError)
+                or (family == socket.AF_INET6 and error.errno == errno.EADDRNOTAVAIL)
+            ),
             "error": error.errno,
         })
 print(json.dumps(results, separators=(",", ":")))
@@ -104,7 +100,7 @@ class SandboxLeaseLostError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class OpenSandboxSettings:
-    """一次 worker 进程使用的 OpenSandbox 连接和资源限制。"""
+    """控制服务持有的 OpenSandbox 连接和资源限制。"""
 
     api_url: str
     api_key: str = field(repr=False)
@@ -260,14 +256,6 @@ def _positive_int(values: Mapping[str, str], name: str, default: int) -> int:
     return value
 
 
-def _sandbox_capacity_lease_seconds(settings: OpenSandboxSettings) -> int:
-    """Keep a capacity slot reserved until an orphaned sandbox must have expired."""
-    return max(
-        SANDBOX_LEASE_MIN_SECONDS,
-        settings.sandbox_ttl_seconds + 2 * settings.api_timeout_seconds,
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class SandboxCommandResult:
     """一条沙盒命令的有限输出。"""
@@ -324,9 +312,9 @@ class OpenSandboxSession:
         await self._sandbox.files.write_file(
             str(path),
             payload,
-            mode=600,
-            owner=str(self._settings.agent_uid),
-            group=str(self._settings.agent_gid),
+            mode=444,
+            owner="root",
+            group="root",
         )
         await self._ensure_active()
         return str(path)
@@ -379,11 +367,12 @@ class OpenSandboxSession:
         async with self._command_lock:
             self._active_capture = capture
             try:
+                await self._ensure_active()
                 async with asyncio.timeout(self._settings.command_timeout_seconds + 5):
                     execution = await self._sandbox.commands.run(
                         command, opts=options, handlers=handlers
                     )
-            except TimeoutError:
+            except (TimeoutError, asyncio.CancelledError):
                 await capture.interrupt_active()
                 raise
             finally:
@@ -403,13 +392,13 @@ class OpenSandboxSession:
         sandbox = self._sandbox
         # This setup runs as root before any model-authored command. Later
         # commands always use the configured unprivileged uid/gid.
-        setup = await sandbox.commands.run(
+        setup, _ = await self._initialization_command(
             "mkdir -p /workspace/raw /workspace/scripts /workspace/output && "
             "chown root:root /workspace/raw && chmod 0555 /workspace/raw && "
             f"chown {settings.agent_uid}:{settings.agent_gid} /workspace/scripts /workspace/output && "
             "chmod 0700 /workspace/scripts /workspace/output",
             opts=RunCommandOpts(
-                working_directory=str(WORKSPACE_ROOT),
+                working_directory="/",
                 timeout=timedelta(seconds=settings.api_timeout_seconds),
                 uid=0,
                 gid=0,
@@ -425,6 +414,7 @@ class OpenSandboxSession:
             owner="root",
             group="root",
         )
+        await self._ensure_active()
         await sandbox.files.write_file(
             str(NETWORK_PROBE_PATH),
             _NETWORK_PROBE.encode("utf-8"),
@@ -432,6 +422,7 @@ class OpenSandboxSession:
             owner="root",
             group="root",
         )
+        await self._ensure_active()
         write_probe_path = WORKSPACE_ROOT / ".causalagent-input-write-probe.py"
         await sandbox.files.write_file(
             str(write_probe_path),
@@ -440,8 +431,9 @@ class OpenSandboxSession:
             owner="root",
             group="root",
         )
+        await self._ensure_active()
 
-        input_result = await sandbox.commands.run(
+        input_result, _ = await self._initialization_command(
             "python3 /workspace/.causalagent-input-write-probe.py",
             opts=_agent_command_options(settings, timeout=5),
         )
@@ -449,18 +441,12 @@ class OpenSandboxSession:
             raise SandboxIsolationError("Sandbox source copy is writable by the processing user")
 
         policy = await sandbox.get_egress_policy()
+        await self._ensure_active()
         if policy.default_action != "deny" or policy.egress not in (None, []):
             raise SandboxIsolationError("OpenSandbox did not apply the explicit deny-all policy")
-        network_capture = _BoundedOutput(4096, interrupt=sandbox.commands.interrupt)
-        network_result = await sandbox.commands.run(
+        network_result, network_capture = await self._initialization_command(
             "python3 /workspace/.causalagent-network-probe.py",
             opts=_agent_command_options(settings, timeout=12),
-            handlers=ExecutionHandlers(
-                on_init=network_capture.on_init,
-                on_stdout=network_capture.on_stdout,
-                on_stderr=network_capture.on_stderr,
-                skip_accumulation=True,
-            ),
         )
         if network_result.exit_code != 0 or network_capture.exceeded:
             raise SandboxIsolationError("OpenSandbox sandbox can reach an external network")
@@ -487,6 +473,28 @@ class OpenSandboxSession:
             raise SandboxIsolationError(
                 "OpenSandbox sandbox did not block IPv4 and IPv6 egress"
             )
+
+    async def _initialization_command(self, command: str, *, opts: RunCommandOpts):
+        capture = _BoundedOutput(4096, interrupt=self._sandbox.commands.interrupt)
+        async with self._command_lock:
+            self._active_capture = capture
+            try:
+                await self._ensure_active()
+                execution = await self._sandbox.commands.run(
+                    command, opts=opts, handlers=ExecutionHandlers(
+                        on_init=capture.on_init, on_stdout=capture.on_stdout,
+                        on_stderr=capture.on_stderr, skip_accumulation=True,
+                    ),
+                )
+                await self._ensure_active()
+                if capture.exceeded:
+                    raise SandboxOutputLimitError("Sandbox initialization output exceeded its limit")
+                return execution, capture
+            except (TimeoutError, asyncio.CancelledError):
+                await capture.interrupt_active()
+                raise
+            finally:
+                self._active_capture = None
 
     async def _read_bounded(
         self, path: PurePosixPath, max_bytes: int, *, allow_truncated: bool = False
@@ -536,6 +544,7 @@ class _BoundedOutput:
         self._stderr: list[str] = []
         self._size = 0
         self._interrupted = False
+        self._interrupt_requested = False
         self.exceeded = False
 
     @property
@@ -550,6 +559,8 @@ class _BoundedOutput:
         execution_id = getattr(event, "id", None)
         if isinstance(execution_id, str) and execution_id:
             self._execution_id = execution_id
+            if self._interrupt_requested:
+                await self.interrupt_active()
 
     async def on_stdout(self, message: Any) -> None:
         await self._append(self._stdout, message)
@@ -580,10 +591,11 @@ class _BoundedOutput:
         self._size += len(payload)
 
     async def interrupt_active(self) -> None:
+        self._interrupt_requested = True
         if self._interrupted or not self._execution_id:
             return
-        self._interrupted = True
         await self._interrupt(self._execution_id)
+        self._interrupted = True
 
 
 def _workspace_path(relative_path: str, *, allowed_roots: set[str]) -> PurePosixPath:
@@ -599,173 +611,6 @@ def _workspace_path(relative_path: str, *, allowed_roots: set[str]) -> PurePosix
     if path.parts[0] not in allowed_roots:
         raise ValueError("Sandbox file path is outside the permitted workspace area")
     return WORKSPACE_ROOT / path
-
-
-class OpenSandboxProvider:
-    """创建禁网、资源受限且每次使用后销毁的 OpenSandbox 沙盒。"""
-
-    def __init__(self, settings: OpenSandboxSettings, *, lease_manager: Any) -> None:
-        self._settings = settings
-        self._lease_manager = lease_manager
-        self._semaphore = asyncio.Semaphore(settings.max_concurrent_per_worker)
-
-    @property
-    def settings(self) -> OpenSandboxSettings:
-        """Expose the validated resource limits used by independent validation."""
-        return self._settings
-
-    async def _renew_global_lease(
-        self,
-        *,
-        job_id: str,
-        worker_id: str,
-        lease_epoch: int,
-        lease_token: str,
-        lease_seconds: int,
-        lease_lost: asyncio.Event,
-        execution_guard: Any,
-        session_ref: list[OpenSandboxSession],
-    ) -> None:
-        while True:
-            await asyncio.sleep(SANDBOX_LEASE_HEARTBEAT_SECONDS)
-            try:
-                if execution_guard is not None:
-                    ensure_active = getattr(execution_guard, "ensure_active", None)
-                    if callable(ensure_active):
-                        result = ensure_active()
-                        if inspect.isawaitable(result):
-                            await result
-                renewed = await asyncio.to_thread(
-                    self._lease_manager.renew,
-                    job_id,
-                    worker_id,
-                    lease_epoch,
-                    lease_token,
-                    lease_seconds=lease_seconds,
-                )
-            except Exception:
-                renewed = False
-            if not renewed:
-                lease_lost.set()
-                if session_ref:
-                    await session_ref[0].revoke()
-                return
-
-    @asynccontextmanager
-    async def open_session(
-        self,
-        *,
-        job_id: str,
-        worker_id: str,
-        lease_epoch: int,
-        execution_guard: Any,
-        original_csv: bytes,
-    ) -> AsyncIterator[OpenSandboxSession]:
-        if not original_csv:
-            raise ValueError("Frozen source CSV is empty")
-        if len(original_csv) > self._settings.max_input_bytes:
-            raise SandboxFileLimitError("Frozen source CSV exceeds its configured size limit")
-        if not job_id or len(job_id) > 80 or not re.fullmatch(r"[A-Za-z0-9-]+", job_id):
-            raise ValueError("Sandbox job identity is invalid")
-        if not worker_id or worker_id != worker_id.strip() or lease_epoch < 0:
-            raise ValueError("Sandbox worker lease identity is invalid")
-
-        await self._semaphore.acquire()
-        lease_token = str(uuid4())
-        lease_seconds = _sandbox_capacity_lease_seconds(self._settings)
-        lease_acquired = False
-        sandbox: Sandbox | None = None
-        heartbeat_task: asyncio.Task[None] | None = None
-        lease_lost = asyncio.Event()
-        session_ref: list[OpenSandboxSession] = []
-        try:
-            deadline = asyncio.get_running_loop().time() + self._settings.global_capacity_wait_seconds
-            while not lease_acquired:
-                if execution_guard is not None:
-                    ensure_active = getattr(execution_guard, "ensure_active", None)
-                    if callable(ensure_active):
-                        result = ensure_active()
-                        if inspect.isawaitable(result):
-                            await result
-                lease_acquired = await asyncio.to_thread(
-                    self._lease_manager.try_acquire,
-                    job_id,
-                    worker_id,
-                    lease_epoch,
-                    lease_token,
-                    lease_seconds=lease_seconds,
-                )
-                if lease_acquired:
-                    break
-                if asyncio.get_running_loop().time() >= deadline:
-                    raise SandboxCapacityTimeout(
-                        "Global OpenSandbox capacity was not available before the wait limit"
-                    )
-                await asyncio.sleep(1)
-
-            heartbeat_task = asyncio.create_task(
-                self._renew_global_lease(
-                    job_id=job_id,
-                    worker_id=worker_id,
-                    lease_epoch=lease_epoch,
-                    lease_token=lease_token,
-                    lease_seconds=lease_seconds,
-                    lease_lost=lease_lost,
-                    execution_guard=execution_guard,
-                    session_ref=session_ref,
-                )
-            )
-            sandbox = await Sandbox.create(
-                SandboxImageSpec(self._settings.image),
-                timeout=timedelta(seconds=self._settings.sandbox_ttl_seconds),
-                ready_timeout=timedelta(seconds=self._settings.api_timeout_seconds),
-                env={"PYTHON_VERSION": "3.11"},
-                resource={
-                    "cpu": self._settings.cpu_limit,
-                    "memory": self._settings.memory_limit,
-                },
-                network_policy=NetworkPolicy(default_action="deny", egress=[]),
-                entrypoint=["/opt/code-interpreter/code-interpreter.sh"],
-                metadata={
-                    "application": "causalagent",
-                    "purpose": "data-preparation",
-                    "job": job_id,
-                },
-                connection_config=self._settings.connection_config(),
-            )
-            session = OpenSandboxSession(
-                sandbox,
-                self._settings,
-                lease_lost=lease_lost,
-                execution_guard=execution_guard,
-            )
-            session_ref.append(session)
-            await session._initialize(original_csv)
-            yield session
-        finally:
-            try:
-                if sandbox is not None:
-                    destroy_task = asyncio.create_task(sandbox.destroy())
-                    try:
-                        await asyncio.shield(destroy_task)
-                    except asyncio.CancelledError:
-                        await asyncio.shield(destroy_task)
-                        raise
-            finally:
-                try:
-                    if heartbeat_task is not None:
-                        heartbeat_task.cancel()
-                        await asyncio.gather(heartbeat_task, return_exceptions=True)
-                    if lease_acquired:
-                        await asyncio.to_thread(
-                            self._lease_manager.release,
-                            job_id,
-                            worker_id,
-                            lease_epoch,
-                            lease_token,
-                        )
-                finally:
-                    self._semaphore.release()
 
 
 def _agent_command_options(

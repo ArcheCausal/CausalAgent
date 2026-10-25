@@ -8,7 +8,12 @@ from typing import Any
 
 from app.db import get_write_connection
 from Agent.measurement_semantics import semantic_kinds_from_validation_report
+from Agent.data_processing.parameters import (
+    PARAMETER_BINDING_KEY, parameter_binding, restore_parameter_binding,
+    parameter_identity, validate_parameter_history,
+)
 from Agent.data_processing.plans import (
+    _answer_object,
     build_processing_plan_version,
     plan_confirmation_version,
 )
@@ -21,6 +26,80 @@ class DatasetPersistenceError(RuntimeError):
 _PROCESSING_PLAN_KEY = "processing_plan_identity"
 
 
+def _verify_parameter_sources(
+    cursor: Any, job_id: str, changes: list[dict[str, Any]], *, include_initial: bool = False,
+) -> str:
+    evidence: list[str] = []
+    previous_sequence = -1
+    for record in changes:
+        cursor.execute(
+            "SELECT input_id, input_text, sequence FROM analysis_job_inputs "
+            "WHERE job_id = %s AND input_id = %s AND input_type = 'resume'",
+            (job_id, record["source_input_id"]),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise DatasetPersistenceError("parameter revision source does not belong to this Job")
+        if int(row["sequence"]) <= previous_sequence:
+            raise DatasetPersistenceError("parameter revision sources are not in input order")
+        previous_sequence = int(row["sequence"])
+        if include_initial:
+            evidence.append(str(row["input_text"]))
+    if include_initial:
+        cursor.execute(
+            "SELECT input_text FROM analysis_job_inputs WHERE job_id = %s AND input_type = 'initial' "
+            "ORDER BY sequence LIMIT 1", (job_id,),
+        )
+        initial = cursor.fetchone()
+        if not initial:
+            raise DatasetPersistenceError("parameter evidence has no initial Job input")
+        evidence.insert(0, str(initial["input_text"]))
+    return "\n".join(evidence)
+
+
+def read_parameter_answer(identity: Any, *, question_id: str, answer: Any) -> dict[str, Any]:
+    """经持久化 interrupt 关联工具 ID 与外层问题 ID，读取真实答复来源。"""
+    with get_write_connection() as connection:
+        try:
+            connection.start_transaction()
+            cursor = connection.cursor(dictionary=True)
+            job_id, _worker, _attempt, _epoch, _user, source_hash = _identity_values(identity)
+            _lock_current_job(cursor, identity, source_hash)
+            cursor.execute(
+                "SELECT i.input_id, i.input_text FROM analysis_job_inputs AS i "
+                "WHERE i.job_id = %s AND i.input_type = 'resume' AND EXISTS ("
+                "SELECT 1 FROM analysis_job_events AS e WHERE e.job_id = i.job_id "
+                "AND e.event_type = 'interrupt' "
+                "AND JSON_UNQUOTE(JSON_EXTRACT(e.payload_json, '$.question_id')) = i.question_id "
+                "AND JSON_UNQUOTE(JSON_EXTRACT(e.payload_json, '$.interaction.question_id')) = %s "
+                "AND JSON_UNQUOTE(JSON_EXTRACT(e.payload_json, '$.interaction.interaction_type')) "
+                "IN ('data_processing_question', 'data_processing_plan_confirmation')) "
+                "ORDER BY i.sequence DESC LIMIT 2 FOR UPDATE",
+                (job_id, question_id),
+            )
+            rows = cursor.fetchall()
+            if len(rows) != 1 or _answer_object(rows[0]["input_text"]) != _answer_object(answer):
+                raise DatasetPersistenceError("answer does not match the trusted question input")
+            row = rows[0]
+            connection.commit()
+            return {"source_input_id": int(row["input_id"]), "answer": _answer_object(row["input_text"])}
+        except BaseException:
+            connection.rollback()
+            raise
+
+
+def require_candidate_parameters(
+    metadata: dict[str, Any], *, job_id: str, parameters: dict[str, Any],
+    changes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    restored = restore_parameter_binding(metadata, job_id=job_id)
+    validate_parameter_history(parameters, changes, job_id=job_id)
+    if (parameter_identity(parameters) != parameter_identity(restored["analysis_parameters"])
+            or changes != restored["analysis_parameter_changes"]):
+        raise DatasetPersistenceError("candidate parameters differ from the final parent parameters")
+    return restored
+
+
 def _candidate_plan_binding(
     *,
     job_id: str,
@@ -29,6 +108,8 @@ def _candidate_plan_binding(
 ) -> tuple[dict[str, Any], str, str]:
     """校验 MySQL 产物中保存的方案版本，并返回原始说明、版本和语义身份。"""
     stored_metadata = dict(metadata)
+    restore_parameter_binding(stored_metadata, job_id=job_id)
+    stored_metadata.pop(PARAMETER_BINDING_KEY)
     binding = stored_metadata.pop(_PROCESSING_PLAN_KEY, None)
     if not isinstance(binding, dict):
         raise DatasetPersistenceError("candidate has no confirmed processing plan identity")
@@ -144,7 +225,8 @@ def _lock_current_job(cursor: Any, identity: Any, source_hash: str) -> dict[str,
 
     cursor.execute(
         """
-        SELECT job_id, user_id, status, worker_id, attempt_count, lease_epoch,
+        SELECT job_id, user_id, session_id, analysis_context_id, input_object_id,
+               status, worker_id, attempt_count, lease_epoch,
                execution_state, input_file_hash, prepared_dataset_id
         FROM analysis_jobs
         WHERE job_id = %s
@@ -216,6 +298,8 @@ def save_candidate(
     metadata: dict[str, Any],
     plan_version: str,
     semantic_identity: str,
+    analysis_parameters: dict[str, Any],
+    analysis_parameter_changes: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """幂等保存候选 CSV、脚本和元数据，并按 Job 锁分配单调 revision。"""
     if not isinstance(data_bytes, bytes) or not isinstance(script_bytes, bytes):
@@ -229,7 +313,7 @@ def save_candidate(
     )
     if not isinstance(metadata, dict):
         raise DatasetPersistenceError("metadata must be a JSON object")
-    if _PROCESSING_PLAN_KEY in metadata:
+    if _PROCESSING_PLAN_KEY in metadata or PARAMETER_BINDING_KEY in metadata:
         raise DatasetPersistenceError("metadata uses a reserved processing plan field")
     try:
         expected_plan_version = build_processing_plan_version(
@@ -244,6 +328,9 @@ def save_candidate(
         raise DatasetPersistenceError("confirmed plan version does not match candidate content")
     stored_metadata = {
         **metadata,
+        PARAMETER_BINDING_KEY: parameter_binding(
+            analysis_parameters, analysis_parameter_changes, job_id=_identity_values(identity)[0],
+        ),
         _PROCESSING_PLAN_KEY: {
             "plan_version": plan_version,
             "semantic_identity": semantic_identity,
@@ -262,6 +349,7 @@ def save_candidate(
             cursor = connection.cursor(dictionary=True)
             job = _lock_current_job(cursor, identity, source_hash)
             job_id = str(job["job_id"])
+            _verify_parameter_sources(cursor, job_id, analysis_parameter_changes)
             if _latest_plan_confirmation_version(cursor, job_id) != plan_version:
                 raise DatasetPersistenceError(
                     "the current Job input does not confirm this processing plan"
@@ -453,7 +541,10 @@ def record_validation(
             raise
 
 
-def bind_candidate(identity: Any, *, dataset_id: int, source_hash: str) -> dict[str, Any]:
+def bind_candidate(
+    identity: Any, *, dataset_id: int, source_hash: str,
+    analysis_parameters: dict[str, Any], analysis_parameter_changes: list[dict[str, Any]],
+) -> dict[str, Any]:
     """只把同一 Job 的 validated candidate 绑定为其 prepared dataset。"""
     if isinstance(dataset_id, bool) or not isinstance(dataset_id, int) or dataset_id <= 0:
         raise DatasetPersistenceError("dataset_id must be a positive integer")
@@ -485,6 +576,12 @@ def bind_candidate(identity: Any, *, dataset_id: int, source_hash: str) -> dict[
             metadata = dataset["metadata"]
             if isinstance(metadata, str):
                 metadata = json.loads(metadata)
+            require_candidate_parameters(
+                metadata, job_id=str(job["job_id"]), parameters=analysis_parameters,
+                changes=analysis_parameter_changes,
+            )
+            _verify_parameter_sources(cursor, str(job["job_id"]), analysis_parameter_changes)
+            _candidate_plan_binding(job_id=str(job["job_id"]), source_hash=source_hash, metadata=metadata)
             binding = metadata.get(_PROCESSING_PLAN_KEY) if isinstance(metadata, dict) else None
             stored_version = (
                 binding.get("plan_version") if isinstance(binding, dict) else None
@@ -542,6 +639,7 @@ def bind_candidate(identity: Any, *, dataset_id: int, source_hash: str) -> dict[
 
 def read_bound_dataset_identity(identity: Any) -> dict[str, Any] | None:
     """Rehydrate a previously bound dataset identity without loading its BLOB."""
+    from Database.analysis_contexts import read_job_analysis_context
     nested_identity = getattr(identity, "trusted_identity", None)
     if nested_identity is not None:
         identity = nested_identity
@@ -563,6 +661,7 @@ def read_bound_dataset_identity(identity: Any) -> dict[str, Any] | None:
             if job["prepared_dataset_id"] is None:
                 connection.commit()
                 return None
+            analysis_context = read_job_analysis_context(cursor, job=job)
             cursor.execute(
                 """
                 SELECT d.id, d.status, d.source_hash, d.data_hash, d.data_object_id,
@@ -596,6 +695,14 @@ def read_bound_dataset_identity(identity: Any) -> dict[str, Any] | None:
             if not isinstance(metadata, dict) or not isinstance(report, dict):
                 raise DatasetPersistenceError("bound dataset metadata or report is invalid")
             semantic_kinds = semantic_kinds_from_validation_report(report)
+            restored = restore_parameter_binding(metadata, job_id=str(job["job_id"]))
+            if any(analysis_context.get(key) != restored["analysis_parameters"].get(key)
+                   for key in ("target", "treatment", "analysis_question")):
+                raise DatasetPersistenceError("bound dataset parameters differ from its Job context")
+            evidence_text = _verify_parameter_sources(
+                cursor, str(job["job_id"]), restored["analysis_parameter_changes"], include_initial=True,
+            )
+            _candidate_plan_binding(job_id=str(job["job_id"]), source_hash=source_hash, metadata=metadata)
             connection.commit()
             return {
                 "dataset_id": int(row["id"]),
@@ -603,6 +710,10 @@ def read_bound_dataset_identity(identity: Any) -> dict[str, Any] | None:
                 "data_hash": str(row["data_hash"]),
                 "filename": str(metadata.get("output_filename") or "prepared.csv"),
                 "semantic_kinds": semantic_kinds,
+                "metadata": metadata,
+                "analysis_context": analysis_context,
+                **restored,
+                "parameter_evidence_text": evidence_text,
             }
         except BaseException:
             connection.rollback()
@@ -771,6 +882,8 @@ def read_candidate(
                     metadata=metadata,
                 )
             )
+            restored = restore_parameter_binding(metadata, job_id=str(job["job_id"]))
+            _verify_parameter_sources(cursor, str(job["job_id"]), restored["analysis_parameter_changes"])
             if _latest_plan_confirmation_version(cursor, str(job["job_id"])) != plan_version:
                 raise DatasetPersistenceError(
                     "candidate processing plan is no longer confirmed by the current Job input"

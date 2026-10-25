@@ -135,9 +135,9 @@ def build_data_processing_run_id(
     *,
     job_id: str | UUID,
     source_input_identity: str,
-    semantic_identity: str,
+    semantic_identity: str | None = None,
 ) -> str:
-    """为同一 Job、原始输入和研究语义生成稳定的数据处理子图 ID。"""
+    """同一 Job 和冻结输入保持一个处理空间，研究参数修订不改变身份。"""
 
     canonical_job_id = str(UUID(str(job_id)))
     payload = {
@@ -145,7 +145,6 @@ def build_data_processing_run_id(
         "source_input_identity": _non_blank(
             source_input_identity, field_name="source_input_identity"
         ),
-        "semantic_identity": _non_blank(semantic_identity, field_name="semantic_identity"),
     }
     identity = uuid5(
         DATA_PROCESSING_RUN_NAMESPACE,

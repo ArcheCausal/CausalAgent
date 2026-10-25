@@ -194,6 +194,26 @@ def build_context_index(
     return entries
 
 
+def rebuild_context_index(
+    previous_index: Any, previous_context: Any, switched_to_id: str | None, *, limit: int = 8,
+) -> list:
+    """切换后保留旧上下文索引，并移除当前上下文，不额外读库。"""
+    entries: list = []
+    if isinstance(previous_context, dict) and previous_context.get("analysis_context_id"):
+        entries.extend(build_context_index([previous_context]))
+    if isinstance(previous_index, list):
+        entries.extend(entry for entry in previous_index if isinstance(entry, dict))
+    unique: list = []
+    seen: set = set()
+    for entry in entries:
+        context_id = entry.get("analysis_context_id")
+        if not context_id or context_id in seen or context_id == switched_to_id:
+            continue
+        seen.add(context_id)
+        unique.append(entry)
+    return unique[: max(0, int(limit))]
+
+
 def index_prompt_view(index: Sequence[Mapping[str, Any]] | None) -> str:
     """把历史上下文索引渲染成模型可读文本，只使用展示信息。"""
     lines: list[str] = []
