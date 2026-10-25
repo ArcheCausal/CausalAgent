@@ -4,13 +4,13 @@
 
 适用范围：部署包已经下载、解压并由部署脚本启动，需要确认密钥、镜像、卷持久化、RAG 和数据库行为时使用；本地静态检查见 [`testing.md`](testing.md)，发布步骤见 [`deployment.md`](deployment.md)。
 
-这些检查需要真实服务器、Docker、MySQL/PostgreSQL、模型服务和测试账号。单元测试或 Compose 配置解析不能替代真实验收。故障注入、容器停止重建和评测数据清理仅在具有独立 project 与数据卷的预发环境进行；生产检查现有运行状态及已保存的预发证据。
+这些检查需要真实服务器、Docker Compose、宿主 Python 3.11 或更新版本、MySQL/PostgreSQL、模型服务和测试账号。单元测试或 Compose 配置解析不能替代真实验收。故障注入、容器停止重建和评测数据清理仅在具有独立 project 与数据卷的预发环境进行；生产检查现有运行状态及已保存的预发证据。
 
 ## 通用前提
 
 普通配置、密钥文件和服务器数据目录应已准备好。以下命令在同一个 Bash 会话执行；预发将 Compose 文件改为 `docker-compose.staging.yml`，并使用独立的普通配置和数据卷。
 
-`CAUSALAGENT_COMPOSE_FILE` 是部署/回滚脚本读取的项目变量；手工 Compose 命令仍需传 `-f`。`verify.sh` 当前没有传 `-f`，因此同时设置 Docker Compose 支持的 `COMPOSE_FILE`，确保该脚本也选择相同文件。
+`CAUSALAGENT_COMPOSE_FILE` 由部署、校验和回滚脚本读取；手工 Compose 命令仍需传 `-f`。以下共用函数显式选择同一文件。
 
 `COMPOSE_PROJECT_NAME` 必须与部署时一致。不要在调用 shell 中保留旧的 `APP_IMAGE`、`STAGING_APP_IMAGE` 等镜像变量，避免覆盖 `images.env`。
 
@@ -65,8 +65,8 @@ release_compose config --quiet
 
 ## 二 清单、Compose 和运行中镜像
 
-1. 执行 `bash scripts/verify.sh "$release_dir"`。这只检查清单引用带 digest、密钥权限、必需键名和 Compose 可解析，不代表密钥完整格式、文件摘要或服务健康已通过。
-2. 将 `release.manifest.json`、`images.lock.json` 与 `release_compose config` 中实际使用的镜像逐项比较。app、worker、monitor、cleanup、rag-eval-worker 和 db-bootstrap 对应清单的 `app`；`causal-mcp` 对应 `mcp`；生产 `mysql` 或预发 `mysql-primary` 对应 `mysql_primary`；其余数据库、网关、搜索和观测镜像按服务映射比较。只比较所选拓扑实际使用的镜像，生产不会启动清单中的全部服务。
+1. 执行 `bash scripts/verify.sh "$release_dir"`。它检查镜像锁与清单、Compose 实际镜像、沙盒文件摘要、独立密钥权限和格式及上游配置引用；不能证明服务健康、真实沙盒网络隔离或完整 Job 已通过。
+2. 将 `release.manifest.json`、`images.lock.json` 与 `release_compose config` 中实际使用的镜像逐项比较。app、worker、sandbox-controller、monitor、cleanup、rag-eval-worker 和 db-bootstrap 对应清单的 `app`；`causal-mcp` 对应 `mcp`；生产 `mysql` 或预发 `mysql-primary` 对应 `mysql_primary`；`opensandbox` 对应 `opensandbox_server`。控制服务的处理镜像须等于 `sandbox_processing`，execd 与 egress 配置须等于各自清单引用。只比较所选拓扑实际使用的镜像，生产不会启动清单中的全部服务。
 3. 配置输出不能证明运行中的容器已经更新。读取实际容器的镜像引用并与同一清单比较：
 
    ```bash
@@ -82,7 +82,7 @@ release_compose config --quiet
 
 ## 三 服务器不挂载应用源码
 
-检查 `release_compose config` 中 app、worker、causal-mcp、monitor、cleanup 和 rag-eval-worker 的挂载，只包含部署包配置、命名卷和服务器数据目录，不包含宿主仓库中的 `./Agent`、`./app` 或完整源码。确认服务器知识库与资产目录包含实际数据，不能仅检查目录存在。
+检查 `release_compose config` 中 app、worker、sandbox-controller、causal-mcp、monitor、cleanup 和 rag-eval-worker 的挂载，只包含部署包配置、命名卷和服务器数据目录，不包含宿主仓库中的 `./Agent`、`./app` 或完整源码。OpenSandbox 的只读 `server_entrypoint.py` 是部署适配文件。确认服务器知识库与资产目录包含实际数据，不能仅检查目录存在。
 
 ## 四 命名卷持久化
 
@@ -115,6 +115,16 @@ done
 ## 九 数据库、MCP、SSE 与 worker
 
 按 [`testing.md`](testing.md) 分别验证所选拓扑：预发包括 MySQL 主从；当前生产 Compose 只有单 MySQL，没有副本、SearXNG 或开发观测服务。分别检查数据库 readiness、bootstrap 与 PostgreSQL checkpoint setup、causal-mcp `/ready`、SSE Last-Event-ID 重放、worker lease/fencing 恢复及真实模型调用。外部搜索仅在另行部署并启用时验证。
+
+## 十 沙盒与研究参数
+
+先核对三个独立沙盒密钥文件的实际消费者：Worker 只挂控制 token，控制服务只挂独立数据库密钥、控制 token 和上游 key，OpenSandbox 只挂上游 key。Worker 不加入上游网络，也不挂 Docker socket。本轮保留 Alloy 已有日志采集权限。
+
+在独立预发中，通过真实 Worker 客户端验证申请、输入 hash、预览、非 root 执行、原始文件只读、受限日志、产物 hash、销毁与 MySQL 关闭记录。分别保存 IPv4/IPv6 实测和实际 egress/bridge/转发配置证据。健康接口不能代替执行及文件代理验证。
+
+故障场景包括最后一个名额并发竞争、创建响应丢失、执行响应丢失、销毁失败、Worker 撤销或删除、控制服务重启，以及命名锁丢失。确认未知操作不重跑，未确认资源结束前不释放占用；只因时间经过而减少占用应判定失败。未知创建且无法确认远端不存在时，记录可以继续占用，需保留并人工核查，不能直接改库释放。
+
+研究参数必须覆盖两次澄清后重启恢复、方案确认自由文本修订、校验失败重入，以及最终上下文写入成功但父 checkpoint 尚未提交时重放。核对修订来源、版本、候选身份和历史结果上下文，再完成真实上传至报告的全流程。分层入口见 [数据处理验证](testing.md#opensandbox-数据处理验证)。
 
 ## 判定
 

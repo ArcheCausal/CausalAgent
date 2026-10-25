@@ -57,7 +57,7 @@ Docker Compose 中 `db-bootstrap` 是一次性服务，`app`、worker、monitor 
 - `c9d0e1f2a3b4` 新建 `analysis_contexts` 并向 `sessions`、`analysis_jobs`、`analysis_job_inputs` 增加可空列；不回填历史 Session 或历史 Job 的上下文，旧数据在下一次分析或追问时按需创建。downgrade 只删除这些新结构与对应外键，不删除会话、Job、输入或报告数据。
 - `d0e1f2a3b4c5` 只向缺少对应关系的用户补写 `user_roles`：所有用户至少获得 `user` 角色，兼容字段仍为 `admin` 的用户同时保留管理员角色；不修改 `users`、角色种子或权限种子。由于新增关系无法与迁移前已存在的合法授权区分，downgrade 不删除任何角色关系。
 - `e1f2a3b4c5d6` 为 `analysis_jobs` 增加 `current_interaction JSON`、`input_wait_expires_at DATETIME(6)` 和 `(status, input_wait_expires_at)` 索引，并把 `execution_release_reason` 扩展为包含 `input_timeout`；这些字段供公开处理确认与五分钟过期扫描使用。downgrade 只移除新增字段与索引并收回枚举值，不删除 Job、事件或用户数据；回退前必须确认不存在仍在等待的 Job。
-- `x1y2z3a4b5c6` 创建 `analysis_job_datasets`、`analysis_sandbox_capacity`、`analysis_sandbox_leases`，并在 `analysis_jobs` 增加可空 `prepared_dataset_id`。downgrade 在删除前检查数据处理产物和沙盒租约记录；只要仍有记录就拒绝回退，不会自动删除数据。
+- `x1y2z3a4b5c6` 创建 `analysis_job_datasets`、`analysis_sandbox_sessions`，并在 `analysis_jobs` 增加可空 `prepared_dataset_id`。downgrade 在删除前检查产物与全部沙盒生命周期记录；包括已关闭资源在内，只要仍有记录就拒绝回退，不会自动删除数据。
 - 迁移脚本属于高风险历史事实，不应为了让本地旧库“看起来能升级”而静默删除、回填或修改历史 migration。
 
 ## PostgreSQL checkpoint

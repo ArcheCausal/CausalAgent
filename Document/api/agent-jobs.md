@@ -32,7 +32,7 @@
 
 `input_user_file_id` 和 `web_search_enabled` 都可省略；`web_search_enabled` 缺省为 `false`。消息必须是非空文本，长度受服务端限制。请求必须带标准 UUID v4 `Idempotency-Key`。`web_search_enabled` 只接受 JSON 布尔值；字符串 `"true"`、`"false"`、数字、`null` 等非布尔值在接口层返回 `400`，服务层在创建 Job 前再次严格校验。该开关参与请求指纹，因此同一个幂等键不能把搜索开关从开启改为关闭或反之。
 
-服务端在一个 MySQL 事务中检查会话归属、活动 Job、文件归属，冻结文件快照，按该文件复用当前 Session 的默认分析上下文或新建一个，然后写入 Job（含 `analysis_context_id`）、initial input（含 `analysis_context_id`）、用户聊天消息和包含 `web_search_enabled` 的请求指纹。target 与 treatment 由后续 fold 节点确定后回填上下文；响应不返回上下文 ID，前端不需要传入。
+服务端在一个 MySQL 事务中检查会话归属、活动 Job、文件归属，冻结文件快照，按该文件复用当前 Session 的默认分析上下文或新建一个，然后写入 Job（含 `analysis_context_id`）、initial input（含 `analysis_context_id`）、用户聊天消息和包含 `web_search_enabled` 的请求指纹。fold 提取初始参数，数据处理完成后由现有父节点使用最终研究参数幂等绑定上下文；响应不返回上下文 ID，前端不需要传入。
 
 请求上下文中的 `X-Request-ID` 会在入口校验或生成，并作为创建 Job 的原始关联 ID 保存到 `analysis_jobs.request_id`；历史 Job 该字段可以为 `NULL`。同一 `Idempotency-Key` 重放时只返回首次创建的 Job，不会用后续请求的 `X-Request-ID` 覆盖首次值；该内部关联字段不进入普通用户响应。
 

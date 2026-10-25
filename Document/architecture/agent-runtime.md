@@ -15,13 +15,13 @@ MySQL readiness
   → MCP Client pool connect/handshake
   → 静态 Algorithm Registry 与领域工具
   → RAG active release readiness
-  → OpenSandbox 配置校验与 Provider 构造
+  → 沙盒控制服务客户端配置校验与 Provider 构造
   → 数据处理 Agent、因果 Deep Agent 与父图编译
   → worker ready
   → slots claim Job
 ```
 
-`ProcessRuntime` 持有进程级 MCP Client pool、`McpAlgorithmExecutor`、静态 Registry、PostgreSQL Store/checkpointer、RAG readiness、领域工具、OpenSandbox Provider、两个 Agent 和编译后的父图。启动时只校验 OpenSandbox 配置并构造 Provider；创建沙盒时才访问 API。`SlotRuntime` 只引用这些共享对象，不为每个 slot 重建 graph 或创建 stdio MCP session。每次 Job invocation 再创建 `AgentRunContext`，绑定可信 Job、attempt、lease、输入身份、execution guard、executor、filesystem backend、RAG 状态、联网搜索开关、沙盒 Provider、数据处理 Agent 和事件 sink；这些运行时对象不进入 State 或 checkpoint。
+`ProcessRuntime` 持有进程级 MCP Client pool、`McpAlgorithmExecutor`、静态 Registry、PostgreSQL Store/checkpointer、RAG readiness、领域工具、沙盒控制服务 Provider、两个 Agent 和编译后的父图。启动时校验控制服务连接和独立凭据，创建沙盒时调用受限控制 API；上游 OpenSandbox 密钥不进入 Worker。`SlotRuntime` 只引用这些共享对象，不为每个 slot 重建 graph 或创建 stdio MCP session。每次 Job invocation 再创建 `AgentRunContext`，绑定可信 Job、attempt、lease、输入身份、execution guard、executor、filesystem backend、RAG 状态、联网搜索开关、沙盒 Provider、数据处理 Agent 和事件 sink；这些运行时对象不进入 State 或 checkpoint。
 
 进程级 MCP Client pool 与 worker slot 数量相互独立。默认 execute lane 为 `2 × 1`，control lane 为 `1 × 2`；控制 lane 只负责取消，不增加服务端算法并发。启动任一步失败都会在 `worker.startup.ready` 前终止进程，不领取 Job。
 
@@ -35,9 +35,15 @@ MySQL readiness
 agent → fold → data_processing → validate_dataset → bind_dataset → preprocess → deep_agent → finalization_gate → report
 ```
 
-父图直接表达的其余路径为 `agent → report`（按当前分析上下文重新生成报告）、`agent → context_switch` 与 `context_switch → fold / report / inquiry_answer / normal_chat`（解析并切换分析上下文后再继续）；普通聊天和报告追问仍由 `normal_chat`、`inquiry_answer` 路径结束。新分析先把冻结的原始 CSV 和研究目标交给数据处理子图。数据处理 Agent 可通过现有 interrupt/resume 契约澄清观察单位和转换语义；它只能调用受控领域工具，不能使用内置 Shell、文件写入工具或通用子 Agent。脚本经 OpenSandbox API 在 Python 3.11 处理镜像中运行，原始输入只读，沙盒创建请求默认拒绝所有外连。候选 CSV、脚本和说明先写入 MySQL；独立校验节点读取实际文件，通过后才绑定 prepared_dataset_id 并重建分析画像。因果分析阶段的所有算法调用使用同一份已校验数据，不在 MCP 或算法适配器中改写输入。
+父图直接表达的其余路径为 `agent → report`（按当前分析上下文重新生成报告）、`agent → context_switch` 与 `context_switch → fold / report / inquiry_answer / normal_chat`（解析并切换分析上下文后再继续）；普通聊天和报告追问仍由 `normal_chat`、`inquiry_answer` 路径结束。新分析先把冻结的原始 CSV 和研究目标交给数据处理子图。数据处理 Agent 可通过现有 interrupt/resume 契约澄清观察单位和转换语义；它只能调用受控领域工具，不能使用内置 Shell、文件写入工具或通用子 Agent。脚本由独立控制服务经 OpenSandbox API 在 Python 3.11 处理镜像中运行，原始输入只读，沙盒创建请求默认拒绝所有外连。候选 CSV、脚本和说明先写入 MySQL；独立校验节点读取实际文件，通过后才绑定 prepared_dataset_id 并重建分析画像。因果分析阶段的所有算法调用使用同一份已校验数据，不在 MCP 或算法适配器中改写输入。
 
 候选数据集和提交后的脚本正文保存在 MySQL file_objects，analysis_job_datasets 记录候选 revision、来源 hash、对象引用和验证报告，Job 保存最终选中产物 ID。独立校验器先流式检查 CSV 行列结构，并限制最多 1,000,000 个数据单元格，再将文件载入 DataFrame 计算画像。PostgreSQL checkpoint 保存当前阶段、运行标识、产物引用、方案说明及尚待执行的脚本草稿，不保存 CSV 正文或 DataFrame。每次脚本执行都创建短期沙盒；用户等待答复时不会保留正在运行的命令。恢复时按原始文件与已保存脚本重新建立工作区；候选幂等身份包含文件、脚本及附带确认版本的规范化元数据，重复提交返回原 revision。数据处理子图使用以 Job 为 thread、以处理运行标识分隔的 namespace，因此现有 Job 清理 outbox 可一次清理该 Job 的全部处理 checkpoint。
+
+父 State 和处理子 State 均保存 analysis_parameters 与 analysis_parameter_changes。fold 仅提取初始研究参数，其输出 schema 拒绝冲突测量类型和空证据，结构不合法时使用统一入口的有界重试；数据澄清和方案确认中的自由文本均经统一结构化入口提取修订，来源 ID 由 MySQL 输入账本提供；读取时通过已持久化的 interrupt 事件关联外层中断 ID 与内层工具调用 ID，不能直接把两者视为同一个问题 ID。缺席字段保持原值，显式 null 清空，实际变化才追加 revision；相同来源重放去重，冲突拒绝。参数版本不包含派生画像。含义或范围变化使旧确认失效，歧义未解决时不能确认或执行。
+
+处理运行身份只依赖 Job 和冻结输入；研究参数变化不切换 checkpoint namespace。初始参数只写入首次子图启动，恢复及校验重试优先使用已有子 State。父包装节点显式接收最终参数、修订链和候选身份，再幂等完成上下文绑定；已有历史结果的研究不能被改写含义，必要时新建上下文。候选 metadata 保存最终参数与方案身份，独立校验和绑定逐次核对；已绑定产物恢复时同时恢复对应参数。无法识别的旧格式处理 checkpoint 明确拒绝继续。沙盒 API 与容量事实见 [沙盒控制服务](sandbox-controller.md)。
+
+处理阶段的开始进度事件另行包含当前 attempt 和父任务 ID。恢复或校验重试产生新的阶段实例时使用不同事件键，同次任务重放仍可去重；公开阶段事件的身份不改变子图 checkpoint 或沙盒申请身份。
 
 父图 checkpoint 使用 `thread_id=analysis_jobs.job_id` 和空 namespace。Deep Agent 子图使用同一个 PostgreSQL saver 和稳定的 `thread_id=deep-agent:<uuid5(job_id)>`。父图调用配置传入 `checkpoint_ns=deep_agent_v1`，当前 LangGraph 独立调用的子图实际保存在该 thread 的根 namespace（空字符串）；检查持久化状态时应读取实际保存的 namespace，不能仅从调用配置推定存储位置。该配置与存储位置差异下的正式中断恢复和故障接管仍需专门验证。子图 State 保存的分析身份由 Job、当前冻结输入和算法 Spec 摘要构成；worker、attempt 和 lease 只代表本次执行权限。输入身份读取的是 invocation 级可刷新引用，服务端重新冻结输入或切换分析上下文后，旧执行产物不会被复用。Gate 要求修正时，父图通过同一子图读取状态并追加受控指令。
 
@@ -57,7 +63,7 @@ cleanup outbox 在同一次清理中删除父图 Job thread 和独立的 Deep Ag
 
 `Session`、`AnalysisContext`、`Job` 和 checkpoint 各管一段事实：Session 是用户可见的会话容器；AnalysisContext 是 MySQL 中的跨 Job 业务事实，保存创建时的文件快照、分析参数、最新结构化算法摘要、RAG/Web 证据摘要和最新报告引用；Job 是一次具体执行并绑定一个上下文；checkpoint 只负责当前 Job 的执行恢复、中间 State 和虚拟文件。一个 Session 可以拥有多个 AnalysisContext，`sessions.active_analysis_context_id` 只表示当前默认上下文。
 
-`fold` 提取目标和处理变量后立即完成上下文绑定，再进入数据准备。`preprocess` 只强读已绑定的数据集并重建画像，不切换上下文。切到不同上下文时清除旧数据绑定，同一上下文的幂等重放保留绑定；同一 Job 恢复继续使用其已校验数据。报告后的普通追问读取报告与分析事实，不重新读取 CSV；新 Job 不自动继承旧 Job 的处理数据。
+`fold` 只提取初始参数，数据处理完成后由现有父包装节点按最终参数绑定上下文，再进入独立校验与数据绑定。`preprocess` 只强读已绑定的数据集并重建画像，不切换上下文。切到不同上下文时清除旧数据绑定，同一上下文的幂等重放保留绑定；恢复已绑定产物时同时从数据库回填当前 Job 的上下文和最终参数。历史研究参数快照取自已有分析产物，普通聊天或报告追问不会遮住该快照。报告后的普通追问读取报告与分析事实，不重新读取 CSV；新 Job 不自动继承旧 Job 的处理数据。
 
 `agent_node` 用一次结构化调用判断意图（`normal_chat`、`start_analysis`、`answer_report`、`revise_report`、`rerun_analysis`、`switch_analysis_context`、`clarify`），模型只输出意图、`context_hint` 和澄清问题；`route_decision` 由后端按固定映射生成，模型不能输出分析上下文 ID 或用户文件 ID，也不能直接选择图节点。节点输入是当前消息、最近有限聊天历史、当前 AnalysisContext 摘要和同一 Session 的历史上下文索引；索引只含文件名、目标变量、处理变量、报告标题、更新时间和简短摘要，提示词里不出现内部 ID。没有可引用报告时 `answer_report` 与 `revise_report` 回退到 `normal_chat`，结构化输出失败同样回退到 `normal_chat`。
 
