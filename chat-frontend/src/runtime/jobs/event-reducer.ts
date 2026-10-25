@@ -169,6 +169,7 @@ export function waitingInputFromInteraction(
     : null
   return {
     questionId,
+    status: 'waiting',
     interactionType: typeof interaction.interaction_type === 'string' ? interaction.interaction_type : null,
     prompt,
     algorithmName: typeof interaction?.algorithm_name === 'string' ? interaction.algorithm_name : '',
@@ -399,6 +400,7 @@ function applyKnownEvent(state: JobRecord, event: DecodedSseEvent): { state: Job
     case 'final_result': {
       const result = structuredResult(data.data)
       thinking.status = 'completed'
+      if (thinking.waitingInput?.status === 'waiting') thinking.waitingInput.status = 'closed'
       releaseAllDecisions(thinking)
       if (thinking.draftStreamId !== null && result.type === 'text') {
         // 公开文字流的终态只校正已有草稿；报告布局同样复用草稿，不做第二次渲染。
@@ -427,6 +429,10 @@ function applyKnownEvent(state: JobRecord, event: DecodedSseEvent): { state: Job
       break
     case 'error':
       thinking.status = 'failed'
+      if (thinking.waitingInput?.status === 'waiting') {
+        thinking.waitingInput.status = data.reason_code === 'human_input_timeout' ? 'expired' : 'closed'
+        thinking.waitingInput.expired = thinking.waitingInput.status === 'expired'
+      }
       releaseAllDecisions(thinking)
       thinking.errorMessage = stringField(data, 'message')
       next.errorMessage = thinking.errorMessage
@@ -438,6 +444,7 @@ function applyKnownEvent(state: JobRecord, event: DecodedSseEvent): { state: Job
       break
     case 'canceled':
       thinking.status = 'canceled'
+      if (thinking.waitingInput?.status === 'waiting') thinking.waitingInput.status = 'closed'
       releaseAllDecisions(thinking)
       next.backendStatus = 'canceled'
       next.uiState = 'canceled'
@@ -513,8 +520,14 @@ export function seedJobFromPhase(
  * 游标、文本去重缓冲和连接状态保持不动，新阶段从同一条事件流接着读。
  */
 export function startResumePhase(state: JobRecord): { snapshot: ThinkingProjection; state: JobRecord } {
+  const snapshot = cloneThinking(state.thinking)
+  snapshot.status = 'completed'
+  if (snapshot.waitingInput) {
+    snapshot.waitingInput.status = 'answered'
+    snapshot.waitingInput.expired = false
+  }
   return {
-    snapshot: cloneThinking(state.thinking),
+    snapshot,
     state: { ...state, phaseInputId: null, thinking: createThinking('active') },
   }
 }

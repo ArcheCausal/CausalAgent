@@ -1,21 +1,23 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import type { ProcessingOptionStep, WaitingInput } from '../types/domain'
+import type { InteractionIdentity, ProcessingOptionAction, ProcessingOptionStep, WaitingInput } from '../types/domain'
 
 const props = defineProps<{
   waiting: WaitingInput
+  identity: InteractionIdentity
   submitting?: boolean
   serverExpired?: boolean
+  errorMessage?: string | null
 }>()
 const emit = defineEmits<{
-  'choose': [optionId: string]
-  'other': []
+  'choose': [action: ProcessingOptionAction]
+  'other': [identity: InteractionIdentity]
 }>()
 
 const now = ref(Date.now())
 let timer: number | null = null
 const isOpenTextQuestion = computed(() =>
-  props.waiting.interactionType === 'data_processing_question' && props.waiting.options.length === 0,
+  props.waiting.interactionType !== 'data_processing_plan_confirmation' && props.waiting.options.length === 0,
 )
 const isPlanConfirmation = computed(() =>
   props.waiting.interactionType === 'data_processing_plan_confirmation'
@@ -24,14 +26,24 @@ const isPlanConfirmation = computed(() =>
 )
 
 const remainingSeconds = computed(() => {
-  if (!props.waiting.expiresAt) return null
+  if (props.waiting.status !== 'waiting' || !props.waiting.expiresAt) return null
   const deadline = Date.parse(props.waiting.expiresAt)
   if (!Number.isFinite(deadline)) return null
   return Math.max(0, Math.ceil((deadline - now.value) / 1000))
 })
 const expired = computed(() =>
-  Boolean(props.serverExpired) || (remainingSeconds.value !== null && remainingSeconds.value <= 0),
+  props.waiting.status === 'expired'
+    || (props.waiting.status === 'waiting'
+      && (props.waiting.expired || Boolean(props.serverExpired)
+        || (remainingSeconds.value !== null && remainingSeconds.value <= 0))),
 )
+const isWaiting = computed(() => props.waiting.status === 'waiting' && !expired.value)
+const identityMatches = computed(() => Boolean(props.identity.jobId)
+  && Boolean(props.identity.questionId)
+  && props.identity.questionId === props.waiting.questionId
+  && props.identity.planVersion === props.waiting.planVersion,
+)
+const disabled = computed(() => !isWaiting.value || props.submitting || !identityMatches.value)
 const countdown = computed(() => {
   const seconds = remainingSeconds.value
   if (seconds === null) return ''
@@ -63,39 +75,62 @@ function stepDescription(step: ProcessingOptionStep): string {
   return `对${columns}执行 ${step.operation}`
 }
 
-watch(
-  () => expired.value,
-  (value) => {
-    if (value && timer !== null) {
-      window.clearInterval(timer)
-      timer = null
-    }
-  },
-  { immediate: true },
-)
-
-if (props.waiting.expiresAt) {
-  timer = window.setInterval(() => {
-    now.value = Date.now()
-  }, 1000)
-}
-onBeforeUnmount(() => {
+function stopTimer(): void {
   if (timer !== null) window.clearInterval(timer)
-})
+  timer = null
+}
+
+watch(
+  () => [props.identity.jobId, props.waiting.questionId, props.waiting.planVersion,
+    props.waiting.expiresAt, props.waiting.status, props.waiting.expired, props.serverExpired],
+  () => {
+    stopTimer()
+    now.value = Date.now()
+    if (!isWaiting.value || remainingSeconds.value === null) return
+    timer = window.setInterval(() => {
+      now.value = Date.now()
+      if (expired.value) stopTimer()
+    }, 1000)
+  },
+  { immediate: true, flush: 'sync' },
+)
+onBeforeUnmount(stopTimer)
+
+function actionIdentity(): InteractionIdentity | null {
+  // 点击时重新核对截止时间，防止两次计时更新之间提交已过期的问题。
+  now.value = Date.now()
+  if (expired.value) stopTimer()
+  if (disabled.value) return null
+  return {
+    jobId: props.identity.jobId,
+    questionId: props.identity.questionId,
+    planVersion: props.identity.planVersion,
+  }
+}
 
 function choose(optionId: string): void {
-  if (expired.value || props.submitting) return
-  emit('choose', optionId)
+  const identity = actionIdentity()
+  if (!identity) return
+  if (optionId === '__confirm_processing_plan__' ? !isPlanConfirmation.value
+    : !props.waiting.options.some((option) => option.optionId === optionId)) return
+  emit('choose', { ...identity, optionId })
+}
+
+function other(): void {
+  const identity = actionIdentity()
+  if (!identity || !props.waiting.allowOther) return
+  emit('other', identity)
 }
 </script>
 
 <template>
-  <section class="processing-options" :aria-label="isOpenTextQuestion ? '数据问题回答' : '数据处理方案确认'">
-    <p v-if="!expired" class="processing-options-hint">
+  <section class="processing-options" :aria-label="isOpenTextQuestion ? '数据问题回答' : '数据处理方案确认'" :aria-busy="isWaiting && submitting ? 'true' : 'false'">
+    <p v-if="waiting.status === 'answered'" class="processing-options-status">已回答</p>
+    <p v-else-if="waiting.status === 'closed'" class="processing-options-status">该交互已结束。</p>
+    <p v-else-if="expired" class="processing-options-expired">该确认已过期，当前任务不能继续提交。</p>
+    <p v-else class="processing-options-hint">
       {{ isOpenTextQuestion ? '请在下方输入框回答这个问题后继续。' : isPlanConfirmation ? '请检查方案。只有确认后才会执行脚本；修改或拒绝时，请在下方说明。' : '请选择一种处理方式；其他要求可在下方输入框说明。' }}
-      <span v-if="countdown" class="processing-options-countdown">剩余 {{ countdown }}</span>
     </p>
-    <p v-else class="processing-options-expired">该确认已过期，当前任务不能继续提交。</p>
     <div v-if="isPlanConfirmation && waiting.plan" class="processing-plan-summary">
       <p>{{ waiting.plan.summary }}</p>
       <dl>
@@ -133,9 +168,10 @@ function choose(optionId: string): void {
         :class="{ selected: waiting.selectedOptionId === option.optionId }"
       >
         <button
+          v-if="isWaiting"
           type="button"
           class="processing-option-button"
-          :disabled="expired || submitting"
+          :disabled="disabled"
           :aria-pressed="waiting.selectedOptionId === option.optionId"
           @click="choose(option.optionId)"
         >
@@ -147,6 +183,7 @@ function choose(optionId: string): void {
             {{ waiting.algorithmName || option.capabilityId }}
           </span>
         </button>
+        <strong v-else>{{ option.steps.length ? option.steps.map(stepDescription).join('；') : option.label }}</strong>
         <ul v-if="option.steps.length" class="processing-option-steps">
           <li v-for="(step, index) in option.steps" :key="index">
             {{ stepDescription(step) }}
@@ -160,23 +197,26 @@ function choose(optionId: string): void {
         </ul>
       </li>
     </ul>
+    <p v-if="isWaiting && errorMessage" class="processing-options-error" role="alert">{{ errorMessage }}</p>
     <button
-      v-if="isPlanConfirmation"
+      v-if="isWaiting && isPlanConfirmation"
       type="button"
       class="processing-option-button processing-plan-confirm"
-      :disabled="expired || submitting"
+      :disabled="disabled"
       @click="choose('__confirm_processing_plan__')"
     >
-      确认方案并继续
+      {{ submitting ? '正在提交…' : '确认方案并继续' }}
     </button>
     <button
-      v-if="waiting.allowOther"
+      v-if="isWaiting && waiting.allowOther"
       type="button"
       class="processing-option-other"
-      :disabled="expired || submitting"
-      @click="emit('other')"
+      :disabled="disabled"
+      @click="other"
     >
       {{ isOpenTextQuestion ? '输入回答' : isPlanConfirmation ? '修改或拒绝方案' : '其他要求' }}
     </button>
+    <p v-if="isWaiting && submitting && !isPlanConfirmation" class="processing-options-status" role="status">正在提交…</p>
+    <p v-if="isWaiting && countdown" class="processing-options-countdown">剩余 {{ countdown }}</p>
   </section>
 </template>

@@ -173,6 +173,7 @@ export interface ProcessingPlanSummary {
 }
 
 export interface WaitingInput {
+  status: 'waiting' | 'answered' | 'expired' | 'closed'
   questionId: string
   interactionType: string | null
   prompt: string
@@ -184,6 +185,16 @@ export interface WaitingInput {
   allowOther: boolean
   selectedOptionId: string | null
   expired: boolean
+}
+
+export interface InteractionIdentity {
+  jobId: string
+  questionId: string
+  planVersion: string | null
+}
+
+export interface ProcessingOptionAction extends InteractionIdentity {
+  optionId: string
 }
 
 export type DetailTone = 'default' | 'error' | 'retry'
