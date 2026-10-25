@@ -178,11 +178,15 @@ docker compose -f docker-compose.test.yml run --rm --no-deps -T unit-test python
 
 新增参数恢复入口为 [research_parameter_recovery.py](../../tests/acceptance/research_parameter_recovery.py)，需先运行原恢复验收，并复用同一次专用环境。它使用明确构造的图输入和真实 MySQL/PostgreSQL，覆盖连续修订、重建连接池、最终上下文重放、候选参数身份、历史上下文保护与旧 checkpoint 拒绝。配套 [research_parameter_tool_sources.py](../../tests/acceptance/research_parameter_tool_sources.py) 通过真实 ToolNode、graph runner、事件写入和 resume 读取答复来源；默认连接不可达模型端口，只证明来源检查先于明确模型失败，不证明成功语义提取。
 
-[real_model_parameter_extraction.py](../../tests/acceptance/real_model_parameter_extraction.py) 单独验证两个原工具入口的真实模型提取。在上述专用验收环境中，准备仅含模型配置的容器私有 JSON，通过 `--model-config` 指定文件；其字段为 `model/base_url/api_key/use_responses_api/output_version/reasoning`。执行 `python tests/acceptance/real_model_parameter_extraction.py --max-model-requests 4`，默认配置文件为 `/tmp/research-parameter-model.json`。入口保留隔离数据库配置，拒绝业务数据库，不加载根 `.env`；限制模型请求次数、输出 token 和总等待时间。问题、工具调用及用户答复为明确的验收输入，只有结构化提取由真实模型执行；报告不含凭据、配置值或答复正文。这不能证明模型自主规划或上传至最终报告的完整 Job。
+[real_model_parameter_extraction.py](../../tests/acceptance/real_model_parameter_extraction.py) 验证初始提取、原澄清工具及方案确认自由文本入口的真实模型提取。在上述专用验收环境中，准备仅含模型配置的容器私有 JSON，通过 `--model-config` 指定交互提取模型；字段为 `model/base_url/api_key/use_responses_api/output_version/reasoning`，默认路径 `/tmp/research-parameter-model.json`。初始提取使用外层模型时，通过相同结构的 `--initial-model-config` 单独提供其配置；未指定则共用模型配置。执行 `python tests/acceptance/real_model_parameter_extraction.py --initial-model-config /tmp/initial-parameter-model.json --repetitions 3 --max-model-requests 144`，覆盖原始范围答复、范围改写、保留已有角色、明确指定、取消目标、取消两个角色、未提及角色及取消干预角色，每项分别经过三个入口并重复三次，共 72 项，报告逐项状态及实际成功次数。初始验收直接复用生产提示词、schema 和结构化调用入口，解析失败不能通过 fold 的空参数降级成为成功。交互验收保留真实 MySQL/PostgreSQL、原工具、来源检查、修订链与原 graph runner/event writer，不以模型替身提供提取结果。入口拒绝业务数据库，不加载根 `.env`；限制 HTTP 请求次数、输出 token 和单次工具等待时间。问题、工具调用及用户答复为明确的验收输入，只有结构化提取由真实模型执行；报告不含凭据、配置值或答复正文。这不能证明模型自主规划或上传至最终报告的完整 Job。
+
+[test_parameter_validation_feedback.py](../../tests/integration/agent/test_parameter_validation_feedback.py) 直接组合真实参数补丁规则、CSV 校验器和重试消息组装，检查缺席角色保留、显式 null 清空，以及错误、实际角色值、列名和算法兼容性从原报告完整进入内部重试消息；它不调用模型，不证明语义提取正确。
 
 [sandbox_upgrade_job.py](../../tests/acceptance/sandbox_upgrade_job.py) 用于完整隔离 Job：上传合成 CSV，经正式 Worker 和模型生成澄清、脚本与方案，提交显式测试答复及带版本的确认，然后执行真实沙盒、独立校验、数据绑定、MCP HTTP 算法和结构化报告。它在两次研究参数答复已保存后结束原 slot，启动新的正式 Worker 进程，再提交方案确认并恢复同一 Job。入口复用专用 MySQL/PostgreSQL；模型客户端必须单独允许外联，不能修改原内部数据库验收客户端的网络限制。控制服务另行连接该专用主库与 OpenSandbox，Worker 仅挂控制 token。
 
 显式设置 `FULL_JOB_SANDBOX_ACCEPTANCE=1`、`FULL_JOB_SANDBOX_CONTROLLER_URL`，并在客户端准备 `/tmp/full-job-controller.token` 及仅含模型配置的 `/tmp/full-job-models.json`，再执行 `python tests/acceptance/sandbox_upgrade_job.py --timeout-seconds 900`。模型配置包含 `outer/deep/context_window_tokens`，前两项各含 `model/base_url/api_key`；入口将真实模型密钥与隔离数据库凭据写入本次私有文件，不修改根 `.env` 或原验收密钥文件。MCP 使用客户端回环地址的 8080 端口，控制服务使用独立容器；报告只保留状态、计数和源码 hash，原始诊断留在容器 `/tmp/sandbox-upgrade-job/`。本场景关闭 Web，RAG 使用独立空目录并报告不可用，不包含浏览器、CDFM 推理、生产网络或生产部署验收。
+
+同一入口增加 `--scenario all-nodes`，默认仍运行原研究参数修订场景。新场景上传列名为 `0/1/2/3/4` 的合成连续数值 CSV，由真实模型提出字段范围问题，测试答复为“全部作为节点参与因果发现”，随后提交带版本的方案确认。验收要求该研究选择只问一次、最终角色均为空、实际列名保留，并通过正式 Worker、真实沙盒、独立校验、CSV 绑定、MCP PC 算法和结构化报告；该场景不要求参数修订次数或 Worker 重启。运行前须确认隔离控制服务及上游已就绪，并与提取验收顺序执行，避免两个 runner 竞争同一隔离 Job 队列。入口存在或提取矩阵通过均不能视为此完整 Job 验收通过。
 
 ### 工具可见性与 Web 开关
 

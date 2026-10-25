@@ -51,6 +51,30 @@ DATA_PROCESSING_CHECKPOINT_NAMESPACE = "data_processing_v1"
 MAX_VALIDATION_RETRIES = 3
 
 
+def _validation_retry_message(candidate_id: Any, report: Mapping[str, Any]) -> HumanMessage:
+    """仅向处理子图反馈本次校验事实，不进入公开事件或普通日志。"""
+    details = {
+        "dataset_id": candidate_id,
+        "errors": report.get("errors", []),
+        "target": report.get("target"),
+        "treatment": report.get("treatment"),
+        "columns": report.get("columns", []),
+        "algorithm_compatibility": report.get("algorithm_compatibility", []),
+    }
+    return HumanMessage(
+        id=f"validation-retry-{candidate_id}",
+        content=(
+            "独立校验未通过。以下是本次校验使用的角色参数、候选 CSV 实际列名和确定性错误。"
+            "请先判断是脚本遗漏已确认字段、用户信息不足，还是参数提取与已有明确答复矛盾。"
+            "脚本遗漏可在原确认范围内修复；有新的语义歧义才向用户澄清。"
+            "参数提取错误不代表校验器强制要求角色，不要要求用户重复作同一个选择，"
+            "也不要声称现有工具已修订参数。不得忽略校验或默认清空角色继续分析；"
+            "遵守重试上限，未解决时如实说明。不要声称未实际执行的修正已完成。\n"
+            + json.dumps(details, ensure_ascii=False, separators=(",", ":"))
+        ),
+    )
+
+
 def _interrupts(snapshot: Any) -> list[Any]:
     if snapshot is None:
         return []
@@ -310,26 +334,8 @@ async def data_processing_parent_node(
     retry_input = None
     if isinstance(retry_report, Mapping):
         candidate_id = state.get("data_processing_candidate_id")
-        message_id = f"validation-retry-{candidate_id}"
-        details = {
-            "dataset_id": candidate_id,
-            "errors": retry_report.get("errors", []),
-            "algorithm_compatibility": retry_report.get(
-                "algorithm_compatibility", []
-            ),
-        }
         retry_input = {
-            "messages": [
-                HumanMessage(
-                    id=message_id,
-                    content=(
-                        "独立校验未通过。请根据以下确定性错误修正处理脚本；"
-                        "若错误要求新的研究语义选择，请先向用户提问。不要声称"
-                        "未实际执行的修正已完成。\n"
-                        + json.dumps(details, ensure_ascii=False, separators=(",", ":"))
-                    ),
-                )
-            ]
+            "messages": [_validation_retry_message(candidate_id, retry_report)]
         }
 
     progress_task_id = (config or {}).get("configurable", {}).get(CONFIG_KEY_TASK_ID)

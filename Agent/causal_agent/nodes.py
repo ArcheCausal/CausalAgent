@@ -782,11 +782,11 @@ class foldQuery(BaseModel):
     """只从用户对话中提取因果分析所需的关键参数。"""
     target: Optional[str] = Field(
         None,
-        description="从用户对话中识别出的目标变量(target)或结果变量(outcome)。如果未提及，则留空。"
+        description="用户指定的目标变量(target)或结果变量(outcome)名称；分析范围、算法和指令不是变量名。未指定时为 null，名称不必与 CSV 列名一致。"
     )
     treatment: Optional[str] = Field(
         None,
-        description="从用户对话中识别出的处理变量(treatment)或干预变量(intervention)。如果未提及，则留空。"
+        description="用户指定的处理变量(treatment)或干预变量(intervention)名称；分析范围、算法和指令不是变量名。未指定时为 null，名称不必与 CSV 列名一致。"
     )
     measurement_semantics: list[MeasurementDeclaration] = Field(default_factory=list)
 
@@ -835,6 +835,26 @@ def _normalize_optional_llm_text(value: str | None) -> str | None:
     return value
 
 
+def _initial_parameter_extraction_prompt() -> ChatPromptTemplate:
+    """初始提取与真实模型验收共用提示词；不包含增量修订语义。"""
+    return ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """从用户的最新消息中提取目标变量、处理变量和明确声明的字段测量含义。
+文件已由当前 Job 的冻结输入确定，不要从自然语言中选择文件。
+target 表示用户指定的目标或结果变量；treatment 表示用户指定的处理或干预变量。
+分析范围、算法名称、处理要求和完整指令不能作为这两个字段的值。用户使用的变量名称不必与 CSV 列名相同，提取阶段不进行列名成员检查，也不自行映射名称。
+结合对话理解用户的研究意图；没有明确指定某个角色，或明确取消该角色时，该字段返回 null。
+例如，“目标是收入，干预变量是培训”提取 target="收入"、treatment="培训"；“全部作为节点参与因果发现”只说明分析范围，不能作为角色值；“取消之前的目标，只做无目标的结构发现”表示 target=null。
+字段含义只能摘录用户明确说明的内容，不能从列名或数值推断。
+严格按 foldQuery schema 返回 JSON。""",
+            ),
+            MessagesPlaceholder(variable_name="messages"),
+        ]
+    )
+
+
 async def fold_node(
     state: CausalAgentState,
     llm: ChatOpenAI,
@@ -856,23 +876,11 @@ async def fold_node(
             "fold_decision": "normal_chat",
         }
 
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                """从用户的最新消息中提取目标变量、处理变量和明确声明的字段测量含义。
-文件已由当前 Job 的冻结输入确定，不要从自然语言中选择文件。
-没有明确的目标或处理变量时返回 null。字段含义只能摘录用户明确说明的内容，不能从列名或数值推断。
-严格按 foldQuery schema 返回 JSON。""",
-            ),
-            MessagesPlaceholder(variable_name="messages"),
-        ]
-    )
     try:
         structured_response = await ainvoke_structured(
             llm=llm,
             schema=foldQuery,
-            prompt=prompt,
+            prompt=_initial_parameter_extraction_prompt(),
             inputs={"messages": llm_prompt_messages(state["messages"])},
             node_name="fold",
         )

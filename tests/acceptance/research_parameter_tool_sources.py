@@ -10,7 +10,7 @@ import secrets
 from uuid import uuid4
 
 
-async def verify_tool_sources(report, new_job, *, model=None, real_model=False):
+async def verify_tool_sources(report, new_job, *, model=None, real_model=False, scenario=None, tool_name=None):
     from langchain_core.messages import AIMessage
     from langchain_openai import ChatOpenAI
     from langgraph.graph import StateGraph, START, END
@@ -37,6 +37,8 @@ async def verify_tool_sources(report, new_job, *, model=None, real_model=False):
         controller_url='http://127.0.0.1:1', token=secrets.token_urlsafe(32)))
     cases = []
     for tool in (_question_tool(model=model), _plan_confirmation_tool(model=model)):
+        if tool_name is not None and tool.name != tool_name:
+            continue
         job = new_job()
         tool_id = f'{job["job_id"]}-original-tool'
         builder = StateGraph(ProjectDeepAgentState)
@@ -55,7 +57,11 @@ async def verify_tool_sources(report, new_job, *, model=None, real_model=False):
                 'observation_unit': 'one observation', 'transformations': ['preserve columns'],
                 'variable_semantics': {'x': 'measurement', 'y': 'outcome'}, 'limitations': []},
             'messages': [AIMessage(content='', tool_calls=[{'id': tool_id, 'name': tool.name,
-                'args': {'question': 'Which observation unit?'} if tool.name == 'ask_data_processing_question' else {}}])]}
+                'args': {'question': scenario['question'] if scenario else 'Which observation unit?'}
+                    if tool.name == 'ask_data_processing_question' else {}}])]}
+        if scenario is not None:
+            require(real_model, 'semantic_scenarios_require_real_model')
+            initial['analysis_parameters'].update(scenario.get('parameters', {}))
 
         async def run(graph, job, claim_kind):
             identity = replace(identity_for(job), frozen_input=FrozenInputRef(
@@ -88,7 +94,7 @@ async def verify_tool_sources(report, new_job, *, model=None, real_model=False):
             finally:
                 if not writer.task.done():
                     await writer.abort()
-        answer = ('请将 target 明确清空为 null；observation_unit 改为 device-day。其他研究参数保持不变。'
+        answer = scenario['answer'] if scenario else ('请将 target 明确清空为 null；observation_unit 改为 device-day。其他研究参数保持不变。'
             if tool.name == 'ask_data_processing_question' else
             '请修改方案：time_window 改为 one day，aggregation_scope 改为 all devices。target、treatment 和 observation_unit 保持不变。'
         ) if real_model else 'Use each device-day as one observation.'
@@ -114,19 +120,23 @@ async def verify_tool_sources(report, new_job, *, model=None, real_model=False):
                 require(any(event['type'] == 'final_result' for event in events), 'real_tool_did_not_complete')
                 values = (await graph.aget_state(config)).values
                 parameters = values['analysis_parameters']
-                expected = ({'target': None, 'observation_unit': 'device-day'}
+                expected = scenario['expected'] if scenario else ({'target': None, 'observation_unit': 'device-day'}
                     if tool.name == 'ask_data_processing_question' else
                     {'time_window': 'one day', 'aggregation_scope': 'all devices'})
                 require(all(parameters.get(key) == value for key, value in expected.items()), 'real_extracted_values_mismatch')
                 require(all(parameters.get(key) == value for key, value in initial['analysis_parameters'].items()
                     if key not in expected), 'unmentioned_parameter_changed')
                 changes = values['analysis_parameter_changes']
-                require(len(changes) == 1 and changes[0]['revision'] == 1
-                    and changes[0]['source_input_id'] == trusted['source_input_id'], 'real_revision_provenance_mismatch')
+                changed = parameters != initial['analysis_parameters']
+                require(len(changes) == int(changed), 'real_revision_count_mismatch')
+                if changed:
+                    require(changes[0]['revision'] == 1
+                        and changes[0]['source_input_id'] == trusted['source_input_id'], 'real_revision_provenance_mismatch')
                 require(not values.get('data_processing_parameter_clarification_required'), 'real_answer_unresolved')
                 require(values.get('data_processing_confirmed_plan_version') is None, 'revision_did_not_clear_confirmation')
-                require(values['data_processing_semantic_identity'] != initial['data_processing_semantic_identity'],
-                    'revision_did_not_change_semantic_identity')
+                if changed:
+                    require(values['data_processing_semantic_identity'] != initial['data_processing_semantic_identity'],
+                        'revision_did_not_change_semantic_identity')
                 require(str(trusted['source_input_id']) in values['data_processing_answer_receipts'], 'answer_receipt_missing')
                 require(job_service.complete_job(job['job_id'], job['worker_id'], job['attempt_count'],
                     {'acceptance': 'real parameter extraction'}, lease_epoch=job['lease_epoch']), 'real_test_job_finalize_failed')

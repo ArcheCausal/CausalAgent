@@ -76,7 +76,7 @@ def serve_mcp():
     uvicorn.run(create_app(), host="127.0.0.1", port=8080, access_log=False, log_level="critical")
 
 
-async def verify(report, timeout):
+async def verify(report, timeout, *, scenario="research-revisions"):
     import httpx
     from Agent.causal_agent.postgres_checkpointer import open_checkpoint_pool
     from app.agent import job_service
@@ -108,16 +108,25 @@ async def verify(report, timeout):
     session_id = client.post("/api/new_chat").json["new_session_id"]
     rng = random.Random(20261025)
     rows = []
+    all_nodes = scenario == "all-nodes"
     for _ in range(240):
         x = rng.expovariate(1)
-        rows.append(f"{x},{1.8*x+rng.gauss(0,0.3)},{rng.gauss(0,1)}")
-    source = ("x,y,z\n" + "\n".join(rows) + "\n").encode()
+        row = f"{x},{1.8*x+rng.gauss(0,0.3)},{rng.gauss(0,1)}"
+        if all_nodes:
+            row += f",{rng.gauss(0,1)},{rng.gauss(0,1)}"
+        rows.append(row)
+    source = (("0,1,2,3,4\n" if all_nodes else "x,y,z\n") + "\n".join(rows) + "\n").encode()
     upload = client.post("/api/upload_file", data={"file": (BytesIO(source), "device-measurements.csv", "text/csv")})
     require(upload.status_code == 200 and upload.json["success"], "actual_upload_failed")
     prompt = ("请对上传数据做真实因果分析并生成完整报告，先使用 PC（fisherz）算法。"
               "x、y、z 均为连续测量值，研究 x 对 y 的作用，z 为另一连续测量变量。"
               "请先向我澄清每一行的观察单位，再记录保留全部行和三个原始列的数据处理方案并请求确认。"
               "不聚合、不标准化、不增加字段；请依据真实算法结果保守说明因果识别限制。")
+    if all_nodes:
+        prompt = ("请对上传数据做因果结构发现并生成报告，先使用PC（fisherz）算法。"
+                  "列0、1、2、3、4都是连续测量值，每行是一台不同设备的一次独立测量。"
+                  "请先向我确认参与因果发现的字段范围，再记录处理方案并请求确认。"
+                  "不聚合、不标准化、不筛选行、不增加字段；依据真实算法结果保守说明识别限制。")
     job, replay = job_service.create_job(user_id, session_id, prompt, str(uuid4()),
         input_user_file_id=upload.json["user_file_id"], request_id=str(uuid4()), web_search_enabled=False)
     require(not replay, "unexpected_job_replay")
@@ -148,16 +157,21 @@ async def verify(report, timeout):
                     interaction = job["current_interaction"]
                     kind = interaction["interaction_type"]
                     if kind == "data_processing_question":
-                        answer = "每一行是一台不同设备的一次独立测量。保留所有设备和原始连续测量值，不聚合。"
+                        if all_nodes:
+                            require(not any(item["type"] == kind for item in report["interactions"]),
+                                "repeated_research_choice_question")
+                            answer = "全部作为节点参与因果发现"
+                        else:
+                            answer = "每一行是一台不同设备的一次独立测量。保留所有设备和原始连续测量值，不聚合。"
                     elif kind == "data_processing_plan_confirmation":
-                        if not modified_plan:
+                        if not all_nodes and not modified_plan:
                             answer = "补充研究参数：时间窗口为2026年10月1日至7日，文件已包含完整范围，不筛选任何行；请保留原处理范围并重新确认。"
                             modified_plan = True
                         else:
                             answer = json.dumps({"action": "confirm", "plan_version": interaction["plan_version"]})
                     else:
                         raise AssertionError("unexpected_interaction_type")
-                    if len(report["interactions"]) == 2:
+                    if not all_nodes and len(report["interactions"]) == 2:
                         stop.set()
                         await asyncio.wait_for(slot, timeout=30)
                         slot = None
@@ -187,7 +201,19 @@ async def verify(report, timeout):
             snapshot = await runtime.graph.aget_state({"configurable": {"thread_id": job_id}})
             values = snapshot.values
             report["parameter_revision_count"] = len(values.get("analysis_parameter_changes") or [])
-            require(report["parameter_revision_count"] >= 2, "research_revisions_not_retained")
+            if all_nodes:
+                parameters = values.get("analysis_parameters") or {}
+                report["role_parameters_empty"] = parameters.get("target") is None and parameters.get("treatment") is None
+                require(report["role_parameters_empty"], "scope_was_saved_as_role")
+                require(sum(item["type"] == "data_processing_question" for item in report["interactions"]) == 1,
+                    "original_scope_question_not_exercised_once")
+                require(any(item["answer_kind"] == "confirmation" for item in report["interactions"]),
+                    "plan_confirmation_not_exercised")
+                require(values["dataset_validation_report"]["columns"] == ["0", "1", "2", "3", "4"],
+                    "prepared_columns_changed")
+                report["validation_retry_count"] = int(values.get("data_processing_retry_count") or 0)
+            else:
+                require(report["parameter_revision_count"] >= 2, "research_revisions_not_retained")
             report["dataset_validated"] = values.get("dataset_validation_status") == "accepted"
             report["report_present"] = bool(values.get("report_document"))
             results = list((values.get("deep_agent_algorithm_results") or {}).values())
@@ -232,6 +258,7 @@ def main():
     parser.add_argument("--role", choices=("run", "mcp"), default="run")
     parser.add_argument("--model-config", type=Path, default=Path("/tmp/full-job-models.json"))
     parser.add_argument("--timeout-seconds", type=int, default=900)
+    parser.add_argument("--scenario", choices=("research-revisions", "all-nodes"), default="research-revisions")
     args = parser.parse_args()
     require(os.environ.get("FULL_JOB_SANDBOX_ACCEPTANCE") == "1", "explicit_isolated_acceptance_required")
     logging.disable(logging.CRITICAL)
@@ -246,7 +273,7 @@ def main():
     logging.getLogger().handlers = [logging.FileHandler(private_log)]
     logging.getLogger().setLevel(logging.INFO)
     logging.disable(logging.NOTSET)
-    report = {"status": "FAIL", "started_at": datetime.now(timezone.utc).isoformat(),
+    report = {"status": "FAIL", "started_at": datetime.now(timezone.utc).isoformat(), "scenario": args.scenario,
         "limitations": ["synthetic data and explicit tester answers", "Flask upload routes and Job service; no browser",
                         "real production Worker, models, controller and MCP HTTP", "RAG unavailable and Web disabled"]}
     sources = ("Agent/causal_agent/nodes.py", "Agent/data_processing/graph.py",
@@ -259,7 +286,7 @@ def main():
         with open_private_log(ARTIFACTS / "mcp.log") as log:
             process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--role", "mcp"],
                 cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
-        asyncio.run(verify(report, args.timeout_seconds))
+        asyncio.run(verify(report, args.timeout_seconds, scenario=args.scenario))
     except BaseException as exc:
         report["failure_types"] = [type(exc).__name__]
         report["failure_code"] = str(exc) if isinstance(exc, AssertionError) else "see_private_logs"
