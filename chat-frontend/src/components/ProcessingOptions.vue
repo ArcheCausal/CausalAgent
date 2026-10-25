@@ -14,6 +14,14 @@ const emit = defineEmits<{
 
 const now = ref(Date.now())
 let timer: number | null = null
+const isOpenTextQuestion = computed(() =>
+  props.waiting.interactionType === 'data_processing_question' && props.waiting.options.length === 0,
+)
+const isPlanConfirmation = computed(() =>
+  props.waiting.interactionType === 'data_processing_plan_confirmation'
+    && Boolean(props.waiting.planVersion)
+    && Boolean(props.waiting.plan),
+)
 
 const remainingSeconds = computed(() => {
   if (!props.waiting.expiresAt) return null
@@ -82,13 +90,42 @@ function choose(optionId: string): void {
 </script>
 
 <template>
-  <section class="processing-options" aria-label="数据处理方案确认">
+  <section class="processing-options" :aria-label="isOpenTextQuestion ? '数据问题回答' : '数据处理方案确认'">
     <p v-if="!expired" class="processing-options-hint">
-      请选择一种处理方式；其他要求可在下方输入框说明。
+      {{ isOpenTextQuestion ? '请在下方输入框回答这个问题后继续。' : isPlanConfirmation ? '请检查方案。只有确认后才会执行脚本；修改或拒绝时，请在下方说明。' : '请选择一种处理方式；其他要求可在下方输入框说明。' }}
       <span v-if="countdown" class="processing-options-countdown">剩余 {{ countdown }}</span>
     </p>
     <p v-else class="processing-options-expired">该确认已过期，当前任务不能继续提交。</p>
-    <ul class="processing-option-list">
+    <div v-if="isPlanConfirmation && waiting.plan" class="processing-plan-summary">
+      <p>{{ waiting.plan.summary }}</p>
+      <dl>
+        <dt>观察单位</dt>
+        <dd>{{ waiting.plan.observationUnit }}</dd>
+        <dt>处理步骤</dt>
+        <dd>
+          <ul>
+            <li v-for="(step, index) in waiting.plan.transformations" :key="index">{{ step }}</li>
+          </ul>
+        </dd>
+        <dt>字段含义</dt>
+        <dd>
+          <ul>
+            <li v-for="(meaning, variable) in waiting.plan.variableSemantics" :key="variable">
+              <strong>{{ variable }}</strong>：{{ meaning }}
+            </li>
+          </ul>
+        </dd>
+        <template v-if="waiting.plan.limitations.length">
+          <dt>限制</dt>
+          <dd>
+            <ul>
+              <li v-for="(limitation, index) in waiting.plan.limitations" :key="index">{{ limitation }}</li>
+            </ul>
+          </dd>
+        </template>
+      </dl>
+    </div>
+    <ul v-if="waiting.options.length" class="processing-option-list">
       <li
         v-for="option in waiting.options"
         :key="option.optionId"
@@ -124,13 +161,22 @@ function choose(optionId: string): void {
       </li>
     </ul>
     <button
+      v-if="isPlanConfirmation"
+      type="button"
+      class="processing-option-button processing-plan-confirm"
+      :disabled="expired || submitting"
+      @click="choose('__confirm_processing_plan__')"
+    >
+      确认方案并继续
+    </button>
+    <button
       v-if="waiting.allowOther"
       type="button"
       class="processing-option-other"
       :disabled="expired || submitting"
       @click="emit('other')"
     >
-      其他要求
+      {{ isOpenTextQuestion ? '输入回答' : isPlanConfirmation ? '修改或拒绝方案' : '其他要求' }}
     </button>
   </section>
 </template>

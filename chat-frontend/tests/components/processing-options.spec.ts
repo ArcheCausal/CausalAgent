@@ -6,12 +6,15 @@ import type { WaitingInput } from '../../src/types/domain'
 function waiting(overrides: Partial<WaitingInput> = {}): WaitingInput {
   return {
     questionId: 'q-1',
+    interactionType: 'data_processing_request',
     prompt: '请选择处理方式',
     algorithmName: 'PC 因果发现',
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
     allowOther: true,
     selectedOptionId: null,
     expired: false,
+    planVersion: null,
+    plan: null,
     options: [
       {
         optionId: 'opt_abc',
@@ -50,5 +53,51 @@ describe('ProcessingOptions', () => {
     const wrapper = mount(ProcessingOptions, { props: { waiting: waiting() } })
     await wrapper.get('.processing-option-other').trigger('click')
     expect(wrapper.emitted('other')).toHaveLength(1)
+  })
+
+  it('shows a text-answer entry for an open data question with no options', async () => {
+    const wrapper = mount(ProcessingOptions, {
+      props: {
+        waiting: waiting({
+          interactionType: 'data_processing_question',
+          prompt: '每一行代表什么观察单位？',
+          options: [],
+        }),
+      },
+    })
+
+    expect(wrapper.attributes('aria-label')).toBe('数据问题回答')
+    expect(wrapper.text()).toContain('请在下方输入框回答这个问题后继续。')
+    expect(wrapper.text()).toContain('输入回答')
+    expect(wrapper.find('.processing-option-list').exists()).toBe(false)
+
+    await wrapper.get('.processing-option-other').trigger('click')
+    expect(wrapper.emitted('other')).toHaveLength(1)
+  })
+
+  it('shows the versioned plan and emits explicit confirmation', async () => {
+    const wrapper = mount(ProcessingOptions, {
+      props: {
+        waiting: waiting({
+          interactionType: 'data_processing_plan_confirmation',
+          options: [],
+          planVersion: 'a'.repeat(64),
+          plan: {
+            summary: '按设备和日期统计告警数。',
+            observationUnit: '设备-日期',
+            transformations: ['按设备和日期分组并计数'],
+            variableSemantics: { alarm_count: '该设备当天的告警次数' },
+            limitations: ['不包含未触发告警的设备日期'],
+          },
+        }),
+      },
+    })
+
+    expect(wrapper.text()).toContain('按设备和日期统计告警数。')
+    expect(wrapper.text()).toContain('设备-日期')
+    expect(wrapper.text()).toContain('修改或拒绝方案')
+    expect(wrapper.text()).toContain('确认方案并继续')
+    await wrapper.get('.processing-plan-confirm').trigger('click')
+    expect(wrapper.emitted('choose')).toEqual([['__confirm_processing_plan__']])
   })
 })

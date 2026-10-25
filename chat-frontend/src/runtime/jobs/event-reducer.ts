@@ -2,6 +2,7 @@ import type {
   BackendJobStatus,
   JobRecord,
   ProcessingOption,
+  ProcessingPlanSummary,
   PublicEvent,
   StepDecisionDetail,
   StepDetail,
@@ -137,6 +138,22 @@ function parseOptions(value: unknown): ProcessingOption[] {
   return options
 }
 
+function parseProcessingPlan(value: unknown): ProcessingPlanSummary | null {
+  if (typeof value !== 'object' || value === null) return null
+  const item = value as Record<string, unknown>
+  if (typeof item.summary !== 'string' || typeof item.observation_unit !== 'string') return null
+  const transformations = Array.isArray(item.transformations)
+    ? item.transformations.filter((entry): entry is string => typeof entry === 'string')
+    : []
+  const variableSemantics = typeof item.variable_semantics === 'object' && item.variable_semantics !== null
+    ? Object.fromEntries(Object.entries(item.variable_semantics).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+    : {}
+  const limitations = Array.isArray(item.limitations)
+    ? item.limitations.filter((entry): entry is string => typeof entry === 'string')
+    : []
+  return { summary: item.summary, observationUnit: item.observation_unit, transformations, variableSemantics, limitations }
+}
+
 export function waitingInputFromInteraction(
   data: Record<string, unknown>,
   questionId: string,
@@ -144,14 +161,21 @@ export function waitingInputFromInteraction(
 ): ThinkingProjection['waitingInput'] {
   const interaction = typeof data.interaction === 'object' && data.interaction !== null
     ? data.interaction as Record<string, unknown>
-    : null
+    : data
   const options = parseOptions(interaction?.options)
+  const planVersion = typeof interaction?.plan_version === 'string'
+    && /^[0-9a-f]{64}$/.test(interaction.plan_version)
+    ? interaction.plan_version
+    : null
   return {
     questionId,
+    interactionType: typeof interaction.interaction_type === 'string' ? interaction.interaction_type : null,
     prompt,
     algorithmName: typeof interaction?.algorithm_name === 'string' ? interaction.algorithm_name : '',
     expiresAt: typeof interaction?.expires_at === 'string' ? interaction.expires_at : null,
     options,
+    planVersion,
+    plan: parseProcessingPlan(interaction?.plan),
     allowOther: interaction?.allow_other !== false,
     selectedOptionId: null,
     expired: false,

@@ -192,11 +192,20 @@ async function chooseProcessingOption(optionId: string): Promise<void> {
   const waiting = job?.thinking.waitingInput
   if (!job || !waiting || job.uiState !== 'waiting_input' || pendingOptionId.value) return
   pendingOptionId.value = optionId
-  jobs.chooseProcessingOption(job.jobId, optionId)
+  const isPlanConfirmation = waiting.interactionType === 'data_processing_plan_confirmation'
+  if (isPlanConfirmation && !waiting.planVersion) {
+    pendingOptionId.value = null
+    report(new Error('当前方案版本无效，请刷新任务后重试。'), '提交处理方案失败。')
+    return
+  }
+  const answer = isPlanConfirmation
+    ? { action: 'confirm', plan_version: waiting.planVersion as string }
+    : JSON.stringify({ option_id: optionId })
+  if (!isPlanConfirmation) jobs.chooseProcessingOption(job.jobId, optionId)
   const key = createIdempotencyKey()
   try {
     const response = await retryIdempotent(
-      () => api.resumeJob(job.jobId, waiting.questionId, JSON.stringify({ option_id: optionId }), key),
+      () => api.resumeJob(job.jobId, waiting.questionId, answer, key),
     )
     if (!response.success || !response.job_id || !response.status) {
       throw new Error(response.error || '方案确认未被接受。')

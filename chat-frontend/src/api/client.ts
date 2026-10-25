@@ -198,7 +198,7 @@ export const api = {
     const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
     return requestJson(`/api/agent/jobs/active${query}`, {}, activeJobsResponseSchema)
   },
-  resumeJob(jobId: string, questionId: string, answer: string, idempotencyKey: string): Promise<JobActionResponse> {
+  resumeJob(jobId: string, questionId: string, answer: string | Record<string, unknown>, idempotencyKey: string): Promise<JobActionResponse> {
     return requestJson(`/api/agent/jobs/${encodeURIComponent(jobId)}/resume`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },

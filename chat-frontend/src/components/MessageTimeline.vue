@@ -172,7 +172,7 @@ watch(() => props.messages.length, () => scrollFollow.keepLatest())
     <article v-if="row.thinking?.waitingInput" class="message ai-message">
       <MessageBody :text="{ type: 'human_input_required', summary: row.thinking.waitingInput.prompt }" />
       <ProcessingOptions
-        v-if="row.thinking.waitingInput.options.length"
+        v-if="row.thinking.waitingInput.options.length || row.thinking.waitingInput.interactionType === 'data_processing_question' || row.thinking.waitingInput.interactionType === 'data_processing_plan_confirmation'"
         :waiting="row.thinking.waitingInput"
         :submitting="Boolean(props.submittingOptionId)"
         @choose="(optionId) => emit('choose-processing-option', optionId)"

@@ -164,12 +164,23 @@ export interface ProcessingOption {
   risks: string[]
 }
 
+export interface ProcessingPlanSummary {
+  summary: string
+  observationUnit: string
+  transformations: string[]
+  variableSemantics: Record<string, string>
+  limitations: string[]
+}
+
 export interface WaitingInput {
   questionId: string
+  interactionType: string | null
   prompt: string
   algorithmName: string
   expiresAt: string | null
   options: ProcessingOption[]
+  planVersion: string | null
+  plan: ProcessingPlanSummary | null
   allowOther: boolean
   selectedOptionId: string | null
   expired: boolean
