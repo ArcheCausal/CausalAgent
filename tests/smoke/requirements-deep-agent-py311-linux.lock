@@ -2862,6 +2862,10 @@ openai==2.54.0 \
     #   langchain-openai
     #   ragas
     # from https://pypi.org/simple
+opensandbox==1.1.1 \
+    --hash=sha256:98eb0d7b57fdeabbbb5202d5e3a5261741f68fe47a631f0ec483b1566eb5fef8
+    # via -r requirements.txt
+    # from https://pypi.org/simple
 opencv-python==4.11.0.86 \
     --hash=sha256:03d60ccae62304860d232272e4a4fda93c39d595780cb40b161b310244b736a4 \
     --hash=sha256:085ad9b77c18853ea66283e98affefe2de8cc4c1f43eda4c100cf9b2721142ec \

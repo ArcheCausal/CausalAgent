@@ -38,6 +38,7 @@ SECRET_KEYS: tuple[str, ...] = (
     "SECRET_KEY",
     "API_KEY",
     "DEEP_AGENT_API_KEY",
+    "CAUSALAGENT_SANDBOX_API_KEY",
     "VISION_API_KEY",
     "EMBEDDING_API_KEY",
     "LANGCHAIN_API_KEY",
@@ -48,8 +49,8 @@ SECRET_KEYS: tuple[str, ...] = (
     "CAUSAL_MCP_SIGNING_KEY_PREVIOUS",
 )
 
-# 发布清单 secrets.required_keys 使用的必需键；缺失时部署校验必须失败。
-REQUIRED_SECRET_KEYS: tuple[str, ...] = (
+# 所有调用 load_secrets() 的应用进程都需要的基础密钥。
+RUNTIME_REQUIRED_SECRET_KEYS: tuple[str, ...] = (
     "MYSQL_ROOT_PASSWORD",
     "MYSQL_PASSWORD",
     "MYSQL_WRITE_PASSWORD",
@@ -62,6 +63,13 @@ REQUIRED_SECRET_KEYS: tuple[str, ...] = (
     "CAUSAL_MCP_SERVICE_TOKEN",
     "CAUSAL_MCP_SIGNING_KEY_CURRENT",
     "GRAFANA_ADMIN_PASSWORD",
+)
+
+# 发布包需要的完整密钥集合。沙盒 key 只由 Worker 通过 require_secret() 按需读取，
+# 但发布校验必须确保部署文件已经配置该 key。
+REQUIRED_SECRET_KEYS: tuple[str, ...] = (
+    *RUNTIME_REQUIRED_SECRET_KEYS,
+    "CAUSALAGENT_SANDBOX_API_KEY",
 )
 
 SECRET_SCHEMA_VERSION = "v1"
@@ -155,7 +163,7 @@ def load_secrets(*, path: Path | None = None, reload: bool = False) -> dict[str,
         except OSError as exc:
             raise SecretFileError(f"密钥文件不可读: {resolved}") from exc
         values = _parse_secret_file(text, path=resolved)
-        missing = [name for name in REQUIRED_SECRET_KEYS if name not in values]
+        missing = [name for name in RUNTIME_REQUIRED_SECRET_KEYS if name not in values]
         if missing:
             raise SecretFileError(f"密钥文件缺少必需键: {', '.join(missing)}。")
         _cached_path = resolved

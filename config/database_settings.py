@@ -1,8 +1,8 @@
 """独立的 MySQL 数据库配置。
 
-该模块供 ``app.db`` 以及不需要模型能力的数据库消费者使用，不导入
-``config.settings``，也不检查模型地址和名称。但它调用的密钥加载器会校验全部
-``REQUIRED_SECRET_KEYS``，因此仍要求应用和模型等全局必需密钥存在于同一个文件中。
+该模块供 app.db 以及不需要模型能力的数据库消费者使用，不导入 config.settings，
+也不检查模型地址和名称。密钥加载器只校验各运行进程共用的必需密钥；沙盒等进程专用
+密钥由对应进程通过 require_secret() 单独读取。
 """
 
 from __future__ import annotations
