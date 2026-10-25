@@ -247,6 +247,33 @@ staging_compose ps --all
 `docker-compose.prod.yml` 使用生产 MySQL、PostgreSQL checkpoint、统一 bootstrap、Web、Agent worker、独立 `causal-mcp`、monitor、checkpoint cleanup 和独立 `rag-eval-worker`；生产环境不挂载源代码，使用独立卷、网络和日志轮转设置。worker 通过进程级 MCP Client pool 调用私有服务，必须显式提供不可变 Deep Agent 配置和 MCP 鉴权材料；它依赖 `causal-mcp` healthy 后才开始 claim Job。`causal-mcp` 使用独立不可变镜像、单 ASGI worker、默认最多 2 个并行 invocation 和 4 个等待队列，不开放宿主端口；每个已运行 invocation 使用独立单进程 executor 以支持精确取消。镜像内的 CDMIR 与 `cdfm-base==0.1.0` 固定版本，并使用 CPU Torch 依赖闭合 `pip check`；CDFM 权重同样在构建期按固定 revision 下载到 `/opt/cdfm-weights-image` 并逐文件校验。生产 Compose 仍由部署环境通过 `CDFM_MODEL_PATH` 显式指定权重位置；命名卷入卷与 `HF_HUB_OFFLINE` 目前只在预发拓扑生效。RAG evaluation worker 与主系统进程隔离，并通过独立评测卷共享必要的运行产物；它不带开发可观测性标签，不应把评测日志混入主系统观测流。当前生产 Compose 是单独的生产配置，不能假设它自动提供开发 Compose 的 MySQL replica、SearXNG、Loki/Alloy/Grafana 或故障切换能力。
 当前生产 Compose 未定义 SearXNG 服务；如果生产环境启用 `web_search_enabled`，必须另外提供可访问的 `SEARXNG_URL` 和对应的搜索服务部署，搜索不可用时仍遵循 worker 运行期降级语义。生产 readiness 和发布证据必须按 [`testing.md`](testing.md) 重新执行并记录，不能用单元或静态 Compose 检查替代。
 
+## OpenSandbox 数据处理沙盒
+
+开发使用 `.env.example` 作为普通环境配置模板，预发使用 `.env.staging.example`，生产使用 `deploy/config/production.env.example`。各模板中的 `.invalid` 地址和 `replace-me` 镜像是占位值，部署前必须替换为当前环境可访问的 API 地址和已批准的镜像引用。
+
+开发、预发和生产使用同一套 OpenSandbox API 契约，但分别连接独立的服务地址并使用不同的 API key。CausalAgent Compose 不启动 OpenSandbox 服务；Worker 不挂载 Docker socket，只通过私网 HTTPS 和 API key 访问 OpenSandbox。OpenSandbox 服务端需要创建 Docker 沙盒，因此它必须运行在专用主机上并访问该主机的 Docker daemon；这项主机控制权限不授予 CausalAgent Worker。
+
+Compose 将 API 地址、镜像和资源限制配置传给 Worker；`CAUSALAGENT_SANDBOX_URL` 与 `CAUSALAGENT_SANDBOX_IMAGE` 是必填项。地址必须是没有用户信息、路径、查询参数或片段的 http(s) origin；非 loopback 地址必须使用 HTTPS。API key 只从密钥文件由 Worker 通过 `require_secret("CAUSALAGENT_SANDBOX_API_KEY")` 读取，不放进普通 `.env`、Compose environment、命令行或日志。开发、预发和生产必须分别使用独立 API key。
+
+处理镜像的构建文件为 `deploy/opensandbox/Dockerfile`，使用经批准的 OpenSandbox Code Interpreter 镜像作为基础，并从 `deploy/opensandbox/requirements.lock` 安装固定的 Python 3.11 数据处理依赖。基础镜像必须通过 `OPENSANDBOX_CODE_INTERPRETER_IMAGE` build argument 以 digest 固定；构建产物也应推送并以 digest 配置到 `CAUSALAGENT_SANDBOX_IMAGE`。requirements.lock 面向 Linux x86_64，由 requirements.in 以 `uv pip compile` 生成。在仓库根目录执行构建时，使用 `docker build --platform linux/amd64 -f deploy/opensandbox/Dockerfile --build-arg OPENSANDBOX_CODE_INTERPRETER_IMAGE=<approved-image>@sha256:<digest> --tag <registry>/causalagent/data-preparation:<revision> deploy/opensandbox`；将推送后的镜像 digest 写入各环境的普通配置模板。示例中的 `.invalid` 地址和 `replace-me` 镜像只是占位值。
+
+Worker 创建沙盒时固定使用 `/opt/code-interpreter/code-interpreter.sh` 入口和 `PYTHON_VERSION=3.11`。请求包含 `NetworkPolicy(default_action=deny, egress=[])`，即不给沙盒配置任何出站许可。OpenSandbox 服务端必须配置 Docker runtime、固定版本的 `execd_image`、`docker.network_mode=bridge` 和版本固定的 egress sidecar；使用 `dns+nft` 模式并保持 `disable_ipv6=true`。沙盒宿主机还必须对 Docker 沙盒网段设置 IPv4/IPv6 转发默认拒绝规则；只允许服务端控制面访问沙盒所需的路径，不允许沙盒访问公网、宿主机管理端口、其他业务容器或任意地址。`publish_host` 应绑定到私网地址，沙盒端口不得暴露到公网。OpenSandbox 主机只负责拉取已批准的镜像；镜像拉取权限不代表沙盒运行时可以出网。服务端字段以 [OpenSandbox 官方配置说明](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md) 为准；Python 入口与版本选择见 [Code Interpreter SDK 文档](https://github.com/opensandbox-group/OpenSandbox/blob/main/sdks/code-interpreter/python/README.md)。
+
+生产 OpenSandbox 必须部署在专用沙盒主机上，并通过 HTTPS/API key 限制 Worker 可达的服务端点。服务端控制面会操作该主机 Docker daemon，因此不要把 OpenSandbox 与 CausalAgent Worker 共用进程或 Docker socket。开发与预发也使用相同 API 契约，各自使用独立服务和凭据。
+
+部署 OpenSandbox 服务端时必须显式启用非空 API key 校验；仅由 Worker 发送 API key 不能证明服务端启用了认证。服务端还必须拒绝沙盒挂载任意宿主机路径，不依赖未确认的默认值。
+
+| 设置 | 默认值 |
+| --- | --- |
+| `CAUSALAGENT_SANDBOX_CPU_LIMIT` / `CAUSALAGENT_SANDBOX_MEMORY_LIMIT` | `1` / `2Gi` |
+| `CAUSALAGENT_SANDBOX_TTL_SECONDS` / `CAUSALAGENT_SANDBOX_COMMAND_TIMEOUT_SECONDS` / `CAUSALAGENT_SANDBOX_API_TIMEOUT_SECONDS` | `900` / `300` / `30` 秒 |
+| `CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER` / `CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY_WAIT_SECONDS` | `2` / `300` 秒 |
+| `CAUSALAGENT_SANDBOX_MAX_INPUT_BYTES` / `CAUSALAGENT_SANDBOX_MAX_PREVIEW_BYTES` | `67108864` / `32768` 字节 |
+| `CAUSALAGENT_SANDBOX_MAX_OUTPUT_FILE_BYTES` / `CAUSALAGENT_SANDBOX_MAX_COMMAND_BYTES` / `CAUSALAGENT_SANDBOX_MAX_COMMAND_OUTPUT_BYTES` | `67108864` / `16384` / `65536` 字节 |
+| `CAUSALAGENT_SANDBOX_AGENT_UID` / `CAUSALAGENT_SANDBOX_AGENT_GID` | `10001` / `10001` |
+
+Worker 的客户端策略检查和沙盒内 IPv4/IPv6 连接探测用于发现明显的网络策略失效，不能替代 OpenSandbox 服务端 egress sidecar 和宿主机转发规则。部署验收必须从真实沙盒分别尝试公网 IPv4 和 IPv6 直连，并确认都无法建立连接；同时验证沙盒创建、Python 执行、文件回读和销毁仍正常，并保存服务端策略及防火墙规则。当前工作区没有已配置的 OpenSandbox 服务地址、生产 API key、批准的基础镜像 digest 或沙盒主机，因此没有执行真实沙盒及外网阻断验收，也没有构建或发布处理镜像。
+
 ## 部署包与发布清单
 
 发布后的服务器验收命令见 [`release-acceptance.md`](release-acceptance.md)。
@@ -372,4 +399,4 @@ powershell -ExecutionPolicy Bypass -File .\windows-client\build.ps1 `
 
 ## 数据库发布顺序
 
-开发/预发空库或数据库环境重建时先启动依赖数据库，再运行 `Database.bootstrap` 完成 Alembic 和 checkpoint setup，确认成功后才启动 app/worker/monitor/agent-persistence-cleanup/rag-eval-worker。当前唯一 Alembic head 是 `e1f2a3b4c5d6`；清理 worker 还要求 Agent worker 至少完成一次启动以初始化官方 Store schema。具有破坏性的 checkpoint/file migration 不会自动回填旧数据，执行 downgrade 必须选择明确 revision，并在隔离环境先验证往返。迁移风险和 preflight 规则见 [`../database/migrations-checkpoints.md`](../database/migrations-checkpoints.md)。
+开发/预发空库或数据库环境重建时先启动依赖数据库，再运行 `Database.bootstrap` 完成 Alembic 和 checkpoint setup，确认成功后才启动 app/worker/monitor/agent-persistence-cleanup/rag-eval-worker。当前唯一 Alembic head 是 `x1y2z3a4b5c6`；清理 worker 还要求 Agent worker 至少完成一次启动以初始化官方 Store schema。具有破坏性的 checkpoint/file migration 不会自动回填旧数据，执行 downgrade 必须选择明确 revision，并在隔离环境先验证往返。迁移风险和 preflight 规则见 [`../database/migrations-checkpoints.md`](../database/migrations-checkpoints.md)。

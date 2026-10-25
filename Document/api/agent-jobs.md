@@ -56,9 +56,13 @@ Last-Event-ID: 42
 
 也兼容 `last_event_id=42` 查询参数。服务端从 `analysis_job_events.id > 42` 读取事件，返回标准 SSE 的 `id`、`event`、`data` 字段；没有新事件时按配置轮询并发送 heartbeat。事件 payload 按事件类型执行字段白名单清洗，worker 的 `attempt`、未知附加字段和内部对象不会对外可见。
 
-`interrupt` 事件可带 `interaction` 公开结构，用于数据处理确认：`interaction_type`、`question_id`、`message`、`algorithm_name`、`expires_at`、`allow_other` 和最多 3 个 `options`。每个选项包含稳定 `option_id`、算法 `capability_id`、处理步骤、影响说明和风险；`algorithm_name` 是用户可见的公开算法名称，前端用它替代内部标识。前端根据结构化步骤生成确定性的执行说明，模型生成的影响说明在确认前没有执行预览时标注“未计算”，不提供虚假精确值。
+`interrupt` 事件可带公开的 `interaction` 结构。通用结构允许 `interaction_type`、`question_id`、`message`、`algorithm_name`、`expires_at`、`allow_other` 和最多 3 个 `options`。若交互包含选项，每项包含稳定 `option_id`、算法 `capability_id`、处理步骤、影响说明和风险；`algorithm_name` 是用户可见的公开算法名称，前端用它替代内部标识。前端根据结构化步骤生成确定性的执行说明，模型生成的影响说明在确认前没有执行预览时标注“未计算”，不提供虚假精确值。
 
 收到 `interrupt` 后，前端应展示公开问题或方案并等待恢复；收到 `final_result`、`error` 或 `canceled` 后连接结束。若 Job 已经进入终态，即使数据库查询时没有新的事件，服务端也会结束连接。
+
+数据处理语义澄清使用同一 `interrupt`、SSE 和 `resume` 契约，`interaction_type` 为 `data_processing_question`；交互载荷包含 `question_id`、公开问题文本、`expires_at` 和 `allow_other=true`，不包含算法选项。用户通过 `resume` 提交文本答复后，同一个 Job 从数据处理 Agent 的原中断位置继续；现有等待时限与幂等规则不变。
+
+方案确认使用 `interaction_type=data_processing_plan_confirmation`，并公开 `plan_version` 与 `plan`。版本为 64 位小写 SHA-256；方案只包含 `summary`、`observation_unit`、`transformations`、`variable_semantics` 和 `limitations`。事件输出逐字段限制类型、数量与长度，不透传脚本或内部运行时字段。SSE 重连及聊天历史恢复使用相同的公开投影，前端据此显示方案和确认按钮。
 
 `decision` 事件除既有路由说明外，还可包含 `decision_kind=algorithm|evidence|final`。`algorithm` 表示模型在同一次算法 Tool Call 中显式提交的公开选择依据，`evidence` 表示同一位置的 `rag_evidence_search`/`web_evidence_search` 检索依据，两者都可同时带公开工具名；`final` 只在 FinalizationGate 验证成功后产生，可带 `low|medium|high` 置信度。模型工具参数流中的公开摘要会先以 `decision_delta` 增量事件发送，工具开始/结果仍分别由可信工具边界发布；完整 `decision` 仍作为历史回放和无增量回退。公开说明是展示文本而非隐藏思维链，不包含内部结果引用；缺失或格式无效的工具说明不会阻止工具执行。相关事件都持久化到 `analysis_job_events`，SSE 重连按原 Event ID 续传，历史回放直接展示完整 `decision` 文本。
 
@@ -175,6 +179,8 @@ Agent 在每轮开始时判断用户意图，再由图路由执行；用户不�
 转达澄清问题时，终态载荷与普通文本回答相同（`type=text`），不包含内部分析上下文 ID。按当前上下文重新生成报告时仍然返回结构化报告文档，该模式只使用上下文已确认的文件、参数、算法结果、因果边和检索证据，不修改算法图，也不新增上下文里没有的因果结论。
 
 ## Resume 与 Cancel
+
+数据处理方案的明确确认通过结构化 answer 提交：{"action":"confirm","plan_version":"<当前方案的 SHA-256>"}。该版本来自服务端发布并保存的交互载荷。服务端在锁定的 waiting_input Job 上核对问题 ID 和方案版本，并把确认写入 analysis_job_inputs；执行脚本、保存候选、独立校验和绑定产物时，还会核对冻结文件、研究语义、方案说明、最新确认输入和当前 Job 租约。自由文本修改或拒绝不会授权执行；新的语义答复或方案说明变化会产生新版本。已确认语义范围内的脚本修正可以继续使用该确认，方案含义变化时必须重新确认。既有算法处理选项继续提交 option_id。
 
 恢复请求示例：
 

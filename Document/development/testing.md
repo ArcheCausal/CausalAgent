@@ -140,6 +140,24 @@ docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p
 
 ## Deep Agent 定向验证
 
+### OpenSandbox 数据处理验证
+
+数据处理验收必须连接真实 OpenSandbox API、真实沙盒主机和真实数据库，不能使用替代 Provider、模拟 API 响应或伪造外网阻断结果。先从真实沙盒验证 Python 3.11 镜像和固定依赖，再逐项检查创建、原始文件只读、脚本执行、输出回读、超时中断、销毁、MySQL 候选持久化/恢复、PostgreSQL 子图恢复以及真实 IPv4/IPv6 出站被拒绝。公网连接探测的超时本身不能作为防火墙配置证据；验收需同时检查沙盒主机上的 egress sidecar、Docker bridge 和转发规则。
+
+本工作区未配置真实 OpenSandbox 服务、API key 或专用沙盒主机，因此没有运行完整沙盒链路。数据库恢复可在另外创建的隔离 MySQL/PostgreSQL 环境单独检查，不能把这类证据或 unit/静态检查描述为真实沙盒验收。上线前还需在隔离环境执行完整模型、Worker 重启接管、MCP HTTP 和报告链路验收。
+
+方案确认还要验证确认版本与 Job 输入账本一致、用户修改或拒绝后旧方案不会执行、新语义答复或方案说明变化会使旧确认失效，以及已确认语义范围内的脚本修正可以安全恢复。只有真实 OpenSandbox、MySQL、PostgreSQL 和 Worker 的完整链路才能证明生产级恢复及网络隔离；当前工作区缺少这些验收服务时，必须明确保留未验证结论。
+
+无需外部服务的定向检查如下。生命周期测试直接运行真实 StateGraph、节点包装器和 InMemorySaver，覆盖连续提问、按中断 ID 恢复、重新编译图、校验重试及正常暂停不产生失败事件；语义快照测试使用真实校验器、ToolRuntime、本地 MCP 服务和算法进程，不证明数据库或 HTTP。
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps -T unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_sandbox_preview.py tests/unit/agent/test_processing_plan_public_events.py tests/unit/agent/test_cdfm_input_authority.py tests/unit/agent/test_deep_agent_state.py tests/integration/agent/test_data_processing_child_lifecycle.py tests/integration/agent/test_measurement_semantics_snapshot.py -q
+```
+
+真实数据库入口是 [data_processing_recovery.py](../../tests/acceptance/data_processing_recovery.py)，必须在专用内部 Docker 网络中连接全新空库，设置 `TERMINAL_ACCEPTANCE_MYSQL_HOST=recovery-mysql`、`TERMINAL_ACCEPTANCE_POSTGRES_HOST=recovery-postgres` 和唯一的 `DATA_RECOVERY_RUN_ID`，按脚本顶部说明运行。它执行正式 bootstrap、真实 Flask 注册/登录及文件和 Job 服务、方案输入账本、候选重复保存、校验绑定、上下文切换、旧租约写入拒绝和 PostgreSQL 重建连接池恢复；MCP 使用进程内服务和真实 MySQL 强读，检查二值语义拒绝 DirectLiNGAM。额外的原生子图检查在三次新建 PostgreSQL 连接池之间恢复两次提问。报告保存在验收容器 `/tmp/data-processing-recovery/`；同一容器续跑必须使用 `--resume`，另起一轮必须使用新的空库，数据库和原始报告保留。该入口不访问业务数据库，也不执行模型、沙盒脚本、Worker 故障接管或浏览器/HTTP 完整链路。
+
+2026-10-23 的隔离 MySQL/PostgreSQL 执行中，上述 13 个检查项全部通过，包含候选元组/JSON 数组重放返回相同 ID 和 revision、同上下文保留与跨上下文清除数据指针、旧租约拒绝保存/校验/绑定，以及从数据库恢复二值语义后拒绝 DirectLiNGAM。原生子图使用实际编译的 StateGraph，在三次新建 PostgreSQL 连接池之间完成两轮 interrupt/resume。数据库最初以空库创建，修复后在同一隔离环境续跑；这些结果不证明真实模型、OpenSandbox、HTTP、Worker 崩溃接管或生产网络隔离。
+
 ### 工具可见性与 Web 开关
 
 新增验证只使用真实规则函数、领域对象和框架组件，不生成模型、算法或搜索的替代返回：
@@ -331,7 +349,7 @@ runner 通过 pytest 执行白名单内的测试文件，从而继承 `tests/con
 
 ## 迁移链验证
 
-空库升级和 migration graph 检查必须确认唯一 head 为 `e1f2a3b4c5d6`：
+空库升级和 migration graph 检查必须确认唯一 head 为 `x1y2z3a4b5c6`：
 
 ```bash
 python -m alembic heads

@@ -15,12 +15,13 @@ MySQL readiness
   → MCP Client pool connect/handshake
   → 静态 Algorithm Registry 与领域工具
   → RAG active release readiness
-  → Deep Agent 与父图编译
+  → OpenSandbox 配置校验与 Provider 构造
+  → 数据处理 Agent、因果 Deep Agent 与父图编译
   → worker ready
   → slots claim Job
 ```
 
-`ProcessRuntime` 持有进程级 MCP Client pool、`McpAlgorithmExecutor`、静态 Registry、PostgreSQL Store/checkpointer、RAG readiness、领域工具和编译后的父图。`SlotRuntime` 只引用这些共享对象，不为每个 slot 重建 graph 或创建 stdio MCP session。每次 Job invocation 再创建 `AgentRunContext`，绑定可信 Job、attempt、lease、输入身份、execution guard、executor、filesystem backend、RAG 状态、联网搜索开关和事件 sink；这些运行时对象不进入 State 或 checkpoint。
+`ProcessRuntime` 持有进程级 MCP Client pool、`McpAlgorithmExecutor`、静态 Registry、PostgreSQL Store/checkpointer、RAG readiness、领域工具、OpenSandbox Provider、两个 Agent 和编译后的父图。启动时只校验 OpenSandbox 配置并构造 Provider；创建沙盒时才访问 API。`SlotRuntime` 只引用这些共享对象，不为每个 slot 重建 graph 或创建 stdio MCP session。每次 Job invocation 再创建 `AgentRunContext`，绑定可信 Job、attempt、lease、输入身份、execution guard、executor、filesystem backend、RAG 状态、联网搜索开关、沙盒 Provider、数据处理 Agent 和事件 sink；这些运行时对象不进入 State 或 checkpoint。
 
 进程级 MCP Client pool 与 worker slot 数量相互独立。默认 execute lane 为 `2 × 1`，control lane 为 `1 × 2`；控制 lane 只负责取消，不增加服务端算法并发。启动任一步失败都会在 `worker.startup.ready` 前终止进程，不领取 Job。
 
@@ -31,24 +32,32 @@ MySQL readiness
 数据分析主路径为：
 
 ```text
-agent → fold → preprocess → deep_agent → finalization_gate → report
+agent → fold → data_processing → validate_dataset → bind_dataset → preprocess → deep_agent → finalization_gate → report
 ```
 
-父图直接表达的其余路径为 `agent → report`（按当前分析上下文重新生成报告）、`agent → context_switch` 与 `context_switch → fold / report / inquiry_answer / normal_chat`（解析并切换分析上下文后再继续）；普通聊天和报告追问仍由 `normal_chat`、`inquiry_answer` 路径结束。父图只把问题、数据画像、分析参数和必要输入消息投影到 Deep Agent；子图返回时只接收算法结果、Action Ledger、RAG/Web evidence、结构化决策和 Gate/report 所需摘要。完整消息、Deep Agents 内部字段和中间计划不会回投影到父 State。
+父图直接表达的其余路径为 `agent → report`（按当前分析上下文重新生成报告）、`agent → context_switch` 与 `context_switch → fold / report / inquiry_answer / normal_chat`（解析并切换分析上下文后再继续）；普通聊天和报告追问仍由 `normal_chat`、`inquiry_answer` 路径结束。新分析先把冻结的原始 CSV 和研究目标交给数据处理子图。数据处理 Agent 可通过现有 interrupt/resume 契约澄清观察单位和转换语义；它只能调用受控领域工具，不能使用内置 Shell、文件写入工具或通用子 Agent。脚本经 OpenSandbox API 在 Python 3.11 处理镜像中运行，原始输入只读，沙盒创建请求默认拒绝所有外连。候选 CSV、脚本和说明先写入 MySQL；独立校验节点读取实际文件，通过后才绑定 prepared_dataset_id 并重建分析画像。因果分析阶段的所有算法调用使用同一份已校验数据，不在 MCP 或算法适配器中改写输入。
+
+候选数据集和提交后的脚本正文保存在 MySQL file_objects，analysis_job_datasets 记录候选 revision、来源 hash、对象引用和验证报告，Job 保存最终选中产物 ID。独立校验器先流式检查 CSV 行列结构，并限制最多 1,000,000 个数据单元格，再将文件载入 DataFrame 计算画像。PostgreSQL checkpoint 保存当前阶段、运行标识、产物引用、方案说明及尚待执行的脚本草稿，不保存 CSV 正文或 DataFrame。每次脚本执行都创建短期沙盒；用户等待答复时不会保留正在运行的命令。恢复时按原始文件与已保存脚本重新建立工作区；候选幂等身份包含文件、脚本及附带确认版本的规范化元数据，重复提交返回原 revision。数据处理子图使用以 Job 为 thread、以处理运行标识分隔的 namespace，因此现有 Job 清理 outbox 可一次清理该 Job 的全部处理 checkpoint。
 
 父图 checkpoint 使用 `thread_id=analysis_jobs.job_id` 和空 namespace。Deep Agent 子图使用同一个 PostgreSQL saver 和稳定的 `thread_id=deep-agent:<uuid5(job_id)>`。父图调用配置传入 `checkpoint_ns=deep_agent_v1`，当前 LangGraph 独立调用的子图实际保存在该 thread 的根 namespace（空字符串）；检查持久化状态时应读取实际保存的 namespace，不能仅从调用配置推定存储位置。该配置与存储位置差异下的正式中断恢复和故障接管仍需专门验证。子图 State 保存的分析身份由 Job、当前冻结输入和算法 Spec 摘要构成；worker、attempt 和 lease 只代表本次执行权限。输入身份读取的是 invocation 级可刷新引用，服务端重新冻结输入或切换分析上下文后，旧执行产物不会被复用。Gate 要求修正时，父图通过同一子图读取状态并追加受控指令。
 
-提交处理确认时，子图在内层 `interrupt` 暂停；父图节点识别子图 pending interrupt，以同一公开载荷在父图暂停并发布 `interrupt` 事件，不把子图标记为完成。用户答复重新进入父图节点后，通过 `Command(resume=...)` 传回子图原中断位置；子图在等待期间结束本轮执行并释放 MCP 请求、算法子进程和 worker 执行槽位。
+提交数据处理语义问题时，子图在内层 `interrupt` 暂停；父图保留原生中断 ID 和公开载荷，让 LangGraph 直接向外传播暂停，不把它当作执行失败，也不再增加一层人工中断。用户答复通过父图的 `Command(resume=...)` 回到子图原中断位置，连续提问分别消费自己的答复。子图配置保留父任务的恢复索引，移除父 checkpoint ID、位置映射和重放状态，并显式指定共享 saver；读取处理 namespace 时不会误用父图位置。等待期间结束本轮执行并释放 OpenSandbox、MCP 请求、算法子进程和 worker 执行槽位。
 
-从可信 checkpoint 恢复时，系统校验同一 Job、冻结输入、Spec 与处理方案；已完成结果以原始 provenance 进入 Gate 认可的恢复结果集合，不因新 attempt/lease 被重复执行。旧 worker 的迟到写入继续被 fencing 拒绝；checkpoint 不可可靠读取时阻止恢复。人工恢复只增加 `resume_count`，不消耗故障恢复次数。
+从可信 checkpoint 恢复时，系统校验同一 Job、冻结输入、Spec 摘要和数据处理运行身份；已完成结果以原始 provenance 进入 Gate 认可的恢复结果集合，不因新 attempt/lease 被重复执行。旧 worker 的迟到写入继续被 fencing 拒绝；checkpoint 不可可靠读取时阻止恢复。人工恢复只增加 `resume_count`，不消耗故障恢复次数。
 
-长期记忆由 `AsyncPostgresStore` 单独保存，不属于 Job checkpoint。模型只注册 `read_file` 和 `edit_file`，并且只允许写 `/memories/preferences.md` 与 `/memories/research_background.md`；其他写入由兜底 deny 拒绝。namespace 从可信 `AgentRunContext` 的 `user_id` 生成，首次使用时仅做 create-if-absent 初始化。Deep Agent 不启用 subagent、`task`、代码执行或宿主文件系统。
+长期记忆由 `AsyncPostgresStore` 单独保存，不属于 Job checkpoint。因果 Deep Agent 只注册 `read_file` 和 `edit_file`，并且只允许写 `/memories/preferences.md` 与 `/memories/research_background.md`；其他写入由兜底 deny 拒绝。数据处理 Deep Agent 的默认文件系统工具被限制为只读，脚本只能经专用工具保存并在 OpenSandbox 运行。两者使用同一 DeepAgents Harness profile：关闭通用子 Agent，并从可见工具中移除 Shell、默认写文件、删除和目录搜索工具。namespace 从可信 `AgentRunContext` 的 `user_id` 生成，首次使用时仅做 create-if-absent 初始化。运行时对象不写入 State 或 checkpoint。
 
 cleanup outbox 在同一次清理中删除父图 Job thread 和独立的 Deep Agent child thread；两者均成功才确认完成，具体生命周期见 [`job-file-lifecycle.md`](job-file-lifecycle.md)。
+
+执行前，数据处理 Agent 必须通过公开交互展示方案并等待用户确认。服务端用 SHA-256 方案版本绑定 Job、冻结文件 hash、研究语义和转换说明；确认版本保存在 Job 的当前交互和恢复输入账本中，候选元数据也保存该身份。用户以自由文本修改或拒绝时不会形成确认；新的语义答复或方案说明变化会使 Deep Agent State 中的确认失效。已确认语义范围内的脚本修正可以复用该确认；脚本与候选文件仍单独记录内容 hash。脚本执行入口和 MySQL 候选写入事务都核对当前租约及最新确认版本，独立校验和最终绑定继续核对同一版本。
+
+独立校验失败时，父图把确定性错误交回数据处理 Agent，最多进行三轮修正。超出已确认语义范围的处理需要再次提问和确认；校验通过后直接绑定，不增加例行的第二次确认。因果分析 Agent 不会反向启动数据重处理。公开事件按字段和大小限制保留方案版本及摘要，不公开脚本或内部身份。沙盒预览只读取有限前缀，在 UTF-8 字符边界截断并标注；完整输出超过限制时仍拒绝保存。
 
 ## 分析上下文与追问路由
 
 `Session`、`AnalysisContext`、`Job` 和 checkpoint 各管一段事实：Session 是用户可见的会话容器；AnalysisContext 是 MySQL 中的跨 Job 业务事实，保存创建时的文件快照、分析参数、最新结构化算法摘要、RAG/Web 证据摘要和最新报告引用；Job 是一次具体执行并绑定一个上下文；checkpoint 只负责当前 Job 的执行恢复、中间 State 和虚拟文件。一个 Session 可以拥有多个 AnalysisContext，`sessions.active_analysis_context_id` 只表示当前默认上下文。
+
+`fold` 提取目标和处理变量后立即完成上下文绑定，再进入数据准备。`preprocess` 只强读已绑定的数据集并重建画像，不切换上下文。切到不同上下文时清除旧数据绑定，同一上下文的幂等重放保留绑定；同一 Job 恢复继续使用其已校验数据。报告后的普通追问读取报告与分析事实，不重新读取 CSV；新 Job 不自动继承旧 Job 的处理数据。
 
 `agent_node` 用一次结构化调用判断意图（`normal_chat`、`start_analysis`、`answer_report`、`revise_report`、`rerun_analysis`、`switch_analysis_context`、`clarify`），模型只输出意图、`context_hint` 和澄清问题；`route_decision` 由后端按固定映射生成，模型不能输出分析上下文 ID 或用户文件 ID，也不能直接选择图节点。节点输入是当前消息、最近有限聊天历史、当前 AnalysisContext 摘要和同一 Session 的历史上下文索引；索引只含文件名、目标变量、处理变量、报告标题、更新时间和简短摘要，提示词里不出现内部 ID。没有可引用报告时 `answer_report` 与 `revise_report` 回退到 `normal_chat`，结构化输出失败同样回退到 `normal_chat`。
 
@@ -64,13 +73,13 @@ cleanup outbox 在同一次清理中删除父图 Job thread 和独立的 Deep Ag
 
 模型看到的是由本地 `AlgorithmSpec` 生成的 LangChain function tools。当前默认 allowlist 包含 PC、DirectLiNGAM 和 CDFM；OLC 的 Spec、Adapter、runner 和算法代码仍保留，但不进入 worker Registry、MCP runner registry 或旧兼容 MCP 工具面。运行时不会调用远端 `list_tools()` 来动态扩展模型工具。CDFM 工具只公开可选 `threshold`，模型路径、CPU device、标准化和缺失值处理策略由 causal-mcp 固定。
 
-预处理在 `analysis_parameters.data_profile` 保存本次冻结数据的完整画像。`to_deep_agent_input()` 优先校验该字段，只有字段不存在时才读取父 State 顶层 `data_profile`；选中的画像存在但非法时明确失败，不使用其他来源掩盖错误。转换复制全部行列、列顺序、数值列、分类列、缺失、非有限值、空列、常数列和质量问题，不按 `column_profiles.inferred_type` 重新判断存储类型。两处完整画像都不存在时，历史 `column_profiles`、分析参数和 `file_summary` 只恢复可确认的行列事实，数值与分类类型保持未知。数值参与条件来自实际 dtype 和有限值分布，不再由旧 inferred_type 标签决定。文件摘要继续记录文件身份与基础事实。
+绑定经过独立校验的数据集后，分析准备阶段在 `analysis_parameters.data_profile` 保存该数据集的完整画像。`to_deep_agent_input()` 优先校验该字段，只有字段不存在时才读取父 State 顶层 `data_profile`；选中的画像存在但非法时明确失败，不使用其他来源掩盖错误。转换复制全部行列、列顺序、数值列、分类列、缺失、非有限值、空列、常数列和质量问题，不按 `column_profiles.inferred_type` 重新判断存储类型。两处完整画像都不存在时，历史 `column_profiles`、分析参数和 `file_summary` 只恢复可确认的行列事实，数值与分类类型保持未知。数值参与条件来自实际 dtype 和有限值分布，不再由旧 inferred_type 标签决定。文件摘要继续记录文件身份与基础事实。
 
 提供给模型的画像、子图 State、依赖调度器及 AlgorithmTool/Adapter 输入使用同一份转换结果；完整画像的缺失值事实同时决定 `missing_values_present`。完整画像采用顶层兼容来源时，投影后的分析参数也保存同值副本，父图原输入不被修改。工具和调度器不再从文件摘要分别重建画像；父图完成回写保存边界选中的完整画像副本。`continuous_tabular_dataset` 要求画像确认全部真实列名均为数值列，历史输入的未知类型不能满足这一前提。此转换只作用于新进入子图的输入，不修改旧任务已经保存的 checkpoint 或终态。
 
-`AlgorithmDependencyDispatchMiddleware` 在 ToolNode 边界收集同一模型响应中的算法调用，按 `requires/produces` 分层：无依赖调用可并行，有依赖调用按层执行，并受单 Job 并发和工具总预算约束。`DependencyPlan.missing_artifacts_by_call` 以原始 call ID 保存没有现存输入且没有本轮生产者的 artifact；该字段只属于运行时计划，不进入数据库 schema 或模型工具参数。被阻塞调用仍保留在拓扑批次内，执行前分别检查直接缺失、上游终态和实际发布的产物。直接缺失或上游未成功发布时只为该调用返回 `not_ready`；独立调用继续进入真实 handler 并接受参数、预处理和审批检查。例如 CDFM 未获得全部数值列的确认时不执行算法，但不会阻止独立的 PC 调用。未执行结果使用固定安全说明，无因果图或 raw artifact；每个调用仍通过自己的 `Command` 保存 ToolMessage、AlgorithmResult、终态 Ledger 和公共结果事件。重复 call ID、工具与 capability 身份冲突和非法依赖图仍属于受控契约错误，不作为普通缺失输入处理；取消和 lease 撤销继续传播控制流。
+`AlgorithmDependencyDispatchMiddleware` 在 ToolNode 边界收集同一模型响应中的算法调用，按 `requires/produces` 分层：无依赖调用可并行，有依赖调用按层执行，并受单 Job 并发和工具总预算约束。`DependencyPlan.missing_artifacts_by_call` 以原始 call ID 保存没有现存输入且没有本轮生产者的 artifact；该字段只属于运行时计划，不进入数据库 schema 或模型工具参数。被阻塞调用仍保留在拓扑批次内，执行前分别检查直接缺失、上游终态和实际发布的产物。直接缺失或上游未成功发布时只为该调用返回 `not_ready`；独立调用继续进入真实 handler，并按其 `AlgorithmSpec` 检查已经绑定的数据集是否满足输入要求。输入不兼容的算法调用结束为安全的 `not_applicable` 或 `invalid_input` 结果，不会修改数据，也不会阻止其他独立调用。未执行结果使用固定安全说明，无因果图或 raw artifact；每个调用仍通过自己的 `Command` 保存 ToolMessage、AlgorithmResult、终态 Ledger 和公共结果事件。重复 call ID、工具与 capability 身份冲突和非法依赖图仍属于受控契约错误，不作为普通缺失输入处理；取消和 lease 撤销继续传播控制流。
 
-Adapter 负责模型参数校验、确定性预处理、标准结果、raw result 完整性和 Ledger 更新；`McpAlgorithmExecutor` 只负责签名传输、远端执行结果校验和安全错误映射。CDFM 的 logits/probabilities 通过仅供 Executor 与 Adapter 使用的私有 envelope 保存到 raw artifact，不进入 `AlgorithmResult`、ToolMessage、SSE 或公共日志。可信 Job、文件、lease、HMAC 与数据库身份不会进入模型参数。
+Adapter 负责模型参数和数据集输入契约检查、标准结果、raw result 完整性和 Ledger 更新；它不根据模型参数删除行、插补、编码或筛选字段。算法必需的数组转换、矩阵运算和算法原生缺失掩码仍由执行实现负责。`McpAlgorithmExecutor` 只负责签名传输、远端执行结果校验和安全错误映射。CDFM 的 logits/probabilities 通过仅供 Executor 与 Adapter 使用的私有 envelope 保存到 raw artifact，不进入 `AlgorithmResult`、ToolMessage、SSE 或公共日志。可信 Job、文件、lease、HMAC 与数据库身份不会进入模型参数。
 
 `ToolCallProtocolMiddleware` 在完整模型响应之后检查最新 `AIMessage.invalid_tool_calls`。参数 JSON 解析失败时，它使用原调用 ID 追加 `status=error` 的 `ToolMessage`，说明工具未执行，并且不修改原参数、不把原始参数或底层异常写入返回内容；仅在本地 JSON 解析器能够确认时附带行列位置。当前响应任一调用缺少有效 ID，或调用 ID 重复时，运行以受控协议错误终止，不生成替代 ID。若仍有合法工具调用待执行，继续原工具路由；否则通过 `jump_to=model` 返回现有 `before_model` 链，继续接受模型预算检查。存在无效调用时，本轮 `structured_response` 会清空，父图继续使用既有 FinalizationGate 拒绝、一次修正和降级规则。该钩子只检查当前响应，不修复旧 checkpoint。
 
@@ -80,9 +89,9 @@ Adapter 负责模型参数校验、确定性预处理、标准结果、raw resul
 
 调用账本保留原始事件阶段 `event_step_id`；聚合兜底复用原阶段、执行 attempt、retry 和事件键，恢复后不使用新阶段改写旧事件的 payload。旧账本缺少事件阶段或完整调用身份时不合成完成事件。
 
-`AlgorithmSpec` 还声明输入要求、原生处理能力、允许的额外处理操作和最小行列数，注册后的算法工具直接使用 `model_description()` 作为模型可见描述。预检测画像区分阻断问题与非阻断提示，保留变量类型、缺失列、非有限值、空列、常数列和疑似标识符列。Deep Agent 根据画像生成 1 到 3 个受控处理选项，由本地 `request_data_processing` 工具校验后触发用户确认；该工具的 `args_schema` 与辅助 schema 来自同一份 `DataProcessingInput`，`option_id`、保护列和确认凭证只由后端生成，确认工具必须独占一次工具调用轮次。
+`AlgorithmSpec` 声明算法实际接受的数据要求、缺失值处理方式、分类数据能力和最小行列数，并通过 `model_description()` 提供给模型。它描述输入条件，不授予算法工具改写数据的权限。数据处理 Agent 读取这些要求作为准备数据的参考；候选文件写入 MySQL 后，独立校验节点从持久化对象读取实际 CSV，生成画像并对每个可用算法执行适用性检查。画像保留变量类型、缺失列、非有限值、空列、常数列和疑似标识符列。数据处理语义问题使用自由文本 interrupt，不再使用绑定算法的处理选项 schema。
 
-确认前和 MCP 执行前共用 `AlgorithmSpec.validate_preprocessing_plan()` 检查操作范围、列名、保护列和步骤顺序。算法工具按 `capability_id + plan.digest` 解析唯一获批记录，并把这次解析得到的方案与凭证直接传给 Adapter；省略方案时只在无歧义时自动取用，多个不同获批方案要求模型明确指定。MCP 在执行前先按原 CSV 画像复核方案，再执行处理并检查处理后的真实数据，结果 provenance 记录同一个方案摘要。
+算法调用不携带预处理方案或批准凭证。独立校验报告保存规范化 `semantic_kinds` 快照，拒绝非法类型、缺失字段及冲突声明。Adapter 从可信运行时的数据集引用读取该快照，MCP 则从 MySQL primary strong read 的同一已绑定候选读取报告；两端都把测量语义传给 `AlgorithmSpec.assess_applicability()`，缺失或无效报告不能回退为空语义。二值、分类或有序变量不会仅因 CSV 中存成数字而被当作连续变量。MCP 同时核对 Job、lease、原始输入 hash、`prepared_dataset_id`、候选状态、数据对象归属和内容 hash，排队后和执行完成后再次核对输入及语义；它不按算法参数改写 CSV。结果 provenance 同时记录分析数据身份和原始来源身份。
 
 `causal-mcp` 是私网 Streamable HTTP/HTTP/1.1 服务。服务端以 MySQL primary strong read 校验 Job、attempt、lease 和 worker 身份，再使用有界队列及独立算法子进程运行 capability。MCP session 不保存 Job、checkpoint 或 Action Ledger。
 
@@ -136,7 +145,7 @@ CDFM 的输入准入检查确认数值存储和可计算性，不将整数列或
 
 `profile_thresholds` 明确：低基数为不同值数不超过 10；低频为取值频数不超过 5 或占非缺失值比例不超过 1%；高缺失为缺失比例大于 30%。低基数与低频独立计算，可以同时成立，不合并低频数值，不由整数和高唯一比推断标识符。画像不修改原数据。非线性检测依据实际数值 dtype、有限观测和至少 10 个不同值选择变量，不执行时提供原因；并列数值用平均秩分箱。图表对低基数数值使用按数值顺序排列的频数柱图，对其他数值使用直方图；字符串类别单独展示。
 
-两套运行入口从 [analysis_principles.py](../../Agent/analysis_principles.py) 引用通用原则。专用提示词继续分别规定工具执行、预处理、检索与报告契约。结构发现不需要处理变量或结果变量；效应量解释仅适用于实际完成的效应识别和估计，变量名称、整数性与偏态不能自行证明混杂或忠实性违反。
+两套运行入口从 [analysis_principles.py](../../Agent/analysis_principles.py) 引用通用原则。专用提示词继续分别规定工具执行、数据处理、检索与报告契约。结构发现不需要处理变量或结果变量；效应量解释仅适用于实际完成的效应识别和估计，变量名称、整数性与偏态不能自行证明混杂或忠实性违反。
 
 ## 结构化终态与报告
 
@@ -162,7 +171,7 @@ Deep Agent 使用 `ToolStrategy(FinalAnalysisDecision)` 生成 `structured_respo
 
 模型可修正的决策校验第一次失败时，父图把失败映射为稳定的规则码，再生成一条脱敏修正指令（包含被违反的具体引用规则）交回同一个 Deep Agent 子图；第二次仍失败则设置 `finalization_status=degraded` 并生成安全报告。身份、账本或状态一致性问题不带规则码，直接终止分析，不进入模型修正或报告降级。可修正的 Gate 拒绝会发布 `progress` 阶段说明：首次挂在 `finalization_gate` 阶段并给出同一份修正要求，降级时说明本次仅基于已验证输入生成报告；第二次 Deep Agent 启动修正时，新阶段同样收到一条 `progress` 说明，指出该阶段复用已有结果，并补齐校验要求的步骤。`degraded` 不公开未经验证的主图或最终选择，但报告成功时 Job 仍以 `succeeded` 收敛。校验通过时设置 `finalization_status=valid`，并把内部结果引用转换为公开算法名称后发布最终决策说明。已完整记录的算法超时不阻止使用其他有效结果；报告装配根据执行摘要固定追加超时算法的分析限制说明。
 
-报告节点让模型只产出 `ReportDraft`：报告标题、块结构、Markdown 文本和资源/证据引用。图表资源、因果图模型、来源和证据全部由后端注入并校验，块 ID 重复、块类型未知、`asset_key` 不存在或类型不匹配、`evidence_id` 不存在都会进入节点受控错误路径并生成降级报告文档，不保存部分报告。来源类别按证据通道（输入文件、知识库、联网检索）显式给出，不根据是否存在 URL 推断。报告装配还会把正文中出现且属于本次证据清单的 `ev_...` ID 回填到对应 `markdown.evidence_refs`，兼容模型漏填结构化字段；前端来源页脚据此提供“定位正文”。父 State 用 `chart_assets` 保存预处理阶段生成的结构化图表资源，用 `report_document` 保存后端装配完成的结构化报告文档；报告追问只使用文档摘要、资源说明、来源说明和证据说明，不把图表数据、因果图模型或完整文档塞进提示词。新报告不再依赖 `visualization_mapping`、Base64 图片、HTML 图片标签和 `[[CHART:...]]` 占位符。
+报告节点让模型只产出 `ReportDraft`：报告标题、块结构、Markdown 文本和资源/证据引用。图表资源、因果图模型、来源和证据全部由后端注入并校验，块 ID 重复、块类型未知、`asset_key` 不存在或类型不匹配、`evidence_id` 不存在都会进入节点受控错误路径并生成降级报告文档，不保存部分报告。来源类别按证据通道（输入文件、知识库、联网检索）显式给出，不根据是否存在 URL 推断。报告装配还会把正文中出现且属于本次证据清单的 `ev_...` ID 回填到对应 `markdown.evidence_refs`，兼容模型漏填结构化字段；前端来源页脚据此提供“定位正文”。父 State 用 `chart_assets` 保存已绑定分析数据集的分析准备阶段生成的结构化图表资源，用 `report_document` 保存后端装配完成的结构化报告文档；报告追问只使用文档摘要、资源说明、来源说明和证据说明，不把图表数据、因果图模型或完整文档塞进提示词。新报告不再依赖 `visualization_mapping`、Base64 图片、HTML 图片标签和 `[[CHART:...]]` 占位符。
 
 算法 Tool 的模型可见参数允许附带 `public_decision.summary`。middleware 在科学参数校验和执行前剥离该字段；有效说明写入 `decision_kind=algorithm` 的公共事件，缺失或格式无效不会阻止算法执行。`rag_evidence_search` 与 `web_evidence_search` 使用同一 envelope，并在外部检索前剥离该字段，写入 `decision_kind=evidence` 的公共事件。两类工具说明都不进入 Adapter、MCP、检索器入参。普通 assistant content、ToolMessage、工具参数、完整工具结果、provider ID、result reference 和隐藏推理都不会因此公开。
 
