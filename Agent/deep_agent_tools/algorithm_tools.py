@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
 from Agent.execution_control import JobExecutionRevoked
+from Agent.measurement_semantics import normalize_semantic_kinds
 
 if TYPE_CHECKING:
     from Agent.deep_agent.context import AgentRunContext
@@ -20,12 +21,9 @@ from .models import (
     ActionAttempt,
     AlgorithmResult,
     DataProfile,
-    PreprocessingApproval,
-    PreprocessingPlan,
     InvocationRecord,
 )
 from .identity import build_invocation_id, current_input_identity
-from .interaction import resolve_approved_plan
 from .registry import AlgorithmRegistry, RegistryEntry
 from .runtime_updates import (
     algorithm_terminal_command,
@@ -84,11 +82,18 @@ class AlgorithmTool:
             return DataProfile.model_validate(profile)
         raise ValueError("converted data_profile is required in algorithm State")
 
+    @staticmethod
+    def _trusted_semantic_kinds(identity: Any, profile: DataProfile) -> dict[str, str]:
+        analysis_input = getattr(identity, "analysis_input", None)
+        if analysis_input is None or analysis_input.dataset_id is None:
+            raise ValueError("bound analysis dataset is required for algorithm input")
+        return normalize_semantic_kinds(
+            analysis_input.semantic_kinds, columns=profile.column_names,
+        )
+
     def _adapter_input_from_runtime(
         self,
         runtime: Any,
-        *,
-        resolved: tuple[PreprocessingApproval, PreprocessingPlan] | None = None,
     ) -> AdapterInput:
         """从当前 ToolRuntime 生成输入快照；文件正文不进入 State。"""
 
@@ -99,17 +104,13 @@ class AlgorithmTool:
         state = getattr(runtime, "state", None)
         if not isinstance(state, Mapping):
             raise RuntimeError("ToolRuntime.state must be a mapping")
-        dataset_csv = state.get("dataset_csv")
-        approval = resolved[0] if resolved is not None else None
-        plan = resolved[1] if resolved is not None else None
+        profile = self._data_profile_from_state(state)
         return AdapterInput(
-            data_profile=self._data_profile_from_state(state),
+            data_profile=profile,
             input_identity=current_input_identity(identity),
-            dataset_csv=dataset_csv if isinstance(dataset_csv, str) else None,
             missing_values_present=bool(state.get("missing_values_present")),
             dataset_authority_available=True,
-            preprocessing=plan,
-            approval=approval,
+            semantic_kinds=self._trusted_semantic_kinds(identity, profile),
         )
 
     def _record(
@@ -166,6 +167,12 @@ class AlgorithmTool:
             lease_epoch=int(active_context.trusted_identity.lease_epoch),
             worker_id=active_context.trusted_identity.worker_id,
             input_identity=current_input_identity(active_context.trusted_identity),
+            source_input_identity=active_context.trusted_identity.source_input_identity(),
+            analysis_dataset_id=(
+                active_context.trusted_identity.analysis_input.dataset_id
+                if active_context.trusted_identity.analysis_input is not None
+                else None
+            ),
             attempts={
                 retry_ordinal: ActionAttempt(
                     retry_ordinal=retry_ordinal,
@@ -207,14 +214,17 @@ class AlgorithmTool:
             active_input = AdapterInput(
                 data_profile=self._data_profile_from_state(state),
                 input_identity=current_input_identity(active_context.trusted_identity),
-                dataset_csv=(
-                    state.get("dataset_csv")
-                    if isinstance(state.get("dataset_csv"), str)
-                    else None
-                ),
                 missing_values_present=bool(state.get("missing_values_present")),
                 dataset_authority_available=True,
             )
+        # 每次调用重读可信绑定；显式 AdapterInput 和 State 都不能覆盖语义。
+        active_input = replace(
+            active_input,
+            dataset_authority_available=True,
+            semantic_kinds=self._trusted_semantic_kinds(
+                active_context.trusted_identity, active_input.data_profile,
+            ),
+        )
         invocation_id = build_invocation_id(
             job_id=active_context.trusted_identity.job_id,
             response_identity=response_identity,
@@ -330,76 +340,13 @@ class AlgorithmTool:
                 runtime,
                 expected_context=self.runtime_context,
             )
-            # 模型可以在同一次 Tool Call 中声明 preprocessing；运行时只在它与
-            # State 中获批方案完全一致时使用。这里解析出的 plan/approval 会直接
-            # 进入 AdapterInput，后续不再按 capability_id 宽泛查找。
             state = getattr(runtime, "state", None)
             if not isinstance(state, Mapping):
                 raise RuntimeError("ToolRuntime.state must be a mapping")
-            model_parameter_plan = kwargs.get("preprocessing")
-            proposed = (
-                PreprocessingPlan.model_validate(model_parameter_plan)
-                if model_parameter_plan is not None
-                else None
-            )
-            resolution = resolve_approved_plan(
-                state=state,
-                capability_id=self.entry.spec.capability_id,
-                plan=proposed,
-            )
-            if resolution.status == "ambiguous":
-                return ToolMessage(
-                    content=json.dumps(
-                        {
-                            "status": "needs_confirmation",
-                            "reason": (
-                                "当前算法存在多个不同的已批准处理方案，请明确携带"
-                                "本次要执行的 preprocessing 方案。"
-                            ),
-                            "unmet_requirements": ["processing_plan_ambiguous"],
-                        },
-                        ensure_ascii=False,
-                    ),
-                    tool_call_id=identity.provider_call_id,
-                    name=self.name,
-                    status="error",
-                )
-            resolved = resolution.entry
-            if model_parameter_plan is not None and resolved is None:
-                return ToolMessage(
-                    content=json.dumps(
-                        {
-                            "status": "needs_confirmation",
-                            "reason": (
-                                "当前处理方案没有对应的用户确认。请先调用 "
-                                "request_data_processing 取得确认，再携带同一方案重试。"
-                            ),
-                            "unmet_requirements": ["processing_not_approved"],
-                        },
-                        ensure_ascii=False,
-                    ),
-                    tool_call_id=identity.provider_call_id,
-                    name=self.name,
-                    status="error",
-                )
-            # envelope 默认值 None 会进入 StructuredTool 参数；执行器 schema
-            # 不接受该字段，必须在任何路径上剥离。
-            kwargs.pop("preprocessing", None)
             started_at = datetime.now(timezone.utc)
-            runtime_adapter_input = self._adapter_input_from_runtime(
-                runtime,
-                resolved=resolved,
-            )
-            active_adapter_input = self.adapter_input or runtime_adapter_input
-            if resolved is not None:
-                active_adapter_input = replace(
-                    active_adapter_input,
-                    preprocessing=resolved[1],
-                    approval=resolved[0],
-                )
+            runtime_adapter_input = self._adapter_input_from_runtime(runtime)
+            active_adapter_input = runtime_adapter_input
             public_decision = kwargs.pop("public_decision", None)
-            # preprocessing 由运行时按获批方案注入；模型以同名字段自行填写时
-            # 只用于与 State 中的确认内容核对，不能直接成为执行参数。
             if public_decision is not None:
                 await emit_public_decision_event(
                     runtime,
@@ -432,7 +379,6 @@ class AlgorithmTool:
         runtime_args_schema = with_tool_runtime_schema(
             build_model_tool_input_schema(
                 self.args_schema,
-                include_preprocessing=True,
             ),
             tool_name=self.name,
             tool_runtime_type=ToolRuntime,
@@ -451,7 +397,6 @@ def build_algorithm_tools(
     runtime_context: "AgentRunContext | None" = None,
     data_profile: DataProfile | None = None,
     input_identity: str | None = None,
-    dataset_csv: str | None = None,
     missing_values_present: bool = False,
 ) -> tuple[AlgorithmTool, ...]:
     """按 Registry 静态顺序生成当前启用的领域工具。"""
@@ -466,8 +411,11 @@ def build_algorithm_tools(
         adapter_input = AdapterInput(
             data_profile=data_profile,
             input_identity=identity,
-            dataset_csv=dataset_csv,
             missing_values_present=missing_values_present,
+            dataset_authority_available=True,
+            semantic_kinds=AlgorithmTool._trusted_semantic_kinds(
+                runtime_context.trusted_identity, data_profile,
+            ),
         )
     tools: list[AlgorithmTool] = []
     for entry in registry.entries:

@@ -25,6 +25,9 @@ NODE_DESCRIPTIONS = {
     "agent": "分析用户意图",
     "fold": "加载文件并验证数据",
     "preprocess": "预处理数据",
+    "data_processing": "理解并处理数据",
+    "validate_dataset": "独立校验分析数据",
+    "bind_dataset": "绑定已校验数据",
     "deep_agent": "执行 Deep Agent 分析",
     "finalization_gate": "校验最终分析决策",
     "mcp": "执行因果分析",
@@ -50,7 +53,7 @@ DECISION_PROGRESS = {
     "normal_chat": "已识别为普通问答",
     "inquiry_answer": "已识别为报告追问",
     "postprocess": "已识别为已有结果的后续处理",
-    "preprocess": "文件与数据验证完成",
+    "preprocess": "分析数据摘要和图表已更新",
     "agent": "需要补充分析输入",
 }
 DECISION_FIELDS = {

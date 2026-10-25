@@ -66,6 +66,19 @@ class CausalAgentState(TypedDict):
     session_id: str
     job_id: NotRequired[str]
     file_summary: NotRequired[Optional[FileSummary]]
+    analysis_file_summary: NotRequired[dict[str, Any]]
+    prepared_dataset_id: NotRequired[int]
+    prepared_dataset_hash: NotRequired[str]
+    prepared_dataset_metadata: NotRequired[dict[str, Any]]
+    dataset_validation_status: NotRequired[str]
+    dataset_validation_report: NotRequired[dict[str, Any]]
+    data_processing_run_id: NotRequired[str]
+    data_processing_candidate_id: NotRequired[int]
+    data_processing_candidate_revision: NotRequired[int]
+    data_processing_retry_count: NotRequired[int]
+    data_processing_retry_report: NotRequired[dict[str, Any] | None]
+    data_processing_failure_code: NotRequired[str | None]
+    data_processing_failure_message: NotRequired[str]
     data_profile: NotRequired[Optional[DataProfile]]
 
     route_decision: NotRequired[

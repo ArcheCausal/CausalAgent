@@ -13,6 +13,7 @@ from .models import McpInvocationContext, canonical_json_bytes
 # 固定项目命名空间，不是 secret；改变它会破坏 checkpoint replay 的身份稳定性。
 CAUSAL_INVOCATION_NAMESPACE = UUID("5f4b8f6b-0f3b-4c37-9e40-9d18a97a2e6f")
 DEEP_AGENT_RUN_NAMESPACE = UUID("7c1b3a10-5f2e-4e75-8e8c-1e9f8d4f1a2b")
+DATA_PROCESSING_RUN_NAMESPACE = UUID("b45c4713-cfc0-4aed-9550-aaf1546f60ba")
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,29 @@ def build_deep_agent_run_id(*, job_id: str | UUID) -> str:
         except (ValueError, AttributeError, TypeError) as exc:
             raise ValueError("job_id must be a UUID string") from exc
     return f"deep-agent:{uuid5(DEEP_AGENT_RUN_NAMESPACE, canonical_job_id)}"
+
+
+def build_data_processing_run_id(
+    *,
+    job_id: str | UUID,
+    source_input_identity: str,
+    semantic_identity: str,
+) -> str:
+    """为同一 Job、原始输入和研究语义生成稳定的数据处理子图 ID。"""
+
+    canonical_job_id = str(UUID(str(job_id)))
+    payload = {
+        "job_id": canonical_job_id,
+        "source_input_identity": _non_blank(
+            source_input_identity, field_name="source_input_identity"
+        ),
+        "semantic_identity": _non_blank(semantic_identity, field_name="semantic_identity"),
+    }
+    identity = uuid5(
+        DATA_PROCESSING_RUN_NAMESPACE,
+        canonical_json_bytes(payload).decode("utf-8"),
+    )
+    return f"data-processing:{identity}"
 
 
 def build_deep_agent_step_id(

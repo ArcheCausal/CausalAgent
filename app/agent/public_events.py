@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from itertools import islice
+import re
 from typing import Any
 
 
@@ -59,6 +61,12 @@ def _public_interaction(value: dict[str, Any]) -> dict[str, Any]:
     """只保留已登记的公开交互字段，拒绝把内部标识或运行时对象带出。"""
 
     public = {key: value[key] for key in _INTERACTION_FIELDS if key in value}
+    plan_version = value.get("plan_version")
+    if isinstance(plan_version, str) and re.fullmatch(r"[0-9a-f]{64}", plan_version):
+        public["plan_version"] = plan_version
+    plan = _public_processing_plan(value.get("plan"))
+    if plan is not None:
+        public["plan"] = plan
     raw_options = value.get("options")
     if isinstance(raw_options, list):
         options: list[dict[str, Any]] = []
@@ -79,3 +87,48 @@ def _public_interaction(value: dict[str, Any]) -> dict[str, Any]:
             options.append(option)
         public["options"] = options
     return public
+
+
+def _public_plan_strings(value: Any) -> list[str]:
+    """只公开有限数量的文字条目，不把对象转换为文字。"""
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item[:600] for item in value[:12] if isinstance(item, str)]
+
+
+def _public_processing_plan(value: Any) -> dict[str, Any] | None:
+    """按 DataProcessingPlanSummary 重建摘要，禁止透传脚本和内部字段。
+
+    保留契约的必填字段和集合数量限制；公开条目另限 600 字符，
+    变量名限 255 字符，超长变量名丢弃以避免截断后混淆变量身份。
+    """
+    if not isinstance(value, dict):
+        return None
+    summary = value.get("summary")
+    observation_unit = value.get("observation_unit")
+    if not isinstance(summary, str) or not summary:
+        return None
+    if not isinstance(observation_unit, str) or not observation_unit:
+        return None
+
+    transformations = _public_plan_strings(value.get("transformations"))
+    raw_semantics = value.get("variable_semantics")
+    if not transformations or not isinstance(raw_semantics, dict):
+        return None
+    variable_semantics = {
+        name: description[:600]
+        for name, description in islice(raw_semantics.items(), 128)
+        if isinstance(name, str)
+        and len(name) <= 255
+        and isinstance(description, str)
+    }
+    if not variable_semantics:
+        return None
+
+    return {
+        "summary": summary[:1200],
+        "observation_unit": observation_unit[:500],
+        "transformations": transformations,
+        "variable_semantics": variable_semantics,
+        "limitations": _public_plan_strings(value.get("limitations")),
+    }

@@ -45,6 +45,7 @@ from Agent.deep_agent_tools.models import (
     McpInvocationContext,
 )
 from app.agent.worker.mcp_client_pool import McpClientPool, McpClientPoolConfig
+from tests.support.local_algorithm_execution import LocalAlgorithmExecutor
 
 
 TOKEN = "cdfm-engineering-smoke-token"
@@ -134,10 +135,11 @@ async def _start_server(
     port: int,
     registry: RunnerRegistry | None = None,
 ) -> tuple[uvicorn.Server, asyncio.Task[Any]]:
+    local_input = LocalAlgorithmExecutor(csv_data).validated_input
     app = create_app(
         _config(),
         registry=registry,
-        authority_reader=lambda _context: csv_data,
+        authority_reader=lambda _context: local_input,
         database_probe=lambda: True,
     )
     server = uvicorn.Server(
@@ -275,7 +277,7 @@ async def _valid_cdfm_call(csv_data: str) -> dict[str, Any]:
                     numeric_columns=("A", "B", "C"),
                 ),
                 input_identity=identity_digest,
-                dataset_csv=csv_data,
+                semantic_kinds=LocalAlgorithmExecutor(csv_data).validated_input.semantic_kinds,
                 dataset_authority_available=True,
             ),
             trusted_context=identity,

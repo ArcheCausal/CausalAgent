@@ -5,6 +5,7 @@
 
 from dataclasses import dataclass
 from secrets import token_hex
+from collections.abc import Mapping
 
 import numpy as np
 import pandas as pd
@@ -14,6 +15,12 @@ from Agent.CausalAgentMCP.config import McpServerConfig
 from Agent.CausalAgentMCP.executor_pool import BoundedProcessPool
 from Agent.CausalAgentMCP.runner_registry import build_default_registry
 from Agent.CausalAgentMCP.service import CausalMcpService
+from Agent.data_processing.validation import validate_candidate
+from Agent.deep_agent_tools.algorithm_specs import DEFAULT_ALGORITHM_SPECS
+from Agent.measurement_semantics import (
+    ValidatedAlgorithmInput, normalize_semantic_kinds,
+    semantic_kinds_from_validation_report,
+)
 from Agent.deep_agent_tools.algorithm_executor import (
     AlgorithmExecutionResponse, validate_executor_command, validate_executor_result,
 )
@@ -43,9 +50,37 @@ class ExecutionCall:
 class LocalAlgorithmExecutor:
     """记录真实调用，并通过正式服务签名校验、进程执行及结果校验。"""
 
-    def __init__(self, csv_data: str = PC_CSV) -> None:
+    def __init__(
+        self, csv_data: str = PC_CSV, *, semantic_kinds: Mapping[str, str] | None = None,
+    ) -> None:
         self.csv_data = csv_data
         self.data_profile = build_data_profile_from_csv(csv_data)
+        kinds = normalize_semantic_kinds(
+            {} if semantic_kinds is None else semantic_kinds,
+            columns=self.data_profile.column_names,
+        )
+        self.validation_report = validate_candidate(
+            data_bytes=csv_data.encode("utf-8"),
+            script_bytes=b"import pandas as pd\n",
+            metadata={
+                "summary": "本地算法输入，不执行转换",
+                "observation_unit": "CSV 中的一条观测记录",
+                "transformations": ["保留原始行列和值"],
+                "variable_semantics": {},
+            },
+            analysis_parameters={
+                "measurement_semantics": [
+                    {"column": column, "kind": kind, "evidence": f"{column}: {kind}"}
+                    for column, kind in kinds.items()
+                ],
+            },
+            specifications=DEFAULT_ALGORITHM_SPECS,
+            max_bytes=max(1, len(csv_data.encode("utf-8"))),
+        )
+        self.validated_input = ValidatedAlgorithmInput(
+            csv_data=csv_data,
+            semantic_kinds=semantic_kinds_from_validation_report(self.validation_report),
+        )
         self.calls: list[ExecutionCall] = []
 
     async def execute(self, command, trusted_context) -> AlgorithmExecutionResponse:
@@ -58,9 +93,9 @@ class LocalAlgorithmExecutor:
             signing_key_previous_id="previous",
         )
 
-        def read_input(context: McpInvocationContext) -> str:
+        def read_input(context: McpInvocationContext) -> ValidatedAlgorithmInput:
             validate_executor_command(command, trusted_context=context)
-            return self.csv_data
+            return self.validated_input
 
         service = CausalMcpService(
             config=config, registry=build_default_registry(),

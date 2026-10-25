@@ -28,10 +28,10 @@ from Agent.deep_agent_tools.models import (
     StandardizedGraph,
     canonical_json_bytes,
 )
-from Agent.deep_agent_tools.preprocessing import (
-    PreprocessingError,
-    apply_preprocessing,
-    build_data_profile_from_csv,
+from Agent.deep_agent_tools.preprocessing import build_data_profile_from_csv
+from Agent.measurement_semantics import (
+    ValidatedAlgorithmInput, normalize_semantic_kinds,
+    semantic_kinds_from_validation_report,
 )
 
 from .auth import McpAuthError, verify_invocation
@@ -51,71 +51,98 @@ class McpServiceError(RuntimeError):
         self.safe_error_code = code
 
 
-def load_frozen_csv_from_connection(
+def load_validated_input_from_connection(
     context: McpInvocationContext,
     connection: Any,
-) -> str:
-    """Read one frozen Job/file tuple from an already-selected strong connection."""
+) -> ValidatedAlgorithmInput:
+    """Read only the validated, Job-bound analysis dataset from the strong primary."""
+
+    if context.analysis_dataset_id is None or context.source_input_identity is None:
+        raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
 
     cursor = connection.cursor(dictionary=True)
     try:
         cursor.execute(
             """
-            SELECT j.user_id,
-                   j.session_id,
-                   j.worker_id,
-                   j.attempt_count,
-                   j.lease_epoch,
-                   fo.content_hash,
-                   fo.file_content
-            FROM analysis_jobs AS j
-            JOIN user_files AS uf
-              ON uf.id = j.input_user_file_id
-             AND uf.user_id = j.user_id
-            JOIN file_objects AS fo
-              ON fo.id = j.input_object_id
-             AND fo.owner_user_id = j.user_id
-             AND fo.id = uf.object_id
-            WHERE j.job_id = %s
-              AND j.user_id = %s
-              AND j.session_id = %s
-              AND j.worker_id = %s
-              AND j.attempt_count = %s
-              AND j.lease_epoch = %s
-              AND j.execution_state = 'leased'
-              AND j.input_user_file_id IS NOT NULL
-              AND j.input_object_id IS NOT NULL
+            SELECT job_id, user_id, session_id, worker_id, attempt_count, lease_epoch,
+                   execution_state, input_file_hash, prepared_dataset_id
+            FROM analysis_jobs
+            WHERE job_id = %s
             LIMIT 1
             """,
-            (
-                context.job_id,
-                context.user_id,
-                context.session_id,
-                context.worker_id,
-                context.attempt_count,
-                context.lease_epoch,
-            ),
+            (context.job_id,),
+        )
+        job = cursor.fetchone()
+        if (
+            not job
+            or int(job["user_id"]) != context.user_id
+            or job["session_id"] != context.session_id
+            or job["worker_id"] != context.worker_id
+            or int(job["attempt_count"]) != context.attempt_count
+            or int(job["lease_epoch"]) != context.lease_epoch
+            or job["execution_state"] != "leased"
+        ):
+            raise McpServiceError(SafeErrorCode.MCP_LEASE_STALE)
+        if (
+            job["input_file_hash"] != context.source_input_identity
+            or job["prepared_dataset_id"] is None
+            or int(job["prepared_dataset_id"]) != context.analysis_dataset_id
+        ):
+            raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
+        cursor.execute(
+            """
+            SELECT d.id, d.source_hash, d.data_hash, data.content_hash,
+                   data.file_content, d.validation_report
+            FROM analysis_job_datasets AS d
+            JOIN file_objects AS data
+              ON data.id = d.data_object_id
+             AND data.owner_user_id = %s
+             AND data.content_hash = d.data_hash
+            WHERE d.id = %s
+              AND d.job_id = %s
+              AND d.status = 'validated'
+            LIMIT 1
+            """,
+            (context.user_id, context.analysis_dataset_id, context.job_id),
         )
         row = cursor.fetchone()
     finally:
         cursor.close()
-    if not row or not row.get("file_content"):
-        raise McpServiceError(SafeErrorCode.MCP_LEASE_STALE)
-    if row.get("content_hash") and row["content_hash"] != context.input_snapshot_digest:
+    if (
+        not row
+        or row.get("source_hash") != context.source_input_identity
+        or row.get("data_hash") != context.input_snapshot_digest
+        or row.get("content_hash") != context.input_snapshot_digest
+        or not row.get("file_content")
+    ):
         raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
     try:
-        return row["file_content"].decode("utf-8")
-    except (AttributeError, UnicodeDecodeError) as exc:
+        semantic_kinds = semantic_kinds_from_validation_report(row.get("validation_report"))
+        return ValidatedAlgorithmInput(
+            csv_data=row["file_content"].decode("utf-8"),
+            semantic_kinds=semantic_kinds,
+        )
+    except (AttributeError, UnicodeError, ValueError, TypeError) as exc:
         raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID) from exc
 
 
-def load_frozen_csv(context: McpInvocationContext) -> str:
+def load_validated_input(context: McpInvocationContext) -> ValidatedAlgorithmInput:
     """Strong-read the current Job/lease/file tuple from MySQL primary."""
 
     from app.db import get_read_connection
 
     with get_read_connection(consistency="strong") as connection:
-        return load_frozen_csv_from_connection(context, connection)
+        return load_validated_input_from_connection(context, connection)
+
+
+def load_frozen_csv_from_connection(context: McpInvocationContext, connection: Any) -> str:
+    """兼容仅需 CSV 的旧调用，仍要求有效的校验报告。"""
+    return load_validated_input_from_connection(context, connection).csv_data
+
+
+def load_frozen_csv(context: McpInvocationContext) -> str:
+    """兼容仅需 CSV 的旧调用；生产执行使用完整可信输入。"""
+    return load_validated_input(context).csv_data
 
 
 def _validate_csv_limits(csv_data: str, config: McpServerConfig) -> None:
@@ -139,13 +166,9 @@ def _standardized_graph(raw_result: Mapping[str, Any], capability_id: str) -> St
 
 
 def _failure_status(code: SafeErrorCode) -> str:
-    if code in {
-        SafeErrorCode.ALGORITHM_INPUT_INVALID,
-        SafeErrorCode.PREPROCESSING_REQUIRED,
-        SafeErrorCode.PREPROCESSING_APPROVAL_REQUIRED,
-        SafeErrorCode.PREPROCESSING_PLAN_INVALID,
-        SafeErrorCode.PREPROCESSING_RESULT_REJECTED,
-    }:
+    if code == SafeErrorCode.ALGORITHM_NOT_APPLICABLE:
+        return "not_applicable"
+    if code == SafeErrorCode.ALGORITHM_INPUT_INVALID:
         return "invalid_input"
     if code == SafeErrorCode.ALGORITHM_NOT_READY:
         return "not_ready"
@@ -163,13 +186,6 @@ def _rejection_reason(code: SafeErrorCode) -> str:
         return "transport_error"
     if code == SafeErrorCode.MCP_CAPACITY_EXHAUSTED:
         return "pool_exhausted"
-    if code in {
-        SafeErrorCode.PREPROCESSING_REQUIRED,
-        SafeErrorCode.PREPROCESSING_APPROVAL_REQUIRED,
-        SafeErrorCode.PREPROCESSING_PLAN_INVALID,
-        SafeErrorCode.PREPROCESSING_RESULT_REJECTED,
-    }:
-        return "preprocessing_rejected"
     return "invalid_schema"
 
 
@@ -246,6 +262,8 @@ def _error_result(
             attempt_count=context.attempt_count,
             lease_epoch=context.lease_epoch,
             input_identity=command.input_identity,
+            source_input_identity=context.source_input_identity,
+            analysis_dataset_id=context.analysis_dataset_id,
             spec_digest=command.spec_digest,
             invocation_id=command.invocation_id,
             capability_id=command.capability_id,
@@ -264,7 +282,7 @@ class CausalMcpService:
         config: McpServerConfig,
         registry: RunnerRegistry,
         executor_pool: BoundedProcessPool,
-        authority_reader: Callable[[McpInvocationContext], str | bytes] = load_frozen_csv,
+        authority_reader: Callable[[McpInvocationContext], Any] = load_validated_input,
         database_probe: Callable[[], bool] | None = None,
         service_instance_id: str = "causal-mcp",
     ) -> None:
@@ -291,8 +309,8 @@ class CausalMcpService:
             mysql_ready = False
         return config_ready, mysql_ready, self.executor_pool.ready()
 
-    async def _read_authority(self, context: McpInvocationContext) -> str:
-        """Read authority off the event loop and normalize the frozen CSV."""
+    async def _read_authority(self, context: McpInvocationContext) -> ValidatedAlgorithmInput:
+        """读取可信 CSV 和语义快照，拒绝只含 CSV 的旧 reader。"""
 
         try:
             if inspect.iscoroutinefunction(self.authority_reader):
@@ -306,14 +324,15 @@ class CausalMcpService:
         except Exception as exc:
             # Database/driver details must not cross the private MCP boundary.
             raise McpServiceError(SafeErrorCode.MCP_TRANSPORT_FAILED) from exc
-        if isinstance(csv_data, bytes):
-            try:
-                csv_data = csv_data.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID) from exc
-        if not isinstance(csv_data, str):
+        if not isinstance(csv_data, ValidatedAlgorithmInput):
             raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID)
         return csv_data
+
+    async def _confirm_authority(
+        self, context: McpInvocationContext, expected: ValidatedAlgorithmInput,
+    ) -> None:
+        if await self._read_authority(context) != expected:
+            raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
 
     async def execute_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         started_at = time.perf_counter()
@@ -418,7 +437,8 @@ class CausalMcpService:
         command = request.command
         context = request.trusted_context
         try:
-            csv_data = await self._read_authority(context)
+            trusted_input = await self._read_authority(context)
+            csv_data = trusted_input.csv_data
             _validate_csv_limits(csv_data, self.config)
             from Agent.deep_agent_tools.algorithm_specs import DEFAULT_ALGORITHM_SPECS
 
@@ -429,60 +449,25 @@ class CausalMcpService:
             parameters = spec.model_input_schema.model_validate(command.parameters).model_dump(
                 mode="json"
             )
-            data_view: DataViewSummary | None = None
-            if command.preprocessing is not None:
-                approval = command.approval
-                if approval is None:
-                    raise McpServiceError(
-                        SafeErrorCode.PREPROCESSING_APPROVAL_REQUIRED
-                    )
-                if approval.plan_digest != command.preprocessing.digest:
-                    raise McpServiceError(
-                        SafeErrorCode.PREPROCESSING_PLAN_INVALID
-                    )
-                try:
-                    spec.validate_preprocessing_plan(
-                        plan=command.preprocessing,
-                        profile=build_data_profile_from_csv(csv_data),
-                        protected_columns=command.preprocessing.protected_columns,
-                    )
-                except ValueError as exc:
-                    raise McpServiceError(
-                        SafeErrorCode.PREPROCESSING_PLAN_INVALID
-                    ) from exc
-                try:
-                    csv_data, view_summary = apply_preprocessing(
-                        csv_data,
-                        command.preprocessing,
-                        protected_columns=command.preprocessing.protected_columns,
-                    )
-                except PreprocessingError as exc:
-                    raise McpServiceError(
-                        SafeErrorCode.PREPROCESSING_PLAN_INVALID
-                    ) from exc
-                processed_profile = build_data_profile_from_csv(csv_data)
-                data_view = DataViewSummary(
-                    row_count=processed_profile.row_count,
-                    column_count=processed_profile.column_count,
-                    columns=processed_profile.column_names,
-                    operations=tuple(view_summary["operations"]),
-                    plan_digest=str(view_summary["plan_digest"]),
-                    dropped_row_count=int(view_summary["dropped_row_count"]),
-                    imputed_columns=tuple(view_summary["imputed_columns"]),
-                    encoded_columns=tuple(view_summary["encoded_mappings"]),
-                )
-            else:
-                processed_profile = build_data_profile_from_csv(csv_data)
-            unmet = spec.required_processing_reason(
-                profile=processed_profile,
-                preprocessing=command.preprocessing,
+            processed_profile = build_data_profile_from_csv(csv_data)
+            semantic_kinds = normalize_semantic_kinds(
+                trusted_input.semantic_kinds, columns=processed_profile.column_names,
             )
-            if unmet is not None:
-                raise McpServiceError(
-                    SafeErrorCode.PREPROCESSING_REQUIRED
-                    if command.preprocessing is None
-                    else SafeErrorCode.PREPROCESSING_RESULT_REJECTED
+            applicability, _reason = spec.assess_applicability(
+                profile=processed_profile, semantic_kinds=semantic_kinds,
+            )
+            if applicability != "ready":
+                code = (
+                    SafeErrorCode.ALGORITHM_NOT_APPLICABLE
+                    if applicability == "not_applicable"
+                    else SafeErrorCode.ALGORITHM_INPUT_INVALID
                 )
+                raise McpServiceError(code)
+            data_view = DataViewSummary(
+                row_count=processed_profile.row_count,
+                column_count=processed_profile.column_count,
+                columns=processed_profile.column_names,
+            )
         except McpServiceError as exc:
             log_event(
                 LOGGER,
@@ -496,22 +481,6 @@ class CausalMcpService:
                 command,
                 context,
                 code=exc.safe_error_code,
-                capability_version=entry.version,
-            )
-            return {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
-        except PreprocessingError:
-            log_event(
-                LOGGER,
-                "mcp.request.rejected",
-                details={
-                    "capability": entry.capability_id,
-                    "reason_code": "preprocessing_rejected",
-                },
-            )
-            result = _error_result(
-                command,
-                context,
-                code=SafeErrorCode.PREPROCESSING_PLAN_INVALID,
                 capability_version=entry.version,
             )
             return {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
@@ -541,7 +510,7 @@ class CausalMcpService:
         async def before_process_start(queue_wait_seconds: float) -> None:
             # A Job may lose its lease while waiting for process capacity.
             # Re-read the authoritative tuple immediately before submission.
-            await self._read_authority(context)
+            await self._confirm_authority(context, trusted_input)
             log_event(
                 LOGGER,
                 "mcp.request.accepted",
@@ -702,7 +671,7 @@ class CausalMcpService:
         try:
             # Never return a result produced by a worker/attempt/lease that
             # became stale while the CPU-bound algorithm was running.
-            await self._read_authority(context)
+            await self._confirm_authority(context, trusted_input)
         except McpServiceError as exc:
             log_event(
                 LOGGER,
@@ -798,15 +767,12 @@ class CausalMcpService:
                         attempt_count=context.attempt_count,
                         lease_epoch=context.lease_epoch,
                         input_identity=command.input_identity,
+                        source_input_identity=context.source_input_identity,
+                        analysis_dataset_id=context.analysis_dataset_id,
                         spec_digest=command.spec_digest,
                         invocation_id=command.invocation_id,
                         capability_id=command.capability_id,
                         capability_version=entry.version,
-                        preprocessing_plan_digest=(
-                            command.preprocessing.digest
-                            if command.preprocessing is not None
-                            else None
-                        ),
                         algorithm_runner_version=normalized.provenance.algorithm_runner_version,
                     ),
                 )

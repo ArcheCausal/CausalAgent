@@ -26,7 +26,6 @@ from .runtime_updates import (
     algorithm_terminal_command, defer_algorithm_terminal_events,
     emit_public_decision_event, emit_tool_lifecycle_event, resolve_runtime_invocation,
 )
-from .interaction import DATA_PROCESSING_TOOL_NAME
 from .models import (
     ActionAttempt, AlgorithmResult, AlgorithmResultProvenance, DataProfile,
     Diagnostics, InvocationRecord,
@@ -112,81 +111,6 @@ def _tool_calls_from_state(
     return result
 
 
-def _safe_tool_message(
-    *,
-    name: str,
-    call_id: str,
-    status: str,
-    safe_error_code: str,
-) -> Any:
-    from langchain_core.messages import ToolMessage
-
-    return ToolMessage(
-        content=json.dumps(
-            {"status": status, "safe_error_code": safe_error_code},
-            ensure_ascii=False,
-            sort_keys=True,
-        ),
-        name=name,
-        tool_call_id=call_id,
-        status="error" if status != "succeeded" else "success",
-    )
-
-
-def _require_processing_message(
-    *,
-    name: str,
-    call_id: str,
-    reason: str,
-    unmet_requirements: list[str] | None = None,
-) -> Any:
-    """返回结构化的“需要确认处理”，模型不能把它当作可原样重试的失败。"""
-
-    from langchain_core.messages import ToolMessage
-
-    return ToolMessage(
-        content=json.dumps(
-            {
-                "status": "needs_confirmation",
-                "reason": reason,
-                "next_action": (
-                    "调用 request_data_processing 提交受控选项并等待用户确认，"
-                    "不要使用相同参数重复调用算法。"
-                ),
-                "unmet_requirements": unmet_requirements or ["data_processing"],
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        ),
-        name=name,
-        tool_call_id=call_id,
-        status="error",
-    )
-
-
-def _tool_message_for_processing_result(value: Any) -> Any | None:
-    """把 Adapter 的“需要处理/不适用”结果转成结构化确认请求。"""
-
-    if isinstance(value, AlgorithmResult):
-        value = value.model_dump(mode="json")
-    if not isinstance(value, Mapping):
-        return None
-    status = getattr(value.get("status"), "value", value.get("status"))
-    if status not in {"invalid_input", "not_applicable", "skipped"}:
-        return None
-    diagnostics = value.get("diagnostics")
-    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
-    code = str(diagnostics.get("safe_error_code") or value.get("safe_error_code") or "")
-    from .error_codes import is_processing_error
-
-    if not is_processing_error(code):
-        return None
-    return {
-        "reason": str(diagnostics.get("summary") or value.get("summary") or ""),
-        "code": code,
-    }
-
-
 class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
     """强制算法 Tool 经过 ``DependencyPlan`` 后才进入真实 handler。"""
 
@@ -262,23 +186,6 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
         handler: Callable[[Any], Awaitable[Any]],
     ) -> Any:
         call = request.tool_call
-        if (
-            isinstance(call, Mapping)
-            and call.get("name") == DATA_PROCESSING_TOOL_NAME
-        ):
-            # 处理确认必须独占工具轮次；不能与算法调用一起进入调度计划。
-            calls = _tool_calls_from_state(
-                _as_mapping(request.state),
-                self._tool_names,
-            )
-            if calls:
-                return _safe_tool_message(
-                    name=DATA_PROCESSING_TOOL_NAME,
-                    call_id=str(call.get("id") or ""),
-                    status="rejected",
-                    safe_error_code="INTERACTION_MUST_BE_EXCLUSIVE",
-                )
-            return await handler(request)
         if not isinstance(call, Mapping) or call.get("name") not in self._tool_names:
             return await handler(request)
 
@@ -397,6 +304,12 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                     job_id=str(trusted.job_id), attempt_count=int(trusted.attempt_count),
                     lease_epoch=int(trusted.lease_epoch),
                     input_identity=current_input_identity(trusted),
+                    source_input_identity=trusted.source_input_identity(),
+                    analysis_dataset_id=(
+                        trusted.analysis_input.dataset_id
+                        if trusted.analysis_input is not None
+                        else None
+                    ),
                     spec_digest=spec.spec_digest, invocation_id=invocation_id,
                     capability_id=spec.capability_id, capability_version=spec.version,
                 ),
@@ -479,40 +392,15 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                         tool_name=outcome.request.tool_name, status=result.status,
                         safe_error_code=getattr(result.diagnostics.safe_error_code, "value", result.diagnostics.safe_error_code),
                     )
-                    processing = next((
-                        details for result in results.values()
-                        if (details := _tool_message_for_processing_result(result)) is not None
-                    ), None)
-                    if processing is not None:
-                        update["messages"] = [_require_processing_message(
-                            name=outcome.request.tool_name, call_id=call_id,
-                            reason=processing["reason"], unmet_requirements=[processing["code"]],
-                        )]
                     outputs[call_id] = outcome.value
                     continue
                 if isinstance(outcome.value, ToolMessage):
-                    # 参数/审批拒绝同样结束已登记调用，但保留工具给模型的处理指令。
-                    try:
-                        payload = json.loads(outcome.value.content)
-                    except (TypeError, ValueError):
-                        payload = {}
-                    needs_confirmation = isinstance(payload, Mapping) and payload.get("status") == "needs_confirmation"
                     command = await terminal_output(
-                        call_id, "not_ready" if needs_confirmation else "failed",
-                        "PREPROCESSING_APPROVAL_REQUIRED" if needs_confirmation else "ALGORITHM_RESULT_CONTRACT_INVALID",
+                        call_id,
+                        "failed",
+                        "ALGORITHM_RESULT_CONTRACT_INVALID",
                     )
                     command.update["messages"] = [outcome.value]
-                    outputs[call_id] = command
-                    continue
-                processing = _tool_message_for_processing_result(outcome.value)
-                if processing is not None:
-                    command = await terminal_output(call_id, "not_ready", processing["code"])
-                    command.update["messages"] = [_require_processing_message(
-                        name=outcome.request.tool_name,
-                        call_id=call_id,
-                        reason=processing["reason"],
-                        unmet_requirements=[processing["code"]],
-                    )]
                     outputs[call_id] = command
                     continue
                 missing = plan.missing_artifacts_by_call.get(call_id, frozenset())

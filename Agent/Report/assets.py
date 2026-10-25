@@ -526,7 +526,9 @@ def _add_file_evidence(
     index.add_evidence(
         source_ids=[file_source_id],
         locator=locator,
-        description=f"{filename} 是本次因果分析使用的冻结数据文件。",
+        description=(
+            f"{filename} 是用户提供的输入文件；报告中的数据概览描述算法实际接收的数据。"
+        ),
     )
 
 

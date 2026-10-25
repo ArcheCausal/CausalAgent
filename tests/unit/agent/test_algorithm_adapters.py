@@ -65,7 +65,8 @@ def test_pc_adapter_uses_fake_executor_and_writes_raw_result() -> None:
     assert result.status == "valid"
     assert result.raw_result_ref is not None
     assert backend.read(result.raw_result_ref) is not None
-    assert result.provenance.preprocessing_recipe_digest
+    assert result.provenance.source_input_identity == "input-sha"
+    assert result.provenance.analysis_dataset_id is None
     assert len(executor.calls) == 1
 
 
