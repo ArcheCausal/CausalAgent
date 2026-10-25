@@ -41,6 +41,8 @@ agent → fold → data_processing → validate_dataset → bind_dataset → pre
 
 父 State 和处理子 State 均保存 analysis_parameters 与 analysis_parameter_changes。fold 仅提取初始研究参数，其输出 schema 拒绝冲突测量类型和空证据，结构不合法时使用统一入口的有界重试；数据澄清和方案确认中的自由文本均经统一结构化入口提取修订，来源 ID 由 MySQL 输入账本提供；读取时通过已持久化的 interrupt 事件关联外层中断 ID 与内层工具调用 ID，不能直接把两者视为同一个问题 ID。缺席字段保持原值，显式 null 清空，实际变化才追加 revision；相同来源重放去重，冲突拒绝。参数版本不包含派生画像。含义或范围变化使旧确认失效，歧义未解决时不能确认或执行。
 
+参数修订中的每个修改项必须包含 `field`、`value` 和外层 `evidence`；`measurement_semantics.value` 中的每条列声明还必须分别包含 `column`、`kind` 和内层 `evidence`。两层证据均需非空并逐字来自本次用户答复，不能相互替代。提取提示提供完整结构示例；此调用显式启用校验反馈，第一次结构校验失败后，统一入口在确认执行资格后追加脱敏字段路径和规则（例如 `updates.1.evidence` / `missing`）再重试一次，不回传模型取值或异常正文。最终提取失败记为 `parameter_extraction_failed`，父图停止处理；worker 将所有数据处理失败转换为现有 `error` 终态，由失败事务保存 `failed`、错误消息和可重放事件。前端据此展示失败；参数提取失败明确显示“参数解析失败”及“本次未启动因果分析”，不再生成成功终态。
+
 处理运行身份只依赖 Job 和冻结输入；研究参数变化不切换 checkpoint namespace。初始参数只写入首次子图启动，恢复及校验重试优先使用已有子 State。父包装节点显式接收最终参数、修订链和候选身份，再幂等完成上下文绑定；已有历史结果的研究不能被改写含义，必要时新建上下文。候选 metadata 保存最终参数与方案身份，独立校验和绑定逐次核对；已绑定产物恢复时同时恢复对应参数。无法识别的旧格式处理 checkpoint 明确拒绝继续。沙盒 API 与容量事实见 [沙盒控制服务](sandbox-controller.md)。
 
 处理阶段的开始进度事件另行包含当前 attempt 和父任务 ID。恢复或校验重试产生新的阶段实例时使用不同事件键，同次任务重放仍可去重；公开阶段事件的身份不改变子图 checkpoint 或沙盒申请身份。

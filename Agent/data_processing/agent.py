@@ -202,6 +202,26 @@ def _description_tool() -> Any:
     )
 
 
+def _parameter_extraction_prompt() -> ChatPromptTemplate:
+    """为两种答复入口提供同一份带完整证据示例的提取要求。"""
+    return ChatPromptTemplate.from_messages([
+        ("system", "你只提取用户此次明确补充或修正的研究参数。未提及字段不要输出；明确清空时 value 为 null。"
+         "updates 中每项修改必须包含 field、value、evidence，包含 value 为 null 的修改。"
+         "measurement_semantics 只输出用户明确修订的列声明，代码会保留其他列；每条声明包含 column、kind、evidence，kind 只能为 count/ordinal/category/continuous/binary/unknown。"
+         "measurement_semantics 有两层必填证据：修改项的外层 evidence 与 value 中每条声明的内层 evidence，必须分别填写，不能相互替代。"
+         "所有 evidence 必须非空且逐字摘自本次答复，可以在两层复用同一原文。不要根据字段名推测语义。观察单位、时间范围、聚合范围分别写入 observation_unit、time_window、aggregation_scope。"
+         "如有歧义，设置 needs_clarification 和具体问题，不提交猜测。仅在处理含义或范围改变时设置 processing_scope_changed，脚本实现修正不改变范围。"),
+        ("human", "结构示例：用户答复为‘次数是计数变量’时，返回完整结构：{example}。示例只说明结构，不能当作当前答复的证据。"),
+        ("human", "当前参数：{parameters}\n当前问题：{question}\n用户答复：{answer}"),
+    ]).partial(example=json.dumps({
+        "updates": [{"field": "measurement_semantics",
+                     "value": [{"column": "次数", "kind": "count", "evidence": "次数是计数变量"}],
+                     "evidence": "次数是计数变量"}],
+        "needs_clarification": False, "clarification_question": "",
+        "processing_scope_changed": True,
+    }, ensure_ascii=False))
+
+
 async def _apply_user_answer(
     runtime: Any, *, model: Any, question_id: str, question: str, answer: Any,
 ) -> dict[str, Any]:
@@ -224,18 +244,12 @@ async def _apply_user_answer(
         if receipts[receipt_key]["answer_digest"] != answer_digest:
             raise RuntimeError("replayed parameter answer conflicts with its trusted input")
         return {}
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "你只提取用户此次明确补充或修正的研究参数。未提及字段不要输出；明确清空时 value 为 null。"
-         "measurement_semantics 只输出用户明确修订的列声明，代码会保留其他列；每条声明包含 column、kind、evidence，kind 只能为 count/ordinal/category/continuous/binary/unknown。"
-         "每项 evidence 必须逐字摘自本次答复。不要根据字段名推测语义。观察单位、时间范围、聚合范围分别写入 observation_unit、time_window、aggregation_scope。"
-         "如有歧义，设置 needs_clarification 和具体问题，不提交猜测。仅在处理含义或范围改变时设置 processing_scope_changed，脚本实现修正不改变范围。"),
-        ("human", "当前参数：{parameters}\n当前问题：{question}\n用户答复：{answer}"),
-    ])
     extracted = await ainvoke_structured(
-        llm=model, schema=ParameterExtraction, prompt=prompt,
+        llm=model, schema=ParameterExtraction, prompt=_parameter_extraction_prompt(),
         inputs={"parameters": json.dumps(state["analysis_parameters"], ensure_ascii=False),
                 "question": question, "answer": answer_text},
         node_name="data_processing_parameter_extraction",
+        retry_with_validation_feedback=True,
     )
     await context.check_after_call()
     patch = extraction_patch(

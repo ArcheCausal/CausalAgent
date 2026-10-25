@@ -44,6 +44,7 @@ from Agent.data_processing.parameters import (
 from Database.analysis_contexts import apply_final_parameters_context
 from Agent.data_processing.validation import validate_candidate
 from Agent.execution_control import JobExecutionRevoked
+from Agent.llm_structured_output import StructuredOutputError
 
 
 DATA_PROCESSING_CHECKPOINT_NAMESPACE = "data_processing_v1"
@@ -352,6 +353,16 @@ async def data_processing_parent_node(
         )
     except (JobExecutionRevoked, GraphBubbleUp, ParameterContractError):
         raise
+    except StructuredOutputError as exc:
+        return {
+            "data_processing_run_id": run_id,
+            "data_processing_failure_code": (
+                "parameter_extraction_failed"
+                if exc.node_name == "data_processing_parameter_extraction"
+                else "processing_failed"
+            ),
+            "data_processing_retry_report": None,
+        }
     except Exception as exc:
         code = "sandbox_unavailable" if "sandbox" in type(exc).__name__.lower() else "processing_failed"
         return {
@@ -573,6 +584,7 @@ def dataset_failure_node(state: Mapping[str, Any]) -> dict[str, Any]:
     failure_labels = {
         "sandbox_unavailable": "数据处理沙盒服务当前不可用",
         "processing_failed": "数据处理阶段未能完成",
+        "parameter_extraction_failed": "参数解析失败，未能从用户答复中提取有效的研究参数",
         "candidate_missing": "数据处理 Agent 未提交可校验的数据集",
         "question_limit_reached": "需要澄清的问题超过本次任务允许次数",
     }

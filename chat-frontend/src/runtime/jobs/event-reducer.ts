@@ -494,7 +494,8 @@ export function seedJobFromPhase(
   phase: { status: string; elapsedSeconds: number; lastEventId: number; events: Array<Record<string, unknown>>; analysisJobInputId?: number },
 ): JobRecord {
   const status: BackendJobStatus = phase.status === 'queued' || phase.status === 'running' || phase.status === 'waiting_input' || phase.status === 'succeeded' || phase.status === 'failed' || phase.status === 'canceled' ? phase.status : 'running'
-  let state = createJobRecord(jobId, sessionId, status, 0)
+  // 先回放事件，再恢复阶段终态，避免终态守卫跳过历史错误消息。
+  let state = createJobRecord(jobId, sessionId, 'running', 0)
   state = { ...state, thinking: createThinking(status === 'waiting_input' ? 'waiting_input' : status === 'succeeded' ? 'completed' : status === 'failed' ? 'failed' : status === 'canceled' ? 'canceled' : 'active', phase.elapsedSeconds) }
   for (const item of phase.events) {
     const eventId = typeof item.event_id === 'number' ? item.event_id : null

@@ -154,6 +154,12 @@ docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p
 docker compose -f docker-compose.test.yml run --rm --no-deps -T unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_sandbox_preview.py tests/unit/agent/test_processing_plan_public_events.py tests/unit/agent/test_cdfm_input_authority.py tests/unit/agent/test_deep_agent_state.py tests/integration/agent/test_data_processing_child_lifecycle.py tests/integration/agent/test_measurement_semantics_snapshot.py -q
 ```
 
+参数提取证据与失败终态的回归检查如下。它使用真实 Pydantic、LangChain 工具调用解析器、提示词、StateGraph、worker 终态构造和公共事件白名单，检查缺失外层证据的准确下标、脱敏修正反馈、两层证据来源、参数修订以及处理失败不产生成功终态；不使用模型或数据库替身，也不证明真实模型纠错、数据库事务或浏览器链路。
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps -T unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_parameter_extraction_feedback.py tests/unit/agent/test_research_parameter_revisions.py tests/integration/agent/test_data_processing_failure_terminal.py tests/integration/agent/test_data_processing_child_lifecycle.py -q
+```
+
 研究参数与控制服务的定向检查如下。修订测试直接调用真实参数规则；恢复测试使用实际 StateGraph 和 InMemorySaver。协议和客户端配置测试不创建远端沙盒；Compose 与 schema 项只证明静态契约。
 
 ```powershell

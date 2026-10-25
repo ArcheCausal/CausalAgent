@@ -29,7 +29,10 @@ class ParameterEdit(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     field: ParameterField
     value: str | list[dict[str, str]] | None
-    evidence: str = Field(min_length=1, max_length=4000)
+    evidence: str = Field(
+        min_length=1, max_length=4000,
+        description="本项参数修改的外层证据，必须逐字摘自本次用户答复；measurement_semantics 的内层 evidence 不能替代此字段。",
+    )
 
 
 class ParameterExtraction(BaseModel):

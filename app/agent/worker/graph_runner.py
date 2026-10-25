@@ -31,6 +31,15 @@ ERROR_HANDLER_STREAM_PREFIX = "__error_handler__"
 
 def _build_final_result(state_values: dict[str, Any], *, job_attempt: int) -> dict[str, Any]:
     """构造稳定终态事件；上下文写回事实只作为内部字段交给 event writer。"""
+    if state_values.get("data_processing_failure_code"):
+        return {
+            "type": "error",
+            "message": (
+                str(state_values.get("data_processing_failure_message") or "数据处理阶段未能完成")
+                + "。本次未启动因果分析。"
+            ),
+            "attempt": job_attempt,
+        }
     return {
         "type": "final_result",
         "data": process_final_result(state_values),
