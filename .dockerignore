@@ -11,6 +11,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.venv*/
 
 # --- IDE和编辑器配置 ---
 .vscode/
@@ -33,7 +34,11 @@ secrets.json
 .env.*
 .env.local
 causalagent.env
-deploy/secrets/*.env
+*.token
+**/*.token
+**/opensandbox-api-key
+**/sandbox-controller.env
+deploy/secrets/
 *.pem
 *.key
 *.cert
@@ -68,6 +73,16 @@ tests/smoke/*
 logs/
 tmp/
 temp/
+output/
+loadtest/local/
+.playwright-cli/
+.playwright-mcp/
+.codex_pycache/
+.pycache_verify/
+study/
+skills/
+.augment/
+.codegraph/
 
 # 原因：
 # - 本地开发产生的日志不应该打包进镜像
