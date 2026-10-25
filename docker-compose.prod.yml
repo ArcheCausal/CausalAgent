@@ -10,11 +10,38 @@
 #   5. 使用构建好的镜像标签
 
 secrets:
+  sandbox_controller_token:
+    file: ${CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_SOURCE:-/etc/causalagent/secrets/sandbox-controller.token}
+  opensandbox_api_key:
+    file: ${CAUSALAGENT_SANDBOX_API_KEY_SOURCE:-/etc/causalagent/secrets/opensandbox-api-key}
+  sandbox_controller_env:
+    file: ${CAUSALAGENT_SANDBOX_CONTROLLER_SECRET_SOURCE:-/etc/causalagent/secrets/sandbox-controller.env}
   # 服务器上的唯一密钥文件；只读挂载到 /run/secrets/causalagent.env。
   causalagent_env:
     file: ${CAUSALAGENT_SECRET_FILE:-/etc/causalagent/secrets/causalagent.env}
 
 services:
+  sandbox-controller:
+    extends:
+      file: ./deploy/opensandbox/services.yml
+      service: sandbox-controller
+    image: ${APP_IMAGE:?APP_IMAGE must be an immutable image digest}
+    environment:
+      ENVIRONMENT: production
+      MYSQL_HOST: mysql
+      MYSQL_WRITE_HOST: mysql
+    networks: [causalagent_network_prod, sandbox_upstream]
+    depends_on:
+      mysql: {condition: service_healthy}
+      db-bootstrap: {condition: service_completed_successfully}
+      opensandbox: {condition: service_healthy}
+
+  opensandbox:
+    extends:
+      file: ./deploy/opensandbox/services.yml
+      service: opensandbox
+    networks: [sandbox_upstream]
+
 
   # --- MySQL 数据库服务（生产配置）---
   mysql:
@@ -381,23 +408,11 @@ services:
       - DEEP_AGENT_BASE_URL=${DEEP_AGENT_BASE_URL:?DEEP_AGENT_BASE_URL is required}
 
       - DEEP_AGENT_CONTEXT_WINDOW_TOKENS=${DEEP_AGENT_CONTEXT_WINDOW_TOKENS:?DEEP_AGENT_CONTEXT_WINDOW_TOKENS is required}
-      - CAUSALAGENT_SANDBOX_URL=${CAUSALAGENT_SANDBOX_URL:?CAUSALAGENT_SANDBOX_URL is required}
-      - CAUSALAGENT_SANDBOX_IMAGE=${CAUSALAGENT_SANDBOX_IMAGE:?CAUSALAGENT_SANDBOX_IMAGE is required}
-      - CAUSALAGENT_SANDBOX_ALLOW_HTTP=false
-      - CAUSALAGENT_SANDBOX_CPU_LIMIT=${CAUSALAGENT_SANDBOX_CPU_LIMIT:-1}
-      - CAUSALAGENT_SANDBOX_MEMORY_LIMIT=${CAUSALAGENT_SANDBOX_MEMORY_LIMIT:-2Gi}
-      - CAUSALAGENT_SANDBOX_TTL_SECONDS=${CAUSALAGENT_SANDBOX_TTL_SECONDS:-900}
-      - CAUSALAGENT_SANDBOX_COMMAND_TIMEOUT_SECONDS=${CAUSALAGENT_SANDBOX_COMMAND_TIMEOUT_SECONDS:-300}
-      - CAUSALAGENT_SANDBOX_API_TIMEOUT_SECONDS=${CAUSALAGENT_SANDBOX_API_TIMEOUT_SECONDS:-30}
+      - CAUSALAGENT_SANDBOX_CONTROLLER_URL=${CAUSALAGENT_SANDBOX_CONTROLLER_URL:-http://sandbox-controller:8081}
+      - CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_FILE=/run/secrets/sandbox-controller.token
+      - CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS=${CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS:-330}
       - CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER=${CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER:-2}
       - CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY_WAIT_SECONDS=${CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY_WAIT_SECONDS:-300}
-      - CAUSALAGENT_SANDBOX_MAX_INPUT_BYTES=${CAUSALAGENT_SANDBOX_MAX_INPUT_BYTES:-67108864}
-      - CAUSALAGENT_SANDBOX_MAX_PREVIEW_BYTES=${CAUSALAGENT_SANDBOX_MAX_PREVIEW_BYTES:-32768}
-      - CAUSALAGENT_SANDBOX_MAX_OUTPUT_FILE_BYTES=${CAUSALAGENT_SANDBOX_MAX_OUTPUT_FILE_BYTES:-67108864}
-      - CAUSALAGENT_SANDBOX_MAX_COMMAND_BYTES=${CAUSALAGENT_SANDBOX_MAX_COMMAND_BYTES:-16384}
-      - CAUSALAGENT_SANDBOX_MAX_COMMAND_OUTPUT_BYTES=${CAUSALAGENT_SANDBOX_MAX_COMMAND_OUTPUT_BYTES:-65536}
-      - CAUSALAGENT_SANDBOX_AGENT_UID=${CAUSALAGENT_SANDBOX_AGENT_UID:-10001}
-      - CAUSALAGENT_SANDBOX_AGENT_GID=${CAUSALAGENT_SANDBOX_AGENT_GID:-10001}
       - CAUSAL_MCP_URL=http://causal-mcp:8080/mcp
 
       - CAUSAL_MCP_SIGNING_KEY_ID=${CAUSAL_MCP_SIGNING_KEY_ID:-current}
@@ -431,6 +446,7 @@ services:
       - rag_formal_prod:/var/lib/causalagent/rag/formal
       - app_logs_prod:/app/logs
     depends_on:
+      sandbox-controller: {condition: service_healthy}
       db-bootstrap:
         condition: service_completed_successfully
       causal-mcp:
@@ -438,6 +454,8 @@ services:
     networks:
       - causalagent_network_prod
     secrets:
+      - source: sandbox_controller_token
+        target: sandbox-controller.token
       - source: causalagent_env
         target: causalagent.env
     restart: unless-stopped
@@ -674,6 +692,7 @@ services:
         target: causalagent.env
 
 networks:
+  sandbox_upstream: {driver: bridge}
   causalagent_network_prod:
     driver: bridge
     # 生产环境也可以考虑：
@@ -682,6 +701,7 @@ networks:
     # - 设置为internal（无外网访问）
 
 volumes:
+  opensandbox_state: {driver: local}
   # 正式 RAG 数据（索引、active pointer、生产配置、隔离区、回滚审计）
   rag_formal_prod:
     driver: local
@@ -773,3 +793,7 @@ volumes:
 # 监控：
 #   docker stats  # 实时查看资源使用
 #   docker-compose -f docker-compose.prod.yml logs --tail=100
+
+configs:
+  opensandbox_config:
+    file: ${CAUSALAGENT_OPENSANDBOX_CONFIG_SOURCE:-./deploy/opensandbox/config.toml}

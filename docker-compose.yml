@@ -1,11 +1,42 @@
 # CausalAgent MySQL 主从 + PostgreSQL checkpoint 开发
 
 secrets:
+  sandbox_controller_token:
+    file: ${CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_SOURCE:-/etc/causalagent/secrets/sandbox-controller.token}
+  opensandbox_api_key:
+    file: ${CAUSALAGENT_SANDBOX_API_KEY_SOURCE:-/etc/causalagent/secrets/opensandbox-api-key}
+  sandbox_controller_env:
+    file: ${CAUSALAGENT_SANDBOX_CONTROLLER_SECRET_SOURCE:-/etc/causalagent/secrets/sandbox-controller.env}
   # 本地开发也使用同一个密钥文件读取入口：项目根目录的 causalagent.env（已加入 .gitignore）。
   causalagent_env:
     file: ${CAUSALAGENT_SECRET_FILE:-./causalagent.env}
 
 services:
+  sandbox-controller:
+    extends:
+      file: ./deploy/opensandbox/services.yml
+      service: sandbox-controller
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./sandbox_controller:/app/sandbox_controller:ro
+    environment:
+      ENVIRONMENT: development
+      MYSQL_HOST: mysql-primary
+      MYSQL_WRITE_HOST: mysql-primary
+    networks: [causalagent_replica_network, sandbox_upstream]
+    depends_on:
+      mysql-primary: {condition: service_healthy}
+      db-bootstrap: {condition: service_completed_successfully}
+      opensandbox: {condition: service_healthy}
+
+  opensandbox:
+    extends:
+      file: ./deploy/opensandbox/services.yml
+      service: opensandbox
+    networks: [sandbox_upstream]
+
   mysql-primary:
     group_add:
       - "3000"
@@ -241,23 +272,11 @@ services:
       - JOB_DRAIN_TIMEOUT_SECONDS=${JOB_DRAIN_TIMEOUT_SECONDS:-60}
       - JOB_MAX_ATTEMPTS=${JOB_MAX_ATTEMPTS:-3}
       - JOB_CHAT_HISTORY_LIMIT=${JOB_CHAT_HISTORY_LIMIT:-20}
-      - CAUSALAGENT_SANDBOX_URL=${CAUSALAGENT_SANDBOX_URL:?CAUSALAGENT_SANDBOX_URL is required}
-      - CAUSALAGENT_SANDBOX_IMAGE=${CAUSALAGENT_SANDBOX_IMAGE:?CAUSALAGENT_SANDBOX_IMAGE is required}
-      - CAUSALAGENT_SANDBOX_ALLOW_HTTP=${CAUSALAGENT_SANDBOX_ALLOW_HTTP:-false}
-      - CAUSALAGENT_SANDBOX_CPU_LIMIT=${CAUSALAGENT_SANDBOX_CPU_LIMIT:-1}
-      - CAUSALAGENT_SANDBOX_MEMORY_LIMIT=${CAUSALAGENT_SANDBOX_MEMORY_LIMIT:-2Gi}
-      - CAUSALAGENT_SANDBOX_TTL_SECONDS=${CAUSALAGENT_SANDBOX_TTL_SECONDS:-900}
-      - CAUSALAGENT_SANDBOX_COMMAND_TIMEOUT_SECONDS=${CAUSALAGENT_SANDBOX_COMMAND_TIMEOUT_SECONDS:-300}
-      - CAUSALAGENT_SANDBOX_API_TIMEOUT_SECONDS=${CAUSALAGENT_SANDBOX_API_TIMEOUT_SECONDS:-30}
+      - CAUSALAGENT_SANDBOX_CONTROLLER_URL=${CAUSALAGENT_SANDBOX_CONTROLLER_URL:-http://sandbox-controller:8081}
+      - CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_FILE=/run/secrets/sandbox-controller.token
+      - CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS=${CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS:-330}
       - CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER=${CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER:-2}
       - CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY_WAIT_SECONDS=${CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY_WAIT_SECONDS:-300}
-      - CAUSALAGENT_SANDBOX_MAX_INPUT_BYTES=${CAUSALAGENT_SANDBOX_MAX_INPUT_BYTES:-67108864}
-      - CAUSALAGENT_SANDBOX_MAX_PREVIEW_BYTES=${CAUSALAGENT_SANDBOX_MAX_PREVIEW_BYTES:-32768}
-      - CAUSALAGENT_SANDBOX_MAX_OUTPUT_FILE_BYTES=${CAUSALAGENT_SANDBOX_MAX_OUTPUT_FILE_BYTES:-67108864}
-      - CAUSALAGENT_SANDBOX_MAX_COMMAND_BYTES=${CAUSALAGENT_SANDBOX_MAX_COMMAND_BYTES:-16384}
-      - CAUSALAGENT_SANDBOX_MAX_COMMAND_OUTPUT_BYTES=${CAUSALAGENT_SANDBOX_MAX_COMMAND_OUTPUT_BYTES:-65536}
-      - CAUSALAGENT_SANDBOX_AGENT_UID=${CAUSALAGENT_SANDBOX_AGENT_UID:-10001}
-      - CAUSALAGENT_SANDBOX_AGENT_GID=${CAUSALAGENT_SANDBOX_AGENT_GID:-10001}
       - WEB_SEARCH_PROVIDER=${WEB_SEARCH_PROVIDER:-searxng}
       - SEARXNG_URL=${SEARXNG_URL:-http://searxng:8080}
       - BASE_URL=${BASE_URL}
@@ -290,6 +309,7 @@ services:
       - ./Agent/knowledge_base/multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
       - ./Agent/knowledge_base/multimodal_runtime:/app/Agent/knowledge_base/multimodal_runtime
     depends_on:
+      sandbox-controller: {condition: service_healthy}
       mysql-primary:
         condition: service_healthy
       mysql-replica:
@@ -301,6 +321,8 @@ services:
     networks:
       - causalagent_replica_network
     secrets:
+      - source: sandbox_controller_token
+        target: sandbox-controller.token
       - source: causalagent_env
         target: causalagent.env
     restart: unless-stopped
@@ -709,12 +731,14 @@ services:
     restart: unless-stopped
 
 networks:
+  sandbox_upstream: {driver: bridge}
   causalagent_replica_network:
     driver: bridge
   observability_network:
     driver: bridge
 
 volumes:
+  opensandbox_state: {driver: local}
   mysql_primary_data:
     driver: local
   mysql_replica_data:
@@ -731,3 +755,7 @@ volumes:
     driver: local
   alloy_positions:
     driver: local
+
+configs:
+  opensandbox_config:
+    file: ${CAUSALAGENT_OPENSANDBOX_CONFIG_SOURCE:-./deploy/opensandbox/config.toml}

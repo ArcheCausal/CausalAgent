@@ -2,6 +2,10 @@ name: Publish staging images
 
 on:
   workflow_dispatch:
+    inputs:
+      sandbox_image:
+        description: "已发布的数据处理镜像完整引用（必须带 @sha256:digest）"
+        required: true
 
 permissions:
   contents: read
@@ -18,9 +22,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Reject any ref other than develop
+        env:
+          SANDBOX_IMAGE: ${{ inputs.sandbox_image }}
         run: |
           if [[ "$GITHUB_REF" != "refs/heads/develop" ]]; then
             echo "::error::Staging images may only be published from the develop branch."
+            exit 1
+          fi
+          if [[ ! "$SANDBOX_IMAGE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::sandbox_image must be a published SHA-256 image reference."
             exit 1
           fi
 
@@ -117,3 +127,4 @@ jobs:
     uses: ./.github/workflows/build-release-bundle.yml
     with:
       source_commit: ${{ github.sha }}
+      sandbox_image: ${{ inputs.sandbox_image }}

@@ -56,6 +56,22 @@ def test_workflow_inputs_are_passed_as_data_instead_of_shell_source():
         assert "${{" not in step.get("with", {}).get("script", "")
 
 
+def test_processing_image_is_required_verified_and_forwarded_without_changing_four_builds():
+    bundle = workflow("build-release-bundle.yml")
+    for trigger in ("workflow_dispatch", "workflow_call"):
+        assert bundle["on"][trigger]["inputs"]["sandbox_image"]["required"] == "true"
+    publish = workflow("publish-staging-images.yml")
+    assert publish["on"]["workflow_dispatch"]["inputs"]["sandbox_image"]["required"] == "true"
+    assert publish["jobs"]["build-release-bundle"]["with"]["sandbox_image"] == "${{ inputs.sandbox_image }}"
+    steps = bundle["jobs"]["build-bundle"]["steps"]
+    registry = next(step for step in steps if step.get("name") == "Verify the published processing image")
+    assert registry["env"]["SANDBOX_IMAGE"] == "${{ inputs.sandbox_image }}"
+    assert '"imagetools", "inspect", reference' in registry["run"]
+    package = next(step for step in steps if step.get("name") == "Build the deployment bundle")
+    assert '--sandbox-image "$SANDBOX_IMAGE"' in package["run"]
+    assert package["env"]["SANDBOX_IMAGE"] == "${{ inputs.sandbox_image }}"
+
+
 @pytest.mark.parametrize("option,value", [
     ("--owner", "../invalid"),
     ("--source-commit", "develop"),

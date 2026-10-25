@@ -23,6 +23,7 @@ backend:
   - 'app/**/*.py'
   - 'app/*.py'
   - 'Agent/**'
+  - 'sandbox_controller/**'
   - 'Database/**'
   - 'config/**'
   - 'loadtest/runner/**'
@@ -73,6 +74,7 @@ contracts:
   - 'observability/**'
   - 'searxng/**'
   - 'deploy/**'
+  - 'sandbox_controller/**'
   - 'scripts/**'
   - 'alembic.ini'
   - 'Database/migrations/**'
@@ -99,6 +101,8 @@ contracts:
 # 构建相关配置只驱动 Dockerfile 静态检查，不单独构成一个执行组。
 build:
   - 'Dockerfile'
+  - 'deploy/opensandbox/Dockerfile'
+  - 'deploy/opensandbox/requirements.lock'
   - 'Agent/CausalAgentMCP/Dockerfile'
   - 'Database/mysql/Dockerfile.*'
   - 'docker-compose*.yml'

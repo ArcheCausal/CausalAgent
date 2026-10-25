@@ -67,7 +67,7 @@ jobs:
       - name: Compile Python sources
         run: >-
           python -m compileall -q
-          app Agent Database config tests
+          app Agent Database config sandbox_controller tests
           CausalAgent.py Run_causal.py
 
   backend-unit-tests:
@@ -259,12 +259,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Check app, MCP, and MySQL Dockerfiles
+      - name: Check app, MCP, MySQL, and sandbox Dockerfiles
         run: |
           docker buildx build --check --file Dockerfile .
           docker buildx build --check --file Agent/CausalAgentMCP/Dockerfile .
           docker buildx build --check --file Database/mysql/Dockerfile.primary Database/mysql
           docker buildx build --check --file Database/mysql/Dockerfile.replica Database/mysql
+          docker buildx build --check --file deploy/opensandbox/Dockerfile deploy/opensandbox
 
   pull-request-policy:
     name: Pull request policy

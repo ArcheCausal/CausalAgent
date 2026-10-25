@@ -11,6 +11,9 @@ on:
       source_commit:
         description: "源码提交（留空选择最近一次成功的 Publish staging images）"
         required: false
+      sandbox_image:
+        description: "已发布的数据处理镜像完整引用（必须带 @sha256:digest）"
+        required: true
       app_sha256:
         description: "app digest 手动覆盖（留空自动查询，必须属于所选提交）"
         required: false
@@ -29,6 +32,9 @@ on:
         type: string
         required: false
       source_commit:
+        type: string
+        required: true
+      sandbox_image:
         type: string
         required: true
       app_sha256:
@@ -135,6 +141,22 @@ jobs:
             --output release-images.json --github-output "$GITHUB_OUTPUT"
         id: images
 
+      - name: Verify the published processing image
+        env:
+          SANDBOX_IMAGE: ${{ inputs.sandbox_image }}
+        run: |
+          python - "$SANDBOX_IMAGE" <<'PY'
+          import re, subprocess, sys
+          reference = sys.argv[1]
+          if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}", reference) is None:
+              raise SystemExit("sandbox_image must be an immutable SHA-256 image reference")
+          result = subprocess.run(["docker", "buildx", "imagetools", "inspect", reference,
+                                   "--format", "{{.Manifest.Digest}}"],
+                                  capture_output=True, text=True, timeout=120)
+          if result.returncode or result.stdout.strip() != reference.rsplit("@", 1)[1]:
+              raise SystemExit("published processing image could not be verified")
+          PY
+
       - name: Resolve official image digests
         run: python scripts/resolve_official_images.py official-images.json
 
@@ -146,6 +168,7 @@ jobs:
           MCP_IMAGE: ${{ steps.images.outputs.mcp }}
           MYSQL_PRIMARY_IMAGE: ${{ steps.images.outputs.mysql_primary }}
           MYSQL_REPLICA_IMAGE: ${{ steps.images.outputs.mysql_replica }}
+          SANDBOX_IMAGE: ${{ inputs.sandbox_image }}
         run: |
           python scripts/build_release_bundle.py \
             --output-dir dist/release \
@@ -155,6 +178,7 @@ jobs:
             --mcp-image "$MCP_IMAGE" \
             --mysql-primary-image "$MYSQL_PRIMARY_IMAGE" \
             --mysql-replica-image "$MYSQL_REPLICA_IMAGE" \
+            --sandbox-image "$SANDBOX_IMAGE" \
             --images-file official-images.json
 
       - name: Report the packaged version

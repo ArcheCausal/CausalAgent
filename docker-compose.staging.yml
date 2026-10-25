@@ -1,11 +1,38 @@
 # 预发 V1：与生产目标一致的 MySQL 主从 + PostgreSQL checkpoint 拓扑。
 # 仅能搭配隔离 `.env.staging` 使用；每个 Python 进程启动前都会执行环境门禁。
 secrets:
+  sandbox_controller_token:
+    file: ${CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_SOURCE:-/etc/causalagent/secrets/sandbox-controller.token}
+  opensandbox_api_key:
+    file: ${CAUSALAGENT_SANDBOX_API_KEY_SOURCE:-/etc/causalagent/secrets/opensandbox-api-key}
+  sandbox_controller_env:
+    file: ${CAUSALAGENT_SANDBOX_CONTROLLER_SECRET_SOURCE:-/etc/causalagent/secrets/sandbox-controller.env}
   # 服务器上的唯一密钥文件；只读挂载到 /run/secrets/causalagent.env。
   causalagent_env:
     file: ${CAUSALAGENT_SECRET_FILE:-/etc/causalagent/secrets/causalagent.env}
 
 services:
+  sandbox-controller:
+    extends:
+      file: ./deploy/opensandbox/services.yml
+      service: sandbox-controller
+    image: ${STAGING_APP_IMAGE:?STAGING_APP_IMAGE must be an immutable image digest}
+    environment:
+      ENVIRONMENT: staging
+      MYSQL_HOST: mysql-primary
+      MYSQL_WRITE_HOST: mysql-primary
+    networks: [rag_eval_staging, sandbox_upstream]
+    depends_on:
+      mysql-primary: {condition: service_healthy}
+      db-bootstrap: {condition: service_completed_successfully}
+      opensandbox: {condition: service_healthy}
+
+  opensandbox:
+    extends:
+      file: ./deploy/opensandbox/services.yml
+      service: opensandbox
+    networks: [sandbox_upstream]
+
   mysql-primary:
     group_add:
       - "3000"
@@ -308,33 +335,24 @@ services:
       DEEP_AGENT_MODEL: ${DEEP_AGENT_MODEL:?DEEP_AGENT_MODEL is required}
       DEEP_AGENT_BASE_URL: ${DEEP_AGENT_BASE_URL:?DEEP_AGENT_BASE_URL is required}
       DEEP_AGENT_CONTEXT_WINDOW_TOKENS: ${DEEP_AGENT_CONTEXT_WINDOW_TOKENS:?DEEP_AGENT_CONTEXT_WINDOW_TOKENS is required}
-      CAUSALAGENT_SANDBOX_URL: ${CAUSALAGENT_SANDBOX_URL:?CAUSALAGENT_SANDBOX_URL is required}
-      CAUSALAGENT_SANDBOX_IMAGE: ${CAUSALAGENT_SANDBOX_IMAGE:?CAUSALAGENT_SANDBOX_IMAGE is required}
-      CAUSALAGENT_SANDBOX_ALLOW_HTTP: "false"
-      CAUSALAGENT_SANDBOX_CPU_LIMIT: ${CAUSALAGENT_SANDBOX_CPU_LIMIT:-1}
-      CAUSALAGENT_SANDBOX_MEMORY_LIMIT: ${CAUSALAGENT_SANDBOX_MEMORY_LIMIT:-2Gi}
-      CAUSALAGENT_SANDBOX_TTL_SECONDS: ${CAUSALAGENT_SANDBOX_TTL_SECONDS:-900}
-      CAUSALAGENT_SANDBOX_COMMAND_TIMEOUT_SECONDS: ${CAUSALAGENT_SANDBOX_COMMAND_TIMEOUT_SECONDS:-300}
-      CAUSALAGENT_SANDBOX_API_TIMEOUT_SECONDS: ${CAUSALAGENT_SANDBOX_API_TIMEOUT_SECONDS:-30}
+      CAUSALAGENT_SANDBOX_CONTROLLER_URL: ${CAUSALAGENT_SANDBOX_CONTROLLER_URL:-http://sandbox-controller:8081}
+      CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_FILE: /run/secrets/sandbox-controller.token
+      CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS: ${CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS:-330}
       CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER: ${CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER:-2}
       CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY_WAIT_SECONDS: ${CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY_WAIT_SECONDS:-300}
-      CAUSALAGENT_SANDBOX_MAX_INPUT_BYTES: ${CAUSALAGENT_SANDBOX_MAX_INPUT_BYTES:-67108864}
-      CAUSALAGENT_SANDBOX_MAX_PREVIEW_BYTES: ${CAUSALAGENT_SANDBOX_MAX_PREVIEW_BYTES:-32768}
-      CAUSALAGENT_SANDBOX_MAX_OUTPUT_FILE_BYTES: ${CAUSALAGENT_SANDBOX_MAX_OUTPUT_FILE_BYTES:-67108864}
-      CAUSALAGENT_SANDBOX_MAX_COMMAND_BYTES: ${CAUSALAGENT_SANDBOX_MAX_COMMAND_BYTES:-16384}
-      CAUSALAGENT_SANDBOX_MAX_COMMAND_OUTPUT_BYTES: ${CAUSALAGENT_SANDBOX_MAX_COMMAND_OUTPUT_BYTES:-65536}
-      CAUSALAGENT_SANDBOX_AGENT_UID: ${CAUSALAGENT_SANDBOX_AGENT_UID:-10001}
-      CAUSALAGENT_SANDBOX_AGENT_GID: ${CAUSALAGENT_SANDBOX_AGENT_GID:-10001}
     volumes:
       - rag_eval_staging_models:/app/Agent/knowledge_base/models
       - ${CAUSALAGENT_KB_DB_DIR:-/var/lib/causalagent/kb/db}:/app/Agent/knowledge_base/db
       - rag_eval_staging_formal:/var/lib/causalagent/rag/formal
       - ${CAUSALAGENT_KB_ASSETS_DIR:-/var/lib/causalagent/kb/assets}:/app/Agent/knowledge_base/multimodal_assets:ro
     secrets:
+      - source: sandbox_controller_token
+        target: sandbox-controller.token
       - source: causalagent_env
         target: causalagent.env
     networks: [rag_eval_staging]
     depends_on:
+      sandbox-controller: {condition: service_healthy}
       db-bootstrap: {condition: service_completed_successfully}
       causal-mcp: {condition: service_healthy}
     stop_grace_period: 75s
@@ -523,10 +541,12 @@ services:
     logging: *bounded_logging
 
 networks:
+  sandbox_upstream: {driver: bridge}
   rag_eval_staging: {driver: bridge}
   rag_eval_staging_observability: {driver: bridge, internal: true}
 
 volumes:
+  opensandbox_state: {driver: local}
   # 正式 RAG 数据（索引、active pointer、生产配置、隔离区、回滚审计）
   rag_eval_staging_formal: {driver: local}
   # 评测数据（runs、sources、datasets、artifacts、reports）
@@ -544,3 +564,7 @@ volumes:
   rag_eval_staging_loki: {driver: local}
   rag_eval_staging_alloy_positions: {driver: local}
   rag_eval_staging_grafana: {driver: local}
+
+configs:
+  opensandbox_config:
+    file: ${CAUSALAGENT_OPENSANDBOX_CONFIG_SOURCE:-./deploy/opensandbox/config.toml}

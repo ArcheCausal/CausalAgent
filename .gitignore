@@ -253,7 +253,11 @@ app/rag_eval/frontend_dist/
 
 # 服务器唯一密钥文件；本地开发与部署都只保留模板，真实密钥不进入版本库。
 causalagent.env
-deploy/secrets/*.env
+*.token
+**/opensandbox-api-key
+**/sandbox-controller.env
+deploy/secrets/*
+!deploy/secrets/*.example
 !deploy/secrets/*.env.example
 deploy/config/*.env
 

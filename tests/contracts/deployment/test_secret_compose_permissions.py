@@ -67,9 +67,12 @@ def test_only_development_compose_relaxes_secret_permissions() -> None:
             if isinstance(environment, list):
                 environment = dict(item.split("=", 1) for item in environment)
             assert environment["ENVIRONMENT"] == "development", service_name
-            assert service["secrets"] == [
+            expected = [
                 {"source": "causalagent_env", "target": "causalagent.env"}
             ]
+            if service_name == "worker":
+                expected.insert(0, {"source": "sandbox_controller_token", "target": "sandbox-controller.token"})
+            assert service["secrets"] == expected
     for filename in ("docker-compose.staging.yml", "docker-compose.prod.yml"):
         compose = yaml.safe_load((REPO_ROOT / filename).read_text(encoding="utf-8"))
         for service_name, service in compose["services"].items():

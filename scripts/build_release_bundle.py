@@ -14,7 +14,8 @@ images.lock.json 的生成规则。
         --app-image ghcr.io/example/causalagent-app@sha256:... \
         --mcp-image ghcr.io/example/causalagent-mcp@sha256:... \
         --mysql-primary-image ghcr.io/example/causalagent-mysql-primary@sha256:... \
-        --mysql-replica-image ghcr.io/example/causalagent-mysql-replica@sha256:...
+        --mysql-replica-image ghcr.io/example/causalagent-mysql-replica@sha256:... \
+        --sandbox-image ghcr.io/example/causalagent-data-preparation@sha256:...
 
 官方镜像 digest 由 --images-file 提供（JSON: {"postgres": "postgres:16-alpine@sha256:..."}），
 或用 --resolve-official-images 调用 docker buildx imagetools 解析。脚本不写入任何真实密钥。
@@ -26,6 +27,7 @@ import argparse
 import ast
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import tarfile
@@ -36,11 +38,12 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from config.secret_file import (  # noqa: E402
     REQUIRED_SECRET_KEYS,
+    SECRET_KEYS,
     SECRET_SCHEMA_VERSION,
 )
 
 # 部署包只包含 Compose、网关与观测配置、运维脚本和非密钥配置模板；
-# 不包含 Python/Vue/TypeScript 源码、真实密钥、数据库数据和 RAG 正式索引。
+# Python 仅允许 OpenSandbox 挂载入口；不包含应用源码、真实密钥、数据库数据或正式索引。
 BUNDLE_INCLUDE = (
     "docker-compose.staging.yml",
     "docker-compose.prod.yml",
@@ -54,7 +57,18 @@ BUNDLE_INCLUDE = (
     "scripts/rollback.sh",
     "scripts/migrate-rag-storage.sh",
 )
-BUNDLE_EXCLUDE_NAMES = {".env", "causalagent.env", "secrets.json"}
+BUNDLE_EXCLUDE_NAMES = {".env", "causalagent.env", "secrets.json", "opensandbox-api-key"}
+SANDBOX_ENTRYPOINT = "deploy/opensandbox/server_entrypoint.py"
+SANDBOX_LOCK = "deploy/opensandbox/release-lock.json"
+SANDBOX_FILES = (
+    SANDBOX_LOCK, SANDBOX_ENTRYPOINT, "deploy/opensandbox/services.yml",
+    "deploy/opensandbox/config.toml", "deploy/opensandbox/controller.env.example",
+)
+SANDBOX_IMAGE_NAMES = {
+    "server": "opensandbox_server", "execd": "opensandbox_execd",
+    "egress": "opensandbox_egress", "interpreter_base": "opensandbox_interpreter_base",
+}
+_PINNED_IMAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}\Z")
 OFFICIAL_IMAGES = (
     "postgres",
     "nginx",
@@ -149,6 +163,10 @@ def _collect_bundle_files() -> list[Path]:
                     continue
                 if path.name in BUNDLE_EXCLUDE_NAMES:
                     continue
+                if path.name.endswith((".env", ".token", ".key")):
+                    continue
+                if path.suffix == ".py" and path.relative_to(REPO_ROOT).as_posix() != SANDBOX_ENTRYPOINT:
+                    continue
                 if "__pycache__" in path.parts:
                     continue
                 files.append(path)
@@ -164,20 +182,31 @@ def main() -> int:
     parser.add_argument("--mcp-image", required=True)
     parser.add_argument("--mysql-primary-image", required=True)
     parser.add_argument("--mysql-replica-image", required=True)
+    parser.add_argument("--sandbox-image", required=True, help="published processing image pinned to a SHA-256 digest")
     parser.add_argument("--images-file")
     parser.add_argument("--resolve-official-images", action="store_true")
     args = parser.parse_args()
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", args.release_id) is None:
+        parser.error("release_id must be 1-100 letters, digits, dots, underscores or hyphens, starting with a letter or digit")
 
     if args.images_file:
         official_references = json.loads(Path(args.images_file).read_text(encoding="utf-8"))
     else:
         official_references = {name: f"{name}:latest" for name in OFFICIAL_IMAGES}
+    if set(official_references) != set(OFFICIAL_IMAGES):
+        raise SystemExit("official image keys must exactly match the required release images")
+
+    sandbox_lock = json.loads((REPO_ROOT / SANDBOX_LOCK).read_text(encoding="utf-8"))
+    if set(sandbox_lock["images"]) != set(SANDBOX_IMAGE_NAMES):
+        raise SystemExit("OpenSandbox release lock must list exactly four official images")
 
     images = {
         "app": args.app_image,
         "mcp": args.mcp_image,
         "mysql_primary": args.mysql_primary_image,
         "mysql_replica": args.mysql_replica_image,
+        "sandbox_processing": args.sandbox_image,
+        **{name: sandbox_lock["images"][key] for key, name in SANDBOX_IMAGE_NAMES.items()},
     }
     if args.resolve_official_images:
         images.update(_resolve_official_images(official_references))
@@ -185,13 +214,18 @@ def main() -> int:
         images.update(official_references)
 
     for name, reference in images.items():
-        if "@sha256:" not in reference:
+        if not isinstance(reference, str) or _PINNED_IMAGE.fullmatch(reference) is None:
             raise SystemExit(f"image {name} is not digest-pinned: {reference}")
+    if images["sandbox_processing"] in sandbox_lock["images"].values():
+        raise SystemExit("processing image must be a published application image, not an upstream base")
 
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     bundle_files = _collect_bundle_files()
+    for name in SANDBOX_FILES:
+        if REPO_ROOT / name not in bundle_files:
+            raise SystemExit(f"required sandbox deployment file is missing: {name}")
     bundle_sha = _sha256_paths(bundle_files)
     compose_sha = _sha256_file(REPO_ROOT / "docker-compose.staging.yml")
     gateway_files = sorted((REPO_ROOT / "deploy/staging").rglob("*"))
@@ -210,7 +244,13 @@ def main() -> int:
             "compose_sha256": compose_sha,
             "gateway_config_sha256": gateway_sha,
             "observability_config_sha256": observability_sha,
+            "compose_files_sha256": {
+                name: _sha256_file(REPO_ROOT / name)
+                for name in ("docker-compose.prod.yml", "docker-compose.staging.yml")
+            },
+            "sandbox_files_sha256": {name: _sha256_file(REPO_ROOT / name) for name in SANDBOX_FILES},
         },
+        "opensandbox": {"release": sandbox_lock["release"], "git_commit": sandbox_lock["git_commit"]},
         "database": {
             "migration_head": _alembic_head(),
             "checkpoint_schema": "langgraph-checkpoint-postgres",
@@ -223,6 +263,16 @@ def main() -> int:
         "secrets": {
             "schema_version": SECRET_SCHEMA_VERSION,
             "required_keys": list(REQUIRED_SECRET_KEYS),
+            "allowed_keys": list(SECRET_KEYS),
+            "independent": {
+                "sandbox_controller_env": {
+                    "format": "env",
+                    "required_keys": ["MYSQL_PASSWORD", "MYSQL_WRITE_PASSWORD", "MYSQL_READ_PASSWORD"],
+                    "allowed_keys": ["MYSQL_PASSWORD", "MYSQL_WRITE_PASSWORD", "MYSQL_READ_PASSWORD"],
+                },
+                "sandbox_controller_token": {"format": "token"},
+                "opensandbox_api_key": {"format": "token"},
+            },
         },
     }
 
