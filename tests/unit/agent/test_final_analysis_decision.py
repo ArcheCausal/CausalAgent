@@ -15,6 +15,7 @@ from tests.support.local_algorithm_execution import LocalAlgorithmExecutor, PC_C
 from Agent.deep_agent.finalization import (
     FinalizationRetryController,
     StructuredResponseError,
+    _requires_effect_estimation,
     build_finalization_retry_instruction,
     validate_decision_references,
     validate_structured_response,
@@ -24,9 +25,16 @@ from Agent.causal_agent.graph import (
     _legacy_rag_evidence_result,
     _legacy_web_evidence_result,
 )
-from Agent.deep_agent_tools.models import EvidenceResult, WebEvidenceResult
-from Agent.deep_agent_tools.identity import build_invocation_id
-from Agent.deep_agent_tools.models import ActionAttempt, InvocationRecord
+from Agent.deep_agent_tools.identity import build_invocation_id, build_result_ref
+from Agent.deep_agent_tools.models import (
+    ActionAttempt,
+    AlgorithmResult,
+    AlgorithmResultProvenance,
+    Diagnostics,
+    EvidenceResult,
+    InvocationRecord,
+    WebEvidenceResult,
+)
 
 
 def _decision():
@@ -168,6 +176,85 @@ def _evidence_ledger(
         },
     )
     return record
+
+
+_EFFECT_PARAMETERS = {"target": "y", "treatment": "x", "columns": ["x", "y"]}
+_EFFECT_QUESTION = "请分析 x 对 y 的因果效应。"
+
+
+def _ate_not_ready(identity, registry):
+    """构造一次真实的 causal_ate not_ready 终态，用于覆盖“尝试即放行”。"""
+
+    spec = registry.get("causal.ate").spec
+    response_identity = "causal_ate-response-1"
+    provider_call_id = "causal_ate-call-1"
+    invocation_id = build_invocation_id(
+        job_id=identity.job_id,
+        response_identity=response_identity,
+        provider_call_id=provider_call_id,
+    )
+    result = AlgorithmResult(
+        result_ref=build_result_ref(invocation_id=invocation_id),
+        invocation_id=invocation_id,
+        provider_call_id=provider_call_id,
+        capability_id=spec.capability_id,
+        capability_version=spec.version,
+        status="not_ready",
+        diagnostics=Diagnostics(
+            safe_error_code="graph_not_ready",
+            summary="尚无可用因果图。",
+        ),
+        provenance=AlgorithmResultProvenance(
+            job_id=str(identity.job_id),
+            attempt_count=identity.attempt_count,
+            lease_epoch=identity.lease_epoch,
+            input_identity=identity.input_identity,
+            spec_digest=spec.spec_digest,
+            invocation_id=invocation_id,
+            capability_id=spec.capability_id,
+            capability_version=spec.version,
+        ),
+    )
+    started_at = datetime.now(timezone.utc)
+    record = InvocationRecord(
+        invocation_id=invocation_id,
+        response_identity=response_identity,
+        response_identity_source="message_execution_id",
+        provider_call_id=provider_call_id,
+        tool_name="causal_ate",
+        final_status="not_ready",
+        job_id=str(identity.job_id),
+        attempt_count=identity.attempt_count,
+        lease_epoch=identity.lease_epoch,
+        worker_id=identity.worker_id,
+        input_identity=identity.input_identity,
+        attempts={
+            0: ActionAttempt(
+                retry_ordinal=0,
+                revision=2,
+                status="not_ready",
+                started_at=started_at,
+                finished_at=started_at,
+            )
+        },
+    )
+    return result, record
+
+
+def _primary_decision(result):
+    return validate_structured_response(
+        {
+            **_decision(),
+            "primary_result_ref": result.result_ref,
+            "result_assessments": [
+                {
+                    "result_ref": result.result_ref,
+                    "disposition": "primary",
+                    "rationale": "该结果通过稳定性诊断。",
+                }
+            ],
+        }
+    )
 
 
 def test_finalization_gate_requires_algorithm_result_on_analysis_route() -> None:
@@ -636,4 +723,119 @@ def test_deep_agent_evidence_projection_keeps_report_snippets_and_sources() -> N
     assert web_result["success"] is True
     assert web_result["content"][0]["text"] == "Web snippet"
     assert web_result["content"][0]["url"] == "https://example.invalid/web"
+
+
+def test_effect_predicate_requires_fields_keywords_and_distinct_variables() -> None:
+    assert _requires_effect_estimation(_EFFECT_PARAMETERS, _EFFECT_QUESTION)
+    assert not _requires_effect_estimation(_EFFECT_PARAMETERS, "请分析 x 和 y 的关系。")
+    assert not _requires_effect_estimation({"target": "y"}, _EFFECT_QUESTION)
+    assert not _requires_effect_estimation(
+        {"target": "y", "treatment": "y", "columns": ["x", "y"]},
+        _EFFECT_QUESTION,
+    )
+    assert not _requires_effect_estimation(
+        {"target": "y", "treatment": "z", "columns": ["x", "y"]},
+        _EFFECT_QUESTION,
+    )
+    assert not _requires_effect_estimation(None, _EFFECT_QUESTION)
+    assert not _requires_effect_estimation(_EFFECT_PARAMETERS, None)
+
+
+def test_gate_requires_ate_attempt_for_effect_question() -> None:
+    identity, registry, result, ledger = _algorithm_execution()
+
+    with pytest.raises(StructuredResponseError) as failure:
+        FinalizationGate(registry=registry).validate(
+            decision=_primary_decision(result),
+            algorithm_results={result.result_ref: result},
+            action_ledger={ledger.invocation_id: ledger},
+            trusted_identity=identity,
+            route_decision="fold",
+            analysis_parameters=_EFFECT_PARAMETERS,
+            analysis_question=_EFFECT_QUESTION,
+        )
+
+    assert failure.value.rule == "effect_question_without_ate_attempt"
+    instruction = build_finalization_retry_instruction(failure.value)
+    assert "causal_ate" in instruction
+    assert "evidence_only" in instruction
+
+
+def test_gate_accepts_effect_question_after_ate_attempt() -> None:
+    identity, registry, result, ledger = _algorithm_execution()
+    ate_result, ate_record = _ate_not_ready(identity, registry)
+
+    accepted = FinalizationGate(registry=registry).validate(
+        decision=_primary_decision(result),
+        algorithm_results={
+            result.result_ref: result,
+            ate_result.result_ref: ate_result,
+        },
+        action_ledger={
+            ledger.invocation_id: ledger,
+            ate_record.invocation_id: ate_record,
+        },
+        trusted_identity=identity,
+        route_decision="fold",
+        analysis_parameters=_EFFECT_PARAMETERS,
+        analysis_question=_EFFECT_QUESTION,
+    )
+
+    assert accepted.primary_result_ref == result.result_ref
+
+
+@pytest.mark.parametrize(
+    "parameters,question",
+    [
+        (_EFFECT_PARAMETERS, "请分析 x 和 y 的关系。"),
+        ({"target": "y", "columns": ["x", "y"]}, _EFFECT_QUESTION),
+        (
+            {"target": "y", "treatment": "y", "columns": ["x", "y"]},
+            _EFFECT_QUESTION,
+        ),
+    ],
+)
+def test_gate_skips_ate_requirement_when_trigger_is_incomplete(parameters, question) -> None:
+    identity, registry, result, ledger = _algorithm_execution()
+
+    accepted = FinalizationGate(registry=registry).validate(
+        decision=_primary_decision(result),
+        algorithm_results={result.result_ref: result},
+        action_ledger={ledger.invocation_id: ledger},
+        trusted_identity=identity,
+        route_decision="fold",
+        analysis_parameters=parameters,
+        analysis_question=question,
+    )
+
+    assert accepted.primary_result_ref == result.result_ref
+
+
+def test_gate_skips_ate_requirement_without_valid_graph() -> None:
+    identity, registry, result, ledger = _algorithm_execution(failure=True)
+    decision = validate_structured_response(
+        {
+            "outcome": "no_valid_algorithm",
+            "primary_result_ref": None,
+            "result_assessments": [],
+            "conflict_status": "none",
+            "conflicts": [],
+            "revision_proposals": [],
+            "selection_rationale": "算法调用没有产生有效结果。",
+            "confidence": "low",
+            "confidence_basis": ["execution ledger"],
+        }
+    )
+
+    accepted = FinalizationGate(registry=registry).validate(
+        decision=decision,
+        algorithm_results={result.result_ref: result},
+        action_ledger={ledger.invocation_id: ledger},
+        trusted_identity=identity,
+        route_decision="fold",
+        analysis_parameters=_EFFECT_PARAMETERS,
+        analysis_question=_EFFECT_QUESTION,
+    )
+
+    assert accepted.outcome == "no_valid_algorithm"
 

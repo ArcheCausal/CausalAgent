@@ -339,6 +339,8 @@ class FinalizationGate:
         web_evidence: Mapping[str, Any] | None = None,
         route_decision: str | None = None,
         web_search_enabled: bool | None = None,
+        analysis_parameters: Mapping[str, Any] | None = None,
+        analysis_question: str | None = None,
     ) -> FinalAnalysisDecision:
         """校验并返回可安全交给 report 的 decision 副本。"""
 
@@ -491,6 +493,27 @@ class FinalizationGate:
                 rule="analysis_route_without_algorithm_result",
             )
 
+        # 用户明确要求估计效应时不替模型选算法，只要求留下一次真实的 ATE
+        # 尝试；图是否适用、估计是否成功都由工具真实返回决定。
+        if (
+            route_decision == ANALYSIS_ROUTE
+            and valid_refs
+            and _requires_effect_estimation(analysis_parameters, analysis_question)
+            and not self._has_current_terminal_tool_invocation(
+                current_ledger,
+                tool_name="causal_ate",
+                job_id=job_id,
+                attempt_count=current_attempt,
+                lease_epoch=current_lease,
+                worker_id=current_worker,
+                input_identity=current_input,
+            )
+        ):
+            raise StructuredResponseError(
+                "effect question requires a causal_ate attempt",
+                rule="effect_question_without_ate_attempt",
+            )
+
         if (
             route_decision == ANALYSIS_ROUTE
             and web_search_enabled is True
@@ -536,6 +559,32 @@ class FinalizationRetryController:
         return self.retries_used
 
 
+_EFFECT_INTENT_KEYWORDS = ("效应", "影响", "作用", "干预效果", "处理效应", "提升", "降低")
+
+
+def _requires_effect_estimation(
+    parameters: Mapping[str, Any] | None,
+    question: str | None,
+) -> bool:
+    """判断本次问题是否明确要求估计处理变量对结果变量的效应。"""
+
+    if not isinstance(parameters, Mapping) or not isinstance(question, str):
+        return False
+    target = parameters.get("target")
+    treatment = parameters.get("treatment")
+    if not (
+        isinstance(target, str) and target.strip()
+        and isinstance(treatment, str) and treatment.strip()
+    ) or target == treatment:
+        return False
+    columns = parameters.get("columns")
+    if isinstance(columns, (list, tuple)) and columns and (
+        target not in columns or treatment not in columns
+    ):
+        return False
+    return any(keyword in question for keyword in _EFFECT_INTENT_KEYWORDS)
+
+
 # Gate 失败规则到公开修正提示的映射。这里只写契约层面的可执行纠正，
 # 不携带内部标识、结果内容或异常正文，因此可以同时用于模型重试指令和
 # 普通用户可见的公开事件。
@@ -577,6 +626,8 @@ FINALIZATION_RETRY_HINTS: dict[str, str] = {
     ),
     "no_valid_algorithm_with_valid_result": (
         "outcome=no_valid_algorithm 时不能存在有效算法结果。"
+        "若你认为已有有效结果不可用，请改用 evidence_only，"
+        "并把每个有效结果标记为 discarded。"
     ),
     "no_valid_algorithm_without_invocation": (
         "outcome=no_valid_algorithm 必须建立在本次真实算法调用之上。"
@@ -585,6 +636,12 @@ FINALIZATION_RETRY_HINTS: dict[str, str] = {
         "本次运行要求执行因果分析，但还没有任何算法调用结果。请至少调用一个算法工具"
         "（例如 causal_pc 或 causal_direct_lingam），并在 result_assessments 中给出它的"
         "取舍；如果算法工具返回未就绪或失败，按它的真实状态提交 outcome。"
+    ),
+    "effect_question_without_ate_attempt": (
+        "本次问题要求估计处理变量对结果变量的效应，且已有有效因果图。"
+        "请携带其中一张图的 result_ref、treatment、outcome 调用一次 causal_ate；"
+        "即使你认为该图不适用，也保留真实返回的未就绪/不适用/失败状态。"
+        "若最终不采用任何图，请改用 evidence_only 并把所有有效结果标记为 discarded。"
     ),
     "analysis_route_without_web_invocation": (
         "本次运行已开启联网搜索。请先调用一次 web_evidence_search 并等待真实返回，"
