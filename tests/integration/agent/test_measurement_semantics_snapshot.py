@@ -50,7 +50,7 @@ def test_validation_persists_normalized_semantics(kind: str) -> None:
 
 
 @pytest.mark.parametrize("declarations", [
-    None, {}, "continuous", [None],
+    {}, "", False, 0, "continuous", [None],
     [{"column": "x", "kind": "Continuous", "evidence": "x"}],
     [{"column": "x", "kind": None, "evidence": "x"}],
     [{"column": [], "kind": "continuous", "evidence": "x"}],
@@ -66,6 +66,14 @@ def test_validation_rejects_invalid_or_conflicting_declarations(declarations: ob
     assert any(issue["code"] == "measurement_semantics_invalid" for issue in report["errors"])
     with pytest.raises(ValueError):
         semantic_kinds_from_validation_report(report)
+
+
+@pytest.mark.parametrize("declarations", [None, [], ()])
+def test_validation_accepts_undeclared_measurement_semantics(declarations: object) -> None:
+    report = _report(declarations)
+    assert report["accepted"] is True
+    assert report["errors"] == []
+    assert semantic_kinds_from_validation_report(report) == {}
 
 
 @pytest.mark.parametrize("report", [

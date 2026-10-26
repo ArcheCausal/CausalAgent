@@ -103,58 +103,6 @@ class DeleteSessionTests(unittest.TestCase):
         ):
             return client.post("/api/delete_session", json={"session_id": "session-1"})
 
-    def test_delete_session_enqueues_checkpoint_cleanup_in_the_same_transaction(self):
-        """正常删除按锁定、任务检查、outbox、业务数据的顺序提交一次。"""
-        connection = FakeConnection(
-            fetch_results=[
-                [{"job_id": "job-1", "status": "succeeded"}],
-                {"id": "session-1", "user_id": 7},
-                {"status": "pending"},
-            ]
-        )
-
-        response = self._post_delete(connection)
-
-        self.assertEqual(response.status_code, 202)
-        self.assertTrue(connection.transaction_started)
-        self.assertTrue(connection.committed)
-        self.assertFalse(connection.rolled_back)
-        statements = connection.fake_cursor.statements
-        self.assertEqual(len(statements), 7)
-        self.assertEqual(
-            statements[0],
-            (
-                "SELECT job_id, status, execution_state FROM analysis_jobs WHERE session_id = %s AND user_id = %s ORDER BY id FOR UPDATE",
-                ("session-1", 7),
-            ),
-        )
-        self.assertEqual(
-            statements[1],
-            (
-                "SELECT id FROM sessions WHERE id = %s AND user_id = %s FOR UPDATE",
-                ("session-1", 7),
-            ),
-        )
-        self.assertIn("INSERT INTO checkpoint_cleanup_outbox", statements[2][0])
-        self.assertEqual(statements[2][1], ("job-1", None))
-        self.assertIn("SELECT status FROM checkpoint_cleanup_outbox", statements[3][0])
-        self.assertTrue(statements[4][0].startswith("DELETE ca FROM chat_attachments"))
-        self.assertEqual(
-            statements[5],
-            ("DELETE FROM chat_messages WHERE session_id = %s AND user_id = %s", ("session-1", 7)),
-        )
-        self.assertEqual(
-            statements[6],
-            ("DELETE FROM sessions WHERE id = %s AND user_id = %s", ("session-1", 7)),
-        )
-        # 只删除会话时保留用户长期记忆，不为用户级 namespace 登记清理。
-        self.assertFalse(
-            any(
-                "user_memory_cleanup_outbox" in statement
-                for statement, _ in statements
-            )
-        )
-
     def test_active_job_blocks_all_delete_statements(self):
         """有 queued/running job 时回滚并拒绝删除 checkpoint 和会话数据。"""
         connection = FakeConnection(

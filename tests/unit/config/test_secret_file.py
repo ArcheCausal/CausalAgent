@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import os
 import stat
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
 from config import secret_file
+from tests.support.configuration_import import run_configuration_import
 from config.secret_file import (
     REQUIRED_SECRET_KEYS,
     SECRET_KEYS,
@@ -277,58 +276,13 @@ def test_partial_load_still_rejects_retired_upstream_key(tmp_path, required_keys
         load_secrets(path=path, required_keys=required_keys)
 
 
-def _run_configuration_import(path: Path, source: str, **overrides: str):
-    environment = os.environ.copy()
-    for name in (*SECRET_KEYS, "BASE_URL", "MODEL", "DEEP_AGENT_BASE_URL", "DEEP_AGENT_MODEL"):
-        environment.pop(name, None)
-    environment.update({
-        "CAUSALAGENT_SECRET_FILE": str(path),
-        "MYSQL_HOST": "127.0.0.1", "MYSQL_WRITE_HOST": "127.0.0.1", "MYSQL_READ_HOSTS": "",
-        "MYSQL_USER": "configuration_user", "MYSQL_WRITE_USER": "configuration_writer",
-        "MYSQL_READ_USER": "configuration_reader", "MYSQL_DATABASE": "configuration_test",
-    })
-    environment.update(overrides)
-    return subprocess.run(
-        [sys.executable, "-c", source], cwd=Path(__file__).resolve().parents[3],
-        env=environment, capture_output=True, text=True, timeout=60,
-    )
-
-
-def test_controller_imports_with_only_three_database_secrets_and_no_model_configuration(tmp_path):
-    result = _run_configuration_import(
-        _database_file(tmp_path),
-        "import sys; import sandbox_controller.__main__; "
-        "from config.database_settings import database_settings; "
-        "assert database_settings.MYSQL_PASSWORD; "
-        "assert database_settings.MYSQL_WRITE_PASSWORD; "
-        "assert database_settings.MYSQL_READ_PASSWORD; "
-        "assert database_settings.MYSQL_REPLICA_STATUS_PASSWORD is None; "
-        "assert 'config.settings' not in sys.modules; print('controller-imported')",
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert "controller-imported" in result.stdout
-
-
-def test_app_import_rejects_database_only_file_after_controller_import(tmp_path):
-    result = _run_configuration_import(
-        _database_file(tmp_path),
-        "import sandbox_controller.__main__; print('controller-imported', flush=True); import config.settings",
-    )
-
-    assert "controller-imported" in result.stdout
-    assert result.returncode != 0
-    assert "SecretFileError" in result.stderr
-    assert "API_KEY" in result.stderr
-
-
 @pytest.mark.parametrize("missing", ["BASE_URL", "MODEL"])
 def test_app_import_still_rejects_missing_model_configuration_with_complete_secrets(tmp_path, missing):
     path = _write(tmp_path / "application.env", _complete_lines())
     options = {"BASE_URL": "https://model.example.invalid", "MODEL": "configuration-model"}
     options.pop(missing)
 
-    result = _run_configuration_import(path, "import config.settings", **options)
+    result = run_configuration_import(path, "import config.settings", **options)
 
     assert result.returncode != 0
     assert "ValueError" in result.stderr

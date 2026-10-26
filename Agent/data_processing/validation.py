@@ -118,9 +118,12 @@ def validate_candidate(
         errors.append(_issue("unknown_semantic_columns", "字段语义引用了输出中不存在的字段"))
 
     parameters = analysis_parameters if isinstance(analysis_parameters, Mapping) else {}
+    declared_semantics = parameters.get("measurement_semantics")
+    if declared_semantics is None:
+        declared_semantics = []
     try:
         semantic_kinds = normalize_measurement_semantics(
-            parameters.get("measurement_semantics") or [], columns=columns,
+            declared_semantics, columns=columns,
         )
     except ValueError:
         semantic_kinds = {}
@@ -135,7 +138,6 @@ def validate_candidate(
         elif column and not _has_semantics(column, variable_semantics, parameters):
             errors.append(_issue(f"{role}_semantics_missing", f"缺少{_role_name(role)}的测量含义"))
 
-    declared_semantics = parameters.get("measurement_semantics") or []
     if isinstance(declared_semantics, (list, tuple)):
         for item in declared_semantics:
             if not isinstance(item, Mapping):

@@ -17,6 +17,7 @@ backend:
   - 'tests/support/**'
   - 'tests/unit/**'
   - 'tests/integration/agent/**'
+  - 'tests/integration/config/**'
   - 'tests/integration/admin/**'
   - 'tests/integration/deployment/test_frontend_entries.py'
   - 'tests/acceptance/run_rag_eval_production_acceptance.py'

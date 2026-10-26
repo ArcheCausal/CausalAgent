@@ -61,6 +61,8 @@ docker compose --env-file .env.staging.example -f docker-compose.staging.yml con
 python -m pytest -p no:cacheprovider tests/contracts/deployment/test_staging_compose.py
 ~~~
 
+轻量 contracts 执行组中的 `tests/unit/config/test_secret_file.py` 只验证密钥文件与基础配置，不导入完整服务。控制服务导入及数据库密钥隔离由 [test_controller_configuration.py](../../tests/integration/config/test_controller_configuration.py) 在 backend 镜像中验证；`.github/filters/paths.yaml` 显式覆盖 `tests/integration/config/**`，新增同类测试时保持这一归属。
+
 ## 普通用户 Vue 前端
 
 在仓库根目录执行：
@@ -167,6 +169,15 @@ docker compose -f docker-compose.test.yml run --rm --no-deps -T unit-test python
 ```
 
 真实 MySQL 生命周期检查位于 [test_sandbox_sessions_mysql.py](../../tests/e2e/database/test_sandbox_sessions_mysql.py)。它只接受显式启用的隔离数据库，按文件顶部说明设置 `SANDBOX_DATABASE_ACCEPTANCE=1`、专用主机名、数据库名与容器内密钥路径，再执行该文件。首次要求空库；已有验收数据库仅在明确设置 `SANDBOX_DATABASE_REUSE=1` 时续跑。该入口检查真实事务、竞争、fencing、操作幂等和迁移，不创建远端沙盒。资源记录不依赖业务级联删除，核查须同时覆盖业务删除后遗留记录仍可清理。
+
+[父图数据库检查](../../tests/e2e/database/test_deep_agent_parent_mysql.py) 与 [会话数据集清理检查](../../tests/e2e/database/test_chat_dataset_cleanup_mysql.py) 复用上述隔离边界。先在持久测试容器中初始化空库，再在同一容器设置 `SANDBOX_DATABASE_REUSE=1` 执行两个模块，保留容器内临时密钥文件：
+
+```bash
+python -m pytest -p no:cacheprovider tests/e2e/database/test_sandbox_sessions_mysql.py -k empty_upgrade_explicit_downgrade_and_schema_inspection -q
+SANDBOX_DATABASE_REUSE=1 python -m pytest -p no:cacheprovider tests/e2e/database/test_deep_agent_parent_mysql.py tests/e2e/database/test_chat_dataset_cleanup_mysql.py -q
+```
+
+这些检查使用真实 MySQL 候选保存、独立校验与绑定、父图强读及 Flask 删除事务，覆盖数据集身份、原生子图恢复、重试事件、checkpoint 清理入队和文件引用保护；子图 checkpoint 使用内存存储，不证明 PostgreSQL、外部模型、MCP HTTP 或 OpenSandbox。默认 CI 的离线 backend 组不运行这些数据库用例。
 
 控制 API 故障验收入口为 [sandbox_controller_http.py](../../tests/acceptance/sandbox_controller_http.py)：在同一隔离 MySQL 边界下显式设置 `SANDBOX_CONTROLLER_HTTP_ACCEPTANCE=1`，执行 `python tests/acceptance/sandbox_controller_http.py`。它使用真实 TCP HTTP、MySQL 和独立控制进程，并连接不可达的 `127.0.0.1:9` 注入上游连接失败，检查认证、请求限制、容量保留、租约撤销及命名锁丢失。报告保存在容器内 `/tmp/sandbox-controller-http/`；失败创建的记录保留且不自动释放。该入口不运行沙盒脚本，不证明真实 OpenSandbox 成功路径。
 

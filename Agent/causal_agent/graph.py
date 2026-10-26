@@ -85,7 +85,9 @@ from Agent.deep_agent_tools.models import (
 )
 
 
-DEEP_AGENT_CHECKPOINT_NAMESPACE = "deep_agent_v1"
+# 独立调用的子图由稳定 thread 隔离，LangGraph 将它写入根 namespace。
+# 读取必须使用同一位置，才能恢复已有子图及 Gate 修正状态。
+DEEP_AGENT_CHECKPOINT_NAMESPACE = ""
 
 
 
@@ -687,6 +689,9 @@ async def _deep_agent_parent_node(
     child_run_id = expected_child_run_id
     child_config = dict(config or {})
     child_config["configurable"] = dict(child_config.get("configurable") or {})
+    # 父图的 checkpoint 位置不能选择独立 child thread 中的状态。
+    child_config["configurable"].pop("checkpoint_id", None)
+    child_config["configurable"].pop("checkpoint_map", None)
     child_config["configurable"]["thread_id"] = child_run_id
     child_config["configurable"]["checkpoint_ns"] = DEEP_AGENT_CHECKPOINT_NAMESPACE
     child_config["metadata"] = dict(child_config.get("metadata") or {})

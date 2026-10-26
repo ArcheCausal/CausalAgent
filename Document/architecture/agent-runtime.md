@@ -49,7 +49,7 @@ agent → fold → data_processing → validate_dataset → bind_dataset → pre
 
 处理阶段的开始进度事件另行包含当前 attempt 和父任务 ID。恢复或校验重试产生新的阶段实例时使用不同事件键，同次任务重放仍可去重；公开阶段事件的身份不改变子图 checkpoint 或沙盒申请身份。
 
-父图 checkpoint 使用 `thread_id=analysis_jobs.job_id` 和空 namespace。Deep Agent 子图使用同一个 PostgreSQL saver 和稳定的 `thread_id=deep-agent:<uuid5(job_id)>`。父图调用配置传入 `checkpoint_ns=deep_agent_v1`，当前 LangGraph 独立调用的子图实际保存在该 thread 的根 namespace（空字符串）；检查持久化状态时应读取实际保存的 namespace，不能仅从调用配置推定存储位置。该配置与存储位置差异下的正式中断恢复和故障接管仍需专门验证。子图 State 保存的分析身份由 Job、当前冻结输入和算法 Spec 摘要构成；worker、attempt 和 lease 只代表本次执行权限。输入身份读取的是 invocation 级可刷新引用，服务端重新冻结输入或切换分析上下文后，旧执行产物不会被复用。Gate 要求修正时，父图通过同一子图读取状态并追加受控指令。
+父图 checkpoint 使用 `thread_id=analysis_jobs.job_id` 和空 namespace。Deep Agent 子图使用同一个 PostgreSQL saver 和稳定的 `thread_id=deep-agent:<uuid5(job_id)>`，独立调用的读写均使用该 thread 的根 namespace（空字符串），不携带父图的 checkpoint ID 或位置映射。父节点读取同一位置的已有状态后继续未完成子图，或在 Gate 修正时追加受控指令。子图 State 保存的分析身份由 Job、当前冻结输入和算法 Spec 摘要构成；worker、attempt 和 lease 只代表本次执行权限。输入身份读取的是 invocation 级可刷新引用，服务端重新冻结输入或切换分析上下文后，旧执行产物不会被复用。
 
 提交数据处理语义问题时，子图在内层 `interrupt` 暂停；父图保留原生中断 ID 和公开载荷，让 LangGraph 直接向外传播暂停，不把它当作执行失败，也不再增加一层人工中断。用户答复通过父图的 `Command(resume=...)` 回到子图原中断位置，连续提问分别消费自己的答复。子图配置保留父任务的恢复索引，移除父 checkpoint ID、位置映射和重放状态，并显式指定共享 saver；读取处理 namespace 时不会误用父图位置。等待期间结束本轮执行并释放 OpenSandbox、MCP 请求、算法子进程和 worker 执行槽位。
 
@@ -102,6 +102,8 @@ Adapter 负责模型参数和数据集输入契约检查、标准结果、raw re
 `AlgorithmSpec` 声明算法实际接受的数据要求、缺失值处理方式、分类数据能力和最小行列数，并通过 `model_description()` 提供给模型。它描述输入条件，不授予算法工具改写数据的权限。数据处理 Agent 读取这些要求作为准备数据的参考；候选文件写入 MySQL 后，独立校验节点从持久化对象读取实际 CSV，生成画像并对每个可用算法执行适用性检查。画像保留变量类型、缺失列、非有限值、空列、常数列和疑似标识符列。数据处理语义问题使用自由文本 interrupt，不再使用绑定算法的处理选项 schema。
 
 算法调用不携带预处理方案或批准凭证。独立校验报告保存规范化 `semantic_kinds` 快照，拒绝非法类型、缺失字段及冲突声明。Adapter 从可信运行时的数据集引用读取该快照，MCP 则从 MySQL primary strong read 的同一已绑定候选读取报告；两端都把测量语义传给 `AlgorithmSpec.assess_applicability()`，缺失或无效报告不能回退为空语义。二值、分类或有序变量不会仅因 CSV 中存成数字而被当作连续变量。MCP 同时核对 Job、lease、原始输入 hash、`prepared_dataset_id`、候选状态、数据对象归属和内容 hash，排队后和执行完成后再次核对输入及语义；它不按算法参数改写 CSV。结果 provenance 同时记录分析数据身份和原始来源身份。
+
+未声明测量语义时，缺席字段、`null` 或空序列生成空快照；显式提供的空对象、布尔值、数字及字符串仍属非法声明，独立校验必须拒绝，不能用真假值判断把它们转换为空序列。
 
 `causal-mcp` 是私网 Streamable HTTP/HTTP/1.1 服务。服务端以 MySQL primary strong read 校验 Job、attempt、lease 和 worker 身份，再使用有界队列及独立算法子进程运行 capability。MCP session 不保存 Job、checkpoint 或 Action Ledger。
 
