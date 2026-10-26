@@ -28,7 +28,12 @@ class _ProcessExecutionEnvelope:
     cpu_seconds: float
 
 
-def _run_runner(runner: Callable[..., Any], csv_data: str, parameters: Mapping[str, Any]) -> Any:
+def _run_runner(
+    runner: Callable[..., Any],
+    csv_data: str,
+    parameters: Mapping[str, Any],
+    artifacts: Mapping[str, Any],
+) -> Any:
     """Top-level callable so a spawned process receives only pure data."""
 
     # Third-party causal libraries may print progress, warnings or file paths;
@@ -36,7 +41,7 @@ def _run_runner(runner: Callable[..., Any], csv_data: str, parameters: Mapping[s
     before = _resource.getrusage(_resource.RUSAGE_SELF) if _resource else None
     try:
         with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-            value = runner(csv_data, parameters)
+            value = runner(csv_data, parameters, artifacts)
     except Exception as exc:
         # 子进程内的第三方输出仍不进入协议或日志流；只把异常类名带回父进程，
         # 让服务层能在不记录自由文本的前提下区分失败类型。
@@ -277,6 +282,7 @@ class BoundedProcessPool:
         runner: Callable[..., Any],
         csv_data: str,
         parameters: Mapping[str, Any],
+        artifacts: Mapping[str, Any] | None = None,
         timeout_seconds: float,
         concurrency: int,
         before_start: Callable[[float], Awaitable[None] | None] | None = None,
@@ -328,7 +334,12 @@ class BoundedProcessPool:
             try:
                 future = asyncio.ensure_future(
                     loop.run_in_executor(
-                        executor, _run_runner, runner, csv_data, dict(parameters)
+                        executor,
+                        _run_runner,
+                        runner,
+                        csv_data,
+                        dict(parameters),
+                        dict(artifacts or {}),
                     )
                 )
             except BaseException:

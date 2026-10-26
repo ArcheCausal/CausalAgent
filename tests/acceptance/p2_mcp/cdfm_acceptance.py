@@ -334,7 +334,7 @@ async def _valid_cdfm_call(csv_data: str) -> dict[str, Any]:
         await _stop_server(server, server_task)
 
 
-def _slow_cdfm_runner(_csv_data: str, _parameters: dict[str, Any]) -> dict[str, Any]:
+def _slow_cdfm_runner(_csv_data: str, _parameters: dict[str, Any], _artifacts: dict[str, Any]) -> dict[str, Any]:
     time.sleep(2.0)
     return {"success": True, "data": {"nodes": [], "edges": []}}
 

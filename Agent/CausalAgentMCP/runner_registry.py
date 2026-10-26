@@ -12,7 +12,7 @@ from Agent.deep_agent_tools.algorithm_specs import (
 from Agent.deep_agent_tools.error_codes import SafeErrorCode
 
 
-Runner = Callable[[str, Mapping[str, Any]], dict[str, Any]]
+Runner = Callable[[str, Mapping[str, Any], Mapping[str, Any]], dict[str, Any]]
 
 
 class RunnerRegistryError(ValueError):
@@ -31,7 +31,9 @@ class RunnerSpec:
     runner: Runner
 
 
-def _pc(csv_data: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
+def _pc(
+    csv_data: str, parameters: Mapping[str, Any], _artifacts: Mapping[str, Any]
+) -> dict[str, Any]:
     from Agent.causal.causalachieve import run_pc_analysis
 
     return run_pc_analysis(
@@ -41,7 +43,9 @@ def _pc(csv_data: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
     )
 
 
-def _olc(csv_data: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
+def _olc(
+    csv_data: str, parameters: Mapping[str, Any], _artifacts: Mapping[str, Any]
+) -> dict[str, Any]:
     from Agent.causal.causalachieve import run_olc_analysis
 
     return run_olc_analysis(
@@ -50,16 +54,62 @@ def _olc(csv_data: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
         beta=float(parameters.get("beta", 0.01)),
     )
 
-def _direct_lingam(csv_data: str, _parameters: Mapping[str, Any]) -> dict[str, Any]:
+def _direct_lingam(
+    csv_data: str, _parameters: Mapping[str, Any], _artifacts: Mapping[str, Any]
+) -> dict[str, Any]:
     from Agent.causal.causalachieve import run_direct_lingam_analysis
 
     return run_direct_lingam_analysis(csv_data)
 
 
-def _cdfm(csv_data: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
+def _cdfm(
+    csv_data: str, parameters: Mapping[str, Any], _artifacts: Mapping[str, Any]
+) -> dict[str, Any]:
     from Agent.causal.cdfm_runner import run_cdfm_analysis
 
     return run_cdfm_analysis(csv_data, threshold=parameters.get("threshold"))
+
+
+ATE_RUNNER_VERSION = "ate-runner-v1"
+
+
+def _ate(
+    csv_data: str,
+    parameters: Mapping[str, Any],
+    artifacts: Mapping[str, Any],
+) -> dict[str, Any]:
+    import io
+
+    import pandas as pd
+
+    from Agent.CausalAgentMCP.inference.ate import AteNotApplicable, estimate_ate
+    from Agent.deep_agent_tools.models import StandardizedGraph
+
+    graph = StandardizedGraph.model_validate(artifacts["standardized_graph"])
+    frame = pd.read_csv(io.StringIO(csv_data))
+    try:
+        effect = estimate_ate(
+            graph=graph,
+            data=frame,
+            treatment=str(parameters["treatment"]),
+            outcome=str(parameters["outcome"]),
+        )
+    except AteNotApplicable as exc:
+        return {
+            "schema_version": "causal_estimation_v1",
+            "success": False,
+            "algorithm": "backdoor_ols",
+            "runner_version": ATE_RUNNER_VERSION,
+            "error_type": "NotApplicable",
+            "message": str(exc),
+        }
+    return {
+        "schema_version": "causal_estimation_v1",
+        "success": True,
+        "algorithm": "backdoor_ols",
+        "runner_version": ATE_RUNNER_VERSION,
+        "causal_effect": effect,
+    }
 
 
 class RunnerRegistry:
@@ -96,6 +146,7 @@ def build_default_registry() -> RunnerRegistry:
         "causal.olc": _olc,
         "causal.direct_lingam": _direct_lingam,
         "causal.cdfm": _cdfm,
+        "causal.ate": _ate,
     }
     entries = [
         (spec, runners[spec.capability_id]) for spec in DEFAULT_ALGORITHM_SPECS

@@ -143,7 +143,7 @@ def test_runner_failure_emits_controlled_diagnostics_without_free_text() -> None
     assert "error_message" not in details
 
 
-def _boom(_csv_data, _parameters):
+def _boom(_csv_data, _parameters, _artifacts):
     """模块级 runner 替身；抛异常时必须保留异常类名而不是输出正文。"""
     print("third-party-noise: /tmp/secret-path")
     raise FileNotFoundError("weights missing")

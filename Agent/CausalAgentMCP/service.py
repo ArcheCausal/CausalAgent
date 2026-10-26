@@ -22,12 +22,14 @@ from Agent.deep_agent_tools.models import (
     AlgorithmExecutionCommand,
     AlgorithmResult,
     AlgorithmResultProvenance,
+    CausalEffect,
     DataViewSummary,
     Diagnostics,
     McpInvocationContext,
     StandardizedGraph,
     canonical_json_bytes,
 )
+from Agent.deep_agent_tools.graph_validation import validate_graph_structure
 from Agent.deep_agent_tools.preprocessing import (
     PreprocessingError,
     apply_preprocessing,
@@ -149,6 +151,8 @@ def _failure_status(code: SafeErrorCode) -> str:
         return "invalid_input"
     if code == SafeErrorCode.ALGORITHM_NOT_READY:
         return "not_ready"
+    if code == SafeErrorCode.ALGORITHM_NOT_APPLICABLE:
+        return "not_applicable"
     if code == SafeErrorCode.ALGORITHM_TIMED_OUT:
         return "timed_out"
     return "execution_failed"
@@ -251,6 +255,78 @@ def _error_result(
             capability_id=command.capability_id,
             capability_version=capability_version,
             algorithm_runner_version=None,
+        ),
+    )
+
+
+def _estimation_result(
+    raw_result: Mapping[str, Any],
+    *,
+    command: AlgorithmExecutionCommand,
+    context: McpInvocationContext,
+    capability_version: str,
+    graph: StandardizedGraph,
+    data_view: DataViewSummary | None,
+) -> AlgorithmResult:
+    """估计能力的成功结果：图取入参图，效应取 runner 返回值。"""
+
+    effect_payload = raw_result.get("causal_effect")
+    if not isinstance(effect_payload, Mapping):
+        raise ValueError("estimation runner did not return causal_effect")
+    effect = CausalEffect.model_validate(
+        {
+            "graph_result_ref": command.parameters.get("graph_result_ref"),
+            **dict(effect_payload),
+        }
+    )
+    if (
+        effect.treatment != command.parameters.get("treatment")
+        or effect.outcome != command.parameters.get("outcome")
+    ):
+        raise ValueError("estimation result does not match the requested pair")
+    validation = validate_graph_structure(graph, graph_semantics=graph.graph_semantics)
+    if not validation.valid:
+        raise ValueError("input graph failed structural validation")
+    metadata = runner_method_metadata(raw_result, command.capability_id)
+    return AlgorithmResult(
+        result_ref=build_result_ref(
+            invocation_id=command.invocation_id,
+            result_index=command.result_index,
+        ),
+        invocation_id=command.invocation_id,
+        provider_call_id=command.provider_call_id,
+        capability_id=command.capability_id,
+        capability_version=capability_version,
+        status="valid",
+        **metadata,
+        standardized_graph=graph,
+        graph_validation=validation,
+        causal_effect=effect,
+        summary="算法调用完成。",
+        data_view=data_view,
+        diagnostics=Diagnostics(
+            summary="后门调整估计完成。",
+            sample_count=effect.n_rows,
+            assumptions_checked=[
+                "all_edges_directed",
+                "acyclic",
+                "treatment_ancestor_of_outcome",
+            ],
+        ),
+        input_identity=command.input_identity,
+        provenance=AlgorithmResultProvenance(
+            job_id=context.job_id,
+            attempt_count=context.attempt_count,
+            lease_epoch=context.lease_epoch,
+            input_identity=command.input_identity,
+            spec_digest=command.spec_digest,
+            invocation_id=command.invocation_id,
+            capability_id=command.capability_id,
+            capability_version=capability_version,
+            preprocessing_plan_digest=(
+                command.preprocessing.digest if command.preprocessing is not None else None
+            ),
+            algorithm_runner_version=metadata["implementation"].runner_version,
         ),
     )
 
@@ -429,6 +505,21 @@ class CausalMcpService:
             parameters = spec.model_input_schema.model_validate(command.parameters).model_dump(
                 mode="json"
             )
+            artifacts = dict(command.artifacts)
+            if set(artifacts) - set(spec.requires):
+                raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID)
+            graph: StandardizedGraph | None = None
+            if "standardized_graph" in artifacts:
+                try:
+                    graph = StandardizedGraph.model_validate(
+                        artifacts["standardized_graph"]
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise McpServiceError(
+                        SafeErrorCode.ALGORITHM_INPUT_INVALID
+                    ) from exc
+            if spec.kind == "causal_estimation" and graph is None:
+                raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID)
             data_view: DataViewSummary | None = None
             if command.preprocessing is not None:
                 approval = command.approval
@@ -473,9 +564,13 @@ class CausalMcpService:
                 )
             else:
                 processed_profile = build_data_profile_from_csv(csv_data)
-            unmet = spec.required_processing_reason(
-                profile=processed_profile,
-                preprocessing=command.preprocessing,
+            unmet = (
+                None
+                if spec.kind == "causal_estimation"
+                else spec.required_processing_reason(
+                    profile=processed_profile,
+                    preprocessing=command.preprocessing,
+                )
             )
             if unmet is not None:
                 raise McpServiceError(
@@ -560,6 +655,7 @@ class CausalMcpService:
                     runner=entry.runner,
                     csv_data=csv_data,
                     parameters=parameters,
+                    artifacts=artifacts,
                     timeout_seconds=timeout_seconds,
                     concurrency=entry.concurrency,
                     before_start=before_process_start,
@@ -747,6 +843,8 @@ class CausalMcpService:
                 if error_type == "InputValidationError"
                 else SafeErrorCode.ALGORITHM_NOT_READY
                 if error_type == "DependencyUnavailableError"
+                else SafeErrorCode.ALGORITHM_NOT_APPLICABLE
+                if error_type == "NotApplicable"
                 else SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID
                 if error_type == "ResultValidationError"
                 else SafeErrorCode.ALGORITHM_EXECUTION_FAILED
@@ -771,45 +869,57 @@ class CausalMcpService:
         else:
             try:
                 metadata = runner_method_metadata(raw_result, command.capability_id)
-                normalized = result_from_runner_payload(
-                    raw_result, command=command, context=context,
-                    capability_version=entry.version,
-                    runner_version=metadata["implementation"].runner_version,
-                )
-                result = AlgorithmResult(
-                    result_ref=build_result_ref(
+                if spec.kind == "causal_estimation":
+                    if graph is None:
+                        raise ValueError("estimation requires a graph artifact")
+                    result = _estimation_result(
+                        raw_result,
+                        command=command,
+                        context=context,
+                        capability_version=entry.version,
+                        graph=graph,
+                        data_view=data_view,
+                    )
+                else:
+                    normalized = result_from_runner_payload(
+                        raw_result, command=command, context=context,
+                        capability_version=entry.version,
+                        runner_version=metadata["implementation"].runner_version,
+                    )
+                    result = AlgorithmResult(
+                        result_ref=build_result_ref(
+                            invocation_id=command.invocation_id,
+                            result_index=command.result_index,
+                        ),
                         invocation_id=command.invocation_id,
-                        result_index=command.result_index,
-                    ),
-                    invocation_id=command.invocation_id,
-                    provider_call_id=command.provider_call_id,
-                    capability_id=command.capability_id,
-                    capability_version=entry.version,
-                    status=normalized.status,
-                    **metadata,
-                    standardized_graph=normalized.standardized_graph,
-                    graph_validation=normalized.graph_validation,
-                    summary="算法调用完成。",
-                    data_view=data_view,
-                    diagnostics=normalized.diagnostics,
-                    input_identity=command.input_identity,
-                    provenance=AlgorithmResultProvenance(
-                        job_id=context.job_id,
-                        attempt_count=context.attempt_count,
-                        lease_epoch=context.lease_epoch,
-                        input_identity=command.input_identity,
-                        spec_digest=command.spec_digest,
-                        invocation_id=command.invocation_id,
+                        provider_call_id=command.provider_call_id,
                         capability_id=command.capability_id,
                         capability_version=entry.version,
-                        preprocessing_plan_digest=(
-                            command.preprocessing.digest
-                            if command.preprocessing is not None
-                            else None
+                        status=normalized.status,
+                        **metadata,
+                        standardized_graph=normalized.standardized_graph,
+                        graph_validation=normalized.graph_validation,
+                        summary="算法调用完成。",
+                        data_view=data_view,
+                        diagnostics=normalized.diagnostics,
+                        input_identity=command.input_identity,
+                        provenance=AlgorithmResultProvenance(
+                            job_id=context.job_id,
+                            attempt_count=context.attempt_count,
+                            lease_epoch=context.lease_epoch,
+                            input_identity=command.input_identity,
+                            spec_digest=command.spec_digest,
+                            invocation_id=command.invocation_id,
+                            capability_id=command.capability_id,
+                            capability_version=entry.version,
+                            preprocessing_plan_digest=(
+                                command.preprocessing.digest
+                                if command.preprocessing is not None
+                                else None
+                            ),
+                            algorithm_runner_version=normalized.provenance.algorithm_runner_version,
                         ),
-                        algorithm_runner_version=normalized.provenance.algorithm_runner_version,
-                    ),
-                )
+                    )
             except Exception:
                 result = _error_result(
                     command,

@@ -57,16 +57,16 @@ SIGNING_KEY = "p2-acceptance-signing-key"
 PORT = 8793
 
 
-def _sleep_runner(_csv_data: str, parameters: dict[str, Any]) -> dict[str, Any]:
+def _sleep_runner(_csv_data: str, parameters: dict[str, Any], _artifacts: dict[str, Any]) -> dict[str, Any]:
     time.sleep(float(parameters["seconds"]))
     return {"success": True, "data": {"nodes": [], "edges": []}}
 
 
-def _quick_runner(_csv_data: str, _parameters: dict[str, Any]) -> dict[str, Any]:
+def _quick_runner(_csv_data: str, _parameters: dict[str, Any], _artifacts: dict[str, Any]) -> dict[str, Any]:
     return {"success": True, "data": {"nodes": [], "edges": []}}
 
 
-def _slow_pc_runner(_csv_data: str, _parameters: dict[str, Any]) -> dict[str, Any]:
+def _slow_pc_runner(_csv_data: str, _parameters: dict[str, Any], _artifacts: dict[str, Any]) -> dict[str, Any]:
     time.sleep(2.0)
     return {"success": True, "data": {"nodes": [], "edges": []}}
 

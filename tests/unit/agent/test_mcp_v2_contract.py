@@ -110,7 +110,7 @@ def _config() -> McpServerConfig:
     )
 
 
-def _sleep_runner(_csv_data, parameters):
+def _sleep_runner(_csv_data, parameters, _artifacts):
     time.sleep(parameters["delay"])
     return {"ok": True, "delay": parameters["delay"]}
 
@@ -274,7 +274,7 @@ def test_service_logs_job_invocation_timeline_and_slow_threshold() -> None:
 
 
 def test_bounded_pool_times_out_before_returning_late_result() -> None:
-    def slow_runner(_csv_data, _parameters):
+    def slow_runner(_csv_data, _parameters, _artifacts):
         import time
 
         time.sleep(0.12)
@@ -316,13 +316,13 @@ def test_bounded_pool_times_out_before_returning_late_result() -> None:
 
 
 def test_bounded_pool_releases_capability_after_global_admission_timeout() -> None:
-    def slow_runner(_csv_data, _parameters):
+    def slow_runner(_csv_data, _parameters, _artifacts):
         import time
 
         time.sleep(0.08)
         return {"ok": True}
 
-    def quick_runner(_csv_data, _parameters):
+    def quick_runner(_csv_data, _parameters, _artifacts):
         return {"ok": True}
 
     async def scenario():
@@ -511,7 +511,7 @@ def test_pc_runner_forwards_spec_alpha(monkeypatch) -> None:
         return {"success": True}
 
     monkeypatch.setattr("Agent.causal.causalachieve.run_pc_analysis", fake_runner)
-    assert _pc("A,B\n1,2\n", {"alpha": 0.2, "test": "chisq"})["success"] is True
+    assert _pc("A,B\n1,2\n", {"alpha": 0.2, "test": "chisq"}, {})["success"] is True
     assert observed == {"csv_data": "A,B\n1,2\n", "alpha": 0.2, "test": "chisq"}
 
 
