@@ -83,7 +83,7 @@ Shell 密钥读取器兼容 LF 和 CRLF 换行，只移除行尾属于分隔符�
 
 ### CI 与人工镜像发布
 
-`.github/workflows/lightweight-ci.yml` 只在面向 `main`/`develop` 的 PR 上运行门禁，并按改动路径选择后端单元测试、五个前端工程自检/构建、Compose 与预发部署合同、Alloy 配置验证和五个 Dockerfile 的 BuildKit 静态检查；面向 `main` 的 PR 无条件运行全部检查。`push` 到 `main`/`develop` 不运行门禁，只重建 Docker unit 测试镜像以导出层缓存。两处流程都不推送镜像。完整镜像构建只由 `.github/workflows/publish-staging-images.yml` 的 `workflow_dispatch` 触发，并拒绝 `develop` 以外的分支；它把 app、MCP、MySQL primary、MySQL replica 分别构建并直接推送 GHCR，不创建镜像 artifact，也不通过 SSH 部署服务器。每个镜像使用 `sha-<commit 前 7 位>` 标签，摘要中同时给出 `sha256` digest；服务器配置必须使用 digest；发布工作流还要求提供已发布的处理镜像 `sandbox_image`，处理镜像不会由这四个构建自动生成。
+`.github/workflows/lightweight-ci.yml` 只在面向 `main`/`develop` 的 PR 上运行门禁，并按改动路径选择后端单元测试、五个前端工程自检/构建、Compose 与预发部署合同、Alloy 配置验证和五个 Dockerfile 的 BuildKit 静态检查；面向 `main` 的 PR 无条件运行全部检查。`push` 到 `main`/`develop` 不运行门禁，只重建 Docker unit 测试镜像以导出层缓存。两处流程都不推送镜像。完整镜像构建只由 `.github/workflows/publish-staging-images.yml` 的 `workflow_dispatch` 触发，并拒绝 `develop` 以外的分支；它把 app、MCP、MySQL primary、MySQL replica 和数据处理镜像分别构建并直接推送 GHCR，不创建镜像 artifact，也不通过 SSH 部署服务器。每个镜像使用 `sha-<commit 前 7 位>` 标签，摘要中同时给出 `sha256` digest；服务器配置必须使用 digest。数据处理镜像使用 `deploy/opensandbox/Dockerfile`、该目录的构建上下文和 `linux/amd64` 平台，构建成功后自动将完整 digest 引用传给部署包，无需人工填写 `sandbox_image`。
 
 仓库默认分支是 `main`，因此首次手动触发前，发布 workflow 文件必须先合并到 `main`；触发时在 Actions 页面选择 `develop`。公开仓库的公开 GHCR Container 镜像按 GitHub Packages 计费规则免费存储和传输（见 [GitHub Packages 计费说明](https://docs.github.com/en/billing/concepts/product-billing/github-packages)）。新建 GHCR 包后，维护者需在包设置中将可见性改为 Public，之后测试服务器才可匿名拉取。构建使用普通 `ubuntu-latest` runner，并在构建前后记录磁盘余量；MCP 首次构建是否能在 runner 可用磁盘内完成，以该次 workflow 实际结果为准。镜像直接推送 GHCR，不导出为 Actions artifact。
 
@@ -274,12 +274,12 @@ Worker 不加入上游网络，不持有 Docker socket。沙盒链路中只有 O
 
 服务器只部署部署包，不执行 `git pull`，也不需要完整源码。部署与校验脚本要求 Docker Compose 和宿主 Python 3.11 或更新版本，校验脚本使用标准库解析 OpenSandbox TOML。CI 用 `scripts/build_release_bundle.py` 在某个源码提交上生成部署包，包含：两个 Compose 文件、`deploy/` 下的网关与配置模板、`observability/` 的采集与看板配置，以及 `scripts/` 下的部署脚本。部署包不包含应用业务 Python、Vue、TypeScript 源码；Python 部署文件包括 OpenSandbox 启动适配器 `deploy/opensandbox/server_entrypoint.py` 及其使用的统一密钥加载器 `config/secret_file.py`。`controller.env.example` 不再是发布所需模板。部署包不包含真实密码、API key、数据库数据或 RAG 正式索引。
 
-镜像范围：应用代码、MCP 代码和 MySQL 自定义初始化逻辑进入自有镜像（`causalagent-app`、`causalagent-mcp`、`causalagent-mysql-primary`、`causalagent-mysql-replica`）；PostgreSQL、Nginx、SearXNG、Valkey、Loki、Alloy 和 Grafana 使用官方镜像。处理镜像和固定 OpenSandbox server、execd、egress、Code Interpreter 基础镜像也登记在清单中。全部镜像都必须在 `images.lock.json` 与 `release.manifest.json` 中固定 digest；`scripts/resolve_official_images.py` 用 `docker buildx imagetools` 解析官方镜像 digest，未固定 digest 时构建直接失败。
+镜像范围：应用代码、MCP 代码、MySQL 自定义初始化逻辑和数据处理依赖进入自有镜像（`causalagent-app`、`causalagent-mcp`、`causalagent-mysql-primary`、`causalagent-mysql-replica`、`causalagent-data-preparation`）；PostgreSQL、Nginx、SearXNG、Valkey、Loki、Alloy 和 Grafana 使用官方镜像。固定 OpenSandbox server、execd、egress、Code Interpreter 基础镜像也登记在清单中。全部镜像都必须在 `images.lock.json` 与 `release.manifest.json` 中固定 digest；`scripts/resolve_official_images.py` 用 `docker buildx imagetools` 解析官方镜像 digest，未固定 digest 时构建直接失败。
 
 正常发布只需人工触发一次 Actions，镜像构建与部署包生成已自动衔接：
 
-1. 先构建并发布数据处理镜像，取得实际 digest。在 `develop` 上运行 `Publish staging images`，填写必需的 `sandbox_image` 完整 digest 引用，构建并推送 app、MCP、MySQL primary 和 MySQL replica 到 GHCR。四个构建全部成功后，工作流自动调用 `Build release bundle`，传入本次完整源码提交 SHA 和该处理镜像引用；任意构建失败时不生成部署包。这里的发布是推送容器仓库，不要求创建 GitHub Release。
-2. 打包工作流用该提交的 `sha-<前7位>` 标签查询四个 GHCR 镜像的 digest，并在不可变引用上核对各平台的 OCI revision。第三方镜像 digest 也由工作流自动查询；随后生成发布清单、镜像锁和压缩包并上传制品。发布标识默认由 UTC 日期、提交短 SHA、运行编号及重试次数组成，摘要显示完整提交和四个镜像引用。查询只读取镜像元数据，不下载完整镜像层。
+1. 在 `develop` 上运行 `Publish staging images`，无需填写镜像参数；工作流从本次提交并行构建并推送 app、MCP、MySQL primary、MySQL replica 和数据处理镜像到 GHCR。处理镜像构建执行 hash 锁定依赖安装、实际 import 与 `pip check`，并通过任务输出传递本次构建产生的完整 digest 引用。五个构建全部成功后，工作流自动调用 `Build release bundle`，传入本次完整源码提交 SHA 和该处理镜像引用；任意构建失败时不生成部署包。这里的发布是推送容器仓库，不要求创建 GitHub Release。
+2. 打包工作流用该提交的 `sha-<前7位>` 标签查询 app、MCP 和 MySQL 主从四个 GHCR 镜像的 digest，并在不可变引用上核对各平台的 OCI revision；处理镜像直接使用上一步的 digest 引用，并查询镜像仓库确认其存在且 digest 一致。第三方镜像 digest 也由工作流自动查询；随后生成发布清单、镜像锁和压缩包并上传制品。发布标识默认由 UTC 日期、提交短 SHA、运行编号及重试次数组成，各构建摘要给出镜像 digest，打包摘要显示完整提交及四个主服务镜像引用，完整镜像集合保存在部署包清单中。查询只读取镜像元数据，不下载完整镜像层。
 3. 下载 Actions 制品，把其中的压缩包传到服务器并解压。服务器配置与密钥保持独立；已有数据的存储迁移只在首次采用新卷结构时执行。
 4. 运行 `deploy.sh`。脚本把清单的镜像映射为 `APP_IMAGE`、`CAUSAL_MCP_IMAGE`、`MYSQL_IMAGE` 等变量，同时生成预发使用的 `STAGING_*` 别名，并写入发布目录的 `images.env`。
 5. 脚本以服务器普通配置和 `images.env` 两个 `--env-file` 启动 Compose，执行 `pull` 和 `up -d`。服务器不再需要逐项手填新发布的镜像 digest。部署 shell 不应保留旧的同名镜像环境变量，以免覆盖清单生成值。
@@ -287,8 +287,11 @@ Worker 不加入上游网络，不持有 Docker socket。沙盒链路中只有 O
 
 ```mermaid
 flowchart LR
-    A[人工运行镜像发布 Action] --> B[构建并推送四个镜像]
-    B --> C[查询同一提交的 digest 并校验 revision]
+    A[人工运行镜像发布 Action] --> B[构建并推送四个主服务镜像]
+    A --> P[构建并推送数据处理镜像]
+    P --> Q[输出本次构建的 digest 引用]
+    B --> C[校验主服务 revision 与处理镜像 digest]
+    Q --> C
     C --> D[自动生成清单和部署包]
     D --> E[人工下载、上传和解压]
     E --> F[服务器运行 deploy.sh]

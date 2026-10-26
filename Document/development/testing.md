@@ -50,9 +50,9 @@ Docker unit 镜像按 `tests/README.md` 中的固定 lock 构建，由 `docker/b
 
 验证缓存时，应先在目标基础分支成功运行一次预热任务，确认日志出现 GHA 缓存导出记录，再查看后续 Pull Request 日志的缓存导入和依赖层 `CACHED` 记录。第一次预热或依赖锁、Dockerfile、基础镜像发生变化时，依赖层可能重新构建；任务成功或配置中存在 `cache-from/cache-to` 不代表缓存已实际写入或命中。
 
-Compose 校验只展开配置，不启动服务。静态 Dockerfile 按构建相关路径触发，不会生成或推送镜像；实际 app、MCP、MySQL 主从镜像只由人工触发的发布工作流构建。
+Compose 校验只展开配置，不启动服务。静态 Dockerfile 按构建相关路径触发，不会生成或推送镜像；实际 app、MCP、MySQL 主从和数据处理镜像只由人工触发的发布工作流构建。
 
-发布工作流的静态契约及镜像解析器参数失败路径由 `tests/contracts/deployment/test_release_workflow.py` 检查，包括四个构建全部成功后才打包、同一源码提交传递、可选手动输入、无效输入不写清单，以及拒绝无法验证 revision 的元数据。该文件不模拟 GHCR 成功响应；通过静态检查不代表仓库鉴权、真实镜像查询或 GitHub Actions 执行成功。真实发布需在 Actions 中检查四个 digest、完整源码提交、制品上传及服务器验收。
+发布工作流的静态契约及镜像解析器参数失败路径由 `tests/contracts/deployment/test_release_workflow.py` 检查，包括五个构建全部成功后才打包、同一源码提交传递、处理镜像的构建上下文与平台、本次构建 digest 的任务输出传递、独立打包的手动输入、无效输入不写清单，以及拒绝无法验证 revision 的元数据。该文件不模拟 GHCR 成功响应；通过静态检查不代表仓库鉴权、真实镜像查询或 GitHub Actions 执行成功。真实发布需在 Actions 中检查五个 digest、完整源码提交、处理镜像引用传递、制品上传及服务器验收。
 
 本地复现预发静态检查：
 
