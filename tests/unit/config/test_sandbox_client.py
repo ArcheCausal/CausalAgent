@@ -1,21 +1,31 @@
 """控制服务客户端的纯配置边界，不启动替代 HTTP 服务或沙盒。"""
 
 import secrets
+import os
 
 import pytest
 
 from Agent.data_processing.sandbox_client import SandboxControllerSettings
-from sandbox_controller.protocol import SandboxProtocolError
+from config.secret_file import SecretFileError, reset_secret_cache
 
 
 def _environment(tmp_path):
-    path = tmp_path / "controller.token"
+    path = tmp_path / "causalagent.env"
     token = secrets.token_hex(32)
-    path.write_text(token + "\n", encoding="utf-8")
-    return {"CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_FILE": str(path)}, token
+    path.write_text("CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN=" + token + "\n", encoding="utf-8")
+    if os.name != "nt":
+        path.chmod(0o600)
+    return {"CAUSALAGENT_SECRET_FILE": str(path)}, token
 
 
-def test_controller_uses_raw_token_file_and_default_port(tmp_path):
+@pytest.fixture(autouse=True)
+def _reset_cache():
+    reset_secret_cache()
+    yield
+    reset_secret_cache()
+
+
+def test_controller_uses_shared_secret_file_and_default_port(tmp_path):
     environment, token = _environment(tmp_path)
 
     settings = SandboxControllerSettings.from_environment(environment)
@@ -27,18 +37,20 @@ def test_controller_uses_raw_token_file_and_default_port(tmp_path):
     assert settings.execution_wait_seconds == 370
 
 
-def test_controller_token_file_is_required():
-    with pytest.raises(ValueError, match="TOKEN_FILE must be configured"):
-        SandboxControllerSettings.from_environment({})
+def test_controller_token_is_required_in_shared_file(tmp_path):
+    environment, _ = _environment(tmp_path)
+    (tmp_path / "causalagent.env").write_text("MYSQL_PASSWORD=database-only\n", encoding="utf-8")
+    with pytest.raises(SecretFileError, match="CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN"):
+        SandboxControllerSettings.from_environment(environment)
 
 
 @pytest.mark.parametrize("content", ["", "short", "x" * 32 + " " + "y" * 32, "x" * 4097])
-def test_controller_rejects_invalid_raw_token_files(tmp_path, content):
+def test_controller_rejects_invalid_tokens_in_shared_file(tmp_path, content):
     environment, _ = _environment(tmp_path)
-    path = tmp_path / "controller.token"
-    path.write_text(content, encoding="utf-8")
+    path = tmp_path / "causalagent.env"
+    path.write_text("CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN=" + content + "\n", encoding="utf-8")
 
-    with pytest.raises(SandboxProtocolError):
+    with pytest.raises(SecretFileError):
         SandboxControllerSettings.from_environment(environment)
 
 

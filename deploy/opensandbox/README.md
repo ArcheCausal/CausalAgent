@@ -6,20 +6,22 @@
 
 四份根 Compose 通过 `services.yml` 复用服务声明。控制服务入口为 `python -m sandbox_controller`，端口为 8081，单实例、单 API 进程；Worker 等待其 `/healthz` 就绪。控制服务等待主 MySQL healthy、`db-bootstrap` 成功以及 OpenSandbox healthy。PostgreSQL checkpoint 和现有主从回退仍由原服务负责，控制服务仅访问主库，写连接池为 4。
 
-| 容器 | 普通配置与文件 | 授权范围 |
+| 容器 | 配置与文件 | 使用方式 |
 | --- | --- | --- |
 | Worker | `CAUSALAGENT_SANDBOX_CONTROLLER_URL`、`CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS`、本地并发与容量等待上限 | 仅控制服务 |
-| Worker 与 controller | `CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_FILE=/run/secrets/sandbox-controller.token` | 同一个独立裸 token |
-| controller | `CAUSALAGENT_SECRET_FILE=/run/secrets/causalagent.env` | 独立数据库凭据文件，不挂应用全量密钥 |
-| controller 与 OpenSandbox | `CAUSALAGENT_SANDBOX_API_KEY_FILE=/run/secrets/opensandbox-api-key` | 同一个上游裸 token，仅这两个服务挂载 |
+| Worker、controller 与 OpenSandbox 管理服务 | `CAUSALAGENT_SECRET_FILE=/run/secrets/causalagent.env` | 同一份只读 `causalagent_env`，可读取全部应用与数据库密钥 |
+| Worker 与 controller | 文件中的 `CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN` | 控制服务认证 |
+| controller 与 OpenSandbox 管理服务 | 文件中的 `CAUSALAGENT_SANDBOX_API_KEY` | 上游管理 API 认证 |
 | controller | `CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY`、心跳、核查、TTL、镜像、资源及文件限制 | 全局策略，启动时读取 |
 | OpenSandbox | `SANDBOX_CONFIG_PATH=/etc/opensandbox/config.toml`、Docker socket、持久状态卷 | 同机 Docker runtime |
 
-配置和密钥均只读挂载。应用、Worker 继续使用原应用密钥文件。宿主文件选择变量为 `CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_SOURCE`、`CAUSALAGENT_SANDBOX_API_KEY_SOURCE`、`CAUSALAGENT_SANDBOX_CONTROLLER_SECRET_SOURCE`，默认位于 `/etc/causalagent/secrets/`。`CAUSALAGENT_OPENSANDBOX_CONFIG_SOURCE` 可指定经过核对的自定义 TOML。开发时也要把密钥放在仓库外，避免根目录源码挂载使其他容器读到文件。服务器密钥用 root:3000、0640；裸 token 为 32 至 4096 个字符，推荐分别生成两个独立的 32 字节随机十六进制值。不要把密钥值放进命令参数或普通环境模板。
+`production.env` 保存服务地址、镜像相关配置、容量、超时、资源限制等普通参数，以及 `CAUSALAGENT_SECRET_FILE` 等文件路径；全部应用密钥、数据库密码和两个沙盒认证值由同一份 `causalagent.env` 管理。宿主 `CAUSALAGENT_SECRET_FILE` 选择实际文件，服务器默认为 `/etc/causalagent/secrets/causalagent.env`；四个 Compose 入口均使用 `causalagent_env`，容器内固定读取 `/run/secrets/causalagent.env`。服务器文件沿用 root:3000、0640，配置和密钥均只读挂载。开发默认使用仓库根目录被 Git 忽略的文件，也可通过宿主变量选择仓库外文件。
 
-从旧配置迁移时，在服务器本地将旧 `CAUSALAGENT_SANDBOX_API_KEY` 的值移入上游裸 token 文件，然后从应用 `causalagent.env` 删除该键。新建独立 controller token 文件，并按 `controller.env.example` 创建控制服务数据库密钥文件。应用统一密钥 schema 必须拒绝残留的旧键；只删除 Worker 的环境变量不构成密钥隔离。不得把旧的整个应用文件复制给控制服务。
+在 [统一密钥模板](../secrets/causalagent.env.example) 中填写 `CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN` 和 `CAUSALAGENT_SANDBOX_API_KEY`。两个认证值必须不同，均为 32 至 4096 个无空白字符，推荐各生成独立的 32 字节随机十六进制值。所有 Python 组件通过 `config/secret_file.py` 读取同一文件，只要求各自使用的键；controller 从中读取数据库密码，不依赖模型配置。三个独立凭据来源及 token/key 文件路径配置不再使用，不支持旧来源兼容；`controller.env.example` 仅保留统一模板的导航说明，不是发布所需模板。不要把密钥值放进命令参数或普通环境模板。
 
-`server_entrypoint.py` 从只读文件读取上游 token，传给官方入口支持的 `OPENSANDBOX_SERVER_API_KEY` 进程环境；Compose environment 与进程参数不含密钥值，服务不启用无鉴权模式。`opensandbox_state` 保存上游服务自身的元数据，控制服务生命周期事实仍在现有 MySQL 中。
+三个管理侧服务共享全部密钥，不提供它们之间的密钥隔离。执行用户脚本的临时沙盒容器不得挂载 `causalagent.env`，也不得接收应用、数据库或沙盒服务密钥。`server_entrypoint.py` 通过统一加载器读取 `CAUSALAGENT_SANDBOX_API_KEY`，只将其导出为官方 server 支持的 `OPENSANDBOX_SERVER_API_KEY` 进程环境；Compose environment 与进程参数不含密钥值，服务不启用无鉴权模式。
+
+`config.toml` 仍是必须保留的结构化运行配置，不是额外凭据文件。`CAUSALAGENT_OPENSANDBOX_CONFIG_SOURCE` 可指定经过核对的自定义 TOML。发布还会按清单生成 `images.env`，因此统一普通配置与密钥不表示部署总共只有两个文件。`opensandbox_state` 保存上游服务自身的元数据，控制服务生命周期事实仍在现有 MySQL 中。
 
 截至 2026-10-25，使用正式版 `release-1.1.1`，其发布时间为 2026-10-09。`1.2.0-rc.2` 是候选版；发布列表中某些 RC 的 `prerelease` 标志并不准确，不能只依赖 GitHub 的 latest 标志。固定值、官方来源与核实方式见 [release-lock.json](release-lock.json)。server、execd、egress 的 digest 与官方 BOM 和实际 registry manifest 一致；Code Interpreter 基础镜像采用官方 SDK 示例的 `v1.1.0` 并固定 digest。
 
@@ -31,7 +33,7 @@
 
 Docker 镜像拉取使用宿主 daemon 的网络及代理，与沙盒 egress 策略不同。不要把 `HTTP_PROXY` 或 `HTTPS_PROXY` 透传给 Worker 或临时沙盒以解决镜像下载问题。宿主仍需设置经过检查的 IPv4/IPv6 转发规则；真实验收必须覆盖控制 API、脚本执行、文件上传/回读、销毁及 IPv4/IPv6 禁止出站，不能只调用 health 接口。
 
-Docker Desktop Linux amd64 的真实验证使用独立测试项目、临时密钥和原生 Docker secret 卷，不启动根业务 Compose。该平台不能使用示例的 `publish_host="172.17.0.1"`；测试配置改为 `publish_host="127.0.0.1"`，保留 `host.docker.internal` 与 `host-gateway`，实际 server proxy 可以访问沙盒。部署到该平台时，复制本目录 TOML 并通过 `CAUSALAGENT_OPENSANDBOX_CONFIG_SOURCE` 选择此配置。Windows 文件绑定不能证明 Linux 0640 权限，测试先将临时裸 token 写入原生卷并设置 root:3000、0640，再只读挂载；不能直接降低 `server_entrypoint.py` 的权限检查。该测试没有证明 Linux 裸 Engine 的默认配置或其他自定义网关。
+Docker Desktop Linux amd64 的真实验证使用独立测试项目、临时密钥和原生 Docker secret 卷，不启动根业务 Compose。该平台不能使用示例的 `publish_host="172.17.0.1"`；测试配置改为 `publish_host="127.0.0.1"`，保留 `host.docker.internal` 与 `host-gateway`，实际 server proxy 可以访问沙盒。部署到该平台时，复制本目录 TOML 并通过 `CAUSALAGENT_OPENSANDBOX_CONFIG_SOURCE` 选择此配置。Windows 文件绑定不能证明 Linux 0640 权限；需要验证 Linux 权限时，应将临时统一密钥文件写入原生卷并设置 root:3000、0640，再只读挂载，由 `config/secret_file.py` 执行权限检查。该测试没有证明 Linux 裸 Engine 的默认配置或其他自定义网关。
 
 2026-10-25 已实际拉取四个锁定的官方镜像。通用 Python 基础设施探测已通过有密钥 200、无密钥 401、SDK `use_server_proxy=True`、文件上传和回读 hash、UID 10001 执行、IPv4/IPv6 连接失败，以及销毁后 404。处理镜像也已实际构建并通过依赖 hash、import 和 `pip check`，本机 manifest 为 `causalagent-sandbox-probe-data-preparation@sha256:1f7362bba4a0a7c143b0964268a3836f6e5a86fdf1e1d90e3c0ac577a21aaeb8`；未向外部仓库发布。实际处理镜像已通过 `OpenSandboxRemote.create`、完整 `OpenSandboxSession._initialize`、固定脚本上传、非 root CSV 处理、预览与产物回读，以及销毁后 404。运行证据确认 UID 10001、`/opt/causalagent/venv/bin/python3`、numpy 1.26.4、pandas 3.0.5、scipy 1.17.1、scikit-learn 1.9.1；输入只读检查和四项 IPv4/IPv6 连接检查均通过。服务和隔离产物继续保留，完整控制服务、MySQL、Worker、模型和生产链路不能由这些结果替代。
 

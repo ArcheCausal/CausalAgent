@@ -1,18 +1,12 @@
-"""Read a mounted token without putting its value in Compose or command arguments."""
+"""Read the shared secret file and export only the official server API key."""
 
 import os
-from pathlib import Path
-import stat
+from config.secret_file import load_secrets
 
 
 def main() -> None:
-    path = Path(os.environ["CAUSALAGENT_SANDBOX_API_KEY_FILE"])
-    if stat.S_IMODE(path.stat().st_mode) not in (0o400, 0o600, 0o640):
-        raise ValueError("OpenSandbox token file must have mode 0400, 0600 or 0640")
-    token = path.read_text(encoding="utf-8").strip()
-    if not 32 <= len(token) <= 4096 or any(c.isspace() for c in token):
-        raise ValueError("OpenSandbox token file must contain one bare token of 32-4096 characters")
-    os.environ["OPENSANDBOX_SERVER_API_KEY"] = token
+    secrets = load_secrets(required_keys=("CAUSALAGENT_SANDBOX_API_KEY",))
+    os.environ["OPENSANDBOX_SERVER_API_KEY"] = secrets["CAUSALAGENT_SANDBOX_API_KEY"]
     os.execvp("opensandbox-server", ["opensandbox-server", "--config", os.environ["SANDBOX_CONFIG_PATH"]])
 
 

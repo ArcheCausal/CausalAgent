@@ -87,7 +87,7 @@ def test_manifest_pins_every_image_and_lists_required_secret_keys(tmp_path, imag
     # 清单只列必需键名，不包含任何密钥值。
     assert "MYSQL_PASSWORD" in manifest["secrets"]["required_keys"]
     assert "API_KEY" in manifest["secrets"]["required_keys"]
-    assert manifest["secrets"]["schema_version"] == "v1"
+    assert manifest["secrets"]["schema_version"] == "v2"
     serialized = json.dumps(manifest)
     assert "unit-test" not in serialized
     assert "REPLACE_WITH" not in serialized
@@ -95,11 +95,11 @@ def test_manifest_pins_every_image_and_lists_required_secret_keys(tmp_path, imag
     for key, reference in upstream["images"].items():
         assert manifest["images"]["opensandbox_" + key] == reference
     assert manifest["images"]["sandbox_processing"] == SANDBOX_IMAGE
-    independent = manifest["secrets"]["independent"]
-    assert set(independent) == {"sandbox_controller_env", "sandbox_controller_token", "opensandbox_api_key"}
-    assert independent["sandbox_controller_env"]["allowed_keys"] == ["MYSQL_PASSWORD", "MYSQL_WRITE_PASSWORD", "MYSQL_READ_PASSWORD"]
-    assert "CAUSALAGENT_SANDBOX_API_KEY" not in manifest["secrets"]["allowed_keys"]
-    assert "CAUSALAGENT_SANDBOX_API_KEY" not in manifest["secrets"]["required_keys"]
+    assert "independent" not in manifest["secrets"]
+    for key in ("CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN", "CAUSALAGENT_SANDBOX_API_KEY"):
+        assert key in manifest["secrets"]["allowed_keys"]
+        assert key in manifest["secrets"]["required_keys"]
+    assert "config/secret_file.py" in manifest["deployment"]["sandbox_files_sha256"]
 
 
 def test_bundle_excludes_source_and_secrets(tmp_path, images_file):
@@ -112,8 +112,8 @@ def test_bundle_excludes_source_and_secrets(tmp_path, images_file):
     assert "docker-compose.prod.yml" in names
     assert "release.manifest.json" in names
     assert "images.lock.json" in names
-    # 仅放行实际挂载的官方服务入口，不扩展为应用源码白名单。
-    assert {name for name in names if name.endswith(".py")} == {"deploy/opensandbox/server_entrypoint.py"}
+    # 只放行实际挂载的入口与同一份轻量密钥加载器。
+    assert {name for name in names if name.endswith(".py")} == {"deploy/opensandbox/server_entrypoint.py", "config/secret_file.py"}
     assert {"deploy/opensandbox/services.yml", "deploy/opensandbox/config.toml", "deploy/opensandbox/release-lock.json"} <= names
     assert not any("frontend" in name for name in names)
     assert not any(name.endswith("causalagent.env") for name in names)

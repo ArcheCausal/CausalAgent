@@ -21,6 +21,7 @@ import re
 import stat
 import threading
 from pathlib import Path
+from typing import Mapping
 
 
 SECRET_FILE_ENV_VAR = "CAUSALAGENT_SECRET_FILE"
@@ -46,6 +47,8 @@ SECRET_KEYS: tuple[str, ...] = (
     "CAUSAL_MCP_SERVICE_TOKEN",
     "CAUSAL_MCP_SIGNING_KEY_CURRENT",
     "CAUSAL_MCP_SIGNING_KEY_PREVIOUS",
+    "CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN",
+    "CAUSALAGENT_SANDBOX_API_KEY",
 )
 
 # 应用入口默认需要的基础密钥；独立服务必须显式声明自己的必需键。
@@ -64,10 +67,15 @@ RUNTIME_REQUIRED_SECRET_KEYS: tuple[str, ...] = (
     "GRAFANA_ADMIN_PASSWORD",
 )
 
-# 上游沙盒密钥由控制服务独立挂载，禁止出现在应用共享密钥文件中。
-REQUIRED_SECRET_KEYS: tuple[str, ...] = RUNTIME_REQUIRED_SECRET_KEYS
+SANDBOX_SECRET_KEYS: tuple[str, ...] = (
+    "CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN",
+    "CAUSALAGENT_SANDBOX_API_KEY",
+)
 
-SECRET_SCHEMA_VERSION = "v1"
+# 发布部署包含沙盒服务；独立进程仍只验证自身必需键。
+REQUIRED_SECRET_KEYS: tuple[str, ...] = (*RUNTIME_REQUIRED_SECRET_KEYS, *SANDBOX_SECRET_KEYS)
+
+SECRET_SCHEMA_VERSION = "v2"
 
 _KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ALLOWED_FILE_MODES = (0o600, 0o400, 0o640)
@@ -81,9 +89,10 @@ class SecretFileError(RuntimeError):
     """密钥文件缺失、格式错误、权限不安全或缺少必需键。"""
 
 
-def resolve_secret_file_path() -> Path:
+def resolve_secret_file_path(environ: Mapping[str, str] | None = None) -> Path:
     """返回密钥文件路径；未显式配置时使用容器内默认挂载点。"""
-    override = os.environ.get(SECRET_FILE_ENV_VAR, "").strip()
+    values = os.environ if environ is None else environ
+    override = values.get(SECRET_FILE_ENV_VAR, "").strip()
     return Path(override) if override else DEFAULT_SECRET_FILE_PATH
 
 
@@ -134,6 +143,12 @@ def _parse_secret_file(text: str, *, path: Path) -> dict[str, str]:
             f"密钥文件包含未定义的键: {', '.join(unknown)}。"
             "请只保留 config/secret_file.py 中 SECRET_KEYS 声明的键。"
         )
+    for key in SANDBOX_SECRET_KEYS:
+        token = values.get(key)
+        if token is not None and (not 32 <= len(token) <= 4096 or any(char.isspace() for char in token)):
+            raise SecretFileError(f"密钥 {key} 必须为 32 至 4096 个字符且不含空白。")
+    if all(key in values for key in SANDBOX_SECRET_KEYS) and values[SANDBOX_SECRET_KEYS[0]] == values[SANDBOX_SECRET_KEYS[1]]:
+        raise SecretFileError("沙盒控制服务 token 与 OpenSandbox API key 必须使用不同的值。")
     return values
 
 
@@ -157,7 +172,8 @@ def load_secrets(
 
     resolved = Path(path) if path is not None else resolve_secret_file_path()
     with _lock:
-        os.environ.pop("CAUSALAGENT_SANDBOX_API_KEY", None)
+        for name in SANDBOX_SECRET_KEYS:
+            os.environ.pop(name, None)
         if not reload and _cached_values is not None and _cached_path == resolved:
             _validate_required_keys(_cached_values, required_keys)
             return dict(_cached_values)

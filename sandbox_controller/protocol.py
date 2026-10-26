@@ -6,7 +6,6 @@ import base64
 import hashlib
 import hmac
 import json
-from pathlib import Path
 import re
 import time
 from typing import Mapping, Any
@@ -19,13 +18,6 @@ class SandboxProtocolError(ValueError):
 
 def canonical_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
-
-
-def read_token(path: str) -> str:
-    token = Path(path).read_text(encoding="utf-8").strip()
-    if len(token) < 32 or len(token) > 4096 or any(char.isspace() for char in token):
-        raise SandboxProtocolError("sandbox token file must contain one token of at least 32 characters")
-    return token
 
 
 def validate_identity(identity: Mapping[str, Any]) -> dict[str, Any]:

@@ -18,7 +18,8 @@ from urllib.parse import urlsplit
 import httpx
 
 from Agent.execution_control import JobExecutionRevoked
-from sandbox_controller.protocol import read_token, request_headers, validate_identity
+from config.secret_file import load_secrets, resolve_secret_file_path
+from sandbox_controller.protocol import request_headers, validate_identity
 
 
 HEARTBEAT_SECONDS = 20
@@ -108,12 +109,13 @@ class SandboxControllerSettings:
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> SandboxControllerSettings:
         values = os.environ if environ is None else environ
-        token_file = values.get("CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_FILE", "").strip()
-        if not token_file:
-            raise ValueError("CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_FILE must be configured")
+        secrets = load_secrets(
+            path=resolve_secret_file_path(values),
+            required_keys=("CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN",),
+        )
         options: dict[str, Any] = {
             "controller_url": values.get("CAUSALAGENT_SANDBOX_CONTROLLER_URL", "http://sandbox-controller:8081").strip(),
-            "token": read_token(token_file),
+            "token": secrets["CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN"],
         }
         for name in (
             "timeout_seconds", "command_timeout_seconds", "max_concurrent_per_worker",

@@ -43,10 +43,11 @@ from config.secret_file import (  # noqa: E402
 )
 
 # 部署包只包含 Compose、网关与观测配置、运维脚本和非密钥配置模板；
-# Python 仅允许 OpenSandbox 挂载入口；不包含应用源码、真实密钥、数据库数据或正式索引。
+# Python 仅允许 OpenSandbox 入口与共享密钥加载器；不包含其他应用源码、真实密钥、数据库数据或正式索引。
 BUNDLE_INCLUDE = (
     "docker-compose.staging.yml",
     "docker-compose.prod.yml",
+    "config/secret_file.py",
     "deploy",
     # 只打包观测的配置文件；observability/*.py 属于应用源码，已经在镜像里。
     "observability/alloy",
@@ -62,7 +63,7 @@ SANDBOX_ENTRYPOINT = "deploy/opensandbox/server_entrypoint.py"
 SANDBOX_LOCK = "deploy/opensandbox/release-lock.json"
 SANDBOX_FILES = (
     SANDBOX_LOCK, SANDBOX_ENTRYPOINT, "deploy/opensandbox/services.yml",
-    "deploy/opensandbox/config.toml", "deploy/opensandbox/controller.env.example",
+    "deploy/opensandbox/config.toml", "config/secret_file.py",
 )
 SANDBOX_IMAGE_NAMES = {
     "server": "opensandbox_server", "execd": "opensandbox_execd",
@@ -264,15 +265,6 @@ def main() -> int:
             "schema_version": SECRET_SCHEMA_VERSION,
             "required_keys": list(REQUIRED_SECRET_KEYS),
             "allowed_keys": list(SECRET_KEYS),
-            "independent": {
-                "sandbox_controller_env": {
-                    "format": "env",
-                    "required_keys": ["MYSQL_PASSWORD", "MYSQL_WRITE_PASSWORD", "MYSQL_READ_PASSWORD"],
-                    "allowed_keys": ["MYSQL_PASSWORD", "MYSQL_WRITE_PASSWORD", "MYSQL_READ_PASSWORD"],
-                },
-                "sandbox_controller_token": {"format": "token"},
-                "opensandbox_api_key": {"format": "token"},
-            },
         },
     }
 

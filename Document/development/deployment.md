@@ -52,9 +52,9 @@
 
 ### 服务器密钥文件
 
-应用密码、令牌和签名密钥保存在服务器上的应用密钥文件里；沙盒上游和控制服务凭据按下文独立拆分。应用密钥文件默认路径为 `/etc/causalagent/secrets/causalagent.env`，可以用环境变量 `CAUSALAGENT_SECRET_FILE` 覆盖。服务器发布必须将文件设为 `0640`、属主设为 `root`、属组设为容器专用 GID `3000`。Compose 会把该组加入 MySQL、PostgreSQL、Grafana 和 SearXNG 容器；发布校验检查服务器权限，验收还需确认各容器的实际读取身份可读。单进程本地运行仍可使用 `0600` 或 `0400`。该文件不进入 Git、部署包或镜像。允许出现的键由 `config/secret_file.py` 的 `SECRET_KEYS` 定义，模板见 [`deploy/secrets/causalagent.env.example`](../../deploy/secrets/causalagent.env.example)；未知键、重复键、空值、缺键和权限不安全都会让进程启动失败。
+全部应用密码、数据库密码、令牌和签名密钥保存在统一的 `causalagent.env` 中，包括 `CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN` 和 `CAUSALAGENT_SANDBOX_API_KEY`。服务器默认路径为 `/etc/causalagent/secrets/causalagent.env`，由普通配置中的 `CAUSALAGENT_SECRET_FILE` 选择，也可通过宿主同名变量覆盖。服务器发布必须将文件设为 `0640`、属主设为 `root`、属组设为容器专用 GID `3000`。Compose 会把该组加入 MySQL、PostgreSQL、Grafana、SearXNG、控制服务和 OpenSandbox 等读取容器；发布校验检查服务器权限，验收还需确认各容器的实际读取身份可读。单进程本地运行仍可使用 `0600` 或 `0400`。该文件不进入 Git、部署包或镜像。允许出现的键由 `config/secret_file.py` 的 `SECRET_KEYS` 定义，模板见 [`deploy/secrets/causalagent.env.example`](../../deploy/secrets/causalagent.env.example)；未知键、重复键、空值、缺少入口必需键和权限不安全都会让进程启动失败。
 
-应用容器通过 Compose secret 把该文件只读挂载到 `/run/secrets/causalagent.env`。应用、worker、MCP 和数据库配置由 `config/secret_file.py` 显式读取；加载器清除继承的密钥环境变量，不会把文件值重新写入进程环境。可选 LangSmith 集成会单独导出其 SDK 所需密钥。所有服务仍由 Compose 启动。Compose 负责选择镜像、提供普通环境变量并挂载密钥文件；镜像内的应用负责解释文件内容。项目 Python 服务直接调用密钥加载器；MySQL、PostgreSQL、SearXNG 和 Grafana 的上游入口不认识项目自定义的多键格式，由 `deploy/scripts/secret-env.sh` 只导出对应入口需要的变量，再执行上游入口。MySQL 主从使用基于官方 MySQL 构建的自有镜像，适配入口已写入镜像；镜像中的 mysql 用户属于 GID 3000，官方入口降权后仍可读取初始化所需密钥。离线开发工具 `Agent/knowledge_base/build_knowledge.py` 与 `Agent/knowledge_base/multimodal/cli.py` 可读取本地 `.env`，但不属于 app 或 worker 的生产启动路径。非敏感配置继续使用环境变量或非密钥配置文件。
+开发、兼容副本、预发和生产 Compose 均通过 `causalagent_env` 把该文件只读挂载到读取服务的 `/run/secrets/causalagent.env`。Worker、控制服务和 OpenSandbox 管理服务显式设置 `CAUSALAGENT_SECRET_FILE` 为该路径，其他 Python 服务沿用加载器的同一路径默认值。应用、worker、MCP、控制服务和数据库配置由 `config/secret_file.py` 显式读取；各入口只要求自身使用的键，加载器清除继承的密钥环境变量，不会把文件值重新写入进程环境。可选 LangSmith 集成会单独导出其 SDK 所需密钥。所有服务仍由 Compose 启动。Compose 负责选择镜像、提供普通环境变量并挂载密钥文件；镜像内的应用负责解释文件内容。项目 Python 服务直接调用密钥加载器；MySQL、PostgreSQL、SearXNG 和 Grafana 的上游入口不认识项目自定义的多键格式，由 `deploy/scripts/secret-env.sh` 只导出对应入口需要的变量，再执行上游入口。OpenSandbox 的 `server_entrypoint.py` 也调用统一加载器，只向官方 server 导出 `OPENSANDBOX_SERVER_API_KEY`。MySQL 主从使用基于官方 MySQL 构建的自有镜像，适配入口已写入镜像；镜像中的 mysql 用户属于 GID 3000，官方入口降权后仍可读取初始化所需密钥。离线开发工具 `Agent/knowledge_base/build_knowledge.py` 与 `Agent/knowledge_base/multimodal/cli.py` 可读取本地 `.env`，但不属于 app 或 worker 的生产启动路径。非敏感配置继续使用环境变量或非密钥配置文件。
 
 开发 Compose 使用仓库根目录的 `causalagent.env`（已加入 `.gitignore`）作为同一个密钥文件入口；首次启动前把它从 [`deploy/secrets/causalagent.env.example`](../../deploy/secrets/causalagent.env.example) 复制到仓库根目录并按需填写。
 
@@ -91,10 +91,10 @@ GitHub 当前的公开 Linux x64 标准 runner 配置为 4 核、16 GB 内存和
 
 服务器不执行 `git pull`，也不需要完整源码；它只解压部署包并使用服务器上的非密钥配置与密钥文件。
 
-首次部署时，在服务器上准备两份文件；模型名、地址等普通参数与密钥的分工见 [`setup.md`](setup.md#配置前提)：
+首次部署时，在服务器上人工准备以下两份配置与密钥文件；发布时还会生成 `images.env`，OpenSandbox 的 `config.toml` 也必须保留。模型名、地址等普通参数与密钥的分工见 [`setup.md`](setup.md#配置前提)：
 
-1. 非密钥配置 `/etc/causalagent/config/production.env`：从部署包的 `deploy/config/production.env.example` 复制，填入普通环境配置；
-2. 密钥文件 `/etc/causalagent/secrets/causalagent.env`：从 `deploy/secrets/causalagent.env.example` 复制，填入互不重复的真实随机值，并设置 `chown root:3000 /etc/causalagent/secrets/causalagent.env` 与 `chmod 640 /etc/causalagent/secrets/causalagent.env`。
+1. 非密钥配置 `/etc/causalagent/config/production.env`：从部署包的 `deploy/config/production.env.example` 复制，填入普通环境配置与密钥文件路径；
+2. 密钥文件 `/etc/causalagent/secrets/causalagent.env`：从 `deploy/secrets/causalagent.env.example` 复制，填写全部应用与数据库密钥，以及两个不同的沙盒认证值，并设置 `chown root:3000 /etc/causalagent/secrets/causalagent.env` 与 `chmod 640 /etc/causalagent/secrets/causalagent.env`。
 
 不要在服务器以外复制密钥文件，也不要把它提交到 Git；`.gitignore` 会排除 `causalagent.env` 与 `deploy/secrets/*.env`，`.dockerignore` 也会排除环境文件与本地数据，避免本地构建时把它们放进镜像上下文。
 
@@ -154,8 +154,8 @@ test -f "$BUNDLE_DIR/docker-compose.staging.yml" && echo "staging compose OK"
 
 | 文件 | 来源与用途 | 本节使用的服务器路径 |
 | --- | --- | --- |
-| 普通配置 | `deploy/config/production.env.example`；项目名、模型名、地址、数据库账号名和运行参数 | `/etc/causalagent/config/production.env` |
-| 密钥文件 | `deploy/secrets/causalagent.env.example`；密码、API key、令牌和签名密钥 | `/etc/causalagent/secrets/causalagent.env` |
+| 普通配置 | `deploy/config/production.env.example`；项目名、模型名、地址、数据库账号名、运行参数和密钥文件路径 | `/etc/causalagent/config/production.env` |
+| 密钥文件 | `deploy/secrets/causalagent.env.example`；全部应用与数据库密码、API key、令牌和签名密钥，包含两个沙盒认证值 | `/etc/causalagent/secrets/causalagent.env` |
 
 首次准备时从部署包的两个模板创建配置并填写真实值；已有文件时编辑现有文件，不用模板覆盖。普通配置中的 `COMPOSE_PROJECT_NAME` 必须与第 1 步一致，不能直接沿用模板的 `causalagent`。`production.env` 可以作为本次测试配置的文件名，环境由项目名、数据库、数据卷和所选 Compose 文件确定；若同一服务器还有生产服务，必须为两套服务配置不同的配置文件与密钥文件路径。
 
@@ -256,9 +256,9 @@ staging_compose ps --all
 
 控制服务等待主库健康、bootstrap 成功和 OpenSandbox 健康后启动；启动核查全部未关闭记录，完成后才报告 `/healthz` 就绪。Worker 等待控制服务就绪。控制服务只有一个 API 进程，并持有 MySQL 命名锁；不得横向扩为多个副本。一个或多个 Worker 共享该服务，降低容量上限不终止已有任务。容量不足时客户端有界等待。
 
-Worker 使用 `CAUSALAGENT_SANDBOX_CONTROLLER_URL`、独立 `CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_FILE`、请求超时和本地并发配置。控制服务另读全局容量、心跳、核查、TTL、资源及文件限制。普通策略均在启动时读取；修改后通过受控重启生效。MySQL 不存容量配置，仅存创建意图、远端身份、执行状态、心跳、期限和清理回执。
+Worker 使用 `CAUSALAGENT_SANDBOX_CONTROLLER_URL`、请求超时和本地并发配置，并从统一密钥文件读取 `CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN`。控制服务另读全局容量、心跳、核查、TTL、资源及文件限制。普通策略均在启动时读取；修改后通过受控重启生效。MySQL 不存容量配置，仅存创建意图、远端身份、执行状态、心跳、期限和清理回执。
 
-密钥按服务拆分。应用密钥文件不再接受 `CAUSALAGENT_SANDBOX_API_KEY`；部署更新前应在服务器本地把该值移入仓库外的上游裸 token 文件。Worker 与控制服务共享独立 controller token；只有控制服务和 OpenSandbox 挂载上游 key。控制服务的独立多键文件仅含数据库密码，不授予模型或应用凭据。数据库加载器按所需数据库键验证，应用启动仍验证其完整必需键。裸 token 推荐使用两个独立随机值，至少 32 字符；挂载均只读，不进入镜像、源码或普通环境模板。
+Worker、控制服务和 OpenSandbox 管理服务共享完整 `causalagent.env`，不要求服务之间的密钥隔离。`CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN` 和 `CAUSALAGENT_SANDBOX_API_KEY` 保留不同值，均为 32 至 4096 个无空白字符；分别用于控制 API 与上游管理 API 认证。控制服务直接读取同一文件中的数据库密码，数据库加载器只验证所需数据库键，仍不依赖应用模型配置；应用启动继续验证自身完整必需键。执行用户脚本的临时沙盒容器不得挂载该文件，也不得接收其中的密钥。独立 controller 数据库密钥来源与两个 token/key 文件来源配置已移除，不支持旧来源兼容。所有密钥只读挂载，不进入镜像、源码或普通环境模板；`config.toml` 仍保留为结构化运行配置。
 
 OpenSandbox server、execd、egress 与 Code Interpreter 基础镜像的核实引用保存在 [release-lock.json](../../deploy/opensandbox/release-lock.json)，全部固定为 digest。处理镜像由现有 [Dockerfile](../../deploy/opensandbox/Dockerfile) 和 hash 锁定依赖构建，仍须把实际发布产物的 digest 配置到 `CAUSALAGENT_SANDBOX_IMAGE`；缺失值会在控制服务监听前失败。不得用基础镜像或本地 image ID 冒充发布后的处理镜像。
 
@@ -272,7 +272,7 @@ Worker 不加入上游网络，不持有 Docker socket。沙盒链路中只有 O
 
 发布后的服务器验收命令见 [`release-acceptance.md`](release-acceptance.md)。
 
-服务器只部署部署包，不执行 `git pull`，也不需要完整源码。部署与校验脚本要求 Docker Compose 和宿主 Python 3.11 或更新版本，校验脚本使用标准库解析 OpenSandbox TOML。CI 用 `scripts/build_release_bundle.py` 在某个源码提交上生成部署包，包含：两个 Compose 文件、`deploy/` 下的网关与配置模板、`observability/` 的采集与看板配置，以及 `scripts/` 下的部署脚本。部署包不包含应用 Python、Vue、TypeScript 源码；唯一 Python 部署入口是 `deploy/opensandbox/server_entrypoint.py`，用于从文件向官方服务传递认证配置。部署包不包含真实密码、API key、数据库数据或 RAG 正式索引。
+服务器只部署部署包，不执行 `git pull`，也不需要完整源码。部署与校验脚本要求 Docker Compose 和宿主 Python 3.11 或更新版本，校验脚本使用标准库解析 OpenSandbox TOML。CI 用 `scripts/build_release_bundle.py` 在某个源码提交上生成部署包，包含：两个 Compose 文件、`deploy/` 下的网关与配置模板、`observability/` 的采集与看板配置，以及 `scripts/` 下的部署脚本。部署包不包含应用业务 Python、Vue、TypeScript 源码；Python 部署文件包括 OpenSandbox 启动适配器 `deploy/opensandbox/server_entrypoint.py` 及其使用的统一密钥加载器 `config/secret_file.py`。`controller.env.example` 不再是发布所需模板。部署包不包含真实密码、API key、数据库数据或 RAG 正式索引。
 
 镜像范围：应用代码、MCP 代码和 MySQL 自定义初始化逻辑进入自有镜像（`causalagent-app`、`causalagent-mcp`、`causalagent-mysql-primary`、`causalagent-mysql-replica`）；PostgreSQL、Nginx、SearXNG、Valkey、Loki、Alloy 和 Grafana 使用官方镜像。处理镜像和固定 OpenSandbox server、execd、egress、Code Interpreter 基础镜像也登记在清单中。全部镜像都必须在 `images.lock.json` 与 `release.manifest.json` 中固定 digest；`scripts/resolve_official_images.py` 用 `docker buildx imagetools` 解析官方镜像 digest，未固定 digest 时构建直接失败。
 
@@ -301,7 +301,7 @@ flowchart LR
 
 `production.env.example` 只提供服务器普通配置模板；填写后的 `production.env` 与自动生成的 `images.env` 是 Compose 的两个输入文件。参数先经 Compose 的 `environment` 声明进入对应容器，再由 `settings.py`、数据库配置类或 worker 的 `os.getenv` 读取；目前普通参数没有统一的 Python 读取入口。
 
-服务器目录为 `/opt/causalagent/releases/<release_id>/` 加一个 `current` 符号链接；`/etc/causalagent/config/production.env` 保存普通参数，密钥按应用与沙盒服务分别保存在 `/etc/causalagent/secrets/`。`verify.sh` 按 `CAUSALAGENT_COMPOSE_FILE` 选择预发或生产文件，检查镜像锁与清单、实际解析的 Compose 镜像、沙盒部署文件摘要、独立密钥文件的权限和格式，以及上游配置引用。它不检查运行中容器、远端隔离或完整 Job；仍需执行服务器验收。`rollback.sh` 按目录修改时间选择非当前目录并启动其中的 Compose，不记录上一成功发布，也不恢复数据库、密钥或 RAG 数据。
+服务器目录为 `/opt/causalagent/releases/<release_id>/` 加一个 `current` 符号链接；`/etc/causalagent/config/production.env` 保存普通参数与密钥路径，全部应用和数据库密钥统一保存在 `/etc/causalagent/secrets/causalagent.env`。`verify.sh` 按 `CAUSALAGENT_COMPOSE_FILE` 选择预发或生产文件，检查镜像锁与清单、实际解析的 Compose 镜像、沙盒部署文件摘要、统一密钥文件的权限和格式、两个沙盒认证值及上游配置引用。它不检查运行中容器、远端隔离或完整 Job；仍需执行服务器验收。`rollback.sh` 按目录修改时间选择非当前目录并启动其中的 Compose，不记录上一成功发布，也不恢复数据库、密钥或 RAG 数据。
 
 测试环境和生产环境使用同一个 `release.manifest.json`，只替换普通环境配置、密钥文件和数据卷；不替换 app 镜像、MCP 镜像、网关配置包、数据库迁移版本和已验收的第三方镜像 digest。
 

@@ -70,8 +70,6 @@ def test_only_development_compose_relaxes_secret_permissions() -> None:
             expected = [
                 {"source": "causalagent_env", "target": "causalagent.env"}
             ]
-            if service_name == "worker":
-                expected.insert(0, {"source": "sandbox_controller_token", "target": "sandbox-controller.token"})
             assert service["secrets"] == expected
     for filename in ("docker-compose.staging.yml", "docker-compose.prod.yml"):
         compose = yaml.safe_load((REPO_ROOT / filename).read_text(encoding="utf-8"))

@@ -2,7 +2,7 @@
 
 文档职责：执行上传、模型澄清与确认、真实处理、独立校验、算法及报告。
 适用范围：仅复用 data_processing_recovery 的专用数据库，模型客户端须允许外联。
-控制服务另行启动；本入口不持有 OpenSandbox 上游 key，不修改业务配置。
+控制服务另行启动；FULL_JOB_SANDBOX_SECRET_FILE 指向其统一密钥文件，不修改业务配置。
 验收答复是显式测试输入，脚本、模型输出、算法和报告均由正式组件生成。
 """
 
@@ -41,6 +41,11 @@ def open_private_log(path):
 
 def configure(model_file):
     from tests.acceptance.data_processing_recovery import configure as restore
+    from config.secret_file import SANDBOX_SECRET_KEYS, load_secrets
+
+    sandbox_secrets = load_secrets(
+        path=Path(os.environ["FULL_JOB_SANDBOX_SECRET_FILE"]), required_keys=SANDBOX_SECRET_KEYS,
+    )
 
     restore(resume=True)
     require(os.environ.get("MYSQL_WRITE_HOST") == "recovery-mysql"
@@ -51,6 +56,7 @@ def configure(model_file):
     secret_path = ARTIFACTS / "worker-secrets.env"
     source = Path(os.environ["CAUSALAGENT_SECRET_FILE"]).read_text()
     values = dict(line.split("=", 1) for line in source.splitlines() if line and not line.startswith("#"))
+    values.update({key: sandbox_secrets[key] for key in SANDBOX_SECRET_KEYS})
     values.update(API_KEY=models["outer"]["api_key"], DEEP_AGENT_API_KEY=models["deep"]["api_key"])
     descriptor = os.open(secret_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as output:
@@ -65,7 +71,6 @@ def configure(model_file):
         "CAUSAL_MCP_URL": "http://127.0.0.1:8080/mcp",
         "CAUSAL_MCP_PROCESS_WORKERS": "1", "JOB_WORKER_SLOTS": "1",
         "CAUSALAGENT_SANDBOX_CONTROLLER_URL": os.environ["FULL_JOB_SANDBOX_CONTROLLER_URL"],
-        "CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_FILE": "/tmp/full-job-controller.token",
     })
 
 

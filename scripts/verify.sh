@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 校验发布清单、实际 Compose 镜像、沙盒配置与独立密钥；不启动服务。
+# 校验发布清单、实际 Compose 镜像、沙盒配置与统一密钥文件；不启动服务。
 set -euo pipefail
 
 release_dir="${1:?usage: verify.sh <release-dir>}"
@@ -54,7 +54,7 @@ for section, required in (
     ("sandbox_files_sha256", {
         "deploy/opensandbox/release-lock.json", "deploy/opensandbox/services.yml",
         "deploy/opensandbox/server_entrypoint.py", "deploy/opensandbox/config.toml",
-        "deploy/opensandbox/controller.env.example",
+        "config/secret_file.py",
     }),
 ):
     expected = manifest["deployment"][section]
@@ -73,34 +73,23 @@ if images["sandbox_processing"] in lock["images"].values():
     raise SystemExit("processing image must be the published application image, not an upstream base")
 
 
-def read_secrets(path, spec):
+def read_secrets(path):
     info = path.stat()
     if stat.S_IMODE(info.st_mode) != 0o640 or info.st_uid != 0 or info.st_gid != 3000:
         raise SystemExit(f"secret file must be mode 0640 and owned by root:GID 3000: {path}")
-    text = path.read_text(encoding="utf-8")
-    if spec["format"] == "token":
-        token = text.strip()
-        if not 32 <= len(token) <= 4096 or any(char.isspace() for char in token):
-            raise SystemExit(f"secret file must contain one bare token: {path}")
-        return token
-    values = {}
-    for number, line in enumerate(text.splitlines(), 1):
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, separator, value = line.partition("=")
-        key, value = key.strip(), value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        if not separator or key in values or key not in spec["allowed_keys"] or not value:
-            raise SystemExit(f"invalid secret key or value at {path}:{number}")
-        values[key] = value
-    if any(key not in values for key in spec["required_keys"]):
-        raise SystemExit(f"secret file is missing required keys: {path}")
-    return values
+    try:
+        return load_secrets(path=path, required_keys=REQUIRED_SECRET_KEYS)
+    except SecretFileError as exc:
+        raise SystemExit(str(exc)) from None
 
 
-application_spec = {"format": "env", **manifest["secrets"]}
+# 共享加载器已经通过上方发布文件摘要检查，不依赖应用或模型运行时。
+sys.path.insert(0, str(release_dir))
+from config.secret_file import REQUIRED_SECRET_KEYS, SECRET_KEYS, SECRET_SCHEMA_VERSION, SecretFileError, load_secrets
+
+if manifest["secrets"] != {"schema_version": SECRET_SCHEMA_VERSION,
+                           "required_keys": list(REQUIRED_SECRET_KEYS), "allowed_keys": list(SECRET_KEYS)}:
+    raise SystemExit("release secret schema differs from the shared loader")
 # Compose 自己解析 env_file、extends、变量优先级和路径；不在脚本中复制其插值语义。
 command = ["docker", "compose", "--project-directory", str(release_dir),
            "--env-file", str(config_file), "--env-file", str(release_dir / "images.env"),
@@ -110,7 +99,7 @@ if parsed.returncode:
     raise SystemExit("release Compose configuration could not be resolved")
 compose = json.loads(parsed.stdout)
 secret_file = Path(compose["secrets"]["causalagent_env"]["file"]).resolve()
-read_secrets(secret_file, application_spec)
+read_secrets(secret_file)
 services = compose["services"]
 for name in ("sandbox-controller", "opensandbox", "worker"):
     if name not in services:
@@ -132,29 +121,14 @@ for name, service in services.items():
 if services["sandbox-controller"]["environment"].get("CAUSALAGENT_SANDBOX_IMAGE") != images["sandbox_processing"]:
     raise SystemExit("Compose processing image differs from release manifest")
 
-independent = manifest["secrets"]["independent"]
-if set(independent) != {"sandbox_controller_env", "sandbox_controller_token", "opensandbox_api_key"}:
-    raise SystemExit("independent sandbox secret inventory is incomplete")
-paths = {}
-loaded = {}
-for name, spec in independent.items():
-    path = Path(compose["secrets"][name]["file"]).resolve()
-    if path == secret_file or path in paths.values():
-        raise SystemExit("sandbox secrets must use separate files")
-    loaded[name] = read_secrets(path, spec)
-    paths[name] = path
-if loaded["sandbox_controller_token"] == loaded["opensandbox_api_key"]:
-    raise SystemExit("controller token and upstream token must be different")
-expected_consumers = {
-    "sandbox_controller_env": {"sandbox-controller"},
-    "sandbox_controller_token": {"sandbox-controller", "worker"},
-    "opensandbox_api_key": {"sandbox-controller", "opensandbox"},
-}
-for secret, expected in expected_consumers.items():
-    consumers = {name for name, service in services.items()
-                 if any(item["source"] == secret for item in service.get("secrets", []))}
-    if consumers != expected:
-        raise SystemExit(f"independent secret consumer mismatch: {secret}")
+if set(compose["secrets"]) != {"causalagent_env"}:
+    raise SystemExit("deployment must use one shared secret file")
+for name in ("worker", "sandbox-controller", "opensandbox"):
+    service = services[name]
+    if service.get("secrets") != [{"source": "causalagent_env", "target": "causalagent.env"}]:
+        raise SystemExit(f"shared secret mount mismatch: {name}")
+    if service["environment"].get("CAUSALAGENT_SECRET_FILE") != "/run/secrets/causalagent.env":
+        raise SystemExit(f"shared secret path mismatch: {name}")
 
 config_path = Path(compose["configs"]["opensandbox_config"]["file"])
 with config_path.open("rb") as handle:
@@ -163,11 +137,12 @@ if config["runtime"]["execd_image"] != images["opensandbox_execd"] or config["eg
     raise SystemExit("OpenSandbox runtime images differ from release manifest")
 if config["runtime"].get("type") != "docker" or config["docker"].get("network_mode") != "bridge":
     raise SystemExit("OpenSandbox configuration must use the single-host Docker bridge runtime")
-if config["storage"].get("allowed_host_paths") != [] or config["egress"].get("disable_ipv6") is not True:
+if (config["storage"].get("allowed_host_paths") != [] or config["docker"].get("sandbox_binds") != []
+        or config["egress"].get("disable_ipv6") is not True):
     raise SystemExit("OpenSandbox configuration does not enforce the required isolation")
 if config["renew_intent"].get("enabled") is not False:
     raise SystemExit("OpenSandbox renewal must be disabled")
-print("release images, sandbox configuration and independent secret files verified")
+print("release images, sandbox configuration and shared secret file verified")
 PY
 
 echo "deployment verified"

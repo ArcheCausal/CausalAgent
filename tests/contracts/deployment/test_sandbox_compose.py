@@ -1,6 +1,7 @@
 """Static deployment contracts; secret ignore verification requires the Git CLI."""
 
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -16,7 +17,6 @@ DEPLOY = ROOT / "deploy/opensandbox"
 COMPOSES = ("docker-compose.yml", "docker-compose.replica.yml", "docker-compose.staging.yml", "docker-compose.prod.yml")
 CLIENT_KEYS = {
     "CAUSALAGENT_SANDBOX_CONTROLLER_URL",
-    "CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_FILE",
     "CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS",
     "CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER",
     "CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY_WAIT_SECONDS",
@@ -33,14 +33,14 @@ def _environment(service):
 
 
 @pytest.mark.parametrize("filename", COMPOSES)
-def test_worker_receives_only_controller_credentials_and_client_policy(filename):
+def test_worker_uses_shared_secrets_and_controller_client_policy(filename):
     compose = _read(filename)
     worker = compose["services"]["worker"]
     environment = _environment(worker)
     assert {key for key in environment if key.startswith("CAUSALAGENT_SANDBOX_")} == CLIENT_KEYS
-    assert environment["CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_FILE"] == "/run/secrets/sandbox-controller.token"
+    assert environment["CAUSALAGENT_SECRET_FILE"] == "/run/secrets/causalagent.env"
     sources = {secret["source"] for secret in worker["secrets"]}
-    assert sources == {"causalagent_env", "sandbox_controller_token"}
+    assert sources == {"causalagent_env"}
     assert worker["depends_on"]["sandbox-controller"]["condition"] == "service_healthy"
     assert "sandbox_upstream" not in worker["networks"]
     assert all("docker.sock" not in str(mount) for mount in worker.get("volumes", []))
@@ -69,20 +69,14 @@ def test_controller_is_single_process_and_waits_for_primary_bootstrap_and_upstre
 
 
 @pytest.mark.parametrize("filename", COMPOSES)
-def test_upstream_token_and_docker_access_stay_out_of_worker(filename):
+def test_management_services_share_one_file_and_keep_network_boundaries(filename):
     compose = _read(filename)
     shared = _read("deploy/opensandbox/services.yml")["services"]
-    consumers = {"opensandbox_api_key": set(), "sandbox_controller_env": set(), "sandbox_controller_token": set()}
-    for name, service in compose["services"].items():
-        definition = shared[name] if name in shared else service
-        for secret in definition.get("secrets", []):
-            if secret["source"] in consumers:
-                consumers[secret["source"]].add(name)
-    assert consumers == {
-        "opensandbox_api_key": {"sandbox-controller", "opensandbox"},
-        "sandbox_controller_env": {"sandbox-controller"},
-        "sandbox_controller_token": {"worker", "sandbox-controller"},
-    }
+    assert set(compose["secrets"]) == {"causalagent_env"}
+    for name in ("worker", "sandbox-controller", "opensandbox"):
+        definition = shared[name] if name in shared else compose["services"][name]
+        assert definition["secrets"] == [{"source": "causalagent_env", "target": "causalagent.env"}]
+        assert _environment(definition)["CAUSALAGENT_SECRET_FILE"] == "/run/secrets/causalagent.env"
     assert compose["services"]["opensandbox"]["networks"] == ["sandbox_upstream"]
     assert "sandbox_upstream" in compose["services"]["sandbox-controller"]["networks"]
     assert "/var/run/docker.sock:/var/run/docker.sock" in shared["opensandbox"]["volumes"]
@@ -90,8 +84,10 @@ def test_upstream_token_and_docker_access_stay_out_of_worker(filename):
     assert shared["opensandbox"]["configs"] == [{"source": "opensandbox_config", "target": "/etc/opensandbox/config.toml"}]
     assert compose["configs"]["opensandbox_config"]["file"] == "${CAUSALAGENT_OPENSANDBOX_CONFIG_SOURCE:-./deploy/opensandbox/config.toml}"
     # The relative mount is resolved from the extends file's directory.
-    entrypoint = shared["opensandbox"]["volumes"][-1].split(":", 1)[0]
-    assert (DEPLOY / entrypoint).is_file()
+    for mount in shared["opensandbox"]["volumes"]:
+        if mount.startswith("."):
+            assert mount.endswith(":ro")
+            assert (DEPLOY / mount.split(":", 1)[0]).is_file()
 
 
 def test_release_references_match_verified_bom_and_interpreter_base():
@@ -121,7 +117,7 @@ def test_compose_proxy_routing_and_sandbox_limits_are_explicit():
     assert config["docker"]["sandbox_binds"] == []
     assert config["renew_intent"]["enabled"] is False
     assert "api_key" not in config["server"]
-    assert set(upstream["environment"]) == {"SANDBOX_CONFIG_PATH", "CAUSALAGENT_SANDBOX_API_KEY_FILE"}
+    assert set(upstream["environment"]) == {"SANDBOX_CONFIG_PATH", "CAUSALAGENT_SECRET_FILE"}
 
 
 def test_bare_secrets_are_excluded_from_git_and_docker_build_context():
@@ -138,6 +134,38 @@ def test_bare_secrets_are_excluded_from_git_and_docker_build_context():
         assert not any(line.startswith("CAUSALAGENT_SANDBOX_API_KEY=") for line in lines)
 
 
-def test_controller_database_secret_template_contains_no_application_secrets():
-    names = {line.split("=", 1)[0] for line in (DEPLOY / "controller.env.example").read_text(encoding="utf-8").splitlines() if line and not line.startswith("#")}
-    assert names == {"MYSQL_PASSWORD", "MYSQL_WRITE_PASSWORD", "MYSQL_READ_PASSWORD"}
+def test_single_secret_template_contains_both_sandbox_authentication_keys():
+    text = (ROOT / "deploy/secrets/causalagent.env.example").read_text(encoding="utf-8")
+    names = {line.split("=", 1)[0] for line in text.splitlines() if line and not line.startswith("#")}
+    assert {"MYSQL_PASSWORD", "CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN", "CAUSALAGENT_SANDBOX_API_KEY"} <= names
+
+
+@pytest.mark.parametrize("filename", COMPOSES)
+def test_resolved_compose_mounts_shared_loader_and_secret_file(filename):
+    if shutil.which("docker") is None:
+        pytest.skip("Docker Compose CLI is required to resolve extends paths")
+    template = ".env.staging.example" if filename == "docker-compose.staging.yml" else "deploy/config/production.env.example"
+    environment = {
+        **os.environ,
+        "CAUSALAGENT_SECRET_FILE": str(ROOT / "tests/unit-test-secrets.env"),
+        **{key: "example/offline-compose@sha256:" + "a" * 64 for key in ("APP_IMAGE", "CAUSAL_MCP_IMAGE", "MYSQL_IMAGE")},
+    }
+    parsed = subprocess.run(
+        ["docker", "compose", "--env-file", str(ROOT / template), "-f", str(ROOT / filename), "config", "--format", "json"],
+        cwd=ROOT, env=environment, text=True, capture_output=True, timeout=30,
+    )
+    assert parsed.returncode == 0, "Docker Compose could not resolve shared secret mounts"
+    compose = json.loads(parsed.stdout)
+    for name in ("worker", "sandbox-controller", "opensandbox"):
+        service = compose["services"][name]
+        assert service["secrets"] == [{"source": "causalagent_env", "target": "causalagent.env"}]
+        assert service["environment"]["CAUSALAGENT_SECRET_FILE"] == "/run/secrets/causalagent.env"
+    upstream = compose["services"]["opensandbox"]
+    for target, source in {
+        "/opt/causalagent/server_entrypoint.py": ROOT / "deploy/opensandbox/server_entrypoint.py",
+        "/opt/causalagent/config/secret_file.py": ROOT / "config/secret_file.py",
+    }.items():
+        mounts = [mount for mount in upstream["volumes"] if mount["target"] == target]
+        assert len(mounts) == 1
+        assert mounts[0]["read_only"] is True
+        assert Path(mounts[0]["source"]) == source.resolve()

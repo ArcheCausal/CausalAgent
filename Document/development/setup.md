@@ -6,7 +6,7 @@
 
 ## 配置前提
 
-配置分为普通运行参数和密钥两类。模型名、服务地址、数据库账号名、连接池和超时等普通参数来自进程环境；应用密码、API key、令牌和签名密钥由 `config/secret_file.py` 从应用密钥文件读取；沙盒控制服务的数据库密钥与两个沙盒 token 使用独立文件。容器内默认路径为 `/run/secrets/causalagent.env`；开发 Compose 默认挂载仓库根目录的 `causalagent.env`（已加入 `.gitignore`）。本地 Python 需用 `CAUSALAGENT_SECRET_FILE` 指向该文件，并在启动前将普通参数提供给进程。应用配置不再自动加载根目录 `.env`，密钥也不回退到环境变量；Compose 自己仍可读取 `.env` 用于普通参数替换。密钥模板见 [`deploy/secrets/causalagent.env.example`](../../deploy/secrets/causalagent.env.example)。
+配置分为普通运行参数和密钥两类。模型名、服务地址、数据库账号名、连接池和超时等普通参数来自进程环境；全部应用密钥、数据库密码和两个沙盒认证值统一保存在 `causalagent.env`，Python 组件通过 `config/secret_file.py` 读取。开发、兼容副本、预发和生产 Compose 均使用 `causalagent_env`，只读挂载到 `/run/secrets/causalagent.env`。Worker、控制服务和 OpenSandbox 管理服务显式设置 `CAUSALAGENT_SECRET_FILE` 为该路径，其他 Python 服务沿用加载器的同一路径默认值。开发 Compose 默认挂载仓库根目录的 `causalagent.env`（已加入 `.gitignore`），可用宿主 `CAUSALAGENT_SECRET_FILE` 指定仓库外文件。本地 Python 需用该变量指向实际文件，并在启动前将普通参数提供给进程。应用配置不再自动加载根目录 `.env`，密钥也不回退到环境变量；Compose 自己仍可读取 `.env` 用于普通参数替换。密钥模板见 [`deploy/secrets/causalagent.env.example`](../../deploy/secrets/causalagent.env.example)。
 
 | 配置模块 | 职责与依赖 |
 | --- | --- |
@@ -20,7 +20,9 @@
 
 当前普通参数没有统一的 Python 读取入口：部分参数经过 `AppConfig`、`DatabaseConfig` 或 checkpoint 配置类，`DEEP_AGENT_MODEL` 等参数仍由 worker 的 `os.getenv` 直接读取。统一的是服务器普通配置的提供方式，以及敏感值的密钥加载器，不能将这两点表述为所有参数都通过 `settings.py` 读取。
 
-密钥加载器按调用入口校验必需键，缓存命中也重新检查该入口的要求。数据库配置只要求三个 MySQL 密码键，因此沙盒控制服务可以使用独立的数据库密钥文件；应用配置仍调用默认完整必需键检查。`causal-mcp` 的认证配置目前仍调用默认完整检查，并挂载完整应用密钥文件；它不消费模型地址和名称，但文件仍须包含模型等必需密钥。
+密钥加载器按调用入口校验必需键，缓存命中也重新检查该入口的要求。数据库配置只要求三个 MySQL 密码键；沙盒控制服务读取同一文件中的数据库密码和两个沙盒认证值，不导入应用模型配置。应用配置仍调用默认完整必需键检查。`causal-mcp` 的认证配置目前仍调用默认完整检查，并挂载完整应用密钥文件；它不消费模型地址和名称，但文件仍须包含模型等必需密钥。
+
+`CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN` 与 `CAUSALAGENT_SANDBOX_API_KEY` 必须是不同的认证值，均为 32 至 4096 个无空白字符。Worker、控制服务和 OpenSandbox 管理服务可以读取完整文件，因此不提供这三个服务之间的密钥隔离。执行用户脚本的临时沙盒容器不得挂载该文件或接收其中的密钥。OpenSandbox 管理服务的启动适配器只向官方 server 导出 `OPENSANDBOX_SERVER_API_KEY`；结构化运行配置仍使用 `config.toml`。
 
 应用/Worker 还需要通用模型地址与名称、Deep Agent 的模型名、地址、context window，以及数据库和 MCP 参数。开发 Compose 允许 Deep Agent base URL 回退到通用 `BASE_URL`；`DEEP_AGENT_API_KEY` 必须在密钥文件中单独提供，不能回退到 `API_KEY`。正式多模态 API embedding 需要文件中的 `EMBEDDING_API_KEY` 和环境中的 `EMBEDDING_BASE_URL`；本地 production embedding 开关当前关闭。`CAUSAL_MCP_SLOW_LOG_SECONDS` 默认 60 秒，只控制慢日志阈值，不改变算法 deadline。不要将密钥文件、密码、API key 或数据库连接串提交到 Git、日志或文档。
 
@@ -63,7 +65,7 @@ docker compose -f docker-compose.yml ps searxng valkey
 
 开发 Compose 直接挂载仓库内的 `Agent/knowledge_base/multimodal_indexes` 与 `Agent/knowledge_base/multimodal_runtime`，不再使用一次性同步容器，也不再使用 `kb_multimodal_indexes` 命名卷。Chroma 打开索引时会写入 `acquire_write` 写锁记录，因此这条路径必须可写；不要改回只读挂载。预发和生产的正式索引改由独立命名卷承载，见 [`deployment.md`](deployment.md)。
 
-开发 Compose 还包含 `sandbox-controller` 和 `opensandbox`。首次启动前，除应用密钥文件外，还需准备独立控制 token、上游 key、仅含 MySQL 密码的控制服务密钥文件，以及固定 digest 的处理镜像，具体路径与构建方式见 [沙盒部署说明](../../deploy/opensandbox/README.md)。Worker 等待控制服务就绪。固定端口和数据卷属于共享 Docker daemon 资源，多个 worktree 同时运行时必须采用独立 project/端口策略，不能误用 `down -v`。
+开发 Compose 还包含 `sandbox-controller` 和 `opensandbox`。首次启动前，在统一 `causalagent.env` 中填写数据库密码、应用密钥和两个不同的沙盒认证值，并准备固定 digest 的处理镜像；不再准备独立沙盒凭据文件，也不支持旧来源兼容。具体路径与构建方式见 [沙盒部署说明](../../deploy/opensandbox/README.md)。Worker 等待控制服务就绪。固定端口和数据卷属于共享 Docker daemon 资源，多个 worktree 同时运行时必须采用独立 project/端口策略，不能误用 `down -v`。
 
 ## 本地 Python
 

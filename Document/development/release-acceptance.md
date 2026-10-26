@@ -8,7 +8,7 @@
 
 ## 通用前提
 
-普通配置、密钥文件和服务器数据目录应已准备好。以下命令在同一个 Bash 会话执行；预发将 Compose 文件改为 `docker-compose.staging.yml`，并使用独立的普通配置和数据卷。
+普通配置、统一密钥文件和服务器数据目录应已准备好。`production.env` 只保存普通参数与密钥路径，`causalagent.env` 保存全部应用与数据库密钥及两个沙盒认证值；发布生成的 `images.env` 和 OpenSandbox 结构化配置 `config.toml` 仍需保留。以下命令在同一个 Bash 会话执行；预发将 Compose 文件改为 `docker-compose.staging.yml`，并使用独立的普通配置和数据卷。
 
 `CAUSALAGENT_COMPOSE_FILE` 由部署、校验和回滚脚本读取；手工 Compose 命令仍需传 `-f`。以下共用函数显式选择同一文件。
 
@@ -37,14 +37,14 @@ release_compose config --quiet
 
 ## 一 密钥文件与实际读取
 
-1. 用 `stat -c '%a:%u:%g' "$CAUSALAGENT_SECRET_FILE"` 检查服务器文件，必须为 `640:0:3000`。检查 `release_compose exec -T app ls -l /run/secrets/causalagent.env`；数据库、Grafana 和 SearXNG 等所选拓扑中的读取服务也必须可读。
+1. 用 `stat -c '%a:%u:%g' "$CAUSALAGENT_SECRET_FILE"` 检查服务器文件，必须为 `640:0:3000`。检查 `release_compose exec -T app ls -l /run/secrets/causalagent.env`，并分别对 `worker`、`sandbox-controller`、`opensandbox` 检查同一路径。四个 Compose 入口均应使用 `causalagent_env`，容器内 `CAUSALAGENT_SECRET_FILE` 必须为 `/run/secrets/causalagent.env`，挂载必须只读；数据库、Grafana 和 SearXNG 等所选拓扑中的读取服务也必须可读。
 2. 在 app 容器执行真实加载器，确认全部必需键和文件格式通过；只输出键名或判定，不打印值：
 
    ```bash
-   release_compose exec -T app python -c 'from config.secret_file import load_secrets; load_secrets(reload=True); print("secret file parsed and required keys verified")'
+   release_compose exec -T app python -c 'from config.secret_file import REQUIRED_SECRET_KEYS, load_secrets; load_secrets(reload=True, required_keys=REQUIRED_SECRET_KEYS); print("secret file parsed and required keys verified")'
    ```
 
-3. 检查 `release_compose config` 中的服务 `environment` 不直接包含密码、API key、服务令牌或签名密钥。启动命令和健康检查中引用键名不代表包含密钥值，不能用搜索 `PASSWORD` 等字样代替这项检查。官方镜像适配入口会向自身进程导出所需变量；可选 LangSmith 也会导出 SDK 所需键。
+3. 检查 `release_compose config` 中的服务 `environment` 不直接包含密码、API key、服务令牌或签名密钥，也不再声明独立沙盒凭据来源或 token/key 文件路径。启动命令和健康检查中引用键名不代表包含密钥值，不能用搜索 `PASSWORD` 等字样代替这项检查。官方镜像适配入口会向自身进程导出所需变量；OpenSandbox 适配器只导出 `OPENSANDBOX_SERVER_API_KEY` 给官方 server，可选 LangSmith 也会导出 SDK 所需键。
 4. 检查发布包没有真实密钥文件，应用镜像也没有预置 `causalagent.env`。镜像检查可使用不挂载 secret 的临时容器；将 `image` 替换为清单中的 app 引用：
 
    ```bash
@@ -65,7 +65,7 @@ release_compose config --quiet
 
 ## 二 清单、Compose 和运行中镜像
 
-1. 执行 `bash scripts/verify.sh "$release_dir"`。它检查镜像锁与清单、Compose 实际镜像、沙盒文件摘要、独立密钥权限和格式及上游配置引用；不能证明服务健康、真实沙盒网络隔离或完整 Job 已通过。
+1. 执行 `bash scripts/verify.sh "$release_dir"`。它检查镜像锁与清单、Compose 实际镜像、沙盒文件摘要、统一密钥权限和格式、两个沙盒认证值及上游配置引用；不能证明服务健康、真实沙盒网络隔离或完整 Job 已通过。
 2. 将 `release.manifest.json`、`images.lock.json` 与 `release_compose config` 中实际使用的镜像逐项比较。app、worker、sandbox-controller、monitor、cleanup、rag-eval-worker 和 db-bootstrap 对应清单的 `app`；`causal-mcp` 对应 `mcp`；生产 `mysql` 或预发 `mysql-primary` 对应 `mysql_primary`；`opensandbox` 对应 `opensandbox_server`。控制服务的处理镜像须等于 `sandbox_processing`，execd 与 egress 配置须等于各自清单引用。只比较所选拓扑实际使用的镜像，生产不会启动清单中的全部服务。
 3. 配置输出不能证明运行中的容器已经更新。读取实际容器的镜像引用并与同一清单比较：
 
@@ -118,7 +118,9 @@ done
 
 ## 十 沙盒与研究参数
 
-先核对三个独立沙盒密钥文件的实际消费者：Worker 只挂控制 token，控制服务只挂独立数据库密钥、控制 token 和上游 key，OpenSandbox 只挂上游 key。Worker 不加入上游网络，也不挂 Docker socket。本轮保留 Alloy 已有日志采集权限。
+先核对 Worker、控制服务和 OpenSandbox 管理服务均通过 `causalagent_env` 只读挂载同一份完整密钥文件，容器内路径统一为 `/run/secrets/causalagent.env`。这三个服务共享应用信任范围，不提供服务之间的密钥隔离。确认 `CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN` 与 `CAUSALAGENT_SANDBOX_API_KEY` 均为 32 至 4096 个无空白字符且值不同，只输出判定，不输出值。通过各自真实启动入口确认 Worker 使用控制 token、controller 使用数据库密码和两个沙盒认证值、OpenSandbox 适配器只导出上游 API key；controller 不应依赖模型配置。
+
+检查实际创建的用户脚本沙盒容器，确认没有挂载统一密钥文件，环境中也没有应用、数据库或沙盒服务密钥；不要打印完整容器环境或密钥正文。Worker 仍不加入上游网络，也不挂 Docker socket。本轮保留 Alloy 已有日志采集权限。
 
 在独立预发中，通过真实 Worker 客户端验证申请、输入 hash、预览、非 root 执行、原始文件只读、受限日志、产物 hash、销毁与 MySQL 关闭记录。分别保存 IPv4/IPv6 实测和实际 egress/bridge/转发配置证据。健康接口不能代替执行及文件代理验证。
 

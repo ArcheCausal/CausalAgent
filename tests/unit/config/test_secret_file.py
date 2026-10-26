@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import stat
 from pathlib import Path
 
@@ -30,6 +31,7 @@ def _write(path: Path, lines: list[str]) -> Path:
 
 def _complete_lines(**overrides: str) -> list[str]:
     values = {name: f"value-{index}" for index, name in enumerate(REQUIRED_SECRET_KEYS)}
+    values.update({name: secrets.token_hex(32) for name in secret_file.SANDBOX_SECRET_KEYS})
     values.update(overrides)
     return [f"{name}={value}" for name, value in values.items()]
 
@@ -105,31 +107,45 @@ def test_unknown_key_is_rejected(tmp_path):
     assert "NOT_A_DECLARED_SECRET" in str(excinfo.value)
 
 
-def test_upstream_sandbox_key_is_not_part_of_shared_schema(tmp_path):
-    assert "CAUSALAGENT_SANDBOX_API_KEY" not in SECRET_KEYS
-    assert "CAUSALAGENT_SANDBOX_API_KEY" not in REQUIRED_SECRET_KEYS
+def test_shared_schema_accepts_distinct_sandbox_tokens(tmp_path):
+    controller, upstream = secrets.token_hex(32), secrets.token_hex(32)
     path = _write(
         tmp_path / "causalagent.env",
-        _complete_lines(CAUSALAGENT_SANDBOX_API_KEY="retired-upstream-key"),
+        _complete_lines(CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN=controller, CAUSALAGENT_SANDBOX_API_KEY=upstream),
     )
 
-    with pytest.raises(SecretFileError, match="未定义的键"):
+    values = load_secrets(path=path)
+    assert values["CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN"] == controller
+    assert values["CAUSALAGENT_SANDBOX_API_KEY"] == upstream
+    assert set(secret_file.SANDBOX_SECRET_KEYS) <= set(REQUIRED_SECRET_KEYS)
+
+
+@pytest.mark.parametrize("key", secret_file.SANDBOX_SECRET_KEYS)
+@pytest.mark.parametrize("value", ["short", "x" * 4097, "x" * 32 + " " + "y" * 32])
+def test_shared_schema_rejects_invalid_sandbox_tokens(tmp_path, key, value):
+    path = _write(tmp_path / "causalagent.env", _complete_lines(**{key: value}))
+    with pytest.raises(SecretFileError, match=key) as caught:
         load_secrets(path=path)
+    assert value not in str(caught.value)
 
 
-def test_upstream_sandbox_key_cannot_be_read_from_shared_secret_api():
-    with pytest.raises(SecretFileError, match="不是已声明的密钥键"):
-        require_secret("CAUSALAGENT_SANDBOX_API_KEY")
+def test_shared_schema_rejects_reused_sandbox_token(tmp_path):
+    token = secrets.token_hex(32)
+    path = _write(tmp_path / "causalagent.env", _complete_lines(**dict.fromkeys(secret_file.SANDBOX_SECRET_KEYS, token)))
+    with pytest.raises(SecretFileError, match="不同的值") as caught:
+        load_secrets(path=path)
+    assert token not in str(caught.value)
 
 
-def test_upstream_sandbox_environment_key_is_removed_even_with_cached_file(tmp_path, monkeypatch):
+@pytest.mark.parametrize("key", secret_file.SANDBOX_SECRET_KEYS)
+def test_sandbox_environment_key_is_removed_even_with_cached_file(tmp_path, monkeypatch, key):
     path = _write(tmp_path / "causalagent.env", _complete_lines())
     load_secrets(path=path)
-    monkeypatch.setenv("CAUSALAGENT_SANDBOX_API_KEY", "retired-upstream-key")
+    monkeypatch.setenv(key, secrets.token_hex(32))
 
     load_secrets(path=path)
 
-    assert "CAUSALAGENT_SANDBOX_API_KEY" not in os.environ
+    assert key not in os.environ
 
 
 def test_duplicate_key_is_rejected(tmp_path):
@@ -267,13 +283,13 @@ def test_get_secret_reads_only_requested_key_without_weakening_app_validation(tm
 
 
 @pytest.mark.parametrize("required_keys", [(), _DATABASE_SECRET_KEYS])
-def test_partial_load_still_rejects_retired_upstream_key(tmp_path, required_keys):
+def test_partial_load_accepts_upstream_key_without_requiring_application_keys(tmp_path, required_keys):
     path = _database_file(tmp_path)
+    token = secrets.token_hex(32)
     with path.open("a", encoding="utf-8") as output:
-        output.write("CAUSALAGENT_SANDBOX_API_KEY=retired-upstream-key\n")
+        output.write("CAUSALAGENT_SANDBOX_API_KEY=" + token + "\n")
 
-    with pytest.raises(SecretFileError, match="未定义的键"):
-        load_secrets(path=path, required_keys=required_keys)
+    assert load_secrets(path=path, required_keys=required_keys)["CAUSALAGENT_SANDBOX_API_KEY"] == token
 
 
 @pytest.mark.parametrize("missing", ["BASE_URL", "MODEL"])

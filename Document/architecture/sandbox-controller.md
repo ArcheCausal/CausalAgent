@@ -15,7 +15,9 @@ flowchart LR
     OpenSandbox --> Docker[临时处理容器]
 ```
 
-Worker 仅持有独立控制服务 token，不持有 OpenSandbox 上游 key，不连接 Docker daemon。控制服务使用独立数据库密钥文件和上游 key 文件。OpenSandbox 持有同机 Docker socket；现有 Alloy 日志采集权限保留，本轮权限拆分只覆盖沙盒链路。两个内部 API 不发布宿主端口；Worker 不加入上游网络。
+Worker、控制服务和 OpenSandbox 管理服务属于同一应用信任范围，均可读取完整的统一密钥文件 `causalagent.env`。四个 Compose 入口统一通过 `causalagent_env` 只读挂载该文件，并在容器内设置 `CAUSALAGENT_SECRET_FILE=/run/secrets/causalagent.env`。这里不提供服务之间的密钥隔离；Worker 仍只调用控制服务的受限 API，不连接 Docker daemon，也不加入上游网络。OpenSandbox 管理服务持有同机 Docker socket；现有 Alloy 日志采集权限保留。两个内部 API 不发布宿主端口。
+
+`CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN` 用于 Worker 与控制服务认证，`CAUSALAGENT_SANDBOX_API_KEY` 用于控制服务与 OpenSandbox 认证。两个值必须不同，长度均为 32 至 4096 个字符且不含空白。各 Python 组件通过 `config/secret_file.py` 读取统一文件，只要求自身使用的键；控制服务直接读取其中的数据库密码，仍不依赖应用模型配置。OpenSandbox 启动适配器也读取该文件，只向官方 server 导出 `OPENSANDBOX_SERVER_API_KEY`。密钥文件不得挂载到执行用户脚本的临时沙盒容器，应用、数据库及沙盒服务密钥也不得传入这些容器。
 
 服务入口为 `python -m sandbox_controller`，固定一个 API 进程。启动先持有 MySQL `GET_LOCK`，再分页读取所有未关闭资源并核查；完成后才开放准入。第二个控制进程不能取得命名锁。命名锁连接失效时，当前服务停止接受执行和新建请求。
 

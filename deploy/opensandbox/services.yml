@@ -9,8 +9,6 @@ services:
     group_add: ["3000"]
     environment:
       CAUSALAGENT_SECRET_FILE: /run/secrets/causalagent.env
-      CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_FILE: /run/secrets/sandbox-controller.token
-      CAUSALAGENT_SANDBOX_API_KEY_FILE: /run/secrets/opensandbox-api-key
       CAUSALAGENT_SANDBOX_CONTROLLER_PORT: "8081"
       CAUSALAGENT_SANDBOX_URL: http://opensandbox:8080
       CAUSALAGENT_SANDBOX_ALLOW_HTTP: "true"
@@ -42,12 +40,8 @@ services:
       MYSQL_POOL_SIZE_WRITE: "4"
       MYSQL_POOL_SIZE_READ: "1"
     secrets:
-      - source: sandbox_controller_env
+      - source: causalagent_env
         target: causalagent.env
-      - source: sandbox_controller_token
-        target: sandbox-controller.token
-      - source: opensandbox_api_key
-        target: opensandbox-api-key
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=2)"]
       interval: 10s
@@ -68,18 +62,19 @@ services:
     group_add: ["3000"]
     environment:
       SANDBOX_CONFIG_PATH: /etc/opensandbox/config.toml
-      CAUSALAGENT_SANDBOX_API_KEY_FILE: /run/secrets/opensandbox-api-key
+      CAUSALAGENT_SECRET_FILE: /run/secrets/causalagent.env
     extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - opensandbox_state:/var/lib/opensandbox
       - ./server_entrypoint.py:/opt/causalagent/server_entrypoint.py:ro
+      - ../../config/secret_file.py:/opt/causalagent/config/secret_file.py:ro
     configs:
       - source: opensandbox_config
         target: /etc/opensandbox/config.toml
     secrets:
-      - source: opensandbox_api_key
-        target: opensandbox-api-key
+      - source: causalagent_env
+        target: causalagent.env
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
       interval: 10s

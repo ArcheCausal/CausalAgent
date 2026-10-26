@@ -1,12 +1,6 @@
 # 兼容旧路径：当前开发请使用 docker-compose.yml；本文件暂保留，不作为默认入口。
 
 secrets:
-  sandbox_controller_token:
-    file: ${CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_SOURCE:-/etc/causalagent/secrets/sandbox-controller.token}
-  opensandbox_api_key:
-    file: ${CAUSALAGENT_SANDBOX_API_KEY_SOURCE:-/etc/causalagent/secrets/opensandbox-api-key}
-  sandbox_controller_env:
-    file: ${CAUSALAGENT_SANDBOX_CONTROLLER_SECRET_SOURCE:-/etc/causalagent/secrets/sandbox-controller.env}
   # 本地开发同样只从项目根目录的 causalagent.env 读取密码与令牌。
   causalagent_env:
     file: ${CAUSALAGENT_SECRET_FILE:-./causalagent.env}
@@ -21,6 +15,7 @@ services:
       dockerfile: Dockerfile
     volumes:
       - ./sandbox_controller:/app/sandbox_controller:ro
+      - ./config/secret_file.py:/app/config/secret_file.py:ro
     environment:
       ENVIRONMENT: development
       MYSQL_HOST: mysql-primary
@@ -35,6 +30,8 @@ services:
     extends:
       file: ./deploy/opensandbox/services.yml
       service: opensandbox
+    environment:
+      ENVIRONMENT: development
     networks: [sandbox_upstream]
 
   mysql-primary:
@@ -221,8 +218,6 @@ services:
 
   worker:
     secrets:
-      - source: sandbox_controller_token
-        target: sandbox-controller.token
       - source: causalagent_env
         target: causalagent.env
     build:
@@ -262,7 +257,7 @@ services:
       - JOB_DRAIN_TIMEOUT_SECONDS=${JOB_DRAIN_TIMEOUT_SECONDS:-60}
       - JOB_MAX_ATTEMPTS=${JOB_MAX_ATTEMPTS:-3}
       - CAUSALAGENT_SANDBOX_CONTROLLER_URL=${CAUSALAGENT_SANDBOX_CONTROLLER_URL:-http://sandbox-controller:8081}
-      - CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_FILE=/run/secrets/sandbox-controller.token
+      - CAUSALAGENT_SECRET_FILE=/run/secrets/causalagent.env
       - CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS=${CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS:-330}
       - CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER=${CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER:-2}
       - CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY_WAIT_SECONDS=${CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY_WAIT_SECONDS:-300}

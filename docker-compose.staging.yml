@@ -1,12 +1,6 @@
 # 预发 V1：与生产目标一致的 MySQL 主从 + PostgreSQL checkpoint 拓扑。
 # 仅能搭配隔离 `.env.staging` 使用；每个 Python 进程启动前都会执行环境门禁。
 secrets:
-  sandbox_controller_token:
-    file: ${CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_SOURCE:-/etc/causalagent/secrets/sandbox-controller.token}
-  opensandbox_api_key:
-    file: ${CAUSALAGENT_SANDBOX_API_KEY_SOURCE:-/etc/causalagent/secrets/opensandbox-api-key}
-  sandbox_controller_env:
-    file: ${CAUSALAGENT_SANDBOX_CONTROLLER_SECRET_SOURCE:-/etc/causalagent/secrets/sandbox-controller.env}
   # 服务器上的唯一密钥文件；只读挂载到 /run/secrets/causalagent.env。
   causalagent_env:
     file: ${CAUSALAGENT_SECRET_FILE:-/etc/causalagent/secrets/causalagent.env}
@@ -336,7 +330,7 @@ services:
       DEEP_AGENT_BASE_URL: ${DEEP_AGENT_BASE_URL:?DEEP_AGENT_BASE_URL is required}
       DEEP_AGENT_CONTEXT_WINDOW_TOKENS: ${DEEP_AGENT_CONTEXT_WINDOW_TOKENS:?DEEP_AGENT_CONTEXT_WINDOW_TOKENS is required}
       CAUSALAGENT_SANDBOX_CONTROLLER_URL: ${CAUSALAGENT_SANDBOX_CONTROLLER_URL:-http://sandbox-controller:8081}
-      CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_FILE: /run/secrets/sandbox-controller.token
+      CAUSALAGENT_SECRET_FILE: /run/secrets/causalagent.env
       CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS: ${CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS:-330}
       CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER: ${CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER:-2}
       CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY_WAIT_SECONDS: ${CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY_WAIT_SECONDS:-300}
@@ -346,8 +340,6 @@ services:
       - rag_eval_staging_formal:/var/lib/causalagent/rag/formal
       - ${CAUSALAGENT_KB_ASSETS_DIR:-/var/lib/causalagent/kb/assets}:/app/Agent/knowledge_base/multimodal_assets:ro
     secrets:
-      - source: sandbox_controller_token
-        target: sandbox-controller.token
       - source: causalagent_env
         target: causalagent.env
     networks: [rag_eval_staging]

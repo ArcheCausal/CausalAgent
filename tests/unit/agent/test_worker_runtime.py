@@ -323,7 +323,7 @@ def test_stop_event_prevents_idle_slot_from_claiming_more_jobs():
     asyncio.run(scenario())
 
 
-def test_production_runtime_waits_for_both_mcp_lanes_before_executor(monkeypatch, tmp_path):
+def test_production_runtime_waits_for_both_mcp_lanes_before_executor(monkeypatch):
     """单一 pool 的 start 完成两类成员握手后才允许创建执行器。"""
 
     order = []
@@ -345,10 +345,6 @@ def test_production_runtime_waits_for_both_mcp_lanes_before_executor(monkeypatch
         yield Mock(name="store")
 
     adapter = SimpleNamespace(raw_backend=Mock(name="backend"))
-    token_path = tmp_path / "controller-token"
-    token_path.write_text(token_hex(32), encoding="utf-8")
-    token_path.chmod(0o600)
-    monkeypatch.setenv("CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN_FILE", str(token_path))
     deep_model = ChatOpenAI(model="gpt-4o-mini", api_key=token_hex(16))
     monkeypatch.setenv("CAUSAL_MCP_SIGNING_KEY_CURRENT", "test-signing-key")
     with (

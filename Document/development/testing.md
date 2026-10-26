@@ -148,6 +148,8 @@ docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p
 
 真实沙盒应使用独立 Compose project、网络、数据库和临时密钥文件，按 [沙盒部署说明](../../deploy/opensandbox/README.md) 准备固定镜像与代理路由。控制服务、OpenSandbox 和处理容器属于不同验证边界，必须分别检查实际连接和权限；数据库恢复、健康接口或静态检查不能代替完整沙盒验收。上线前还需在隔离环境执行完整模型、Worker 重启接管、MCP HTTP 和报告链路验收。
 
+统一密钥文件的代码与部署检查包括 `tests/unit/config/test_secret_file.py`、`tests/unit/config/test_sandbox_client.py`、`tests/integration/config/test_controller_configuration.py`、`tests/contracts/deployment/test_sandbox_compose.py` 和 `tests/contracts/deployment/test_release_preflight.py`。发布预检使用真实 Bash、Linux root 文件权限和 Docker Compose CLI，只解析配置，不启动服务。真实启动时，Worker、控制服务和 OpenSandbox 管理服务共享 `causalagent.env`，执行用户脚本的沙盒不得接收文件或密钥；两个认证值分别验证有凭据成功、无凭据及错误凭据拒绝。完整 Job 入口 `tests/acceptance/sandbox_upgrade_job.py` 通过 `FULL_JOB_SANDBOX_SECRET_FILE` 读取控制服务所用统一密钥文件中的两个认证值。
+
 方案确认还要验证确认版本与 Job 输入账本一致、用户修改或拒绝后旧方案不会执行、新语义答复或方案说明变化会使旧确认失效，以及已确认语义范围内的脚本修正可以安全恢复。只有真实 OpenSandbox、MySQL、PostgreSQL 和 Worker 的完整链路才能证明生产级恢复及网络隔离；当前工作区缺少这些验收服务时，必须明确保留未验证结论。
 
 无需外部服务的定向检查如下。生命周期测试直接运行真实 StateGraph、节点包装器和 InMemorySaver，覆盖连续提问、按中断 ID 恢复、重新编译图、校验重试及正常暂停不产生失败事件；语义快照测试使用真实校验器、ToolRuntime、本地 MCP 服务和算法进程，不证明数据库或 HTTP。

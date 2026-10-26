@@ -70,10 +70,6 @@ def release(tmp_path):
     manifest = json.loads((target / "release.manifest.json").read_text(encoding="utf-8"))
     write_secret(secret_dir / "causalagent.env", "".join(
         f"{key}={secrets.token_hex(32)}\n" for key in manifest["secrets"]["required_keys"]))
-    write_secret(secret_dir / "sandbox-controller.env", "".join(
-        f"{key}={secrets.token_hex(32)}\n" for key in ("MYSQL_PASSWORD", "MYSQL_WRITE_PASSWORD", "MYSQL_READ_PASSWORD")))
-    write_secret(secret_dir / "sandbox-controller.token", secrets.token_hex(32))
-    write_secret(secret_dir / "opensandbox-api-key", secrets.token_hex(32))
     return target, secret_dir, env
 
 
@@ -84,48 +80,69 @@ def verify(release, **overrides):
 
 
 @pytest.mark.parametrize("compose", ["docker-compose.prod.yml", "docker-compose.staging.yml"])
-def test_real_compose_and_independent_secrets_pass_without_a_daemon(release, compose):
+def test_real_compose_and_shared_secret_pass_without_a_daemon(release, compose):
     result = verify(release, CAUSALAGENT_COMPOSE_FILE=compose)
     assert result.returncode == 0, result.stderr
     assert "deployment verified" in result.stdout
 
 
-@pytest.mark.parametrize("name", ["causalagent.env", "sandbox-controller.env", "sandbox-controller.token", "opensandbox-api-key"])
-def test_each_secret_requires_restricted_real_file_permissions(release, name):
-    (release[1] / name).chmod(0o644)
+def test_shared_secret_requires_restricted_real_file_permissions(release):
+    (release[1] / "causalagent.env").chmod(0o644)
     result = verify(release)
     assert result.returncode != 0
     assert "root:GID 3000" in result.stderr
 
 
-def test_controller_file_rejects_model_keys(release):
-    path = release[1] / "sandbox-controller.env"
-    write_secret(path, path.read_text(encoding="utf-8") + "API_KEY=unexpected\n")
+def test_shared_file_rejects_unknown_keys(release):
+    path = release[1] / "causalagent.env"
+    write_secret(path, path.read_text(encoding="utf-8") + "UNKNOWN_SECRET=unexpected\n")
     result = verify(release)
     assert result.returncode != 0
-    assert "invalid secret key or value" in result.stderr
+    assert "UNKNOWN_SECRET" in result.stderr
 
 
-def test_application_file_rejects_legacy_upstream_key(release):
+def test_shared_file_rejects_duplicate_upstream_key(release):
     path = release[1] / "causalagent.env"
     write_secret(path, path.read_text(encoding="utf-8") + "CAUSALAGENT_SANDBOX_API_KEY=unexpected\n")
     result = verify(release)
     assert result.returncode != 0
-    assert "invalid secret key or value" in result.stderr
+    assert "CAUSALAGENT_SANDBOX_API_KEY" in result.stderr
+    assert "重复定义" in result.stderr
 
 
 def test_controller_and_upstream_tokens_must_differ(release):
-    write_secret(release[1] / "opensandbox-api-key", (release[1] / "sandbox-controller.token").read_text())
+    path = release[1] / "causalagent.env"
+    values = dict(line.split("=", 1) for line in path.read_text().splitlines())
+    values["CAUSALAGENT_SANDBOX_API_KEY"] = values["CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN"]
+    write_secret(path, "".join(f"{key}={value}\n" for key, value in values.items()))
     result = verify(release)
     assert result.returncode != 0
-    assert "tokens must be different" in result.stderr or "token must be different" in result.stderr
+    assert "不同的值" in result.stderr
 
 
-def test_base64_padding_is_valid_in_both_independent_tokens(release):
-    for name in ("sandbox-controller.token", "opensandbox-api-key"):
-        write_secret(release[1] / name, base64.b64encode(secrets.token_bytes(32)).decode("ascii") + "\n")
+def test_base64_padding_is_valid_in_both_shared_authentication_fields(release):
+    path = release[1] / "causalagent.env"
+    values = dict(line.split("=", 1) for line in path.read_text().splitlines())
+    for key in ("CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN", "CAUSALAGENT_SANDBOX_API_KEY"):
+        values[key] = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+    write_secret(path, "".join(f"{key}={value}\n" for key, value in values.items()))
     result = verify(release)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("key", ["CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN", "CAUSALAGENT_SANDBOX_API_KEY"])
+@pytest.mark.parametrize("value", [None, "short", "x" * 4097, "x" * 32 + " " + "y" * 32])
+def test_shared_authentication_fields_are_required_and_validated(release, key, value):
+    path = release[1] / "causalagent.env"
+    values = dict(line.split("=", 1) for line in path.read_text().splitlines())
+    if value is None:
+        del values[key]
+    else:
+        values[key] = value
+    write_secret(path, "".join(f"{name}={secret}\n" for name, secret in values.items()))
+    result = verify(release)
+    assert result.returncode != 0
+    assert key in result.stderr
 
 
 def test_shell_cannot_override_the_processing_image(release):
