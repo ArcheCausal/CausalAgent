@@ -182,8 +182,8 @@ _EFFECT_PARAMETERS = {"target": "y", "treatment": "x", "columns": ["x", "y"]}
 _EFFECT_QUESTION = "请分析 x 对 y 的因果效应。"
 
 
-def _ate_not_ready(identity, registry):
-    """构造一次真实的 causal_ate not_ready 终态，用于覆盖“尝试即放行”。"""
+def _ate_attempt(identity, registry, *, status="not_ready"):
+    """构造一次真实的 causal_ate 终态，用于覆盖“尝试即放行”。"""
 
     spec = registry.get("causal.ate").spec
     response_identity = "causal_ate-response-1"
@@ -199,10 +199,10 @@ def _ate_not_ready(identity, registry):
         provider_call_id=provider_call_id,
         capability_id=spec.capability_id,
         capability_version=spec.version,
-        status="not_ready",
+        status=status,
         diagnostics=Diagnostics(
-            safe_error_code="graph_not_ready",
-            summary="尚无可用因果图。",
+            safe_error_code=f"ate_{status}",
+            summary="ATE 未产生估计结果。",
         ),
         provenance=AlgorithmResultProvenance(
             job_id=str(identity.job_id),
@@ -222,7 +222,7 @@ def _ate_not_ready(identity, registry):
         response_identity_source="message_execution_id",
         provider_call_id=provider_call_id,
         tool_name="causal_ate",
-        final_status="not_ready",
+        final_status=status,
         job_id=str(identity.job_id),
         attempt_count=identity.attempt_count,
         lease_epoch=identity.lease_epoch,
@@ -232,7 +232,7 @@ def _ate_not_ready(identity, registry):
             0: ActionAttempt(
                 retry_ordinal=0,
                 revision=2,
-                status="not_ready",
+                status=status,
                 started_at=started_at,
                 finished_at=started_at,
             )
@@ -761,9 +761,10 @@ def test_gate_requires_ate_attempt_for_effect_question() -> None:
     assert "evidence_only" in instruction
 
 
-def test_gate_accepts_effect_question_after_ate_attempt() -> None:
+@pytest.mark.parametrize("ate_status", ["not_ready", "not_applicable"])
+def test_gate_accepts_effect_question_after_ate_attempt(ate_status) -> None:
     identity, registry, result, ledger = _algorithm_execution()
-    ate_result, ate_record = _ate_not_ready(identity, registry)
+    ate_result, ate_record = _ate_attempt(identity, registry, status=ate_status)
 
     accepted = FinalizationGate(registry=registry).validate(
         decision=_primary_decision(result),

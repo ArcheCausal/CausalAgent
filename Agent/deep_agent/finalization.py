@@ -211,10 +211,13 @@ class FinalizationGate:
         lease_epoch: int,
         worker_id: str,
         input_identity: str,
+        terminal_statuses: Set[str] | None = None,
     ) -> bool:
         """检查指定工具是否在当前 Job attempt 中完成过一次真实调用。"""
 
-        terminal_statuses = {"succeeded", "not_ready", "failed", "timed_out"}
+        accepted_statuses = terminal_statuses or {
+            "succeeded", "not_ready", "failed", "timed_out",
+        }
         for record in ledger.values():
             if record.tool_name != tool_name:
                 continue
@@ -257,7 +260,7 @@ class FinalizationGate:
                 raise StructuredResponseError(
                     "evidence action ledger terminal status mismatch"
                 )
-            if record.final_status in terminal_statuses:
+            if record.final_status in accepted_statuses:
                 return True
         return False
 
@@ -507,6 +510,10 @@ class FinalizationGate:
                 lease_epoch=current_lease,
                 worker_id=current_worker,
                 input_identity=current_input,
+                terminal_statuses={
+                    "succeeded", "not_ready", "failed", "timed_out",
+                    "not_applicable",
+                },
             )
         ):
             raise StructuredResponseError(
@@ -639,7 +646,7 @@ FINALIZATION_RETRY_HINTS: dict[str, str] = {
     ),
     "effect_question_without_ate_attempt": (
         "本次问题要求估计处理变量对结果变量的效应，且已有有效因果图。"
-        "请携带其中一张图的 result_ref、treatment、outcome 调用一次 causal_ate；"
+        "请携带其中一张图的 graph_result_ref、treatment、outcome 调用一次 causal_ate；"
         "即使你认为该图不适用，也保留真实返回的未就绪/不适用/失败状态。"
         "若最终不采用任何图，请改用 evidence_only 并把所有有效结果标记为 discarded。"
     ),
