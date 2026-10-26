@@ -63,6 +63,9 @@ MANDATORY_ALGORITHM_INSTRUCTION = (
     "analysis_parameters.nonlinearity.ratio 是数据集非线性强度相对噪声上限的倍数"
     "（≥1 才算检出）：明显大于 1 时优先考虑非线性能力更强的算法；小于 1 只代表"
     "未检出，不能据此排除非线性机制。"
+    "若 analysis_parameters 中 target 与 treatment 都已指定，在获得有效标准图后"
+    "必须调用 causal_ate；即使你认为该图不可信，也要保留一次真实的估计或"
+    "不可估计结果。"
 )
 
 

@@ -139,4 +139,5 @@ def test_linearity_signal_and_preprocess_report_reach_the_algorithm_prompt() -> 
     assert payload["preprocess_summary"].startswith("非线性度")
     assert payload["analysis_parameters"]["nonlinearity"] == nonlinearity
     assert "nonlinearity.ratio" in MANDATORY_ALGORITHM_INSTRUCTION
+    assert "causal_ate" in MANDATORY_ALGORITHM_INSTRUCTION
 
