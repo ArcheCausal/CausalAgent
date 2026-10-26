@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import time
+import base64
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -283,10 +284,104 @@ def collect_jobs(run_id: str, path: str) -> dict:
         j.get("execution_release_reason") or "missing" for j in result["jobs"]))
     result["drained"] = (False if result["business_drained"] is False or result["execution_drained"] is False else
         True if result["business_drained"] is True and result["execution_drained"] is True else None)
+    # 沙盒资源释放与业务终态、执行释放并列判定；缺少本轮会话证据时保持未知。
+    sandboxes = sandbox_sessions(db, job_ids)
+    sessions = sandboxes.get("sessions") or []
+    sandbox_status_known = sandboxes.get("status") == "collected"
+    open_sessions = [item for item in sessions if item.get("status") != "closed"]
+    uncertain = [item for item in sessions if item.get("status") == "uncertain"]
+    sandbox_closed = (not open_sessions) if sandbox_status_known else None
+    result["sandbox"] = {
+        "schema_version": "loadtest.sandbox-evidence.v1",
+        "status": sandboxes.get("status"), "reason": sandboxes.get("reason"),
+        "jobs_with_sessions": len({item.get("job_id") for item in sessions if item.get("job_id")}),
+        "session_count": len(sessions),
+        "closed": sum(1 for item in sessions if item.get("status") == "closed"),
+        "open": len(open_sessions), "uncertain": len(uncertain),
+        "succeeded_operations": sum(1 for item in sessions if item.get("operation_status") == "succeeded"),
+        "pending_operations": sum(1 for item in sessions if item.get("operation_status") == "pending"),
+        "remote_identity_known": sum(1 for item in sessions if item.get("remote_sandbox_id")),
+        "timings": sandbox_timing(sandboxes), "sessions": sessions,
+    }
+    result["sandbox_drained"] = sandbox_closed
+    # 完整排空要求业务终态、执行释放、沙盒关闭三类证据都成立且身份核对完整。
+    result["complete_drained"] = (
+        None if complete is False or sandbox_closed is None else
+        bool(complete and result["business_drained"] is True and result["execution_drained"] is True
+             and sandbox_closed is True and all(item.get("remote_sandbox_id") or item.get("status") == "closed"
+                                               for item in sessions)))
+    return result
+
+
+SANDBOX_SESSION_FIELDS = (
+    "request_id", "remote_sandbox_id", "status", "operation_status",
+    "attempt_count", "lease_epoch", "created_at", "closed_at", "heartbeat_at", "expires_at",
+)
+
+
+def request_label(request_id: str) -> str | None:
+    """与控制服务一致的请求标签：32 字节 base32 小写、去掉填充。"""
+    try:
+        return base64.b32encode(bytes.fromhex(request_id)).decode("ascii").rstrip("=").lower()
+    except (ValueError, AttributeError):
+        return None
+
+
+def sandbox_sessions(db: "Primary", job_ids: list[str]) -> dict:
+    """按本轮 Job 读取沙盒生命周期，并给出阶段时间与远端身份。"""
+    result = {"status": "missing", "sessions": [], "request_ids": [], "reason": None}
+    if not job_ids:
+        result["reason"] = "no_job_ids"
+        return result
+    # job_id 是 VARCHAR 主键；只接受受限 ASCII 标识符后直接引用，避免字符序转换失败。
+    safe_ids = [job_id for job_id in job_ids if re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", str(job_id))]
+    if len(safe_ids) != len(job_ids):
+        result["reason"] = "invalid_job_id"
+        return result
+    quoted = ",".join("'" + job_id + "'" for job_id in safe_ids)
+    rows = db.query(
+        "SELECT JSON_OBJECT(" + ",".join(f"'{name}',s.{name}" for name in SANDBOX_SESSION_FIELDS)
+        + ",'stage_timings',JSON_EXTRACT(s.metadata,'$.stage_timings')"
+        + ",'execute_plan_version',JSON_EXTRACT(s.metadata,'$.execute_plan_version'))"
+        + " FROM analysis_sandbox_sessions s WHERE s.job_id IN (" + quoted + ") ORDER BY s.id"
+    )
+    if rows is None:
+        result["reason"] = "query_failed"
+        return result
+    sessions = []
+    for row in rows:
+        created, closed = epoch(row.get("created_at")), epoch(row.get("closed_at"))
+        sessions.append({
+            **{name: row.get(name) for name in SANDBOX_SESSION_FIELDS},
+            "request_label": request_label(str(row.get("request_id") or "")),
+            "stage_timings": row.get("stage_timings") if isinstance(row.get("stage_timings"), dict) else None,
+            "plan_version_recorded": bool(row.get("execute_plan_version")),
+            "lifetime_ms": round((closed - created) * 1000, 3) if created is not None and closed is not None else None,
+        })
+    result.update(status="collected", sessions=sessions,
+                  request_ids=[item["request_id"] for item in sessions])
+    return result
+
+
+def sandbox_timing(payload: dict) -> dict:
+    """汇总阶段时间；缺失阶段显示为未采集，不做推算。"""
+    stages = {"reserve_committed": [], "remote_created": [], "initialized": [],
+              "execute_started": [], "execute_finished": []}
+    for session in payload.get("sessions") or []:
+        timings = session.get("stage_timings") or {}
+        for name in stages:
+            value = epoch(timings.get(name)) if isinstance(timings, dict) else None
+            if value is not None:
+                stages[name].append(value)
+    result = {}
+    for name, values in stages.items():
+        result[name] = {"samples": len(values),
+                        "min_ms": round((max(values) - min(values)) * 1000, 3) if len(values) > 1 else None}
     return result
 
 
 def host_sample() -> dict:
+    result = {"timestamp": utc_now()}
     result = {"timestamp": utc_now()}
     try:
         loads = Path("/proc/loadavg").read_text().split()
@@ -304,6 +399,62 @@ def host_sample() -> dict:
     except (OSError, ValueError, IndexError):
         result["status"] = "missing"
     return result
+
+
+def attributed_containers(db: "Primary", owners: dict[str, str] | None = None) -> dict:
+    """按应用标签与请求标签归属动态沙盒容器；名称只作为补充线索。
+
+    owners 是远端容器标识到本轮请求标签的映射，来自本轮沙盒会话证据。未取得标签或
+    映射的容器单列为未归属，不按名称猜测成本轮资源。
+    """
+    owners = owners or {}
+    result = {"status": "unknown", "attribute": "docker_labels", "mine": [], "background": [],
+              "unattributed": [], "exited": [], "oom_killed": []}
+    listing = execute([*db.docker, "ps", "-a", "--filter", "label=application=causalagent",
+                       "--format", "{{json .}}"], 30)
+    if listing is None:
+        return result
+    try:
+        items = [json.loads(line) for line in listing.splitlines() if line.strip()]
+    except (ValueError, TypeError):
+        return result
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("Names") or "")
+        labels = item.get("Labels") or ""
+        request_label = None
+        for part in str(labels).split(","):
+            key, separator, value = part.partition("=")
+            if separator and key.strip() == "request":
+                request_label = value.strip()
+        entry = {"name": name, "request_label": request_label,
+                 "status": str(item.get("Status") or ""),
+                 "state": str(item.get("State") or "")}
+        if "exited" in entry["state"].lower() or "exited" in entry["status"].lower():
+            result["exited"].append(name)
+        owner = owners.get(request_label) if request_label else None
+        if owner:
+            entry["owner_request_id"] = owner
+            result["mine"].append(entry)
+        elif request_label:
+            result["background"].append(entry)
+        else:
+            result["unattributed"].append(entry)
+    result["status"] = "collected"
+    return result
+
+
+def _container_owners(db: "Primary") -> dict[str, str]:
+    """本轮会话请求标签到请求 ID 的映射；未取得会话记录时为空。"""
+    rows = db.query("SELECT JSON_OBJECT('request_id',request_id) FROM analysis_sandbox_sessions")
+    owners: dict[str, str] = {}
+    for row in rows or []:
+        request_id = str(row.get("request_id") or "")
+        label = request_label(request_id)
+        if label:
+            owners[label] = request_id
+    return owners
 
 
 def resource_sample(db: Primary) -> dict:
@@ -337,7 +488,9 @@ def resource_sample(db: Primary) -> dict:
                                 for key, source in keys.items()})
         if all(connection_data.get(key) is not None for key in keys):
             connection_data["status"] = "collected"
+    sandbox_containers = attributed_containers(db, _container_owners(db))
     return {"host": host_sample(), "containers": containers,
+            "sandbox_containers": sandbox_containers,
             "queue": {"status": "collected", "scope": "database_background", **queue[0]} if queue else {"status": "unknown"},
             "connections": connection_data}
 

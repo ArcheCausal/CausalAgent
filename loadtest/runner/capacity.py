@@ -216,6 +216,10 @@ def enrich_summary(source: dict) -> dict:
     phase_stats = _phases(summary, samples, db_rows)
     capacity["phases"] = phase_stats
     _drain_evidence(summary, db if db_available else {}, samples, n)
+    capacity["sandbox"] = _sandbox_evidence(summary, db if db_available else {}, n)
+    capacity["interaction"] = _interaction_evidence(summary, n)
+    capacity["conclusion"] = _conclusion(summary, capacity, samples)
+    _complete_drain(summary, capacity["sandbox"], n)
     summary["phases"] = phase_stats
     summary["capacity"] = capacity
     if has_ledger:
@@ -290,6 +294,144 @@ def _drain_evidence(summary: dict, db: dict, samples: list[dict], denominator: i
             if elapsed >= drain.get("checkpoint_ms", 300000):
                 drain.setdefault("checkpoint", {})["drained"] = False
     summary["drain"] = drain
+
+
+def _conclusion(summary: dict, capacity: dict, samples: list[dict]) -> dict:
+    """给出三项容量结论；只用本轮实测值，缺阈值或缺证据保持未确定。"""
+    load = (capacity.get("phases") or {}).get("load") or {}
+    curve = summary.get("resource_curve") or {}
+    groups = capacity.get("latency_groups") or {}
+    thresholds = summary.get("latency_targets_ms") or {}
+    sustained = load.get("client_completion_throughput")
+    server_rate = load.get("server_completion_throughput")
+    target = thresholds.get("server_total_ms") if isinstance(thresholds, dict) else None
+    within = []
+    for name, bucket in groups.items():
+        p95 = bucket.get("completed_sample_p95_server_total_ms")
+        if isinstance(p95, (int, float)) and isinstance(target, (int, float)) and p95 <= target:
+            within.append(name)
+    # 先报告看到的第一处饱和；没有任何饱和证据时保持未确定，不猜测瓶颈组件。
+    limiting = None
+    cpu = curve.get("cpu_percent_max")
+    available = curve.get("mem_available_mb_min")
+    connections = curve.get("threads_connected_max")
+    sandbox_containers = (curve.get("sandbox_containers") or {}).get("mine_peak")
+    if isinstance(cpu, (int, float)) and cpu >= 90:
+        limiting = "host_cpu"
+    elif isinstance(available, (int, float)) and available <= 512:
+        limiting = "host_memory"
+    elif load.get("queue_phase_basis") and (load.get("completed_sample_queue_p95_ms") or 0) > 0:
+        limiting = "job_queue_wait"
+    return {
+        "schema_version": "loadtest.capacity-conclusion.v1",
+        "sustained_completion_per_second": sustained,
+        "sustained_server_completion_per_second": server_rate,
+        "active_job_range_within_latency_target": within or None,
+        "latency_target_ms": target,
+        "first_limiting_component": limiting,
+        "evidence": {"cpu_percent_max": cpu, "mem_available_mb_min": available,
+                     "threads_connected_max": connections, "sandbox_containers_peak": sandbox_containers,
+                     "queue_p95_ms": load.get("completed_sample_queue_p95_ms")},
+        "boundary": ("阈值需由基线实测确定后再固定；当前没有实测基线时，活动 Job 范围与瓶颈组件保持未确定。"
+                     if not isinstance(target, (int, float)) else
+                     "瓶颈只按本轮已采集到的饱和证据给出；缺少沙盒容量、模型请求或数据库等待证据时不能归因。"),
+    }
+
+
+def _sandbox_evidence(summary: dict, db: dict, denominator: int) -> dict:
+    """汇总本轮沙盒会话证据；旧产物没有该字段时全部显示未采集。
+
+    一个 Job 可以创建多个沙盒会话，因此分母是 Job 数，覆盖率按有会话记录的 Job 计算。
+    """
+    evidence = (db or {}).get("sandbox") or {}
+    sessions = evidence.get("sessions") or []
+    status = evidence.get("status") if evidence else None
+    jobs = {str(item.get("job_id")) for item in sessions if item.get("job_id")}
+    durations = []
+    for item in sessions:
+        created, closed = epoch(item.get("created_at")), epoch(item.get("closed_at"))
+        if created is not None and closed is not None and closed >= created:
+            durations.append((closed - created) * 1000)
+    operation = Counter(str(item.get("operation_status") or "missing") for item in sessions)
+    lifecycle = Counter(str(item.get("status") or "missing") for item in sessions)
+    covered = len(jobs) if status == "collected" else 0
+    collected = status == "collected"
+    return {
+        "schema_version": "loadtest.sandbox-capacity.v1",
+        "status": status or "not_collected",
+        "job_denominator": denominator,
+        "jobs_with_sessions": len(jobs) if collected else None,
+        "job_coverage": _rate(covered, denominator) if collected else None,
+        "sessions": len(sessions) if collected else None,
+        "sessions_per_job": round(len(sessions) / len(jobs), 3) if jobs else None,
+        "closed": lifecycle.get("closed") if collected else None,
+        "open": sum(v for k, v in lifecycle.items() if k != "closed") if collected else None,
+        "uncertain": lifecycle.get("uncertain") if collected else None,
+        "operation_succeeded": operation.get("succeeded") if collected else None,
+        "operation_pending": operation.get("pending") if collected else None,
+        "sessions_without_remote_id": (sum(1 for item in sessions if not item.get("remote_sandbox_id"))
+                                       if collected else None),
+        "lifetime_p95_ms": percentile(durations, .95),
+        "lifetime_samples": len(durations),
+        "timings": evidence.get("timings"),
+        "source": "mysql-primary/analysis_sandbox_sessions",
+    }
+
+
+def _interaction_evidence(summary: dict, denominator: int) -> dict:
+    """统计交互轮次、类型分布与自动答复覆盖；未记录时保持未采集。"""
+    requests = summary.get("requests")
+    if not isinstance(requests, list):
+        return {"status": "not_collected", "rounds": None, "answered": None,
+                "unrecognized": None, "deviation": None, "types": None,
+                "plan_confirmations": None, "status_counts": None}
+    rounds, counts, jobs = 0, Counter(), set()
+    answered = unrecognized = deviation = confirmations = 0
+    statuses: Counter = Counter()
+    for row in requests:
+        history = row.get("interactions")
+        if not isinstance(history, list) or not history:
+            continue
+        jobs.add(str(row.get("job_id") or row.get("logical_request_id")))
+        rounds += len(history)
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("interaction_type") or "unknown")
+            status = item.get("interaction_status")
+            counts[kind] += 1
+            statuses[str(status or "unrecorded")] += 1
+            answered += int(status == "answered")
+            unrecognized += int(status in {"unrecognized", "budget_exhausted"})
+            deviation += int(status == "deviation")
+            confirmations += int(kind == "data_processing_plan_confirmation" and status == "answered")
+    return {"status": "collected" if rounds else "no_interactions",
+            "rounds": rounds, "jobs_with_interactions": len(jobs),
+            "answered": answered, "unrecognized": unrecognized, "deviation": deviation,
+            "plan_confirmations": confirmations, "types": dict(counts),
+            "status_counts": dict(statuses) if rounds else None,
+            "job_denominator": denominator,
+            "pause_ms": percentile([row.get("interaction_pause_ms") for row in requests
+                                    if isinstance(row.get("interaction_pause_ms"), (int, float))], .95)}
+
+
+def _complete_drain(summary: dict, sandbox: dict, denominator: int) -> None:
+    """在业务结束、执行释放之外补出沙盒释放与完整排空结论。"""
+    drain = summary.setdefault("drain", {})
+    evidence = (summary.get("job_db_check") or {}).get("sandbox") or {}
+    drain["sandbox_released"] = evidence.get("sandbox_drained")
+    drain["sandbox_sessions_closed"] = sandbox.get("closed")
+    drain["sandbox_sessions_open"] = sandbox.get("open")
+    drain["sandbox_sessions_uncertain"] = sandbox.get("uncertain")
+    drain["sandbox_evidence_status"] = sandbox.get("status")
+    complete = evidence.get("complete_drained")
+    drain["complete_drained"] = complete
+    if complete is False:
+        drain["finally_drained"] = False
+    if complete is None:
+        drain["complete_drain_reason"] = ("sandbox_evidence_missing"
+                                          if sandbox.get("status") != "collected"
+                                          else "incomplete_evidence")
 
 
 def _phases(summary: dict, samples: list[dict], db_rows: dict) -> dict:

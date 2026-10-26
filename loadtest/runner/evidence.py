@@ -27,6 +27,12 @@ STAGE_ORDER = [
     "multi_session_pressure",
     "cdfm_fixed",
     "cdfm_rate",
+    "sandbox_baseline",
+    "sandbox_repeat",
+    "sandbox_ladder",
+    "sandbox_rate",
+    "sandbox_mixed",
+    "sandbox_stability",
 ]
 
 
@@ -428,7 +434,8 @@ def _summary_table(selected: dict[str, Path]) -> list[str]:
     columns = ["档位", "run_id", "虚拟用户", "HTTP RPS", "HTTP p95 ms", "5xx", "唯一 Job", "主库核对/成功",
                "已完成样本排队 p95 ms（分组）", "已完成样本执行跨度 p95 ms（分组）",
                "已完成样本服务器总耗时 p95 ms（分组）", "活动 Job 峰值", "SSE 峰值", "断线/重连",
-               "已核对缺失事件", "全窗口 CPU 均值/峰值 %", "可用内存最低 MB"]
+               "已核对缺失事件", "沙盒会话 Job 覆盖", "会话 关闭/未关闭/uncertain", "完整排空",
+               "全窗口 CPU 均值/峰值 %", "可用内存最低 MB"]
     rows = ["## 跨档摘要", "", "| " + " | ".join(columns) + " |", "| " + " | ".join(["---"] * len(columns)) + " |"]
     for stage in STAGE_ORDER:
         path = selected.get(stage)
@@ -440,6 +447,8 @@ def _summary_table(selected: dict[str, Path]) -> list[str]:
             capacity, curve = summary.get("capacity") or {}, summary.get("resource_curve") or {}
             success = capacity.get("db_success") or {}
             groups = capacity.get("latency_groups") or {}
+            sandbox = capacity.get("sandbox") or {}
+            drain = summary.get("drain") or {}
 
             def grouped(field):
                 parts = []
@@ -456,6 +465,11 @@ def _summary_table(selected: dict[str, Path]) -> list[str]:
                      _value(summary.get("peak_active_jobs")), _value(summary.get("peak_sse")),
                      f"{_value(sse.get('disconnects'))}/{_value(sse.get('reconnects'))}",
                      _value((capacity.get("sse_integrity") or {}).get("missing_events")),
+                     ("未采集" if sandbox.get("status") not in {"collected"} else
+                      f"{_value(sandbox.get('jobs_with_sessions'))}/{_value(sandbox.get('job_denominator'))}"),
+                     ("未采集" if sandbox.get("status") != "collected" else
+                      f"{_value(sandbox.get('closed'))}/{_value(sandbox.get('open'))}/{_value(sandbox.get('uncertain'))}"),
+                     _value(drain.get("complete_drained")),
                      f"{_value(curve.get('cpu_percent_avg'))}/{_value(curve.get('cpu_percent_max'))}",
                      _value(curve.get("mem_available_mb_min"))]
         rows.append("| " + " | ".join(str(cell) for cell in cells) + " |")

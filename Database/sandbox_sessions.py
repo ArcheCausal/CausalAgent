@@ -27,6 +27,10 @@ _HASH_PATTERN = re.compile(r"[0-9a-f]{64}")
 _OWNER_FIELDS = ("job_id", "worker_id", "attempt_count", "lease_epoch")
 _JSON_FIELDS = ("metadata", "operation_result")
 _EXECUTE_PLAN_VERSION_KEY = "execute_plan_version"
+_TIMING_KEY = "stage_timings"
+_TIMING_STAGES = frozenset(
+    {"reserve_committed", "remote_created", "initialized", "execute_started", "execute_finished"}
+)
 _TRANSITIONS = {
     "creating": {"creating", "active", "uncertain", "deleting", "closed"},
     "active": {"active", "uncertain", "deleting", "closed"},
@@ -413,6 +417,31 @@ def heartbeat_session(request_id: str, identity: Mapping) -> dict:
                WHERE request_id = %s AND version = %s""",
             (request_id, row["version"]),
         )
+        return _row(cursor, request_id)
+
+
+def record_stage_timing(request_id: str, stage: str) -> dict:
+    """记录一次沙盒阶段时间；同一阶段只写第一次，不改变生命周期状态。
+
+    只用数据库时钟，避免控制服务宿主与数据库之间存在时差。阶段名限定为固定集合，
+    metadata 只保存阶段名与时间，不保存脚本、文件正文或凭据。
+    """
+    if stage not in _TIMING_STAGES:
+        raise ValueError("unsupported sandbox timing stage")
+    _identifier(request_id, "request_id")
+    with _transaction() as cursor:
+        row = _row(cursor, request_id, lock=True)
+        if row["status"] == "closed":
+            return row
+        cursor.execute(
+            """UPDATE analysis_sandbox_sessions
+               SET metadata = JSON_SET(metadata, %s, COALESCE(
+                       JSON_EXTRACT(metadata, %s), DATE_FORMAT(UTC_TIMESTAMP(6), '%Y-%m-%dT%H:%i:%s.%fZ'))),
+                   updated_at = UTC_TIMESTAMP(6), version = version + 1
+               WHERE request_id = %s AND version = %s""",
+            (f"$.{_TIMING_KEY}.{stage}", f"$.{_TIMING_KEY}.{stage}", request_id, row["version"]),
+        )
+        # 并发更新时本阶段时间可能没有写入；返回当前行，由调用方按缺失处理。
         return _row(cursor, request_id)
 
 

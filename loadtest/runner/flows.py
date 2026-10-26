@@ -18,7 +18,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from runner import config
+from runner import config, interaction
 from runner.api import ApiError, UserClient, new_idempotency_key
 from runner.metrics import JobSample, Recorder
 
@@ -159,7 +159,10 @@ class VirtualUser:
         self.csv = (build_cdfm_csv(int(self.spec.get("rows", config.CDFM_ROWS)),
                                    int(self.spec.get("seed", config.CDFM_SEED)))
                     if self.scenario.startswith("cdfm") else build_csv(context.index))
-        self.message = config.CDFM_MESSAGE if self.scenario.startswith("cdfm") else MESSAGE
+        self.message = (str(self.spec.get("message") or "")
+                        or (config.CDFM_MESSAGE if self.scenario.startswith("cdfm") else MESSAGE))
+        self.profile = interaction.profile_from_spec(self.spec)
+        self._ledgers: dict[str, interaction.InteractionLedger] = {}
         self.sse_gate = context.client.sse_gate
         self._session_lock = threading.Lock()
         self._prepare_lock = threading.Lock()
@@ -606,18 +609,22 @@ class VirtualUser:
         return job_id
 
     def _answer_interrupt(self, job_id: str, payload: dict, deadline: float) -> bool:
-        interaction = payload.get("interaction") or {}
-        question_id = payload.get("question_id") or interaction.get("question_id")
-        if not question_id:
-            self.recorder.lifecycle(job_id=job_id, event="resume_error",
-                                    resume_error="missing_question_id")
+        """按交互类型答复；未识别或超出场景约束时记录缺口，不发送默认答复。"""
+        ledger = self._ledgers.setdefault(job_id, interaction.InteractionLedger(
+            max_rounds=self.profile.max_rounds,
+            max_interaction_seconds=self.profile.max_interaction_seconds))
+        decision = interaction.decide(payload, job_id, self.profile, ledger)
+        self.recorder.lifecycle(job_id=job_id, event="interaction_decided",
+                                interaction_round=len(ledger.rounds),
+                                interactions=list(ledger.rounds), **decision.record())
+        answered_started = time.monotonic()
+        if not decision.sendable:
+            # 缺口写入运行说明，供报告区分“未识别”和“已经答复”。
+            self.recorder.note(
+                f"交互未答复：job={job_id} type={decision.interaction_type or 'unknown'} "
+                f"status={decision.status} detail={decision.detail or '-'}")
             return False
-        options = [option for option in interaction.get("options", [])
-                   if isinstance(option, dict) and option.get("option_id")]
-        if self.scenario.startswith("cdfm"):
-            options = [option for option in options if option.get("capability_id") == "causal.cdfm"]
-        answer = {"option_id": options[0]["option_id"]} if options else "请按默认参数继续分析。"
-        key, errors = new_idempotency_key(), []
+        key, errors = decision.key, []
         for attempt in range(1, config.CREATE_MAX_ATTEMPTS + 1):
             if self.recorder.observation_stop.is_set() or time.monotonic() >= min(
                     deadline, self.recorder.observation_deadline):
@@ -625,11 +632,15 @@ class VirtualUser:
             try:
                 remaining = min(deadline, self.recorder.observation_deadline) - time.monotonic()
                 status, body = self.ctx.client.resume_job(
-                    job_id, str(question_id), answer, key,
+                    job_id, decision.question_id, decision.answer, key,
                     timeout=max(0.001, min(config.HTTP_TIMEOUT_SECONDS, remaining)))
                 if status in (200, 202):
                     self.recorder.lifecycle(job_id=job_id, event="resume_accepted",
-                                            resume_errors=errors, resume_idempotency_key=key)
+                                            resume_errors=errors, resume_idempotency_key=key,
+                                            interaction_type=decision.interaction_type or None,
+                                            plan_version=decision.plan_version,
+                                            interactions=list(ledger.rounds),
+                                            interaction_pause_ms=(time.monotonic() - answered_started) * 1000)
                     return True
                 errors.append({"attempt": attempt, "status": status, "code": body.get("code")})
                 if status < 500:

@@ -126,6 +126,7 @@ def summarize(sample: dict, *, _with_phases: bool = True) -> dict:
         "threads_connected_max": max(connections) if connections else None,
         "container_states_last": _last_field(samples, "container_states"),
         "exited_containers_last": _last_field(samples, "exited_containers"),
+        "sandbox_containers": _sandbox_containers(samples),
     }
     if _with_phases:
         from ops.server_evidence import epoch
@@ -155,6 +156,26 @@ def summarize(sample: dict, *, _with_phases: bool = True) -> dict:
     return summary
 
 
+def _sandbox_containers(samples: list) -> dict:
+    """汇总动态沙盒容器的归属；早期的扁平采样没有这一层，保持未采集。"""
+    seen = [sample.get("sandbox_containers") for sample in samples
+            if isinstance(sample.get("sandbox_containers"), dict)]
+    if not seen:
+        return {"status": "not_collected", "mine_peak": None, "background_peak": None,
+                "unattributed_peak": None, "exited": None, "statuses": None}
+    mine = [len(item.get("mine") or []) for item in seen if item.get("status") == "collected"]
+    background = [len(item.get("background") or []) for item in seen if item.get("status") == "collected"]
+    unattributed = [len(item.get("unattributed") or []) for item in seen if item.get("status") == "collected"]
+    exited = [name for item in seen for name in (item.get("exited") or [])]
+    return {"status": "collected" if mine else "not_collected",
+            "attribute": "docker_labels",
+            "mine_peak": max(mine) if mine else None,
+            "background_peak": max(background) if background else None,
+            "unattributed_peak": max(unattributed) if unattributed else None,
+            "exited": sorted(set(exited)) or None,
+            "samples": len(mine)}
+
+
 def render(summary: dict | None) -> list[str]:
     """把资源摘要渲染为报告段落；没有采样时如实说明。"""
     if not summary:
@@ -179,6 +200,14 @@ def render(summary: dict | None) -> list[str]:
         f"- 主库连接数峰值：{_show(summary.get('threads_connected_max'))}",
         f"- 窗口末容器：{_container_summary(summary)}",
     ]
+    sandbox = summary.get("sandbox_containers") or {}
+    if sandbox.get("status") == "collected":
+        lines.append(
+            f"- 动态沙盒容器（按 Docker 标签归属）：本轮峰值 {sandbox.get('mine_peak')} 个；"
+            f"其他请求标签 {sandbox.get('background_peak')} 个；未归属 {sandbox.get('unattributed_peak')} 个；"
+            f"窗口内已退出：{'、'.join(sandbox.get('exited') or []) or '无'}")
+    else:
+        lines.append("- 动态沙盒容器：未采集（需要采集脚本按 application=causalagent 与 request 标签归属）")
     lines.extend(["", "| 资源阶段 | 样本数 | CPU 均值/峰值 % | 可用内存最低 MB | 排队峰值 | 连接峰值 |",
                   "| --- | --- | --- | --- | --- | --- |"])
     phases = summary.get("phases") or {}

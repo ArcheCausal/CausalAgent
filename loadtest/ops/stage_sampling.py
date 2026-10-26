@@ -51,6 +51,13 @@ SPECS: dict[str, tuple[list[str], int]] = {
     ),
     "cdfm_fixed": (["stage", "--stage", "cdfm_fixed"], 7500),
     "cdfm_rate": (["stage", "--stage", "cdfm_rate"], 500),
+    # 沙盒专项按档位定义运行；单任务与重复档位不覆盖持续时间。
+    "sandbox_baseline": (["stage", "--stage", "sandbox_baseline"], 900),
+    "sandbox_repeat": (["stage", "--stage", "sandbox_repeat"], 3600),
+    "sandbox_ladder": (["stage", "--stage", "sandbox_ladder", "--duration", "180"], 3600),
+    "sandbox_rate": (["stage", "--stage", "sandbox_rate"], 1800),
+    "sandbox_mixed": (["stage", "--stage", "sandbox_mixed", "--duration", "300"], 1200),
+    "sandbox_stability": (["stage", "--stage", "sandbox_stability", "--duration", "1800"], 2700),
 }
 
 
@@ -280,9 +287,15 @@ def check_jobs_in_db(stage: str, run_id: str, phase: str = "final") -> dict:
 def load_runtime_budget(stage: str, sampling_budget: int) -> float:
     """full_flow 按每个账号内串行轮数计算；账号之间并发，不乘账号数。"""
     spec = config.STAGES.get(stage, {})
-    serial = int(spec.get("flows") or 1) if spec.get("mode") == "full_flow" else 1
+    serial = (int(spec.get("flows") or 1)
+              if spec.get("mode") in {"full_flow", "sandbox_flow"} else 1)
     if stage == "cdfm_fixed":
         serial = int(spec.get("tasks") or 1)
+    if stage == "sandbox_rate":
+        serial = int(spec.get("tasks") or 1)
+    if stage == "sandbox_ladder":
+        # 每个并发档位都按单档持续时间与一个观察期限计算，档位之间不共享预算。
+        serial = len(spec.get("ladder") or [1])
     if stage == "recovery":
         # 专项检查顺序执行多个真实 Job，不使用 mixed 档的持续时间推算。
         serial = 12

@@ -233,6 +233,9 @@ class Recorder:
         for row in requests:
             if row.get("created_request_at") is not None and row.get("terminal_received_at") is None:
                 row["wait_lower_bound_ms"] = max(0, observed_until - row["created_request_at"]) * 1000
+        # 交互轮次随每个逻辑请求保存；旧产物没有该字段，报告按未采集处理。
+        for row in requests:
+            row.setdefault("interactions", None)
 
         durations = [s.duration_ms for s in http]
         status_counts = Counter(s.status for s in http)
@@ -395,6 +398,7 @@ class Recorder:
             },
             "server_baseline": self.server_baseline,
             "server_after": self.server_after,
+            "interaction_schema_version": "loadtest.interaction.v1",
             "notes": notes,
         }
         from runner.capacity import enrich_summary

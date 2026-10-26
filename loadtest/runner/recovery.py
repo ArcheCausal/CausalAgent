@@ -13,16 +13,20 @@ import httpx
 from runner import config
 from runner.accounts import Account
 from runner.api import ApiError, UserClient, new_idempotency_key
+from runner import interaction
 from runner.flows import MESSAGE, build_csv
 from runner.manifest import collect_client_manifest
 from runner.metrics import HttpSample, Recorder, SseSample
 from runner.sse import iter_events
 
 TERMINAL = {"final_result", "error", "canceled"}
+SANDBOX_MESSAGE = config.SANDBOX_MESSAGE
+SANDBOX_PROFILE = interaction.profile_from_spec(dict(config.SANDBOX_SCENARIO, mode="sandbox_cancel"))
 SPECIAL_GAPS = [
     "取消执行释放：需主库 execution_state、execution_released_at、释放原因和 worker 槽位前后证据；取消 API 成功仅证明业务取消。",
     "算法进程终止：需真实 invocation 与目标 PID、取消响应、PID 消失及重复取消证据；本专项不执行进程终止操作。",
     "前端阶段：需真实浏览器刷新恢复、waiting_input 展示、取消后迟到事件不反转及页面交互证据；API 检查不证明前端通过。",
+    "沙盒资源释放：需 analysis_sandbox_sessions 关闭时间与远端身份核对；缺少该证据时完整排空为未知。",
 ]
 
 
@@ -62,7 +66,7 @@ class RecoverySuite:
         self.file_id = self.client.upload_csv("loadtest_recovery.csv", build_csv(90))
 
     def _create_job(self, session_id: str, message: str, file_id: int | None, key: str,
-                    payload_variant: str = "original") -> tuple[int, dict]:
+                    payload_variant: str = "original", *, sandbox: bool = False) -> tuple[int, dict]:
         logical_id = new_idempotency_key()
         started_at, started = time.time(), time.monotonic()
         deadline = started + config.JOB_OBSERVE_DEADLINE_SECONDS
@@ -70,7 +74,8 @@ class RecoverySuite:
                                                  "input_user_file_id": file_id, "web_search_enabled": False},
                                                 sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
         self.recorder.register_request(
-            logical_id, created_request_at=started_at, group="recovery", session_id=session_id,
+            logical_id, created_request_at=started_at, group="sandbox" if sandbox else "recovery",
+            scenario="sandbox_cancel" if sandbox else "recovery", session_id=session_id,
             username=self.account.username, user_index=1, idempotency_key=key,
             payload_variant=payload_variant, payload_fingerprint=fingerprint,
             intentional_conflict=payload_variant == "different_message",
@@ -292,6 +297,125 @@ class RecoverySuite:
     def check_cancel_running(self) -> None:
         self._check_cancel("running")
 
+    def check_cancel_waiting_plan(self) -> None:
+        """等待方案确认时取消：取消后不得执行该方案，旧确认不能恢复已取消任务。"""
+        name = "取消等待方案确认的 Job"
+        session = self.client.new_chat()
+        status, payload = self._create_job(session, SANDBOX_MESSAGE, self.file_id, new_idempotency_key(),
+                                           sandbox=True)
+        job_id = str(payload.get("job_id") or "")
+        if status not in (200, 202) or job_id not in self.job_requests:
+            self.record(name, False, f"创建失败，HTTP {status}")
+            return
+        first, plan_version, question = self._await_plan_confirmation(job_id)
+        if first is None:
+            self.record(name, None, "观察期限内未取得方案确认交互，该分支未验证")
+            self._cancel(job_id, "结束未触发的等待确认检查")
+            return
+        cancel_status, _ = self.client.cancel_job(job_id, new_idempotency_key())
+        history = self._job_status_in_history(session, job_id)
+        late = None
+        if question and plan_version:
+            # 旧确认提交到已取消任务必须被拒绝，且不能产生新的执行。
+            late, _ = self.client.resume_job(job_id, question,
+                                             json.dumps({"action": "confirm", "plan_version": plan_version}),
+                                             new_idempotency_key())
+        stream = self._read_segment(job_id, first)
+        self.record(name, cancel_status in (200, 202) and history == "canceled"
+                    and stream["terminal"] == "canceled" and late in (None, 409, 404),
+                    f"取消前观察到方案确认；取消 {cancel_status}、历史 {history}、重放终态 {stream['terminal']}；"
+                    f"旧确认提交状态 {late}；脚本未执行的证据需主库沙盒操作状态核对")
+
+    def check_cancel_capacity_wait(self) -> None:
+        """等待沙盒容量时取消；没有独立容量等待计时事件时不判定通过。"""
+        self.record("取消等待沙盒容量的 Job", None,
+                    "Worker 尚未记录本地并发与全局容量的等待区间；不能按容量拒绝次数推断取消发生在等待阶段，"
+                    "该分支保持未验证。")
+
+    def check_cancel_executing(self) -> None:
+        """脚本执行期间取消：必须有实际执行开始证据，终态不反转。"""
+        name = "取消执行中的 Job"
+        session = self.client.new_chat()
+        status, payload = self._create_job(session, SANDBOX_MESSAGE, self.file_id, new_idempotency_key(),
+                                           sandbox=True)
+        job_id = str(payload.get("job_id") or "")
+        if status not in (200, 202) or job_id not in self.job_requests:
+            self.record(name, False, f"创建失败，HTTP {status}")
+            return
+        started, observed = self._drive_to_execution(job_id)
+        if not started:
+            self.record(name, None, f"未取得实际执行开始证据（当前观察 {observed}），执行中取消分支未验证")
+            self._cancel(job_id, "结束未进入执行阶段的检查")
+            return
+        cancel_started = time.monotonic()
+        cancel_status, _ = self.client.cancel_job(job_id, new_idempotency_key())
+        cancel_ack_ms = (time.monotonic() - cancel_started) * 1000
+        history = self._job_status_in_history(session, job_id)
+        stream = self._read_segment(job_id, observed)
+        self.record(name, cancel_status in (200, 202) and history == "canceled"
+                    and stream["terminal"] in {"canceled", "final_result"}
+                    and stream["terminal"] != "error",
+                    f"取消前取得执行开始证据；取消回执 {cancel_status}（{cancel_ack_ms:.0f} ms），"
+                    f"历史 {history}，重放终态 {stream['terminal']}；取消 API 成功不证明脚本结束")
+
+    def _await_plan_confirmation(self, job_id: str) -> tuple[int, str | None, str | None]:
+        """读取到方案确认事件为止；返回游标、方案版本和问题 ID。"""
+        cursor = 0
+        deadline = self.deadlines.get(job_id, time.monotonic() + config.JOB_OBSERVE_DEADLINE_SECONDS)
+        for _ in range(config.MAX_INTERACTIONS_PER_JOB + 2):
+            if time.monotonic() >= deadline:
+                return 0, None, None
+            segment = self._read_segment(job_id, cursor, stop_after=0)
+            cursor = segment["last_event_id"]
+            if segment["terminal"] == "interrupt":
+                payload = segment["payload"] or {}
+                kind = interaction.interaction_type(payload)
+                if kind == interaction.PLAN_CONFIRMATION_TYPE:
+                    body = payload.get("interaction") or {}
+                    return cursor, body.get("plan_version"), interaction.question_id(payload)
+                # 语义问题先按场景答复，再继续等待方案确认。
+                decision = interaction.decide(payload, job_id, SANDBOX_PROFILE,
+                                              interaction.InteractionLedger(self.profile_max_rounds(),
+                                                                           config.INTERACTION_DEADLINE_SECONDS))
+                if not decision.sendable:
+                    return 0, None, None
+                status, _ = self.client.resume_job(job_id, decision.question_id, decision.answer, decision.key)
+                if status not in (200, 202):
+                    return 0, None, None
+                continue
+            if segment["terminal"] in TERMINAL:
+                return 0, None, None
+        return 0, None, None
+
+    def _drive_to_execution(self, job_id: str) -> tuple[bool, int]:
+        """按交互协议推进到进程内可观测的最远阶段。
+
+        Worker 已开始执行脚本时不会有新的公开事件，因此这里只能证明“交互已全部答复且
+        没有终态”；执行开始本身要由主库沙盒会话的 execute_started 时间确认。
+        """
+        cursor, rounds = 0, 0
+        deadline = time.monotonic() + min(config.JOB_OBSERVE_DEADLINE_SECONDS, 120)
+        ledger = interaction.InteractionLedger(self.profile_max_rounds(),
+                                               config.INTERACTION_DEADLINE_SECONDS)
+        while time.monotonic() < deadline and rounds <= self.profile_max_rounds():
+            segment = self._read_segment(job_id, cursor, stop_after=0)
+            cursor = segment["last_event_id"]
+            if segment["terminal"] in TERMINAL:
+                return False, cursor
+            if segment["terminal"] != "interrupt":
+                return False, cursor
+            decision = interaction.decide(segment["payload"] or {}, job_id, SANDBOX_PROFILE, ledger)
+            rounds += 1
+            if not decision.sendable:
+                return False, cursor
+            status, _ = self.client.resume_job(job_id, decision.question_id, decision.answer, decision.key)
+            if status not in (200, 202):
+                return False, cursor
+        return True, cursor
+
+    def profile_max_rounds(self) -> int:
+        return config.MAX_INTERACTIONS_PER_JOB
+
     def _check_cancel(self, target: str) -> None:
         name = f"取消 {target} Job（业务状态）"
         session = self.client.new_chat()
@@ -433,7 +557,9 @@ def run_recovery_suite(base_url: str, accounts: list[Account], server_baseline: 
     recorder.note(f"客户端清单: {json.dumps(collect_client_manifest(), ensure_ascii=False)}")
     suite = RecoverySuite(base_url, accounts[0], accounts[1], recorder)
     checks = (suite.check_sse_resume, suite.check_idempotency, suite.check_cancel_queued,
-              suite.check_cancel_running, suite.check_no_reversal, suite.check_waiting_input,
+              suite.check_cancel_running, suite.check_cancel_waiting_plan,
+              suite.check_cancel_capacity_wait, suite.check_cancel_executing,
+              suite.check_no_reversal, suite.check_waiting_input,
               suite.check_cross_account_isolation)
     try:
         suite.setup()
