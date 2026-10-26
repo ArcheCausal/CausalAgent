@@ -53,6 +53,17 @@ def current_input_identity(identity: Any) -> str:
     )
 
 
+def provenance_matches_identity(provenance: Any, identity: Any) -> bool:
+    """结果 provenance 是否由当前 job/attempt/lease 与冻结输入产生。"""
+
+    return (
+        str(provenance.job_id) == str(identity.job_id)
+        and int(provenance.attempt_count) == int(identity.attempt_count)
+        and int(provenance.lease_epoch) == int(identity.lease_epoch)
+        and provenance.input_identity == current_input_identity(identity)
+    )
+
+
 def resolve_response_identity(
     *, provider_response_id: str | None, message_execution_id: str | None
 ) -> ResponseIdentity:

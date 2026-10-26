@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from Agent.deep_agent.context import AgentRunContext
 
 from .adapters.base import AdapterInput
-from .algorithm_specs import build_model_tool_input_schema
+from .algorithm_specs import AlgorithmSpec, build_model_tool_input_schema
 from .models import (
     ActionAttempt,
     AlgorithmResult,
@@ -24,7 +24,11 @@ from .models import (
     PreprocessingPlan,
     InvocationRecord,
 )
-from .identity import build_invocation_id, current_input_identity
+from .identity import (
+    build_invocation_id,
+    current_input_identity,
+    provenance_matches_identity,
+)
 from .interaction import resolve_approved_plan
 from .registry import AlgorithmRegistry, RegistryEntry
 from .runtime_updates import (
@@ -35,6 +39,75 @@ from .runtime_updates import (
     resolve_runtime_invocation,
     with_tool_runtime_schema,
 )
+
+
+def _trusted_graph_result_refs(
+    state: Mapping[str, Any],
+    *,
+    trusted_identity: Any,
+    plan_digest: str | None,
+) -> list[str]:
+    """列出本调用开始前已存在、可被当前模型引用的有效图结果。"""
+
+    refs: list[str] = []
+    for ref, raw_result in (state.get("algorithm_results") or {}).items():
+        try:
+            result = (
+                raw_result
+                if isinstance(raw_result, AlgorithmResult)
+                else AlgorithmResult.model_validate(raw_result)
+            )
+        except (TypeError, ValueError):
+            continue
+        if (
+            result.status == "valid"
+            and result.standardized_graph is not None
+            and provenance_matches_identity(result.provenance, trusted_identity)
+            and result.provenance.preprocessing_plan_digest == plan_digest
+        ):
+            refs.append(ref)
+    return sorted(refs)
+
+
+def _resolve_graph_artifacts(
+    *,
+    spec: AlgorithmSpec,
+    state: Mapping[str, Any],
+    arguments: Mapping[str, Any],
+    trusted_identity: Any,
+    plan: PreprocessingPlan | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """估计能力在调用前校验图引用；拒绝时返回可行动的 ToolMessage 载荷。"""
+
+    if spec.kind != "causal_estimation":
+        return None, {}
+    plan_digest = plan.digest if plan is not None else None
+    available = _trusted_graph_result_refs(
+        state, trusted_identity=trusted_identity, plan_digest=plan_digest
+    )
+    ref = arguments.get("graph_result_ref")
+    if not isinstance(ref, str) or ref not in available:
+        return (
+            {
+                "status": "not_ready",
+                "reason": (
+                    "所引用的因果图不存在、不是本次运行的有效结果，"
+                    "或与当前数据版本不一致。"
+                ),
+                "available_graph_result_refs": available,
+                "expected_plan_digest": plan_digest,
+                "next_action": (
+                    "先调用因果发现工具得到 status=valid 的结果，再携带它的 "
+                    "result_ref 重试；若列表为空，确认数据版本与本次一致。"
+                ),
+                "unmet_requirements": ["valid_graph_result"],
+            },
+            {},
+        )
+    result = state["algorithm_results"][ref]
+    if not isinstance(result, AlgorithmResult):
+        result = AlgorithmResult.model_validate(result)
+    return None, {"standardized_graph": result.standardized_graph.model_dump(mode="json")}
 
 
 def _mark_unfinished_invocation(
@@ -397,6 +470,32 @@ class AlgorithmTool:
                     preprocessing=resolved[1],
                     approval=resolved[0],
                 )
+            graph_rejection, graph_artifacts = _resolve_graph_artifacts(
+                spec=self.entry.spec,
+                state=state,
+                arguments=kwargs,
+                trusted_identity=identity.runtime_context.trusted_identity,
+                plan=active_adapter_input.preprocessing,
+            )
+            if graph_rejection is not None:
+                return ToolMessage(
+                    content=json.dumps(graph_rejection, ensure_ascii=False),
+                    tool_call_id=identity.provider_call_id,
+                    name=self.name,
+                    status="error",
+                )
+            if graph_artifacts:
+                active_adapter_input = replace(
+                    active_adapter_input, artifacts=graph_artifacts
+                )
+            if self.entry.spec.kind == "causal_estimation":
+                treatment = kwargs.get("treatment")
+                outcome = kwargs.get("outcome")
+                if isinstance(treatment, str) and isinstance(outcome, str):
+                    active_adapter_input = replace(
+                        active_adapter_input,
+                        execution_columns=(treatment, outcome),
+                    )
             public_decision = kwargs.pop("public_decision", None)
             # preprocessing 由运行时按获批方案注入；模型以同名字段自行填写时
             # 只用于与 State 中的确认内容核对，不能直接成为执行参数。

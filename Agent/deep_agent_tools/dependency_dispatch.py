@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 import json
 from typing import Any, Awaitable, Callable
 
-from .algorithm_specs import DEFAULT_ALGORITHM_SPECS
+from .algorithm_specs import DEFAULT_ALGORITHM_SPECS, get_algorithm_spec
 from .dependency_planner import (
     DependencyPlanningError,
     ToolCallRequest,
@@ -31,7 +31,12 @@ from .models import (
     ActionAttempt, AlgorithmResult, AlgorithmResultProvenance, DataProfile,
     Diagnostics, InvocationRecord,
 )
-from .identity import build_invocation_id, build_result_ref, current_input_identity
+from .identity import (
+    build_invocation_id,
+    build_result_ref,
+    current_input_identity,
+    provenance_matches_identity,
+)
 from .registry import AlgorithmRegistry
 
 from langchain.agents.middleware import AgentMiddleware
@@ -64,20 +69,41 @@ def _state_data_profile(state: Mapping[str, Any]) -> DataProfile | None:
     raise ValueError("data_profile must be a DataProfile or mapping")
 
 
-def _initial_artifacts(state: Mapping[str, Any]) -> frozenset[str]:
-    """只读取父子 State 边界已转换的画像，判断输入 artifact 是否存在。"""
+def _initial_artifacts(
+    state: Mapping[str, Any], *, trusted_identity: Any = None
+) -> frozenset[str]:
+    """读取画像与上一轮已发布的算法产物，判断本轮可用 artifact。"""
 
     profile = _state_data_profile(state)
     if profile is None or profile.row_count < 2 or profile.column_count < 2:
-        return frozenset()
-    artifacts = {"tabular_dataset"}
-    if (
-        not profile.categorical_columns
-        and len(profile.numeric_columns) == profile.column_count
-        and len(set(profile.column_names)) == profile.column_count
-        and set(profile.numeric_columns) == set(profile.column_names)
-    ):
-        artifacts.add("continuous_tabular_dataset")
+        artifacts: set[str] = set()
+    else:
+        artifacts = {"tabular_dataset"}
+        if (
+            not profile.categorical_columns
+            and len(profile.numeric_columns) == profile.column_count
+            and len(set(profile.column_names)) == profile.column_count
+            and set(profile.numeric_columns) == set(profile.column_names)
+        ):
+            artifacts.add("continuous_tabular_dataset")
+    if trusted_identity is not None:
+        for raw_result in (state.get("algorithm_results") or {}).values():
+            try:
+                result = (
+                    raw_result
+                    if isinstance(raw_result, AlgorithmResult)
+                    else AlgorithmResult.model_validate(raw_result)
+                )
+            except (TypeError, ValueError):
+                continue
+            if (
+                result.status == "valid"
+                and result.standardized_graph is not None
+                and provenance_matches_identity(result.provenance, trusted_identity)
+            ):
+                artifacts |= set(
+                    get_algorithm_spec(result.capability_id).produces
+                )
     return frozenset(artifacts)
 
 
@@ -442,7 +468,12 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
             plan = build_dependency_plan(
                 planner_requests,
                 registry=self.registry,
-                initial_artifacts=_initial_artifacts(state),
+                initial_artifacts=_initial_artifacts(
+                    state,
+                    trusted_identity=resolve_runtime_invocation(
+                        request.runtime
+                    ).runtime_context.trusted_identity,
+                ),
             )
             outcomes = await execute_dependency_plan(
                 plan,
