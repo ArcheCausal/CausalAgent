@@ -291,6 +291,11 @@
           ],
           "default": null,
           "title": "Timeout Seconds"
+        },
+        "artifacts": {
+          "additionalProperties": true,
+          "title": "Artifacts",
+          "type": "object"
         }
       },
       "required": [
@@ -413,6 +418,95 @@
             "spec_digest"
           ],
           "title": "AlgorithmResultProvenance",
+          "type": "object"
+        },
+        "CausalEffect": {
+          "additionalProperties": false,
+          "description": "后门调整下的线性总效应；数值可追溯到所用图与数据版本。",
+          "properties": {
+            "estimand": {
+              "const": "ATE",
+              "title": "Estimand",
+              "type": "string"
+            },
+            "graph_result_ref": {
+              "title": "Graph Result Ref",
+              "type": "string"
+            },
+            "treatment": {
+              "title": "Treatment",
+              "type": "string"
+            },
+            "outcome": {
+              "title": "Outcome",
+              "type": "string"
+            },
+            "adjustment_set": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Adjustment Set",
+              "type": "array"
+            },
+            "estimate": {
+              "title": "Estimate",
+              "type": "number"
+            },
+            "standard_error": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Standard Error"
+            },
+            "ci95": {
+              "anyOf": [
+                {
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "prefixItems": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "number"
+                    }
+                  ],
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Ci95"
+            },
+            "estimator": {
+              "title": "Estimator",
+              "type": "string"
+            },
+            "n_rows": {
+              "minimum": 1,
+              "title": "N Rows",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "estimand",
+            "graph_result_ref",
+            "treatment",
+            "outcome",
+            "estimate",
+            "estimator",
+            "n_rows"
+          ],
+          "title": "CausalEffect",
           "type": "object"
         },
         "DataViewSummary": {
@@ -1064,6 +1158,17 @@
           ],
           "default": null
         },
+        "causal_effect": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CausalEffect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "provenance": {
           "$ref": "#/$defs/AlgorithmResultProvenance"
         }
@@ -1187,6 +1292,95 @@
         "spec_digest"
       ],
       "title": "AlgorithmResultProvenance",
+      "type": "object"
+    },
+    "CausalEffect": {
+      "additionalProperties": false,
+      "description": "后门调整下的线性总效应；数值可追溯到所用图与数据版本。",
+      "properties": {
+        "estimand": {
+          "const": "ATE",
+          "title": "Estimand",
+          "type": "string"
+        },
+        "graph_result_ref": {
+          "title": "Graph Result Ref",
+          "type": "string"
+        },
+        "treatment": {
+          "title": "Treatment",
+          "type": "string"
+        },
+        "outcome": {
+          "title": "Outcome",
+          "type": "string"
+        },
+        "adjustment_set": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Adjustment Set",
+          "type": "array"
+        },
+        "estimate": {
+          "title": "Estimate",
+          "type": "number"
+        },
+        "standard_error": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Standard Error"
+        },
+        "ci95": {
+          "anyOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ci95"
+        },
+        "estimator": {
+          "title": "Estimator",
+          "type": "string"
+        },
+        "n_rows": {
+          "minimum": 1,
+          "title": "N Rows",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "estimand",
+        "graph_result_ref",
+        "treatment",
+        "outcome",
+        "estimate",
+        "estimator",
+        "n_rows"
+      ],
+      "title": "CausalEffect",
       "type": "object"
     },
     "DataIssue": {

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 from datetime import datetime
 from enum import Enum
@@ -388,6 +389,42 @@ class GraphValidation(ContractModel):
     not_checked: list[str] = Field(default_factory=list)
 
 
+class CausalEffect(ContractModel):
+    """后门调整下的线性总效应；数值可追溯到所用图与数据版本。"""
+
+    estimand: Literal["ATE"]
+    graph_result_ref: str
+    treatment: str
+    outcome: str
+    adjustment_set: tuple[str, ...] = ()
+    estimate: float
+    standard_error: float | None = None
+    ci95: tuple[float, float] | None = None
+    estimator: str
+    n_rows: int = Field(ge=1)
+
+    @field_validator("graph_result_ref", "treatment", "outcome", "estimator")
+    @classmethod
+    def validate_effect_strings(cls, value: str, info: Any) -> str:
+        return _non_blank(value, field_name=info.field_name)
+
+    @model_validator(mode="after")
+    def validate_effect_numbers(self) -> "CausalEffect":
+        if not math.isfinite(self.estimate):
+            raise ValueError("estimate must be finite")
+        if self.standard_error is not None and (
+            not math.isfinite(self.standard_error) or self.standard_error < 0
+        ):
+            raise ValueError("standard_error must be finite and non-negative")
+        if self.ci95 is not None:
+            low, high = self.ci95
+            if not (math.isfinite(low) and math.isfinite(high)):
+                raise ValueError("ci95 bounds must be finite")
+            if low > high:
+                raise ValueError("ci95 lower bound must not exceed upper bound")
+        return self
+
+
 class MethodDefinition(ContractModel):
     """本次执行采用的方法契约快照，不随报告重新生成而更新。"""
 
@@ -436,6 +473,7 @@ class AlgorithmResult(ContractModel):
     method: MethodDefinition | None = None
     implementation: MethodImplementation | None = None
     graph_validation: GraphValidation | None = None
+    causal_effect: CausalEffect | None = None
     provenance: AlgorithmResultProvenance
 
     @field_validator(
@@ -464,6 +502,8 @@ class AlgorithmResult(ContractModel):
             raise ValueError("method snapshot does not match result identity")
         if self.status == "valid" and self.standardized_graph is None:
             raise ValueError("valid AlgorithmResult must include standardized_graph")
+        if self.causal_effect is not None and self.standardized_graph is None:
+            raise ValueError("causal_effect requires standardized_graph")
         if self.status == "timed_out" and (
             self.standardized_graph is not None or self.raw_result_ref is not None
         ):
@@ -875,6 +915,7 @@ class AlgorithmExecutionCommand(ContractModel):
     approval: "PreprocessingApproval | None" = None
     result_index: int = Field(default=0, ge=0)
     timeout_seconds: int | None = Field(default=None, gt=0)
+    artifacts: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator(
         "invocation_id",

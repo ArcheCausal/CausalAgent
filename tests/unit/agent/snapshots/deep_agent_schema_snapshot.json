@@ -20,6 +20,7 @@
     "AlgorithmExecutionCommand": {
       "properties": [
         "approval",
+        "artifacts",
         "capability_id",
         "capability_version",
         "input_identity",
@@ -39,13 +40,14 @@
         "provider_call_id",
         "input_identity"
       ],
-      "sha256": "7a09d0ab261933e980c59b26cc1324ab52fcf4cb70b3d283cc5edb514152ed7f",
+      "sha256": "11ea3696be412fde1bea460e4a13eed017647d8fad88c73ce69ab458f0fff5e3",
       "title": "AlgorithmExecutionCommand"
     },
     "AlgorithmResult": {
       "properties": [
         "capability_id",
         "capability_version",
+        "causal_effect",
         "data_view",
         "diagnostics",
         "graph_semantics",
@@ -75,7 +77,7 @@
         "status",
         "provenance"
       ],
-      "sha256": "af3cfc553f80596c4baef2360e4459b01fe9c8e54bf54df09c0dfa5c4805827f",
+      "sha256": "89f5f34e5a8574ecd2324b4e004d4c7721c75fb6b455474b4fae1f3924460ad5",
       "title": "AlgorithmResult"
     },
     "AlgorithmResultProvenance": {
@@ -101,6 +103,31 @@
       ],
       "sha256": "a95c390a3413302af9fa3d70a44d4c90ec389a7776b4d3b1726fb9da84ea8c73",
       "title": "AlgorithmResultProvenance"
+    },
+    "CausalEffect": {
+      "properties": [
+        "adjustment_set",
+        "ci95",
+        "estimand",
+        "estimate",
+        "estimator",
+        "graph_result_ref",
+        "n_rows",
+        "outcome",
+        "standard_error",
+        "treatment"
+      ],
+      "required": [
+        "estimand",
+        "graph_result_ref",
+        "treatment",
+        "outcome",
+        "estimate",
+        "estimator",
+        "n_rows"
+      ],
+      "sha256": "7f9ecef33b4f54567592d955a6aaa1192b47b9cffb7da8dd05dc7670ee2ecdd2",
+      "title": "CausalEffect"
     },
     "DataIssue": {
       "properties": [
