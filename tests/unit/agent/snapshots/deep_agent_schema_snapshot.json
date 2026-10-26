@@ -524,6 +524,12 @@
   "schema_version": "p1-v1",
   "tools": [
     {
+      "capability_id": "causal.ate",
+      "schema_sha256": "e4d1f18d619f6ea49d8bb2392288438b9b3d91eb94b8161306db43438bb640ec",
+      "spec_digest": "1364679f2d0597959312022cda50d3563359cefe03e44c1a0995097aaca6c414",
+      "tool_name": "causal_ate"
+    },
+    {
       "capability_id": "causal.cdfm",
       "schema_sha256": "ace96d517f904e9af7358615c12aef1b5c241d30667890b882196cef48a8b1f8",
       "spec_digest": "9a950ea5a1095e7c3b5ec97c48b231718213b6f9ea2ceb448e8f71f9a8944e27",

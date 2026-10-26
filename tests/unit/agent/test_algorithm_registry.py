@@ -13,7 +13,7 @@ from Agent.deep_agent_tools import (
     UnknownCapabilityError,
     build_default_registry,
 )
-from Agent.deep_agent_tools.algorithm_specs import CausalPcInput
+from Agent.deep_agent_tools.algorithm_specs import CAUSAL_ATE_SPEC, CausalPcInput
 from Agent.deep_agent_tools.models import StandardizedGraph
 from Agent.deep_agent_tools.algorithm_specs import AlgorithmSpec
 
@@ -76,10 +76,12 @@ def test_default_registry_does_not_expose_disabled_olc() -> None:
             "causal.pc": object(),
             "causal.direct_lingam": object(),
             "causal.cdfm": object(),
+            "causal.ate": object(),
         }
     )
 
     assert [entry.spec for entry in registry.entries] == [
+        CAUSAL_ATE_SPEC,
         CDFM_SPEC,
         DIRECT_LINGAM_SPEC,
         PC_SPEC,

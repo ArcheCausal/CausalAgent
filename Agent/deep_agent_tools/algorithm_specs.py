@@ -813,6 +813,7 @@ DEFAULT_ALGORITHM_SPECS: tuple[AlgorithmSpec, ...] = (
     PC_SPEC,
     DIRECT_LINGAM_SPEC,
     CDFM_SPEC,
+    CAUSAL_ATE_SPEC,
 )
 
 

@@ -3288,6 +3288,137 @@
   "schema_version": "p1-v1",
   "tools": [
     {
+      "capability_id": "causal.ate",
+      "spec_digest": "1364679f2d0597959312022cda50d3563359cefe03e44c1a0995097aaca6c414",
+      "tool": {
+        "name": "causal_ate",
+        "description": "在后门调整下估计处理变量对结果变量的线性总效应。必须引用本次运行中已经发现且有效的因果图；不支持未定向边、双箭头边、有向环或处理变量不是结果变量祖先的图。同一张图只能与产生它的数据版本一起使用。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；可确认的处理操作：选列、按列删除含缺失值的行、数值插补；至少 3 行、2 列。\n方法假设：图包含查询的处理与结果变量，且无未定向边、双箭头边或有向环；处理变量与结果变量为数值列，缺失值已在执行前处理；函数形式近似线性，效应按每 1 单位变化解释，不对非线性或交互建模；调整集取处理变量的全部父节点，不搜索其他有效调整集。\n目标图：causal_estimation_input；矩阵约定：backdoor_ols。\n边语义：directed：后门调整所用的因果方向。\n适用边界：只做父节点调整；不处理未观测混杂、选择偏倚或测量误差；不做 bootstrap，区间为线性模型内区间。如果原始数据不满足要求，先调用 request_data_processing 让用户确认处理方案，再携带同一方案调用本工具；不要自行假设清洗步骤。",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "graph_result_ref": {
+              "description": "本次运行中已发现且有效的因果图结果引用。",
+              "title": "Graph Result Ref",
+              "type": "string"
+            },
+            "treatment": {
+              "title": "Treatment",
+              "type": "string"
+            },
+            "outcome": {
+              "title": "Outcome",
+              "type": "string"
+            },
+            "public_decision": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "description": "模型在 Tool Call 中显式生成、可直接展示的简短决策说明。",
+                  "properties": {
+                    "summary": {
+                      "maxLength": 400,
+                      "minLength": 1,
+                      "title": "Summary",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "summary"
+                  ],
+                  "title": "PublicDecision",
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "面向当前用户公开的工具选择依据；应在同一次 Tool Call 中提供。该字段不属于算法科学参数或检索参数。",
+              "title": "Public Decision"
+            },
+            "preprocessing": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "version": {
+                      "enum": [
+                        "data-preprocessing-v1"
+                      ],
+                      "type": "string"
+                    },
+                    "steps": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "operation": {
+                            "enum": [
+                              "select_columns",
+                              "drop_rows",
+                              "numeric_impute",
+                              "categorical_encode"
+                            ],
+                            "type": "string"
+                          },
+                          "columns": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "method": {
+                            "enum": [
+                              "mean",
+                              "median",
+                              "ordinal",
+                              null
+                            ],
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "operation",
+                          "columns"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "protected_columns": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "steps"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "用户已经确认的处理方案。只填写 request_data_processing 返回的方案内容；运行时按 capability_id 与方案摘要核对，未获批或摘要不一致的方案不会执行。",
+              "title": "Preprocessing"
+            }
+          },
+          "required": [
+            "graph_result_ref",
+            "treatment",
+            "outcome"
+          ],
+          "title": "CausalAteInputToolInput",
+          "type": "object"
+        }
+      }
+    },
+    {
       "capability_id": "causal.cdfm",
       "spec_digest": "9a950ea5a1095e7c3b5ec97c48b231718213b6f9ea2ceb448e8f71f9a8944e27",
       "tool": {

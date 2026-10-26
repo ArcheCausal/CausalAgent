@@ -53,6 +53,7 @@ def test_default_mcp_registry_does_not_expose_disabled_olc() -> None:
     registry = build_default_registry()
 
     assert [item[0] for item in registry.capability_summary()] == [
+        "causal.ate",
         "causal.cdfm",
         "causal.direct_lingam",
         "causal.pc",

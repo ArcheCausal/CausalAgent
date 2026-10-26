@@ -28,6 +28,7 @@ def test_default_specs_only_enable_reviewed_runtime_capabilities() -> None:
         "causal.pc",
         "causal.direct_lingam",
         "causal.cdfm",
+        "causal.ate",
     ]
     assert OLC_SPEC.capability_id == "causal.olc"
     assert OLC_SPEC not in DEFAULT_ALGORITHM_SPECS
@@ -62,6 +63,7 @@ def test_spec_digest_and_tool_schema_are_stable() -> None:
 def test_tool_snapshot_contains_capability_and_spec_identity() -> None:
     snapshot = build_tool_schema_snapshot()
     assert [item["capability_id"] for item in snapshot] == [
+        "causal.ate",
         "causal.cdfm",
         "causal.direct_lingam",
         "causal.pc",
@@ -86,7 +88,7 @@ def test_cdfm_threshold_accepts_none_and_boundary_values() -> None:
     assert CausalCdfmInput(threshold=0.5).threshold == 0.5
 
 
-def test_causal_ate_spec_is_declared_but_not_activated() -> None:
+def test_causal_ate_spec_is_activated() -> None:
     assert CAUSAL_ATE_SPEC.capability_id == "causal.ate"
     assert CAUSAL_ATE_SPEC.tool_name == "causal_ate"
     assert CAUSAL_ATE_SPEC.kind == "causal_estimation"
@@ -95,7 +97,7 @@ def test_causal_ate_spec_is_declared_but_not_activated() -> None:
     assert CAUSAL_ATE_SPEC.default_timeout_seconds == 120
     assert CAUSAL_ATE_SPEC.default_concurrency == 1
     assert get_algorithm_spec("causal.ate") is CAUSAL_ATE_SPEC
-    assert CAUSAL_ATE_SPEC not in DEFAULT_ALGORITHM_SPECS
+    assert CAUSAL_ATE_SPEC in DEFAULT_ALGORITHM_SPECS
     schema = CAUSAL_ATE_SPEC.build_tool_schema()
     assert set(schema["parameters"]["properties"]) >= {
         "graph_result_ref",
