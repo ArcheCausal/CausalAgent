@@ -66,6 +66,7 @@ from Agent.deep_agent_tools.models import (
     merge_action_ledger,
 )
 from Agent.deep_agent_tools.registry import build_default_registry
+from Agent.deep_agent_tools.preprocessing import build_data_profile_from_csv
 from Agent.deep_agent_tools.runtime_updates import (
     RuntimeInvocationIdentity,
     algorithm_terminal_command,
@@ -76,13 +77,15 @@ from Agent.deep_agent_tools.runtime_updates import (
     tool_lifecycle_event_key,
 )
 from Agent.execution_control import JobExecutionRevoked
+from tests.support.bound_analysis_input import bind_analysis_input
+from tests.support.local_algorithm_execution import PC_INSUFFICIENT_SAMPLE_CSV
 
 
 @pytest.fixture
-def context():
+def context(pc_csv):
     return AgentRunContext(
         execution_guard=None,
-        trusted_identity=TrustedJobIdentity(
+        trusted_identity=bind_analysis_input(TrustedJobIdentity(
             job_id="00000000-0000-0000-0000-000000000801",
             session_id="00000000-0000-0000-0000-000000000802",
             user_id=7,
@@ -90,7 +93,7 @@ def context():
             lease_epoch=3,
             worker_id="terminal-contract-worker",
             input_identity="local-terminal-input",
-        ),
+        ), pc_csv),
     )
 
 
@@ -126,7 +129,7 @@ def execution_command(identity, spec=PC_SPEC):
         capability_version=spec.version,
         spec_digest=spec.spec_digest,
         provider_call_id=identity.provider_call_id,
-        input_identity=identity.runtime_context.trusted_identity.input_identity,
+        input_identity=identity.runtime_context.trusted_identity.current_input_identity(),
     )
 
 
@@ -153,7 +156,9 @@ def diagnostic_result(identity, status="timed_out", spec=CDFM_SPEC):
             job_id=str(trusted.job_id),
             attempt_count=trusted.attempt_count,
             lease_epoch=trusted.lease_epoch,
-            input_identity=trusted.input_identity,
+            input_identity=trusted.current_input_identity(),
+            source_input_identity=trusted.source_input_identity(),
+            analysis_dataset_id=trusted.analysis_input.dataset_id,
             spec_digest=spec.spec_digest,
             invocation_id=call_id,
             capability_id=spec.capability_id,
@@ -163,16 +168,21 @@ def diagnostic_result(identity, status="timed_out", spec=CDFM_SPEC):
 
 
 @pytest.fixture(scope="module")
-def pc_payload():
-    """确定种子的合成数值输入由真正的 causal-learn PC runner 计算。"""
+def pc_csv():
+    """确定种子的数值 CSV 同时用于数据绑定与真实 runner。"""
     rng = np.random.default_rng(20261020)
     x = rng.normal(size=160)
     y = 0.8 * x + rng.normal(size=160)
     z = 0.5 * y + rng.normal(size=160)
-    csv = "x,y,z\n" + "\n".join(
+    return "x,y,z\n" + "\n".join(
         f"{a:.12g},{b:.12g},{c:.12g}" for a, b, c in zip(x, y, z)
     )
-    payload = run_pc_analysis(csv, alpha=0.05, test="fisherz")
+
+
+@pytest.fixture(scope="module")
+def pc_payload(pc_csv):
+    """真实 causal-learn PC runner 计算已绑定的 CSV。"""
+    payload = run_pc_analysis(pc_csv, alpha=0.05, test="fisherz")
     assert payload["success"] is True, "真实本地 PC runner 必须成功"
     return payload
 
@@ -403,8 +413,11 @@ def test_local_execution_cancel_or_revocation_propagates_and_cleans_up(context, 
 
 @pytest.mark.parametrize("pc_failure", [False, True])
 def test_real_graph_checkpoints_queued_running_and_timeout_then_recovers(
-    context, registry, pc_payload, pc_failure,
+    context, registry, pc_payload, pc_csv, pc_failure,
 ):
+    csv = PC_INSUFFICIENT_SAMPLE_CSV if pc_failure else pc_csv
+    context = replace(context, trusted_identity=bind_analysis_input(context.trusted_identity, csv))
+
     async def scenario():
         identity_hook = _build_message_identity_middleware(registry=registry)
         dispatch = AlgorithmDependencyDispatchMiddleware(registry=registry, timeout_seconds=0.1)
@@ -416,7 +429,7 @@ def test_real_graph_checkpoints_queued_running_and_timeout_then_recovers(
             """将真实本地 PC runner 的产物写入生产终态 Command。"""
             calls.append(runtime.tool_call_id)
             identity = resolve_runtime_invocation(runtime)
-            payload = run_pc_analysis("x\n1\n2\n3\n") if pc_failure else pc_payload
+            payload = run_pc_analysis(csv) if pc_failure else pc_payload
             return await algorithm_terminal_command(
                 runtime, identity=identity, tool_name="causal_pc",
                 result=pc_result(identity, payload), started_at=datetime.now(timezone.utc),
@@ -457,10 +470,7 @@ def test_real_graph_checkpoints_queued_running_and_timeout_then_recovers(
                 {"id": "cdfm-call", "name": "causal_cdfm", "args": {}},
             ])],
             "algorithm_results": {}, "action_ledger": {},
-            "data_profile": DataProfile(
-                row_count=160, column_count=3, column_names=("x", "y", "z"),
-                numeric_columns=("x", "y", "z"),
-            ),
+            "data_profile": build_data_profile_from_csv(csv),
         }, config, context=context)
         queued = await graph.aget_state(config)
         assert queued.next == ("running",)
@@ -509,7 +519,7 @@ def test_real_graph_checkpoints_queued_running_and_timeout_then_recovers(
         decision = (
             FinalAnalysisDecision(
                 outcome="no_valid_algorithm", conflict_status="none",
-                selection_rationale="PC 输入未通过校验，CDFM 超时，没有可用因果图。",
+                selection_rationale="PC 样本不足以完成估计，CDFM 超时，没有可用因果图。",
                 confidence="low",
             ) if pc_failure else decision_for(pc, timeout)
         )
@@ -549,6 +559,7 @@ def test_slow_terminal_sink_does_not_timeout_completed_local_pc_toolnode(
         ",".join(f"{value:.12g}" for value in row)
         for row in rng.normal(size=(80, 3))
     )
+    context = replace(context, trusted_identity=bind_analysis_input(context.trusted_identity, csv))
 
     async def scenario():
         deadline = 1.0
@@ -617,10 +628,7 @@ def test_slow_terminal_sink_does_not_timeout_completed_local_pc_toolnode(
                     {"id": "slow-sink-pc", "name": "causal_pc", "args": {}},
                 ])],
                 "algorithm_results": {}, "action_ledger": {},
-                "data_profile": DataProfile(
-                    row_count=80, column_count=3, column_names=("x", "y", "z"),
-                    numeric_columns=("x", "y", "z"),
-                ),
+                "data_profile": build_data_profile_from_csv(csv),
             }, config, context=runtime_context, stream_mode=["custom", "updates"]):
                 if mode == "custom":
                     custom_events.append(chunk)

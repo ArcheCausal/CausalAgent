@@ -21,7 +21,8 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from Agent.causal.causalachieve import run_pc_analysis
-from Agent.deep_agent.context import AgentRunContext, TrustedJobIdentity
+from Agent.deep_agent.context import AnalysisInputRef, AgentRunContext, TrustedJobIdentity
+from Agent.measurement_semantics import semantic_kinds_from_validation_report
 from Agent.deep_agent.graph import _build_message_identity_middleware
 from Agent.deep_agent.state import ProjectDeepAgentState
 from Agent.deep_agent_tools.adapters import build_default_adapters
@@ -35,6 +36,7 @@ from Agent.deep_agent_tools.models import AlgorithmExecutionCommand, DataProfile
 from Agent.deep_agent_tools.preprocessing import build_data_profile_from_csv
 from Agent.deep_agent_tools.registry import build_default_registry
 from Agent.deep_agent_tools.runtime_updates import algorithm_terminal_command, normalize_tool_status, resolve_runtime_invocation
+from tests.support.local_algorithm_execution import LocalAlgorithmExecutor
 
 
 def _csv():
@@ -44,13 +46,20 @@ def _csv():
     )
 
 
-def _context(events):
+def _context(events, *, semantic_kinds=None):
+    report = LocalAlgorithmExecutor(_csv(), semantic_kinds=semantic_kinds).validation_report
+    analysis_input = AnalysisInputRef()
+    analysis_input.bind(
+        dataset_id=1, object_id=1, content_hash="explicit-local-pc-csv",
+        filename="local.csv", semantic_kinds=semantic_kinds_from_validation_report(report),
+    )
     return AgentRunContext(
         execution_guard=None,
         trusted_identity=TrustedJobIdentity(
             job_id=str(uuid4()), session_id=str(uuid4()), user_id=7,
             attempt_count=1, lease_epoch=1, worker_id="local-input-isolation",
             input_identity="explicit-local-pc-csv",
+            analysis_input=analysis_input,
         ), event_sink=events.append,
     )
 
@@ -75,9 +84,9 @@ def _call(name, call_id, args=None):
     return {"name": name, "id": call_id, "args": args or {}, "type": "tool_call"}
 
 
-async def _toolnode(profile, calls, *, local_pc=True, parameter_rejection=False):
+async def _toolnode(profile, calls, *, local_pc=True, parameter_rejection=False, semantic_kinds=None):
     events, entered, runner_payloads, handler_errors = [], [], {}, []
-    context = _context(events)
+    context = _context(events, semantic_kinds=semantic_kinds)
     registry = build_default_registry(build_default_adapters(executor=None))
     tools = [item.to_langchain_tool() for item in build_algorithm_tools(registry, runtime_context=context)]
 
@@ -181,21 +190,21 @@ def test_both_inputs_missing_produce_separate_unexecuted_terminals():
     assert all(result.standardized_graph is None and result.raw_result_ref is None for result in results.values())
 
 
-@pytest.mark.parametrize("mode", ["missing_values", "unapproved_plan", "invalid_parameter"])
-def test_ready_pc_reaches_production_parameter_and_approval_checks_while_cdfm_is_blocked(mode):
+@pytest.mark.parametrize("mode", ["missing_values", "removed_preprocessing_argument", "invalid_parameter"])
+def test_algorithm_contract_rejects_incompatible_data_or_removed_arguments(mode):
     csv = "x,y,label\n1,3,red\n2,4,blue\n3,8,red\n4,9,blue\n"
     if mode == "missing_values":
         csv = "x,y,label\n1,3,red\n2,,blue\n3,8,red\n4,9,blue\n"
     profile = build_data_profile_from_csv(csv)
     args = {}
-    if mode == "unapproved_plan":
+    if mode == "removed_preprocessing_argument":
         args = {"preprocessing": {"steps": [{"operation": "categorical_encode", "columns": ["label"], "method": "ordinal"}]}}
     elif mode == "invalid_parameter":
         # 生产 StructuredTool 在调用函数前拒绝不满足科学参数 schema 的值。
         args = {"alpha": 2.0}
     results, entered, payloads, messages = asyncio.run(_toolnode(
         profile, [_call("causal_pc", "pc", args), _call("causal_cdfm", "cdfm")],
-        local_pc=False, parameter_rejection=mode == "invalid_parameter",
+        local_pc=False, parameter_rejection=mode in {"removed_preprocessing_argument", "invalid_parameter"},
     ))
     assert entered == ["pc"] and payloads == {}
     assert results["cdfm"].status == "not_ready"
@@ -205,13 +214,29 @@ def test_ready_pc_reaches_production_parameter_and_approval_checks_while_cdfm_is
         # StructuredTool 在调用函数前执行 Pydantic 参数校验；调度器保存受控失败。
         assert results["pc"].status == "execution_failed"
         assert results["pc"].diagnostics.safe_error_code == "ALGORITHM_EXECUTION_FAILED"
+    elif mode == "removed_preprocessing_argument":
+        assert results["pc"].status == "execution_failed"
+        assert results["pc"].diagnostics.safe_error_code == "ALGORITHM_EXECUTION_FAILED"
     else:
-        assert message["status"] == "needs_confirmation"
-        assert results["pc"].status == ("invalid_input" if mode == "missing_values" else "not_ready")
-        assert results["pc"].diagnostics.safe_error_code == (
-            "PREPROCESSING_REQUIRED" if mode == "missing_values" else "PREPROCESSING_APPROVAL_REQUIRED"
-        )
-        assert message["unmet_requirements"]
+        assert results["pc"].status == "not_applicable"
+        assert results["pc"].diagnostics.safe_error_code == "ALGORITHM_NOT_APPLICABLE"
+        assert "缺失值" in (results["pc"].diagnostics.summary or "")
+
+
+def test_category_snapshot_blocks_continuous_only_algorithm_without_stopping_real_pc():
+    profile = build_data_profile_from_csv(_csv())
+    assert profile.categorical_columns == ()
+    results, entered, payloads, _ = asyncio.run(_toolnode(
+        profile, [_call("causal_pc", "pc"), _call("causal_direct_lingam", "lingam")],
+        semantic_kinds={"x": "category"},
+    ))
+    assert set(entered) == {"pc", "lingam"}
+    assert set(payloads) == {"pc"}
+    assert payloads["pc"]["success"] is True
+    assert results["pc"].status == "valid"
+    assert results["lingam"].status == "not_applicable"
+    assert "分类变量" in results["lingam"].diagnostics.summary
+    assert results["lingam"].raw_result_ref is None
 
 
 @pytest.mark.parametrize("producer_missing", [True, False])

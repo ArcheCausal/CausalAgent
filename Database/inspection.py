@@ -617,6 +617,27 @@ EXPECTED_FOREIGN_KEYS = (
         "fk_user_memory_cleanup_outbox_operation",
         (("operation_id", "admin_operations", "operation_id"),),
     ),
+    (
+        "analysis_job_datasets",
+        "fk_analysis_job_datasets_job",
+        (("job_id", "analysis_jobs", "job_id"),),
+    ),
+    (
+        "analysis_job_datasets",
+        "fk_analysis_job_datasets_data_object",
+        (("data_object_id", "file_objects", "id"),),
+    ),
+    (
+        "analysis_job_datasets",
+        "fk_analysis_job_datasets_script_object",
+        (("script_object_id", "file_objects", "id"),),
+    ),
+)
+
+EXPECTED_FOREIGN_KEY_DELETE_RULES = (
+    ("analysis_job_datasets", "fk_analysis_job_datasets_job", "CASCADE"),
+    ("analysis_job_datasets", "fk_analysis_job_datasets_data_object", "RESTRICT"),
+    ("analysis_job_datasets", "fk_analysis_job_datasets_script_object", "RESTRICT"),
 )
 
 EXPECTED_UNIQUE_INDEXES = (
@@ -655,6 +676,24 @@ EXPECTED_UNIQUE_INDEXES = (
         "uq_chat_messages_source_event",
         ("source_event_id",),
     ),
+    (
+        "analysis_job_datasets",
+        "uq_analysis_job_datasets_job_revision",
+        ("job_id", "revision"),
+    ),
+    (
+        "analysis_job_datasets",
+        "uq_analysis_job_datasets_job_idempotency",
+        ("job_id", "idempotency_key"),
+    ),
+    (
+        "analysis_job_datasets",
+        "uq_analysis_job_datasets_job_id",
+        ("job_id", "id"),
+    ),
+    ("analysis_sandbox_sessions", "uq_analysis_sandbox_sessions_request", ("request_id",)),
+    ("analysis_sandbox_sessions", "uq_analysis_sandbox_sessions_remote", ("remote_sandbox_id",)),
+    ("analysis_sandbox_sessions", "uq_analysis_sandbox_sessions_open_job", ("open_job_id",)),
 )
 
 
@@ -714,6 +753,22 @@ def _foreign_key_definition_sql(
           AND referenced_table_name IS NOT NULL"""
 
 
+def _foreign_key_delete_rule_sql(
+    timeout_ms: int,
+    table_name: str,
+    constraint_name: str,
+    delete_rule: str,
+) -> str:
+    """核对外键删除规则，防止文件对象引用被改成级联删除。"""
+    return f"""SELECT {_timeout_hint(timeout_ms)} CASE
+        WHEN COUNT(*) = 1 AND MAX(UPPER(delete_rule)) = '{delete_rule}'
+        THEN 1 ELSE 0 END AS count_value
+        FROM information_schema.referential_constraints
+        WHERE constraint_schema = DATABASE()
+          AND table_name = '{table_name}'
+          AND constraint_name = '{constraint_name}'"""
+
+
 def _unique_index_definition_sql(
     timeout_ms: int,
     table_name: str,
@@ -760,6 +815,23 @@ def _operational_integrity_definitions(timeout_ms: int) -> list[dict[str, Any]]:
         }
         for table_name, constraint_name, columns in EXPECTED_FOREIGN_KEYS
     ]
+    definitions.extend(
+        {
+            "key": f"constraint_{constraint_name}_delete_rule",
+            "label": f"外键 {constraint_name} 删除规则",
+            "severity": "blocking",
+            "healthy_when": "one",
+            "description": f"确认 {table_name}.{constraint_name} 的删除规则为 {delete_rule}。",
+            "failure_warning": f"外键 {constraint_name} 的删除规则不是 {delete_rule}",
+            "sql": _foreign_key_delete_rule_sql(
+                timeout_ms,
+                table_name,
+                constraint_name,
+                delete_rule,
+            ),
+        }
+        for table_name, constraint_name, delete_rule in EXPECTED_FOREIGN_KEY_DELETE_RULES
+    )
     definitions.extend([
         {
             "key": f"constraint_{index_name}",
@@ -782,6 +854,18 @@ def _operational_integrity_definitions(timeout_ms: int) -> list[dict[str, Any]]:
         for table_name, index_name, columns in EXPECTED_UNIQUE_INDEXES
     ])
     definitions.extend([
+        {
+            "key": "constraint_sandbox_lifecycle_independent",
+            "label": "沙盒生命周期记录独立保留",
+            "severity": "blocking",
+            "healthy_when": "zero",
+            "description": "确认沙盒记录没有业务外键，业务删除后仍可核查并清理资源。",
+            "failure_warning": "沙盒生命周期记录存在可能阻止删除或使记录丢失的业务外键",
+            "sql": f"""SELECT {hint} COUNT(*) AS count_value
+                FROM information_schema.referential_constraints
+                WHERE constraint_schema = DATABASE()
+                  AND table_name = 'analysis_sandbox_sessions'""",
+        },
         {
             "key": "constraint_chat_attachment_type_enum",
             "label": "约束 chat_attachments.attachment_type ENUM",

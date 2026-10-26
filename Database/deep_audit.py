@@ -69,7 +69,7 @@ EXPECTED_COLUMNS = {
         "input_filename", "current_question_id", "current_waiting_prompt",
         "current_interaction", "input_wait_expires_at",
         "cancel_idempotency_key", "cancel_request_fingerprint",
-        "analysis_context_id",
+        "analysis_context_id", "prepared_dataset_id",
     },
     "analysis_contexts": {
         "analysis_context_id", "session_id", "user_id", "status",
@@ -86,6 +86,19 @@ EXPECTED_COLUMNS = {
         "input_id", "job_id", "sequence", "input_type", "input_text",
         "question_id", "idempotency_key", "request_fingerprint",
         "chat_message_id", "created_at", "analysis_context_id",
+    },
+    "analysis_job_datasets": {
+        "id", "job_id", "revision", "idempotency_key", "source_hash",
+        "data_object_id", "script_object_id", "data_hash", "script_hash",
+        "status", "metadata", "validation_report", "created_at", "validated_at",
+    },
+    "analysis_sandbox_sessions": {
+        "id", "request_id", "request_digest", "source_hash",
+        "job_id", "worker_id", "attempt_count", "lease_epoch",
+        "remote_sandbox_id", "status", "metadata", "operation_id",
+        "operation_type", "operation_digest", "operation_status", "operation_result",
+        "heartbeat_at", "expires_at", "max_expires_at", "next_retry_at", "version",
+        "created_at", "updated_at", "closed_at", "open_job_id",
     },
     "database_monitor_snapshots": {
         "snapshot_key", "payload_json", "observed_at",
@@ -118,6 +131,7 @@ EXPECTED_INDEXES = {
         "idx_analysis_jobs_input_user_file_status",
         "idx_analysis_jobs_execution_state_heartbeat",
         "idx_analysis_jobs_analysis_context",
+        "idx_analysis_jobs_prepared_dataset",
         "uq_analysis_jobs_user_idempotency", "uq_analysis_jobs_cancel_idempotency",
     },
     "analysis_contexts": {
@@ -132,6 +146,20 @@ EXPECTED_INDEXES = {
         "uq_analysis_job_inputs_sequence",
         "uq_analysis_job_inputs_idempotency",
         "idx_analysis_job_inputs_analysis_context",
+    },
+    "analysis_job_datasets": {
+        "PRIMARY",
+        "uq_analysis_job_datasets_job_revision",
+        "uq_analysis_job_datasets_job_idempotency",
+        "uq_analysis_job_datasets_job_id",
+        "idx_analysis_job_datasets_objects",
+        "idx_analysis_job_datasets_job_status",
+    },
+    "analysis_sandbox_sessions": {
+        "PRIMARY", "uq_analysis_sandbox_sessions_request",
+        "uq_analysis_sandbox_sessions_remote", "uq_analysis_sandbox_sessions_open_job",
+        "idx_analysis_sandbox_sessions_expiry", "idx_analysis_sandbox_sessions_reconcile",
+        "idx_analysis_sandbox_sessions_job",
     },
     "file_objects": {
         "PRIMARY", "uq_file_objects_owner_hash", "idx_file_objects_owner_created",
@@ -184,6 +212,15 @@ EXPECTED_FOREIGN_KEYS = {
     "fk_analysis_contexts_file_object",
     "fk_analysis_jobs_analysis_context",
     "fk_analysis_job_inputs_analysis_context",
+    "fk_analysis_job_datasets_job",
+    "fk_analysis_job_datasets_data_object",
+    "fk_analysis_job_datasets_script_object",
+}
+
+EXPECTED_FOREIGN_KEY_DELETE_RULES = {
+    ("analysis_job_datasets", "fk_analysis_job_datasets_job"): "CASCADE",
+    ("analysis_job_datasets", "fk_analysis_job_datasets_data_object"): "RESTRICT",
+    ("analysis_job_datasets", "fk_analysis_job_datasets_script_object"): "RESTRICT",
 }
 
 
@@ -293,12 +330,19 @@ def _schema_check() -> dict[str, Any]:
         cursor.execute(
             f"""
             SELECT /*+ MAX_EXECUTION_TIME({timeout}) */
-                   CONSTRAINT_NAME AS constraint_name
+                   TABLE_NAME AS table_name,
+                   CONSTRAINT_NAME AS constraint_name,
+                   DELETE_RULE AS delete_rule
             FROM information_schema.REFERENTIAL_CONSTRAINTS
             WHERE CONSTRAINT_SCHEMA = DATABASE()
             """
         )
-        actual_foreign_keys = {row["constraint_name"] for row in cursor.fetchall()}
+        foreign_key_rows = cursor.fetchall()
+        actual_foreign_keys = {row["constraint_name"] for row in foreign_key_rows}
+        actual_foreign_key_delete_rules = {
+            (row["table_name"], row["constraint_name"]): str(row["delete_rule"]).upper()
+            for row in foreign_key_rows
+        }
 
     missing_columns = {
         table: sorted(columns - actual_columns.get(table, set()))
@@ -311,7 +355,25 @@ def _schema_check() -> dict[str, Any]:
         if indexes - actual_indexes.get(table, set())
     }
     missing_foreign_keys = sorted(EXPECTED_FOREIGN_KEYS - actual_foreign_keys)
-    healthy = not missing_columns and not missing_indexes and not missing_foreign_keys
+    invalid_foreign_key_delete_rules = {
+        f"{table}.{constraint}": {
+            "expected": expected_rule,
+            "actual": actual_foreign_key_delete_rules.get((table, constraint)),
+        }
+        for (table, constraint), expected_rule in EXPECTED_FOREIGN_KEY_DELETE_RULES.items()
+        if actual_foreign_key_delete_rules.get((table, constraint)) != expected_rule
+    }
+    unexpected_sandbox_foreign_keys = sorted(
+        row["constraint_name"] for row in foreign_key_rows
+        if row["table_name"] == "analysis_sandbox_sessions"
+    )
+    healthy = (
+        not missing_columns
+        and not missing_indexes
+        and not missing_foreign_keys
+        and not invalid_foreign_key_delete_rules
+        and not unexpected_sandbox_foreign_keys
+    )
     return _check(
         "schema",
         "关键 schema",
@@ -321,6 +383,8 @@ def _schema_check() -> dict[str, Any]:
             "missing_columns": missing_columns,
             "missing_indexes": missing_indexes,
             "missing_foreign_keys": missing_foreign_keys,
+            "invalid_foreign_key_delete_rules": invalid_foreign_key_delete_rules,
+            "unexpected_sandbox_foreign_keys": unexpected_sandbox_foreign_keys,
         },
     )
 

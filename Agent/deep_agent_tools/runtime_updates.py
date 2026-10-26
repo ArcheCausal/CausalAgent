@@ -387,6 +387,12 @@ def build_terminal_invocation(
         lease_epoch=int(identity.runtime_context.trusted_identity.lease_epoch),
         worker_id=identity.runtime_context.trusted_identity.worker_id,
         input_identity=current_input_identity(identity.runtime_context.trusted_identity),
+        source_input_identity=identity.runtime_context.trusted_identity.source_input_identity(),
+        analysis_dataset_id=(
+            identity.runtime_context.trusted_identity.analysis_input.dataset_id
+            if identity.runtime_context.trusted_identity.analysis_input is not None
+            else None
+        ),
         event_step_id=tool_lifecycle_step_id(identity),
         attempts={
             retry_ordinal: ActionAttempt(
@@ -425,6 +431,12 @@ def build_pending_invocation(
         lease_epoch=int(trusted.lease_epoch),
         worker_id=trusted.worker_id,
         input_identity=current_input_identity(trusted),
+        source_input_identity=trusted.source_input_identity(),
+        analysis_dataset_id=(
+            trusted.analysis_input.dataset_id
+            if trusted.analysis_input is not None
+            else None
+        ),
         event_step_id=tool_lifecycle_step_id(identity),
         attempts={0: ActionAttempt(retry_ordinal=0, revision=0, status="queued")},
     )

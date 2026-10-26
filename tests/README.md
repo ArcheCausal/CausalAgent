@@ -20,13 +20,14 @@ tests/
 ├── integration/        # 多个实际组件之间的数据传递、生命周期和协作行为
 │   ├── admin/
 │   ├── agent/
+│   ├── config/         # 完整运行时配置与服务模块导入
 │   ├── database/
 │   └── deployment/     # Flask 页面入口、静态资源与权限行为
 ├── contracts/          # 跨文件配置一致性、部署约束、迁移图与静态政策
 │   ├── database/
 │   ├── deployment/
 │   └── observability/
-├── e2e/database/       # 需要真实 MySQL 主从的索引与查询验证
+├── e2e/database/       # 真实 MySQL 事务、数据绑定、父图恢复和清理验证
 ├── acceptance/         # 分层 RAG contract/integration/production runner
 ├── e2e/admin/          # 隔离主从 + PostgreSQL checkpoint E2E 模块
 ├── run_admin_31_e2e.ps1
@@ -41,6 +42,8 @@ RAG 评测台本体（`test_rag_eval_*.py`、`test_rag_candidate_*.py`、`test_i
 对 staging 入口执行真实 HTTP/SSE 负载的压测客户端不在 `tests/` 之下，位于仓库根 `loadtest/`，不进入默认 pytest 与 CI 执行范围。压测的运行产物、凭据和报告正文都不提交，唯一入库的压测索引是 `loadtest/evidence/index.md`。
 
 `contracts/deployment/` 只做不启动容器的 Compose、Dockerfile、发布 workflow 和镜像边界检查；`integration/deployment/` 只验证 Flask 页面与静态资源的路由行为。SearXNG 的 `SEARXNG_SECRET` 注入和 `/healthz` 真实容器验证通过 `tests/run_searxng_docker_validation.ps1` 手工执行，不属于默认 pytest 范围。需要真实 MySQL 的 `tests/e2e/database/test_load_session_event_query.py` 同样不进入默认范围。
+
+`unit/config/test_secret_file.py` 保持只依赖轻量测试环境；需要导入完整控制服务的配置检查位于 `integration/config/test_controller_configuration.py`，由 backend 组在运行时依赖齐全的镜像中执行。父图读取已绑定数据集、子图恢复和会话删除回收分别在 `e2e/database/test_deep_agent_parent_mysql.py` 与 `test_chat_dataset_cleanup_mysql.py` 使用真实 MySQL，显式隔离环境与续跑要求见 [测试与验证](../Document/development/testing.md)。
 
 ## 前端与页面入口
 

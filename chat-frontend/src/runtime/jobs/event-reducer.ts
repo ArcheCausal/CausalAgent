@@ -2,6 +2,7 @@ import type {
   BackendJobStatus,
   JobRecord,
   ProcessingOption,
+  ProcessingPlanSummary,
   PublicEvent,
   StepDecisionDetail,
   StepDetail,
@@ -137,6 +138,22 @@ function parseOptions(value: unknown): ProcessingOption[] {
   return options
 }
 
+function parseProcessingPlan(value: unknown): ProcessingPlanSummary | null {
+  if (typeof value !== 'object' || value === null) return null
+  const item = value as Record<string, unknown>
+  if (typeof item.summary !== 'string' || typeof item.observation_unit !== 'string') return null
+  const transformations = Array.isArray(item.transformations)
+    ? item.transformations.filter((entry): entry is string => typeof entry === 'string')
+    : []
+  const variableSemantics = typeof item.variable_semantics === 'object' && item.variable_semantics !== null
+    ? Object.fromEntries(Object.entries(item.variable_semantics).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+    : {}
+  const limitations = Array.isArray(item.limitations)
+    ? item.limitations.filter((entry): entry is string => typeof entry === 'string')
+    : []
+  return { summary: item.summary, observationUnit: item.observation_unit, transformations, variableSemantics, limitations }
+}
+
 export function waitingInputFromInteraction(
   data: Record<string, unknown>,
   questionId: string,
@@ -144,14 +161,22 @@ export function waitingInputFromInteraction(
 ): ThinkingProjection['waitingInput'] {
   const interaction = typeof data.interaction === 'object' && data.interaction !== null
     ? data.interaction as Record<string, unknown>
-    : null
+    : data
   const options = parseOptions(interaction?.options)
+  const planVersion = typeof interaction?.plan_version === 'string'
+    && /^[0-9a-f]{64}$/.test(interaction.plan_version)
+    ? interaction.plan_version
+    : null
   return {
     questionId,
+    status: 'waiting',
+    interactionType: typeof interaction.interaction_type === 'string' ? interaction.interaction_type : null,
     prompt,
     algorithmName: typeof interaction?.algorithm_name === 'string' ? interaction.algorithm_name : '',
     expiresAt: typeof interaction?.expires_at === 'string' ? interaction.expires_at : null,
     options,
+    planVersion,
+    plan: parseProcessingPlan(interaction?.plan),
     allowOther: interaction?.allow_other !== false,
     selectedOptionId: null,
     expired: false,
@@ -375,6 +400,7 @@ function applyKnownEvent(state: JobRecord, event: DecodedSseEvent): { state: Job
     case 'final_result': {
       const result = structuredResult(data.data)
       thinking.status = 'completed'
+      if (thinking.waitingInput?.status === 'waiting') thinking.waitingInput.status = 'closed'
       releaseAllDecisions(thinking)
       if (thinking.draftStreamId !== null && result.type === 'text') {
         // 公开文字流的终态只校正已有草稿；报告布局同样复用草稿，不做第二次渲染。
@@ -403,6 +429,10 @@ function applyKnownEvent(state: JobRecord, event: DecodedSseEvent): { state: Job
       break
     case 'error':
       thinking.status = 'failed'
+      if (thinking.waitingInput?.status === 'waiting') {
+        thinking.waitingInput.status = data.reason_code === 'human_input_timeout' ? 'expired' : 'closed'
+        thinking.waitingInput.expired = thinking.waitingInput.status === 'expired'
+      }
       releaseAllDecisions(thinking)
       thinking.errorMessage = stringField(data, 'message')
       next.errorMessage = thinking.errorMessage
@@ -414,6 +444,7 @@ function applyKnownEvent(state: JobRecord, event: DecodedSseEvent): { state: Job
       break
     case 'canceled':
       thinking.status = 'canceled'
+      if (thinking.waitingInput?.status === 'waiting') thinking.waitingInput.status = 'closed'
       releaseAllDecisions(thinking)
       next.backendStatus = 'canceled'
       next.uiState = 'canceled'
@@ -463,7 +494,8 @@ export function seedJobFromPhase(
   phase: { status: string; elapsedSeconds: number; lastEventId: number; events: Array<Record<string, unknown>>; analysisJobInputId?: number },
 ): JobRecord {
   const status: BackendJobStatus = phase.status === 'queued' || phase.status === 'running' || phase.status === 'waiting_input' || phase.status === 'succeeded' || phase.status === 'failed' || phase.status === 'canceled' ? phase.status : 'running'
-  let state = createJobRecord(jobId, sessionId, status, 0)
+  // 先回放事件，再恢复阶段终态，避免终态守卫跳过历史错误消息。
+  let state = createJobRecord(jobId, sessionId, 'running', 0)
   state = { ...state, thinking: createThinking(status === 'waiting_input' ? 'waiting_input' : status === 'succeeded' ? 'completed' : status === 'failed' ? 'failed' : status === 'canceled' ? 'canceled' : 'active', phase.elapsedSeconds) }
   for (const item of phase.events) {
     const eventId = typeof item.event_id === 'number' ? item.event_id : null
@@ -489,8 +521,14 @@ export function seedJobFromPhase(
  * 游标、文本去重缓冲和连接状态保持不动，新阶段从同一条事件流接着读。
  */
 export function startResumePhase(state: JobRecord): { snapshot: ThinkingProjection; state: JobRecord } {
+  const snapshot = cloneThinking(state.thinking)
+  snapshot.status = 'completed'
+  if (snapshot.waitingInput) {
+    snapshot.waitingInput.status = 'answered'
+    snapshot.waitingInput.expired = false
+  }
   return {
-    snapshot: cloneThinking(state.thinking),
+    snapshot,
     state: { ...state, phaseInputId: null, thinking: createThinking('active') },
   }
 }

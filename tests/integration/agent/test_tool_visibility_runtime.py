@@ -1,4 +1,4 @@
-"""真实框架请求序列化和工具拒绝路径；不生成模型或搜索的替代返回。
+"""真实框架请求序列化、本地算法失败和工具拒绝路径；不生成模型或搜索的替代返回。
 
 HTTP 请求钩子在传输前显式中止，因此载荷检查不代表真实模型验收。
 """
@@ -25,45 +25,38 @@ from Agent.deep_agent.state import (
 )
 from Agent.deep_agent_tools.adapters import build_default_adapters
 from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
-from Agent.deep_agent_tools.mcp_algorithm_executor import McpAlgorithmExecutor
-from Agent.deep_agent_tools.models import DataProfile, FinalAnalysisDecision
+from Agent.deep_agent_tools.models import FinalAnalysisDecision
+from Agent.deep_agent_tools.preprocessing import build_data_profile_from_csv
 from Agent.deep_agent_tools.rag_evidence_tool import build_default_rag_evidence_tool
 from Agent.deep_agent_tools.registry import build_default_registry
 from Agent.deep_agent_tools.web_evidence_tool import build_default_web_evidence_tool
-from app.agent.worker.mcp_client_pool import McpClientPool, McpClientPoolConfig
 from config.secret_file import require_secret
+from tests.support.bound_analysis_input import bind_analysis_input
+from tests.support.local_algorithm_execution import (
+    LocalAlgorithmExecutor, PC_CSV, PC_INSUFFICIENT_SAMPLE_CSV,
+)
 
 
-def _registry():
-    # 真实生产组件，仅构造而不连接；本模块不声称执行过 MCP 算法。
-    pool = McpClientPool(McpClientPoolConfig(
-        url="http://127.0.0.1:9/mcp",
-        service_token=require_secret("CAUSAL_MCP_SERVICE_TOKEN"),
-    ))
-    executor = McpAlgorithmExecutor(
-        pool, signing_key=require_secret("CAUSAL_MCP_SIGNING_KEY_CURRENT"),
-    )
+def _registry(csv_data=PC_CSV):
+    executor = LocalAlgorithmExecutor(csv_data)
     return build_default_registry(build_default_adapters(executor=executor))
 
 
-def _context(enabled):
+def _context(enabled, csv_data=PC_CSV):
     return AgentRunContext(
         execution_guard=None, web_search_enabled=enabled,
-        trusted_identity=TrustedJobIdentity(
+        trusted_identity=bind_analysis_input(TrustedJobIdentity(
             job_id="00000000-0000-0000-0000-000000000901",
             session_id="00000000-0000-0000-0000-000000000902",
             user_id=7, attempt_count=1, lease_epoch=2,
             worker_id="visibility-worker", input_identity="visibility-input",
-        ),
+        ), csv_data),
     )
 
 
-def _input(messages):
+def _input(messages, csv_data=PC_CSV):
     return initial_deep_agent_state(
-        data_profile=DataProfile(
-            row_count=0, column_count=2, column_names=("x", "y"),
-            numeric_columns=("x", "y"),
-        ),
+        data_profile=build_data_profile_from_csv(csv_data),
         messages=messages, message_execution_id="visibility-response",
     )
 
@@ -128,9 +121,10 @@ def test_real_graph_serializes_isolated_concurrent_tools_and_retry_requests():
             baseline = {
                 "causal_pc", "causal_direct_lingam", "causal_cdfm",
                 "rag_evidence_search", "read_file", "edit_file",
-                "request_data_processing", "FinalAnalysisDecision",
+                "FinalAnalysisDecision",
             }
             assert all(baseline <= names for _, names in observed)
+            assert all("request_data_processing" not in names for _, names in observed)
             assert all(("web_evidence_search" in names) is (flag is True)
                        for flag, names in observed)
 
@@ -150,16 +144,17 @@ def test_real_graph_serializes_isolated_concurrent_tools_and_retry_requests():
                 assert len(observed) == before + 1
                 assert "web_evidence_search" not in observed[-1][1]
                 assert baseline <= observed[-1][1]
+                assert "request_data_processing" not in observed[-1][1]
     asyncio.run(run())
 
 
-async def _invoke_tools(tools, context, calls):
+async def _invoke_tools(tools, context, calls, *, csv_data=PC_CSV):
     builder = StateGraph(ProjectDeepAgentState, context_schema=AgentRunContext)
     builder.add_node("tools", ToolNode(tools))
     builder.add_edge(START, "tools")
     builder.add_edge("tools", END)
     return await builder.compile().ainvoke(
-        _input([AIMessage(content="", tool_calls=calls)]), context=context,
+        _input([AIMessage(content="", tool_calls=calls)], csv_data), context=context,
     )
 
 
@@ -177,10 +172,11 @@ def test_disabled_production_tool_persists_real_denial_without_network():
 
 
 def test_gate_reuses_complete_same_attempt_but_requires_new_attempt_web_call():
-    context = _context(True)
-    registry = _registry()
-    # 空数据的真实算法前置检查产生 invalid_input；关闭 Web 的真实执行入口产生
-    # terminal not_ready。两者是实际拒绝结果，不代表算法或搜索已经执行。
+    csv_data = PC_INSUFFICIENT_SAMPLE_CSV
+    context = _context(True, csv_data)
+    registry = _registry(csv_data)
+    # 两行数据通过独立输入校验，但真实 PC runner 不能完成估计，返回 execution_failed。
+    # 关闭 Web 的真实入口返回 terminal not_ready，没有执行搜索。
     state = asyncio.run(_invoke_tools(
         [
             *[tool.to_langchain_tool() for tool in build_algorithm_tools(registry)],
@@ -190,17 +186,18 @@ def test_gate_reuses_complete_same_attempt_but_requires_new_attempt_web_call():
             dict(name="causal_pc", args={}, id="pc-precheck"),
             dict(name="web_evidence_search", args={"query": "causality"}, id="web-precheck"),
         ],
+        csv_data=csv_data,
     ))
     result, = state["algorithm_results"].values()
-    assert result.status == "invalid_input"
+    assert result.status == "execution_failed"
     decision = FinalAnalysisDecision(
         outcome="evidence_only", primary_result_ref=None,
         result_assessments=[{
             "result_ref": result.result_ref, "disposition": "discarded",
-            "rationale": "真实数据前置检查未通过。",
+            "rationale": "真实 PC runner 无法从两行数据完成估计。",
         }],
         conflict_status="none", selection_rationale="没有可用算法结果。",
-        confidence="low", confidence_basis=["数据不足"],
+        confidence="low", confidence_basis=["样本不足"],
     )
     gate = FinalizationGate(registry=registry)
     kwargs = dict(
@@ -219,11 +216,13 @@ def test_gate_reuses_complete_same_attempt_but_requires_new_attempt_web_call():
     next_state = asyncio.run(_invoke_tools(
         [tool.to_langchain_tool() for tool in build_algorithm_tools(registry)],
         next_context, [dict(name="causal_pc", args={}, id="next-pc-precheck")],
+        csv_data=csv_data,
     ))
     next_result, = next_state["algorithm_results"].values()
+    assert next_result.status == "execution_failed"
     next_decision = FinalAnalysisDecision.model_validate({**decision.model_dump(), "result_assessments": [{
         "result_ref": next_result.result_ref, "disposition": "discarded",
-        "rationale": "新 attempt 的真实前置拒绝。",
+        "rationale": "新 attempt 的真实 PC 估计失败。",
     }]})
     with pytest.raises(StructuredResponseError) as failure:
         gate.validate(**{

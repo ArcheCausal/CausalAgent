@@ -178,6 +178,20 @@ def _ensure_retry_allowed() -> None:
     raise_if_execution_revoked()
 
 
+def _with_validation_feedback(prompt: Any, error: StructuredOutputError) -> Any:
+    """只反馈字段路径和规则，不回传模型取值或异常正文。"""
+    summary = error.safe_validation
+    if not summary:
+        return prompt
+    location = summary.get("first_loc", "root")
+    rule = summary.get("first_type", "schema_invalid")
+    return prompt + [("human", (
+        f"上次结构化输出未通过校验：字段路径 {location}，规则 {rule}。"
+        "请重新返回完整结构，补齐该层级的必填字段，继续遵守原有证据和来源要求。"
+        "不要用内层同名字段替代外层必填字段，不要编造证据。"
+    ))]
+
+
 def invoke_structured(
     *,
     llm: ChatOpenAI,
@@ -186,6 +200,7 @@ def invoke_structured(
     inputs: Mapping[str, Any],
     node_name: str,
     config: Any = None,
+    retry_with_validation_feedback: bool = False,
 ) -> SchemaT:
     """同步执行结构化调用：结果不可用时重试一次，随后抛出 StructuredOutputError。"""
     attempts = 0
@@ -211,6 +226,8 @@ def invoke_structured(
             if not _retry_allowed(error):
                 raise error from exc
             _ensure_retry_allowed()
+            if retry_with_validation_feedback:
+                prompt = _with_validation_feedback(prompt, error)
 
 
 async def ainvoke_structured(
@@ -221,6 +238,7 @@ async def ainvoke_structured(
     inputs: Mapping[str, Any],
     node_name: str,
     config: Any = None,
+    retry_with_validation_feedback: bool = False,
 ) -> SchemaT:
     """异步执行结构化调用：结果不可用时重试一次，随后抛出 StructuredOutputError。"""
     attempts = 0
@@ -246,3 +264,5 @@ async def ainvoke_structured(
             if not _retry_allowed(error):
                 raise error from exc
             _ensure_retry_allowed()
+            if retry_with_validation_feedback:
+                prompt = _with_validation_feedback(prompt, error)

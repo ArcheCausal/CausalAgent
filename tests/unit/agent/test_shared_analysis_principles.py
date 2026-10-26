@@ -9,7 +9,10 @@ def test_both_runtime_entries_use_the_same_principles_and_keep_local_contracts()
     assert causal_prompt() == CAUSAL_ANALYSIS_PRINCIPLES
     deep = build_deep_agent_system_prompt("本次限制")
     assert deep.startswith(CAUSAL_ANALYSIS_PRINCIPLES)
-    assert "FinalAnalysisDecision" in deep and "request_data_processing" in deep
+    assert "FinalAnalysisDecision" in deep
+    assert "request_data_processing" not in deep
+    assert "同一份经过独立校验的数据集绑定为本次 Job 的分析输入" in deep
+    assert "算法工具只能按已绑定输入执行" in deep
     assert deep.endswith("本次限制")
     assert "只有本次真正估计并识别了效应时才解释效应量" in causal_report_prompt()
     assert "未检出非线性不证明线性机制" in data_prompt()

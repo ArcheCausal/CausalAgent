@@ -6,6 +6,7 @@ import { useLocale } from '../i18n/use-locale'
 import { chatScrollFollowKey, createChatScrollFollow } from '../runtime/chat/scroll-follow'
 import { createIdempotencyKey, retryIdempotent } from '../runtime/jobs/idempotency'
 import { JobController } from '../runtime/jobs/job-controller'
+import { canSubmitInteraction, interactionIdentity, matchesInteraction } from '../runtime/jobs/interaction'
 import { sessionHref, settingsHref, workspaceHref } from '../runtime/navigation/app-route'
 import type { DashboardRoute } from '../runtime/navigation/app-route'
 import { useAuthStore } from '../stores/auth.store'
@@ -13,7 +14,7 @@ import { useComposerStore } from '../stores/composer.store'
 import { useFilesStore } from '../stores/files.store'
 import { useJobsStore } from '../stores/jobs.store'
 import { useSessionsStore } from '../stores/sessions.store'
-import type { JobRecord } from '../types/domain'
+import type { BackendJobStatus, ExecutionPhase, InteractionIdentity, JobRecord, ProcessingOptionAction } from '../types/domain'
 import Composer from './Composer.vue'
 import MessageTimeline from './MessageTimeline.vue'
 import NetworkBackground from './NetworkBackground.vue'
@@ -52,6 +53,9 @@ const selectedComposerFile = computed(
   () => files.items.find((file) => file.userFileId === composer.selectedFileId) ?? null,
 )
 const pendingOptionId = ref<string | null>(null)
+const interactionFailure = ref<{ identity: InteractionIdentity; message: string } | null>(null)
+const interactionError = computed(() => interactionFailure.value
+  && matchesInteraction(activeJob.value, interactionFailure.value.identity) ? interactionFailure.value.message : null)
 
 watch(pendingConfirmation, async (confirmation) => {
   if (confirmation) {
@@ -98,19 +102,36 @@ function report(error: unknown, fallback: string): void {
 
 async function loadSession(sessionId: string): Promise<void> {
   try {
+    const loadGeneration = sessions.loadGeneration + 1
     await sessions.select(sessionId)
-    if (sessions.currentId !== sessionId) return
+    if (sessions.currentId !== sessionId || sessions.loadGeneration !== loadGeneration) return
     const active = await api.activeJobs(sessionId)
-    if (sessions.currentId !== sessionId) return
-    /* 只有仍在执行的 Job 需要运行态记录；已结束的历史阶段由消息自带的 thinking_after 渲染。 */
+    if (sessions.currentId !== sessionId || sessions.loadGeneration !== loadGeneration) return
+    /* 历史与活动摘要是两次读取；两次读取之间结束的 Job 仍需回放终态。 */
     const activeJobIds = new Set((active.jobs ?? []).map((job) => job.job_id))
+    const latestPhases = new Map<string, ExecutionPhase>()
     for (const message of sessions.messages) {
       const phase = message.thinkingAfter
-      if (phase?.analysisJobId && activeJobIds.has(phase.analysisJobId)) jobs.seedPhase(sessionId, phase)
+      if (!phase?.analysisJobId) continue
+      const latest = latestPhases.get(phase.analysisJobId)
+      if (!latest || phase.phaseSequence > latest.phaseSequence) latestPhases.set(phase.analysisJobId, phase)
+    }
+    const replayJobIds = new Set([...latestPhases.entries()]
+      .filter(([jobId, phase]) => !activeJobIds.has(jobId) && ['queued', 'running', 'waiting_input'].includes(phase.status))
+      .map(([jobId]) => jobId))
+    const runtimeJobIds = new Set([...activeJobIds, ...replayJobIds])
+    jobs.reconcileSessionJobs(sessionId, [...runtimeJobIds])
+    for (const [jobId, phase] of latestPhases) {
+      if (runtimeJobIds.has(jobId)) jobs.seedPhase(sessionId, phase, true)
     }
     for (const job of active.jobs ?? []) {
       const record = jobs.observeActive(job)
       if (record.uiState !== 'waiting_input') void props.controller.subscribe(record.jobId).catch((error: unknown) => report(error, '恢复任务订阅失败。'))
+    }
+    for (const jobId of replayJobIds) {
+      void props.controller.subscribe(jobId).then(async () => {
+        if (sessions.currentId === sessionId && sessions.loadGeneration === loadGeneration) await loadSession(sessionId)
+      }).catch((error: unknown) => report(error, '恢复最终任务事件失败。'))
     }
     await jumpToLatest()
   } catch (error) {
@@ -144,8 +165,12 @@ async function send(): Promise<void> {
   const message = composer.draft.trim()
   if (!message || composer.sending) return
   const existing = activeJob.value
-  if (existing && ['queued', 'running', 'canceling'].includes(existing.uiState)) return
+  if (existing && ['queued', 'running', 'resuming', 'canceling'].includes(existing.uiState)) return
   const resumeJob = existing?.uiState === 'waiting_input' ? existing : null
+  const submittedLoadGeneration = sessions.loadGeneration
+  const identity = resumeJob ? interactionIdentity(resumeJob) : null
+  if (resumeJob && (!identity || !jobs.beginResume(identity))) return
+  interactionFailure.value = null
   const selectedFile = !resumeJob ? selectedComposerFile.value : null
   const fileAttachment = selectedFile ? { filename: selectedFile.filename } : undefined
   composer.setSending(true)
@@ -158,14 +183,17 @@ async function send(): Promise<void> {
     if (!sessionId) throw new Error('当前没有可用会话。')
     const key = createIdempotencyKey()
     const response = resumeJob
-      ? await retryIdempotent(() => api.resumeJob(resumeJob.jobId, resumeJob.thinking.waitingInput?.questionId ?? '', message, key))
+      ? await retryIdempotent(() => api.resumeJob(resumeJob.jobId, identity!.questionId, message, key))
       : await retryIdempotent(() => api.createJob(message, sessionId as string, key, composer.selectedFileId, composer.webSearchEnabled))
     if (!response.success || !response.job_id || !response.status) throw new Error(response.error || '任务请求未被接受。')
-    const job = jobs.startFromResponse(response.job_id, sessionId, response.status, resumeJob?.resumeEventId ?? 0)
-    if (resumeJob) {
+    if (resumeJob && identity) {
+      if (response.job_id !== identity.jobId) throw new Error('恢复响应与当前任务不匹配。')
       /* 追问开始新阶段：上一阶段的执行记录留在原来的用户消息上，运行态记录从空投影继续。 */
-      const frozen = jobs.startResume(job.jobId)
-      if (frozen) sessions.freezeThinking(job.jobId, frozen)
+      const resumed = await finishResume(identity, response.status, sessionId, submittedLoadGeneration)
+      if (sessions.currentId === sessionId && composer.draft.trim() === message) composer.draft = ''
+      if (!resumed) return
+    } else {
+      jobs.startFromResponse(response.job_id, sessionId, response.status)
     }
     const stillInSubmittedSession = sessions.currentId === sessionId
     if (stillInSubmittedSession) {
@@ -180,45 +208,82 @@ async function send(): Promise<void> {
     void props.controller.subscribe(response.job_id).catch((error: unknown) => report(error, '任务事件订阅失败。'))
     void sessions.loadList().catch(() => undefined)
   } catch (error) {
-    composer.restoreDraft(message)
+    if (identity) {
+      jobs.failResume(identity)
+      interactionFailure.value = { identity, message: error instanceof Error ? error.message : '提交回答失败，请重试。' }
+    }
+    if (!resumeJob || (sessions.currentId === resumeJob.sessionId && sessions.loadGeneration === submittedLoadGeneration)) composer.restoreDraft(message)
     report(error, '发送消息时发生网络错误。')
   } finally {
     composer.setSending(false)
   }
 }
 
-async function chooseProcessingOption(optionId: string): Promise<void> {
+async function finishResume(identity: InteractionIdentity, status: BackendJobStatus, sessionId: string, loadGeneration: number): Promise<boolean> {
+  // 重新加载后的历史可能已包含这次答复，不能再把迟到响应追加为本地消息。
+  if (sessions.currentId !== sessionId) return false
+  if (sessions.loadGeneration !== loadGeneration) {
+    await loadSession(sessionId)
+    return false
+  }
+  const frozen = jobs.acceptResume(identity, status)
+  if (!frozen) {
+    await loadSession(sessionId)
+    return false
+  }
+  sessions.freezeThinking(identity.jobId, frozen)
+  return true
+}
+
+async function chooseProcessingOption(action: ProcessingOptionAction): Promise<void> {
   const job = activeJob.value
   const waiting = job?.thinking.waitingInput
-  if (!job || !waiting || job.uiState !== 'waiting_input' || pendingOptionId.value) return
+  if (!job || !waiting || !canSubmitInteraction(job, action) || composer.sending || pendingOptionId.value) return
+  const { optionId } = action
+  const isPlanConfirmation = waiting.interactionType === 'data_processing_plan_confirmation'
+  if (isPlanConfirmation && (!waiting.planVersion || !waiting.plan || optionId !== '__confirm_processing_plan__')) {
+    report(new Error('当前方案版本无效，请刷新任务后重试。'), '提交处理方案失败。')
+    return
+  }
+  if (!isPlanConfirmation && !waiting.options.some((option) => option.optionId === optionId)) return
+  if (!jobs.beginResume(action)) return
+  const submittedLoadGeneration = sessions.loadGeneration
   pendingOptionId.value = optionId
-  jobs.chooseProcessingOption(job.jobId, optionId)
-  const key = createIdempotencyKey()
+  composer.setSending(true)
+  interactionFailure.value = null
+  const answer = isPlanConfirmation
+    ? { action: 'confirm', plan_version: waiting.planVersion as string }
+    : JSON.stringify({ option_id: optionId })
   try {
+    const key = createIdempotencyKey()
     const response = await retryIdempotent(
-      () => api.resumeJob(job.jobId, waiting.questionId, JSON.stringify({ option_id: optionId }), key),
+      () => api.resumeJob(action.jobId, action.questionId, answer, key),
     )
     if (!response.success || !response.job_id || !response.status) {
       throw new Error(response.error || '方案确认未被接受。')
     }
-    const next = jobs.startFromResponse(response.job_id, job.sessionId, response.status, job.resumeEventId)
-    const frozen = jobs.startResume(next.jobId)
-    if (frozen) sessions.freezeThinking(next.jobId, frozen)
+    if (response.job_id !== action.jobId) throw new Error('恢复响应与当前任务不匹配。')
+    if (!await finishResume(action, response.status, job.sessionId, submittedLoadGeneration)) return
     const selected = waiting.options.find((option) => option.optionId === optionId)
-    sessions.appendUserMessage(selected ? `已确认处理方案：${selected.label}` : '已确认处理方案', response.job_id)
+    if (sessions.currentId === job.sessionId) {
+      sessions.appendUserMessage(selected ? `已确认处理方案：${selected.label}` : '已确认处理方案', response.job_id)
+    }
     void props.controller.subscribe(response.job_id).catch((error: unknown) => report(error, '任务事件订阅失败。'))
   } catch (error) {
+    jobs.failResume(action)
+    interactionFailure.value = { identity: action, message: error instanceof Error ? error.message : '提交处理方案失败，请重试。' }
     report(error, '提交处理方案失败。')
   } finally {
     pendingOptionId.value = null
+    composer.setSending(false)
   }
 }
 
-async function useOtherRequirement(): Promise<void> {
+async function useOtherRequirement(identity: InteractionIdentity): Promise<void> {
   const job = activeJob.value
-  const waiting = job?.thinking.waitingInput
-  if (!job || !waiting) return
+  if (!canSubmitInteraction(job, identity) || composer.sending) return
   await nextTick()
+  if (!canSubmitInteraction(activeJob.value, identity)) return
   const input = document.querySelector<HTMLTextAreaElement>('.composer textarea')
   input?.focus()
 }
@@ -442,6 +507,9 @@ function closeSettings(): void {
         <MessageTimeline
           :messages="sessions.messages"
           :submitting-option-id="pendingOptionId"
+          :active-job="activeJob"
+          :interaction-submitting="composer.sending"
+          :interaction-error="interactionError"
           @choose-processing-option="chooseProcessingOption"
           @use-other-requirement="useOtherRequirement"
         />

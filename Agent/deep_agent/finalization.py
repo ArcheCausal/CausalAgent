@@ -122,6 +122,22 @@ class FinalizationGate:
         return value
 
     @staticmethod
+    def _source_input_identity(identity: Any) -> str:
+        resolver = getattr(identity, "source_input_identity", None)
+        value = resolver() if callable(resolver) else None
+        if not isinstance(value, str) or not value:
+            raise StructuredResponseError("trusted source input identity is incomplete")
+        return value
+
+    @staticmethod
+    def _analysis_dataset_id(identity: Any) -> int:
+        analysis_input = getattr(identity, "analysis_input", None)
+        value = getattr(analysis_input, "dataset_id", None)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise StructuredResponseError("trusted analysis dataset identity is incomplete")
+        return value
+
+    @staticmethod
     def _coerce_results(value: Mapping[str, Any] | None) -> dict[str, AlgorithmResult]:
         results: dict[str, AlgorithmResult] = {}
         for key, raw_result in dict(value or {}).items():
@@ -161,6 +177,8 @@ class FinalizationGate:
         ledger: Mapping[str, InvocationRecord],
         *,
         job_id: str,
+        source_input_identity: str,
+        analysis_dataset_id: int,
     ) -> dict[str, InvocationRecord]:
         current: dict[str, InvocationRecord] = {}
         for record in ledger.values():
@@ -196,6 +214,13 @@ class FinalizationGate:
                 raise StructuredResponseError("action ledger Job ownership mismatch")
             if not self._is_algorithm_record(record):
                 continue
+            if (
+                record.source_input_identity != source_input_identity
+                or record.analysis_dataset_id != analysis_dataset_id
+            ):
+                raise StructuredResponseError(
+                    "action ledger analysis dataset identity mismatch"
+                )
             if record.final_status == "pending" or not record.attempts:
                 raise StructuredResponseError("algorithm action ledger is not terminal")
             current[record.invocation_id] = record
@@ -300,6 +325,14 @@ class FinalizationGate:
             raise StructuredResponseError("result lease does not match the trusted Job")
         if provenance.input_identity != self._current_input_identity(identity):
             raise StructuredResponseError("result input identity does not match the Job")
+        if provenance.source_input_identity != self._source_input_identity(identity):
+            raise StructuredResponseError("result source input identity does not match the Job")
+        if provenance.analysis_dataset_id != self._analysis_dataset_id(identity):
+            raise StructuredResponseError("result analysis dataset does not match the Job")
+        if record.source_input_identity != provenance.source_input_identity:
+            raise StructuredResponseError("result and ledger source input identities differ")
+        if record.analysis_dataset_id != provenance.analysis_dataset_id:
+            raise StructuredResponseError("result and ledger analysis datasets differ")
         latest_attempt = max(
             record.attempts.values(),
             key=lambda attempt: (attempt.retry_ordinal, attempt.revision),
@@ -350,7 +383,14 @@ class FinalizationGate:
         current_lease = int(self._identity_value(trusted_identity, "lease_epoch"))
         current_worker = str(self._identity_value(trusted_identity, "worker_id"))
         current_input = self._current_input_identity(trusted_identity)
-        current_ledger = self._current_ledger(ledger, job_id=job_id)
+        current_source = self._source_input_identity(trusted_identity)
+        current_dataset_id = self._analysis_dataset_id(trusted_identity)
+        current_ledger = self._current_ledger(
+            ledger,
+            job_id=job_id,
+            source_input_identity=current_source,
+            analysis_dataset_id=current_dataset_id,
+        )
         current_ledger = {
             key: record
             for key, record in current_ledger.items()
@@ -358,6 +398,8 @@ class FinalizationGate:
             and record.lease_epoch == current_lease
             and record.worker_id == current_worker
             and record.input_identity == current_input
+            and record.source_input_identity == current_source
+            and record.analysis_dataset_id == current_dataset_id
         }
 
         eligible: dict[str, AlgorithmResult] = {}

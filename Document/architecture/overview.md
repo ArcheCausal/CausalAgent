@@ -17,6 +17,8 @@ CausalAgent 的 Web 入口是 `CausalAgent.py`，它调用 `app/__init__.py` 的
 | Web | `python CausalAgent.py` 或 Gunicorn `CausalAgent:app` | 认证、会话/文件短请求、Job 入队、普通用户 SSE、管理员 API | MySQL 业务表；读取 PostgreSQL 安全摘要 |
 | Agent worker | `python -m app.agent.worker` | 领取 Job、运行父图/Deep Agent/RAG/Web、通过私网 MCP 调用算法、写事件和终态结果 | MySQL Job/Event；PostgreSQL 父子 checkpoint 与长期记忆 Store |
 | causal-mcp | `python -m Agent.CausalAgentMCP.app` | 校验签名与 Job lease，以有界独立进程执行因果算法和精确取消 | MySQL primary strong read；不持有业务状态 |
+| 沙盒控制服务 | `python -m sandbox_controller` | 受限操作、容量准入、资源核查和清理 | MySQL 生命周期记录 |
+| OpenSandbox | 固定 digest 的官方 server | 在同机 Docker 创建隔离处理容器 | 上游持久元数据；临时容器 |
 | monitor | `python -m Database.monitor_worker` | 采集 MySQL/PostgreSQL 运行事实并写共享快照 | MySQL monitor 快照和在线配置 |
 | Agent 持久化清理 | `python -m Database.agent_persistence_cleanup_worker` | 轮转消费两张 MySQL outbox，删除 PostgreSQL 父子图 checkpoint 和用户长期记忆 Store namespace | MySQL outbox；PostgreSQL checkpoint 与 Store |
 | db-bootstrap | `python -m Database.bootstrap` | 建库、Alembic migration、PostgreSQL checkpoint schema setup | 修改初始化目标数据库 |
@@ -37,6 +39,10 @@ flowchart LR
     Worker -->|父图/Deep Agent checkpoint 与 Store| PostgreSQL[(PostgreSQL)]
     Worker -->|私网 Streamable HTTP| MCP[causal-mcp]
     MCP -->|lease strong read| MySQL
+    Worker --> Controller[沙盒控制服务]
+    Controller -->|生命周期与实时授权| MySQL
+    Controller --> OpenSandbox[同机 OpenSandbox]
+    OpenSandbox --> Sandboxes[临时处理容器]
     Web -->|只读安全摘要| PostgreSQL
     MySQL -->|checkpoint_cleanup_outbox / user_memory_cleanup_outbox| Cleanup[Agent 持久化清理 worker]
     Cleanup -->|adelete_thread(父图与子图) / Store namespace purge| PostgreSQL
@@ -53,14 +59,14 @@ cleanup worker 之后异步删除 PostgreSQL 父图 checkpoint、Deep Agent 子�
 
 ## Docker 拓扑
 
-默认开发 Compose `docker-compose.yml` 当前包含 16 个服务：`mysql-primary`、
+默认开发 Compose `docker-compose.yml` 当前包含 17 个服务：`mysql-primary`、
 `mysql-replica`、`postgres-checkpoint`、`db-bootstrap`、`app`、`worker`、
-`causal-mcp`、`monitor`、`agent-persistence-cleanup`、`rag-eval-worker`、
+`causal-mcp`、`sandbox-controller`、`opensandbox`、`monitor`、`agent-persistence-cleanup`、`rag-eval-worker`、
 `searxng`、`valkey`、`loki`、`alloy` 和 `grafana`。
 `db-bootstrap` 成功后，依赖它的运行服务才启动；开发拓扑没有自动故障切换。
 
 当前生产 Compose `docker-compose.prod.yml` 实际包含生产 MySQL、PostgreSQL checkpoint、
-`db-bootstrap`、`app`、Agent `worker`、私网 `causal-mcp`、
+`db-bootstrap`、`app`、Agent `worker`、私网 `causal-mcp`、`sandbox-controller`、`opensandbox`、
 `agent-persistence-cleanup`、`monitor` 和独立 `rag-eval-worker` 服务；它不提供开发拓扑的
 MySQL replica、SearXNG/Valkey、Loki/Alloy/Grafana 或自动故障切换。部署入口见
 [`../development/deployment.md`](../development/deployment.md)。
@@ -70,6 +76,7 @@ MySQL replica、SearXNG/Valkey、Loki/Alloy/Grafana 或自动故障切换。部�
 - `app/` 负责 HTTP、认证、持久化服务编排和 Job worker 外壳，不承载因果算法实现。
 - `Agent/` 负责 LangGraph 图、结构化输出、MCP/RAG 工具节点和因果工具。
 - `Database/` 负责连接、迁移、bootstrap、monitor、checkpoint setup 和 Agent 持久化清理 worker。
+- `sandbox_controller/` 负责独立内部 API、沙盒容量与生命周期，不承载模型推理、算法调度或用户公开接口。
 - `website-frontend/` 只负责官网公开页面、登录注册表单和公开内容展示；登录与注册只调用 `/api/login`、`/api/register`，不做授权判定。
 - `chat-frontend/` 只负责登录后的普通用户工作区（`/dashboard*`）、API schema、Pinia 领域状态、Job SSE 传输和声明式渲染；其 SSE 传输使用 `fetch()` + `ReadableStream`，不改变 Flask SSE 路径和内容，未登录时把浏览器交给 `/auth/sign-in`。
 - `app/rag_eval/frontend/` 只负责 RAG 评测台页面与其审核工作流；页面只通过 `/api/rag_eval` 访问后端。

@@ -123,128 +123,6 @@ ResponseIdentitySource: TypeAlias = Literal[
 
 FinalizationStatus: TypeAlias = Literal["valid", "degraded"]
 
-PreprocessingOperation: TypeAlias = Literal[
-    "select_columns",
-    "drop_rows",
-    "numeric_impute",
-    "categorical_encode",
-]
-
-PREPROCESSING_OPERATION_ORDER: tuple[PreprocessingOperation, ...] = (
-    "select_columns",
-    "drop_rows",
-    "numeric_impute",
-    "categorical_encode",
-)
-
-
-class PreprocessingStep(ContractModel):
-    """一个已确认的数据处理步骤；只表达模型可理解的列与参数。"""
-
-    operation: PreprocessingOperation = Field(
-        description=(
-            "处理操作：select_columns 选列，drop_rows 按列删除含缺失值的行，"
-            "numeric_impute 数值插补，categorical_encode 分类编码。"
-        )
-    )
-    columns: tuple[str, ...] = Field(
-        default=(),
-        description="步骤作用的真实列名；删行和插补必须明确列出列名。",
-    )
-    method: Literal["mean", "median", "ordinal"] | None = Field(
-        default=None,
-        description=(
-            "数值插补使用 mean 或 median；分类编码使用 ordinal；其他操作必须为 null。"
-        ),
-    )
-
-    @field_validator("columns")
-    @classmethod
-    def validate_columns(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        for column in value:
-            _non_blank(column, field_name="columns")
-        if len(value) != len(set(value)):
-            raise ValueError("columns must be unique within one step")
-        if not value:
-            raise ValueError("a preprocessing step must name at least one column")
-        return value
-
-    @model_validator(mode="after")
-    def validate_operation_parameters(self) -> "PreprocessingStep":
-        if self.operation == "numeric_impute":
-            if self.method not in {"mean", "median"}:
-                raise ValueError("numeric_impute requires method=mean or median")
-        elif self.operation == "categorical_encode":
-            if self.method != "ordinal":
-                raise ValueError("categorical_encode requires method=ordinal")
-        elif self.method is not None:
-            raise ValueError(f"{self.operation} does not accept a method")
-        return self
-
-
-class PreprocessingPlan(ContractModel):
-    """用户确认的确定性处理方案；顺序固定且不隐式补充操作。"""
-
-    version: Literal["data-preprocessing-v1"] = "data-preprocessing-v1"
-    steps: tuple[PreprocessingStep, ...] = ()
-    protected_columns: tuple[str, ...] = ()
-
-    @field_validator("protected_columns")
-    @classmethod
-    def validate_protected_columns(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        for column in value:
-            _non_blank(column, field_name="protected_columns")
-        if len(value) != len(set(value)):
-            raise ValueError("protected_columns must be unique")
-        return value
-
-    @model_validator(mode="after")
-    def validate_step_order(self) -> "PreprocessingPlan":
-        positions: list[int] = []
-        operations: set[str] = set()
-        for step in self.steps:
-            if step.operation in operations:
-                raise ValueError(f"preprocessing operation repeated: {step.operation}")
-            operations.add(step.operation)
-            positions.append(PREPROCESSING_OPERATION_ORDER.index(step.operation))
-        if positions != sorted(positions):
-            raise ValueError(
-                "preprocessing steps must follow select_columns, drop_rows, "
-                "numeric_impute, categorical_encode"
-            )
-        selected = {
-            column
-            for step in self.steps
-            if step.operation == "select_columns"
-            for column in step.columns
-        }
-        if selected and not set(self.protected_columns) <= selected:
-            raise ValueError("select_columns must keep every protected column")
-        return self
-
-    @property
-    def digest(self) -> str:
-        """返回方案内容的稳定摘要，用于确认凭证和结果 provenance。"""
-
-        return hashlib.sha256(canonical_json_bytes(self.model_dump(mode="json"))).hexdigest()
-
-    def operations(self) -> tuple[str, ...]:
-        return tuple(step.operation for step in self.steps)
-
-
-class PreprocessingApproval(ContractModel):
-    """运行时注入的确认凭证；模型不能自行构造或改写。"""
-
-    option_id: str
-    question_id: str
-    plan_digest: str
-
-    @field_validator("option_id", "question_id", "plan_digest")
-    @classmethod
-    def validate_approval_strings(cls, value: str, info: Any) -> str:
-        return _non_blank(value, field_name=info.field_name)
-
-
 class GraphEdge(ContractModel):
     """标准化图中的一条有向或部分定向边。"""
 
@@ -332,12 +210,12 @@ class AlgorithmResultProvenance(ContractModel):
     attempt_count: int = Field(ge=0)
     lease_epoch: int = Field(ge=0)
     input_identity: str
+    source_input_identity: str | None = None
+    analysis_dataset_id: int | None = Field(default=None, gt=0)
     spec_digest: str
     invocation_id: str | None = None
     capability_id: str | None = None
     capability_version: str | None = None
-    preprocessing_recipe_digest: str | None = None
-    preprocessing_plan_digest: str | None = None
     algorithm_runner_version: str | None = None
 
     @model_validator(mode="after")
@@ -345,12 +223,11 @@ class AlgorithmResultProvenance(ContractModel):
         for field_name in (
             "job_id",
             "input_identity",
+            "source_input_identity",
             "spec_digest",
             "invocation_id",
             "capability_id",
             "capability_version",
-            "preprocessing_recipe_digest",
-            "preprocessing_plan_digest",
             "algorithm_runner_version",
         ):
             value = getattr(self, field_name)
@@ -562,6 +439,8 @@ class InvocationRecord(ContractModel):
     lease_epoch: int | None = Field(default=None, ge=0)
     worker_id: str | None = None
     input_identity: str | None = None
+    source_input_identity: str | None = None
+    analysis_dataset_id: int | None = Field(default=None, gt=0)
     event_step_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{24}$")
     attempts: dict[int, ActionAttempt] = Field(default_factory=dict)
 
@@ -582,6 +461,7 @@ class InvocationRecord(ContractModel):
         "job_id",
         "worker_id",
         "input_identity",
+        "source_input_identity",
     )
     @classmethod
     def validate_optional_strings(cls, value: str | None, info: Any) -> str | None:
@@ -833,6 +713,8 @@ class McpInvocationContext(ContractModel):
     lease_epoch: int = Field(ge=0)
     worker_id: str
     input_snapshot_digest: str
+    source_input_identity: str | None = None
+    analysis_dataset_id: int | None = Field(default=None, gt=0)
     issued_at: datetime
     expires_at: datetime
     key_id: str
@@ -846,6 +728,11 @@ class McpInvocationContext(ContractModel):
     @classmethod
     def validate_context_strings(cls, value: str, info: Any) -> str:
         return _non_blank(value, field_name=info.field_name)
+
+    @field_validator("source_input_identity")
+    @classmethod
+    def validate_source_input_identity(cls, value: str | None) -> str | None:
+        return None if value is None else _non_blank(value, field_name="source_input_identity")
 
     @field_validator("issued_at", "expires_at")
     @classmethod
@@ -871,8 +758,6 @@ class AlgorithmExecutionCommand(ContractModel):
     provider_call_id: str
     input_identity: str
     parameters: dict[str, Any] = Field(default_factory=dict)
-    preprocessing: "PreprocessingPlan | None" = None
-    approval: "PreprocessingApproval | None" = None
     result_index: int = Field(default=0, ge=0)
     timeout_seconds: int | None = Field(default=None, gt=0)
 
@@ -887,16 +772,6 @@ class AlgorithmExecutionCommand(ContractModel):
     @classmethod
     def validate_command_strings(cls, value: str, info: Any) -> str:
         return _non_blank(value, field_name=info.field_name)
-
-    @model_validator(mode="after")
-    def validate_preprocessing_binding(self) -> "AlgorithmExecutionCommand":
-        if (self.preprocessing is None) != (self.approval is None):
-            raise ValueError("preprocessing and approval must be present together")
-        if self.preprocessing is not None and self.approval is not None:
-            if self.preprocessing.digest != self.approval.plan_digest:
-                raise ValueError("approval does not match preprocessing plan")
-        return self
-
 
 class RawResultMetadata(ContractModel):
     """canonical raw JSON 的可审计元数据。"""

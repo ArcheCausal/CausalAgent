@@ -1,4 +1,5 @@
 import os
+import secrets
 import stat
 import tempfile
 from pathlib import Path
@@ -24,6 +25,8 @@ _SECRET_VALUES = {
     "GRAFANA_ADMIN_PASSWORD": "unit-test-grafana-password",
     "CAUSAL_MCP_SERVICE_TOKEN": "unit-test-mcp-service-token",
     "CAUSAL_MCP_SIGNING_KEY_CURRENT": "unit-test-mcp-signing-key",
+    "CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN": secrets.token_hex(32),
+    "CAUSALAGENT_SANDBOX_API_KEY": secrets.token_hex(32),
 }
 
 

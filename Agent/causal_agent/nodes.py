@@ -1,11 +1,12 @@
 import asyncio
+from collections.abc import Mapping
 from .state import CausalAgentState, RagSubgraphState, WebSearchState
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Literal, Optional, Any, List, Tuple, Dict
 import logging
 import json
@@ -19,13 +20,14 @@ from langgraph.func import task
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 from Agent.llm_structured_output import StructuredOutputError, ainvoke_structured
+from Agent.measurement_semantics import normalize_measurement_semantics
 from .fault_tolerance import (
     RAG_DEGRADATION_SUMMARY,
     build_rag_degradation_result,
 )
 from .analysis_context import (
-    MAX_CONTEXT_QUESTION_CHARS,
     build_context_index,
+    rebuild_context_index as _rebuild_context_index,
     build_report_analysis_context,
     report_primary_result,
     report_data_metadata,
@@ -81,9 +83,7 @@ from Agent.causal_agent.web_search_node import (
 )
 
 # 数据库
-from Database.agent_connect import require_frozen_file_for_job
 from Database.analysis_contexts import (
-    apply_fold_context,
     create_context_for_new_file,
     find_user_file_by_name,
     switch_to_context,
@@ -539,30 +539,6 @@ def _context_candidates_text(candidates: list) -> str:
     return "\n".join(f"- {line}" for line in lines)
 
 
-def _rebuild_context_index(
-    previous_index: Any,
-    previous_context: Any,
-    switched_to_id: Optional[str],
-    *,
-    limit: int = 8,
-) -> list:
-    """切换后用内存中的旧索引与旧当前上下文重建历史索引，不额外读库。"""
-    entries: list = []
-    if isinstance(previous_context, dict) and previous_context.get("analysis_context_id"):
-        entries.extend(build_context_index([previous_context]))
-    if isinstance(previous_index, list):
-        entries.extend(entry for entry in previous_index if isinstance(entry, dict))
-    unique: list = []
-    seen: set = set()
-    for entry in entries:
-        context_id = entry.get("analysis_context_id")
-        if not context_id or context_id in seen or context_id == switched_to_id:
-            continue
-        seen.add(context_id)
-        unique.append(entry)
-    return unique[: max(0, int(limit))]
-
-
 def _switched_context_state(
     *,
     context_row: dict,
@@ -588,6 +564,7 @@ def _switched_context_state(
             AIMessage(content="决策：已切换分析上下文。", name="context_switch")
         ],
         "analysis_parameters": None,
+        "analysis_parameter_changes": [],
         "causal_analysis_result": None,
         "knowledge_base_result": None,
         "web_search_result": None,
@@ -795,53 +772,6 @@ async def context_switch_node(
             )
     return _clarification_update(question=None, status="no_match")
 
-async def _bind_analysis_context(
-    state: CausalAgentState,
-    runtime: Any,
-    *,
-    target: Optional[str],
-    treatment: Optional[str],
-) -> dict:
-    """fold 确定参数后把 Job 绑定到正确的分析上下文。
-
-    绑定上下文还没有参数时回填；参数与绑定上下文不同时优先复用同一文件上参数一致的
-    历史上下文，没有才新建并切换 active 指针。没有可信 Job 身份时不做任何写入。
-    """
-    identity = getattr(getattr(runtime, "context", None), "trusted_identity", None)
-    if identity is None:
-        return {}
-    question = _latest_human_text(state).strip()
-    result = await asyncio.to_thread(
-        apply_fold_context,
-        user_id=int(identity.user_id),
-        session_id=str(identity.session_id),
-        job_id=str(identity.job_id),
-        worker_id=identity.worker_id,
-        attempt_count=int(identity.attempt_count),
-        lease_epoch=int(identity.lease_epoch),
-        target=target,
-        treatment=treatment,
-        analysis_question=question[:MAX_CONTEXT_QUESTION_CHARS] or None,
-    )
-    if not result:
-        return {}
-    update: dict = {
-        "context_resolution": {
-            "status": "fold_bound",
-            "analysis_context_id": result.get("analysis_context_id"),
-            "action": result.get("action"),
-        },
-        "analysis_context_index": _rebuild_context_index(
-            state.get("analysis_context_index"),
-            state.get("analysis_context"),
-            result.get("analysis_context_id"),
-        ),
-    }
-    context = result.get("context")
-    if isinstance(context, dict):
-        update["analysis_context"] = context
-    return update
-
 class MeasurementDeclaration(BaseModel):
     column: str
     kind: Literal["count", "ordinal", "category", "continuous", "binary", "unknown"]
@@ -852,13 +782,20 @@ class foldQuery(BaseModel):
     """只从用户对话中提取因果分析所需的关键参数。"""
     target: Optional[str] = Field(
         None,
-        description="从用户对话中识别出的目标变量(target)或结果变量(outcome)。如果未提及，则留空。"
+        description="用户指定的目标变量(target)或结果变量(outcome)名称；分析范围、算法和指令不是变量名。未指定时为 null，名称不必与 CSV 列名一致。"
     )
     treatment: Optional[str] = Field(
         None,
-        description="从用户对话中识别出的处理变量(treatment)或干预变量(intervention)。如果未提及，则留空。"
+        description="用户指定的处理变量(treatment)或干预变量(intervention)名称；分析范围、算法和指令不是变量名。未指定时为 null，名称不必与 CSV 列名一致。"
     )
     measurement_semantics: list[MeasurementDeclaration] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_measurement_declarations(self):
+        normalize_measurement_semantics([item.model_dump() for item in self.measurement_semantics])
+        if any(not item.evidence.strip() for item in self.measurement_semantics):
+            raise ValueError("measurement evidence must be non-blank")
+        return self
 
 ## fold节点用到的函数
 from Agent.Processing.fold_processing import get_data_summary, apply_measurement_semantics
@@ -873,6 +810,7 @@ from Agent.Report.assets import (
 )
 from Agent.Report.document import (
     ChartAsset,
+    MarkdownBlock,
     ReportDraft,
     ReportSchemaError,
     ReportDocument,
@@ -897,25 +835,36 @@ def _normalize_optional_llm_text(value: str | None) -> str | None:
     return value
 
 
+def _initial_parameter_extraction_prompt() -> ChatPromptTemplate:
+    """初始提取与真实模型验收共用提示词；不包含增量修订语义。"""
+    return ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """从用户的最新消息中提取目标变量、处理变量和明确声明的字段测量含义。
+文件已由当前 Job 的冻结输入确定，不要从自然语言中选择文件。
+target 表示用户指定的目标或结果变量；treatment 表示用户指定的处理或干预变量。
+分析范围、算法名称、处理要求和完整指令不能作为这两个字段的值。用户使用的变量名称不必与 CSV 列名相同，提取阶段不进行列名成员检查，也不自行映射名称。
+结合对话理解用户的研究意图；没有明确指定某个角色，或明确取消该角色时，该字段返回 null。
+例如，“目标是收入，干预变量是培训”提取 target="收入"、treatment="培训"；“全部作为节点参与因果发现”只说明分析范围，不能作为角色值；“取消之前的目标，只做无目标的结构发现”表示 target=null。
+字段含义只能摘录用户明确说明的内容，不能从列名或数值推断。
+严格按 foldQuery schema 返回 JSON。""",
+            ),
+            MessagesPlaceholder(variable_name="messages"),
+        ]
+    )
+
+
 async def fold_node(
     state: CausalAgentState,
     llm: ChatOpenAI,
     *,
     runtime: Any = None,
 ) -> dict:
-    """
-    文件加载、解析与验证节点。
-    1.  使用LLM从对话中提取目标和处理变量。
-    2.  按 Job 冻结的对象 ID 从数据库加载文件内容。
-    3.  运行 get_data_summary 进行全面的数据分析。
-    4.  调用 validate_analysis 进行严格的条件验证。
-    5.  根据验证结果，决策进入 'preprocess' 节点或 'ask_human' 节点。
-    """
-    user_id = state.get("user_id")
+    """提取初始研究参数；最终上下文在数据处理父节点中绑定。"""
     file_summary = state.get("file_summary") or {}
     input_user_file_id = file_summary.get("user_file_id")
     input_object_id = file_summary.get("object_id")
-
     if not input_user_file_id or not input_object_id:
         return {
             "messages": [
@@ -927,189 +876,65 @@ async def fold_node(
             "fold_decision": "normal_chat",
         }
 
-    # 1. 使用 LLM 提取分析参数，不从自然语言选择文件
-    prompt = ChatPromptTemplate.from_messages([
-            ("system",
-            """你是一个智能助手，你的任务是从用户的最新消息中识别出以下信息，并以JSON格式返回：
-            1. 用户关心的目标变量 (target/outcome)。
-            2. 用户想要评估效果的处理变量 (treatment/intervention)。
-            3. measurement_semantics 只摘录用户明确陈述的列测量含义，并提供包含列名的逐字原话。
-               不能根据列名、整数、偏态或低基数推断业务含义；没有明确陈述时返回空列表。
-
-            文件已经由当前 Job 的冻结输入确定，严禁从自然语言选择文件。
-            如果用户没有提到目标或处理变量，请将对应字段设为 null。
-
-            示例:
-            - 用户: "帮我分析销售额和促销活动的关系..."
-            -> 提取: `target='销售额'`, `treatment='促销活动'`
-            - 用户: "分析一下我的数据，看看是什么影响了客户流失"
-            -> 提取: `target='客户流失'`, `treatment=null`
-            
-            你必须严格按照 `foldQuery` 的 schema 返回一个 JSON 对象。
-            **绝对不要**在你的回复中包含任何Markdown格式或解释性文字。
-            **重要：如果某个字段为空，请使用 JSON 的 null 值，而不是字符串 "None"。**
-
-            示例输出（所有字段都有值）:
-            {{
-                "target": "销售额",
-                "treatment": "促销活动"
-            }}
-            
-            示例输出（部分字段为空）:
-            {{
-                "target": "客户流失",
-                "treatment": null
-            }}
-            
-            """),
-            MessagesPlaceholder(variable_name="messages"),
-        ])
     try:
         structured_response = await ainvoke_structured(
             llm=llm,
             schema=foldQuery,
-            prompt=prompt,
+            prompt=_initial_parameter_extraction_prompt(),
             inputs={"messages": llm_prompt_messages(state["messages"])},
             node_name="fold",
         )
-
         target = _normalize_optional_llm_text(structured_response.target)
         treatment = _normalize_optional_llm_text(structured_response.treatment)
-        semantic_declarations = [item.model_dump() for item in structured_response.measurement_semantics]
-        
+        semantic_declarations = [
+            item.model_dump() for item in structured_response.measurement_semantics
+        ]
     except StructuredOutputError:
         _log_node_degradation("structured_output_error", "empty_parameters")
         target = None
         treatment = None
         semantic_declarations = []
 
-    try:
-        file_row = await asyncio.to_thread(
-            require_frozen_file_for_job,
-            user_id,
-            state.get("job_id", ""),
-            input_user_file_id,
-            input_object_id,
-        )
-        file_content_str = file_row["file_content"].decode("utf-8")
-        df = await asyncio.to_thread(pd.read_csv, io.StringIO(file_content_str))
-        data_summary = await asyncio.to_thread(get_data_summary, df)
-        user_text = "\n".join(message.content for message in state.get("messages", [])
-                              if isinstance(message, HumanMessage) and isinstance(message.content, str))
-        apply_measurement_semantics(data_summary, semantic_declarations, user_text=user_text)
-    
-    except Exception:
-        _log_node_degradation(
-            "file_load_error",
-            "waiting_input",
-            exc_info=True,
-        )
-        
-        # 使用 interrupt() 暂停并等待用户输入
-        user_response = interrupt(FILE_LOAD_INTERRUPT_MESSAGE)
-        new_message = HumanMessage(content=resume_value_to_message_content(user_response))
-        
-        return {"messages": [new_message], "fold_decision": "agent"}
-
-    state['analysis_parameters'] = data_summary
-    # 预检测画像由真实表格生成，后续 Deep Agent 依据它选择算法和处理方案。
-    from Agent.deep_agent_tools.preprocessing import build_data_profile
-
-    state['analysis_parameters']['data_profile'] = build_data_profile(df).model_dump(
-        mode="json"
-    )
-    # 刻意放在上面的 try 块之外：那块抛异常会走 interrupt() 挂起等用户输入。
-    # measure_nonlinearity 内部全兜、绝不抛异常，但仍不放进那条路径。
-    state['analysis_parameters']['nonlinearity'] = measure_nonlinearity(
-        df, state['analysis_parameters']
+    user_text = "\n".join(
+        message.content
+        for message in state.get("messages", [])
+        if isinstance(message, HumanMessage) and isinstance(message.content, str)
     )
     file_summary = {
         "user_file_id": input_user_file_id,
         "object_id": input_object_id,
         "file_hash": file_summary.get("file_hash"),
         "filename": file_summary.get("filename"),
-        "rows": data_summary.get("n_rows"),
-        "columns": data_summary.get("columns", []),
+        "rows": None,
+        "columns": [],
     }
-    state["file_summary"] = file_summary
-    
-    # 运行确定性验证
-    is_ready, issues, recommends = await asyncio.to_thread(
-        validate_analysis,
-        data_summary, 
-        target=target,
-        treatment=treatment,
-    )
-
-    # 根据验证结果决策
-    if is_ready == 0 or is_ready == 1:
-        state['analysis_parameters'].update({"target": target, "treatment": treatment})
-
-        # 收集需要返回的新消息
-        new_messages = []
-        recommend_message = AIMessage(content = "决策：输入确定，进入预检测与说明节点。", name="fold")
-        new_messages.append(recommend_message)
-
-        # 针对建议，生成提示
-        if recommends:
-            recommend_message = AIMessage(
-                content=(
-                    "决策：输入确定，进入预检测与说明节点。"
-                    "数据检查结果会作为后续算法选择和处理确认的依据：\n- "
-                    + "\n- ".join(recommends)
-                )
+    analysis_parameters = {
+        "target": target,
+        "treatment": treatment,
+        "analysis_question": user_text[-6000:],
+        "measurement_semantics": semantic_declarations,
+    }
+    update = {
+        "messages": [
+            AIMessage(
+                content="原始文件已由当前任务冻结，接下来先准备并校验分析数据。",
+                name="fold",
             )
-            new_messages.append(recommend_message)
-        
-        update = {"messages": new_messages,
-                "analysis_parameters": state['analysis_parameters'],
-                "file_summary": file_summary,
-                "tool_call_request": False,
-                "fold_decision": "preprocess",
-                }
-        # 参数确定后再把 Job 绑定到正确的分析上下文；同一文件、不同目标变量
-        # 会得到不同的上下文，而不是覆盖历史上下文。
-        update.update(
-            await _bind_analysis_context(
-                state,
-                runtime,
-                target=target,
-                treatment=treatment,
-            )
-        )
-        return update
-    
-    else:
-        # 只有目标/处理变量本身的事实错误需要在这里澄清；数据质量问题交给
-        # Deep Agent 在算法选择后生成受控处理方案。
-        call_to_action = "请您根据上述问题，明确或修正'目标变量'和'处理变量'的指定。"
-        
-        columns_list = data_summary.get('columns', [])
-        question = (
-            "为了开始因果分析，我需要您的帮助来解决以下问题：\n"
-            f"- {issues}\n\n"
-            f"作为参考，您的数据中包含以下可用列：\n`{', '.join(columns_list)}`\n\n"
-            f"**{call_to_action}**"
-        )
-        
-        # interrupt() 会立即暂停节点执行，返回 question 给调用者
-        # 当用户提供输入后，interrupt() 会返回用户的输入值
-        user_response = interrupt(question)
-        
-        # 将用户的响应添加到消息历史，并返回一个路由消息
-        # 让 fold_router 知道需要回到 agent 重新判断
-        return {
-            "messages": [
-                HumanMessage(content=resume_value_to_message_content(user_response)),
-                AIMessage(content="决策：已收到用户输入，返回 agent 重新判断", name="fold")
-            ],
-            "analysis_parameters": state['analysis_parameters'],
-            "file_summary": state.get("file_summary"),
-            "fold_decision": "agent",
-        }
+        ],
+        "analysis_parameters": analysis_parameters,
+        "analysis_parameter_changes": [],
+        "file_summary": file_summary,
+        "tool_call_request": False,
+        "fold_decision": "preprocess",
+    }
+    return update
 
-
-async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
+async def preprocess_node(
+    state: CausalAgentState,
+    llm: ChatOpenAI,
+    *,
+    runtime: Any = None,
+) -> dict:
     """
     项目预处理模块:
     1.  从状态(state)中加载 DataFrame 和数据摘要。
@@ -1118,34 +943,100 @@ async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
     3.  调用 LLM 对数据摘要进行自然语言总结。
     4.  将图表和总结存入状态，然后直接进入下一步。
     """
-    analysis_parameters = state.get("analysis_parameters", {})
-
-    file_summary = state.get("file_summary") or {}
-    input_user_file_id = file_summary.get("user_file_id")
-    input_object_id = file_summary.get("object_id")
-
-    if (
-        not analysis_parameters
-        or not input_user_file_id
-        or not input_object_id
-    ):
-        error_msg = "无法执行预处理，因为数据或其摘要信息在状态中丢失。"
-        raise RuntimeError(error_msg)
-
-    file_row = await asyncio.to_thread(
-        require_frozen_file_for_job,
-        state.get("user_id"),
-        state.get("job_id", ""),
-        input_user_file_id,
-        input_object_id,
+    from Agent.deep_agent_tools.preprocessing import build_data_profile
+    from Agent.data_processing.persistence import (
+        read_bound_dataset,
+        read_bound_dataset_identity,
     )
-    df = await asyncio.to_thread(
-        pd.read_csv,
-        io.BytesIO(file_row["file_content"]),
+
+    context = getattr(runtime, "context", None)
+    identity = getattr(context, "trusted_identity", None)
+    if identity is None:
+        raise RuntimeError("重建分析数据需要可信 Job 身份。")
+    await context.ensure_active()
+    bound_identity = await asyncio.to_thread(read_bound_dataset_identity, identity)
+    if bound_identity is None:
+        raise RuntimeError("当前 Job 没有经过独立校验并绑定的数据集。")
+    expected_dataset_id = state.get("prepared_dataset_id")
+    if expected_dataset_id is not None and int(expected_dataset_id) != int(bound_identity["dataset_id"]):
+        raise RuntimeError("checkpoint 中的数据集身份与 MySQL 绑定记录不一致。")
+    if identity.analysis_input is None:
+        raise RuntimeError("可信 Job 身份缺少分析数据引用。")
+    identity.analysis_input.bind(
+        dataset_id=int(bound_identity["dataset_id"]),
+        object_id=int(bound_identity["data_object_id"]),
+        content_hash=str(bound_identity["data_hash"]),
+        filename=str(bound_identity["filename"]),
+        semantic_kinds=bound_identity["semantic_kinds"],
     )
+    bound_data = await asyncio.to_thread(
+        read_bound_dataset,
+        identity,
+        source_hash=identity.source_input_identity(),
+    )
+    await context.check_after_call()
+    if int(bound_data["dataset_id"]) != int(bound_identity["dataset_id"]):
+        raise RuntimeError("读取到的数据集与 Job 当前绑定身份不一致。")
+    try:
+        csv_text = bound_data["data_bytes"].decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("已绑定数据集不是有效的 UTF-8 CSV。") from exc
+    df = await asyncio.to_thread(pd.read_csv, io.StringIO(csv_text), low_memory=False)
+    profile = build_data_profile(df)
+
+    from Agent.Processing.fold_processing import (
+        apply_measurement_semantics,
+        get_data_summary,
+    )
+    from Agent.Processing.fold_verify import validate_analysis
+    from Agent.Processing.nonlinearity import measure_nonlinearity
+
+    source_parameters = dict(bound_identity["analysis_parameters"])
+    prepared_metadata = bound_data["metadata"]
+    summary = get_data_summary(df)
+    declarations = source_parameters.get("measurement_semantics") or []
+    apply_measurement_semantics(
+        summary, declarations, user_text=bound_identity["parameter_evidence_text"],
+    )
+    validation_code, validation_issues, recommendations = validate_analysis(
+        summary,
+        target=source_parameters.get("target"),
+        treatment=source_parameters.get("treatment"),
+    )
+    if validation_code == 2:
+        raise RuntimeError("目标变量或处理变量未映射到经过校验的数据集。")
+    summary.update(
+        {
+            **source_parameters,
+            "transformations": prepared_metadata.get("transformations", []),
+            "variable_semantics": prepared_metadata.get("variable_semantics", {}),
+            "processing_summary": prepared_metadata.get("summary", ""),
+            "processing_limitations": prepared_metadata.get("limitations", []),
+            "analysis_dataset_id": int(bound_data["dataset_id"]),
+            "analysis_dataset_hash": str(bound_data["data_hash"]),
+            "source_file_hash": identity.source_input_identity(),
+            "validation_issues": validation_issues,
+            "recommendations": recommendations,
+            "dataset_validation_report": bound_data["validation_report"],
+            "data_profile": profile.model_dump(mode="json"),
+            "data_preparation": {
+                "source_filename": (state.get("file_summary") or {}).get("filename"),
+                "analysis_filename": str(
+                    prepared_metadata.get("output_filename") or "prepared.csv"
+                ),
+                "row_count": int(profile.row_count),
+                "column_count": int(profile.column_count),
+                "observation_unit": prepared_metadata.get("observation_unit"),
+                "processing_summary": prepared_metadata.get("summary", ""),
+                "transformations": list(prepared_metadata.get("transformations") or []),
+                "limitations": list(prepared_metadata.get("limitations") or []),
+            },
+        }
+    )
+    summary["nonlinearity"] = measure_nonlinearity(df, summary)
     # 生成结构化图表资源
     try:
-        chart_assets = await asyncio.to_thread(build_chart_assets, df, analysis_parameters)
+        chart_assets = await asyncio.to_thread(build_chart_assets, df, summary)
         state["chart_assets"] = {
             asset_key: asset.model_dump(mode="json")
             for asset_key, asset in chart_assets.items()
@@ -1187,7 +1078,7 @@ async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
     runnable = prompt | llm | StrOutputParser()
     
     preprocess_summary = await runnable.ainvoke({
-        "data_summary": json.dumps(analysis_parameters, indent=2, ensure_ascii=False),
+        "data_summary": json.dumps(summary, indent=2, ensure_ascii=False),
         "system_role": data_prompt()
     })
     # 4. 更新状态并返回新消息
@@ -1199,11 +1090,26 @@ async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
     )
 
     # 只返回新消息和需要更新的状态
-    return {
+    update = {
         "messages": [summary_message],
         "preprocess_summary": state["preprocess_summary"],
         "chart_assets": state.get("chart_assets", {}),
+        "analysis_parameters": summary,
+        "analysis_parameter_changes": bound_identity["analysis_parameter_changes"],
+        "data_profile": profile,
+        "prepared_dataset_id": int(bound_data["dataset_id"]),
+        "prepared_dataset_hash": str(bound_data["data_hash"]),
+        "prepared_dataset_metadata": prepared_metadata,
+        "analysis_file_summary": {
+            "dataset_id": int(bound_data["dataset_id"]),
+            "object_id": int(bound_data["data_object_id"]),
+            "content_hash": str(bound_data["data_hash"]),
+            "filename": str(prepared_metadata.get("output_filename") or "prepared.csv"),
+            "rows": int(profile.row_count),
+            "columns": list(profile.column_names),
+        },
     }
+    return update
 
 
 from Agent.knowledge_base.query_rag import format_rag_summary_for_prompt
@@ -2022,6 +1928,65 @@ def _report_document_from_state(state: CausalAgentState):
     return document if isinstance(document, ReportDocument) else None
 
 
+def _report_fact_text(value: Any) -> str:
+    """Render a short plain-text fact without allowing it to become Markdown syntax."""
+    text = " ".join(str(value or "").split()).replace("\\", "\\\\")
+    for marker in (chr(96), "*", "_", "{", "}", "[", "]", "(", ")", "#", "+", ".", "!", "|"):
+        text = text.replace(marker, "\\" + marker)
+    return text.replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _with_dataset_preparation_block(
+    draft: ReportDraft,
+    facts: Mapping[str, Any],
+) -> ReportDraft:
+    """Add measured data dimensions and clearly labeled processing declarations."""
+    metadata = facts.get("data_metadata")
+    preparation = metadata.get("data_preparation") if isinstance(metadata, Mapping) else None
+    if not isinstance(preparation, Mapping):
+        return draft
+
+    rows = preparation.get("row_count")
+    columns = preparation.get("column_count")
+    if (
+        isinstance(rows, int) and not isinstance(rows, bool)
+        and isinstance(columns, int) and not isinstance(columns, bool)
+    ):
+        size = f"{rows} 行、{columns} 列"
+    else:
+        size = "未知"
+    transformations = preparation.get("transformations")
+    transformation_text = "；".join(
+        _report_fact_text(item)
+        for item in transformations
+        if isinstance(item, str) and item.strip()
+    ) if isinstance(transformations, (list, tuple)) else ""
+    limitations = preparation.get("limitations")
+    limitation_text = "；".join(
+        _report_fact_text(item)
+        for item in limitations
+        if isinstance(item, str) and item.strip()
+    ) if isinstance(limitations, (list, tuple)) else ""
+    lines = [
+        "### 数据来源与分析数据",
+        "",
+        f"- 原始输入文件：{_report_fact_text(preparation.get('source_filename') or '未提供文件名')}",
+        f"- 实际分析数据：{_report_fact_text(preparation.get('analysis_filename') or '未知')}（{size}）",
+        f"- 记录的观察单位：{_report_fact_text(preparation.get('observation_unit') or '未记录')}",
+        f"- 处理摘要（提交记录）：{_report_fact_text(preparation.get('processing_summary') or '未记录')}",
+        f"- 声明的转换步骤：{transformation_text or '未记录'}",
+        f"- 记录的限制：{limitation_text or '未记录其他限制'}",
+    ]
+    occupied = {block.id for block in iter_report_blocks(draft.blocks)}
+    block_id = "dataset_preparation_summary"
+    suffix = 2
+    while block_id in occupied:
+        block_id = f"dataset_preparation_summary_{suffix}"
+        suffix += 1
+    block = MarkdownBlock(id=block_id, content="\n".join(lines))
+    return draft.model_copy(update={"blocks": [block, *draft.blocks]})
+
+
 def _report_execution_summary(state: CausalAgentState) -> dict[str, Any]:
     """按真实结果公开数据视图差异、算法状态和报告完整性事实。"""
 
@@ -2107,9 +2072,7 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
     if regeneration:
         rag_evidence = {item["evidence_ref"]: item for item in ((context or {}).get("latest_rag_evidence") or [])}
         web_evidence = {item["evidence_ref"]: item for item in ((context or {}).get("latest_web_evidence") or [])}
-        file_summary = {"filename": (context or {}).get("filename"),
-                        "rows": facts.get("data_metadata", {}).get("n_rows"),
-                        "columns": facts.get("data_metadata", {}).get("columns", [])}
+        file_summary = {"filename": (context or {}).get("filename")}
 
     resources = build_report_resources(
         file_summary=file_summary,
@@ -2238,6 +2201,7 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         },
         node_name="report",
     )
+    draft = _with_dataset_preparation_block(draft, facts)
 
     document = build_report_document(
         draft,

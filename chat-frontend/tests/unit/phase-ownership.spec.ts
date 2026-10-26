@@ -62,7 +62,7 @@ describe('运行态记录与历史阶段的归属', () => {
     jobs.startFromResponse('job-1', 'session-1', 'running')
     const snapshot = jobs.startResume('job-1')
 
-    expect(snapshot).toMatchObject({ status: 'waiting_input', stepOrder: ['s1'] })
+    expect(snapshot).toMatchObject({ status: 'completed', stepOrder: ['s1'], waitingInput: { status: 'answered', expired: false } })
     expect(jobs.get('job-1')).toMatchObject({ phaseInputId: null, resumeEventId: 7, uiState: 'running' })
     expect(jobs.get('job-1')?.thinking).toMatchObject({ status: 'active', stepOrder: [], waitingInput: null })
   })

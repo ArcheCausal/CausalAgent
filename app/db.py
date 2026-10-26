@@ -502,6 +502,8 @@ def check_database_readiness():
                 "analysis_jobs",
                 "analysis_job_events",
                 "analysis_job_inputs",
+                "analysis_job_datasets",
+                "analysis_sandbox_sessions",
                 "database_monitor_snapshots",
                 "database_monitor_settings",
                 "admin_audit_events",
@@ -604,7 +606,7 @@ def check_database_readiness():
                     'current_question_id', 'current_waiting_prompt',
                     'current_interaction', 'input_wait_expires_at',
                     'cancel_idempotency_key', 'cancel_request_fingerprint',
-                    'analysis_context_id'
+                    'analysis_context_id', 'prepared_dataset_id'
                   )
                 """,
                 (database_settings.MYSQL_DATABASE,),
@@ -631,6 +633,7 @@ def check_database_readiness():
                 "cancel_idempotency_key",
                 "cancel_request_fingerprint",
                 "analysis_context_id",
+                "prepared_dataset_id",
             } - job_request_columns
             if missing_job_request_columns:
                 error_msg = (
@@ -639,6 +642,78 @@ def check_database_readiness():
                     "请先运行 'python -m Database.bootstrap'。"
                 )
                 raise RuntimeError(error_msg)
+
+            cursor.execute(
+                """
+                SELECT table_name, column_name
+                FROM information_schema.columns
+                WHERE table_schema = %s
+                  AND (
+                    (
+                      table_name = 'analysis_job_datasets'
+                      AND column_name IN (
+                        'id', 'job_id', 'revision', 'idempotency_key',
+                        'source_hash', 'data_object_id', 'script_object_id',
+                        'data_hash', 'script_hash', 'status', 'metadata',
+                        'validation_report', 'created_at', 'validated_at'
+                      )
+                    )
+                    OR (
+                      table_name = 'analysis_sandbox_sessions'
+                      AND column_name IN (
+                        'id', 'request_id', 'request_digest', 'source_hash',
+                        'job_id', 'worker_id', 'attempt_count', 'lease_epoch',
+                        'remote_sandbox_id', 'status', 'metadata', 'operation_id',
+                        'operation_type', 'operation_digest', 'operation_status',
+                        'operation_result', 'heartbeat_at', 'expires_at',
+                        'max_expires_at', 'next_retry_at', 'version',
+                        'created_at', 'updated_at', 'closed_at', 'open_job_id'
+                      )
+                    )
+                  )
+                """,
+                (database_settings.MYSQL_DATABASE,),
+            )
+            dataset_schema_columns = {(row[0], row[1]) for row in cursor.fetchall()}
+            required_dataset_schema_columns = {
+                ("analysis_job_datasets", name)
+                for name in (
+                    "id", "job_id", "revision", "idempotency_key", "source_hash",
+                    "data_object_id", "script_object_id", "data_hash", "script_hash",
+                    "status", "metadata", "validation_report", "created_at", "validated_at",
+                )
+            } | {
+                ("analysis_sandbox_sessions", name)
+                for name in (
+                    "id", "request_id", "request_digest", "source_hash",
+                    "job_id", "worker_id", "attempt_count", "lease_epoch",
+                    "remote_sandbox_id", "status", "metadata", "operation_id",
+                    "operation_type", "operation_digest", "operation_status",
+                    "operation_result", "heartbeat_at", "expires_at",
+                    "max_expires_at", "next_retry_at", "version",
+                    "created_at", "updated_at", "closed_at", "open_job_id",
+                )
+            }
+            missing_dataset_schema_columns = (
+                required_dataset_schema_columns - dataset_schema_columns
+            )
+            if missing_dataset_schema_columns:
+                error_msg = (
+                    "数据库关键字段缺失: "
+                    f"{sorted(f'{table}.{name}' for table, name in missing_dataset_schema_columns)}。"
+                    "请先运行 'python -m Database.bootstrap'。"
+                )
+                raise RuntimeError(error_msg)
+
+            cursor.execute(
+                """
+                SELECT COUNT(*) FROM information_schema.referential_constraints
+                WHERE constraint_schema = %s AND table_name = 'analysis_sandbox_sessions'
+                """,
+                (database_settings.MYSQL_DATABASE,),
+            )
+            if int(cursor.fetchone()[0]) != 0:
+                raise RuntimeError("沙盒生命周期记录不得依赖业务外键，必须在业务删除后保留。")
 
             cursor.execute(
                 """
@@ -769,6 +844,56 @@ def check_database_readiness():
                       AND non_unique = 0
                     )
                     OR (
+                      table_name = 'analysis_job_datasets'
+                      AND index_name = 'uq_analysis_job_datasets_job_revision'
+                      AND non_unique = 0
+                    )
+                    OR (
+                      table_name = 'analysis_job_datasets'
+                      AND index_name = 'uq_analysis_job_datasets_job_idempotency'
+                      AND non_unique = 0
+                    )
+                    OR (
+                      table_name = 'analysis_job_datasets'
+                      AND index_name = 'uq_analysis_job_datasets_job_id'
+                      AND non_unique = 0
+                    )
+                    OR (
+                      table_name = 'analysis_job_datasets'
+                      AND index_name = 'idx_analysis_job_datasets_objects'
+                    )
+                    OR (
+                      table_name = 'analysis_job_datasets'
+                      AND index_name = 'idx_analysis_job_datasets_job_status'
+                    )
+                    OR (
+                      table_name = 'analysis_sandbox_sessions'
+                      AND index_name = 'uq_analysis_sandbox_sessions_request'
+                      AND non_unique = 0
+                    )
+                    OR (
+                      table_name = 'analysis_sandbox_sessions'
+                      AND index_name = 'uq_analysis_sandbox_sessions_remote'
+                      AND non_unique = 0
+                    )
+                    OR (
+                      table_name = 'analysis_sandbox_sessions'
+                      AND index_name = 'uq_analysis_sandbox_sessions_open_job'
+                      AND non_unique = 0
+                    )
+                    OR (
+                      table_name = 'analysis_sandbox_sessions'
+                      AND index_name IN (
+                        'idx_analysis_sandbox_sessions_expiry',
+                        'idx_analysis_sandbox_sessions_reconcile',
+                        'idx_analysis_sandbox_sessions_job'
+                      )
+                    )
+                    OR (
+                      table_name = 'analysis_jobs'
+                      AND index_name = 'idx_analysis_jobs_prepared_dataset'
+                    )
+                    OR (
                       table_name = 'analysis_job_events'
                       AND index_name = 'uq_analysis_job_events_event_key'
                       AND non_unique = 0
@@ -844,6 +969,18 @@ def check_database_readiness():
                 ),
                 ("analysis_job_inputs", "uq_analysis_job_inputs_sequence"),
                 ("analysis_job_inputs", "uq_analysis_job_inputs_idempotency"),
+                ("analysis_job_datasets", "uq_analysis_job_datasets_job_revision"),
+                ("analysis_job_datasets", "uq_analysis_job_datasets_job_idempotency"),
+                ("analysis_job_datasets", "uq_analysis_job_datasets_job_id"),
+                ("analysis_job_datasets", "idx_analysis_job_datasets_objects"),
+                ("analysis_job_datasets", "idx_analysis_job_datasets_job_status"),
+                ("analysis_sandbox_sessions", "uq_analysis_sandbox_sessions_request"),
+                ("analysis_sandbox_sessions", "uq_analysis_sandbox_sessions_remote"),
+                ("analysis_sandbox_sessions", "uq_analysis_sandbox_sessions_open_job"),
+                ("analysis_sandbox_sessions", "idx_analysis_sandbox_sessions_expiry"),
+                ("analysis_sandbox_sessions", "idx_analysis_sandbox_sessions_reconcile"),
+                ("analysis_sandbox_sessions", "idx_analysis_sandbox_sessions_job"),
+                ("analysis_jobs", "idx_analysis_jobs_prepared_dataset"),
                 ("analysis_job_events", "uq_analysis_job_events_event_key"),
                 ("chat_messages", "uq_chat_messages_source_event"),
                 ("rag_eval_jobs", "idx_rag_eval_jobs_kind_queue"),

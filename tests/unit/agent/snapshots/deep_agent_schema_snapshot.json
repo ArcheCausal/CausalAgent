@@ -14,18 +14,16 @@
         "revision",
         "status"
       ],
-      "sha256": "7d4aa095f222ce68f31e5ee296e0d4924c80c4dbb373d61586f4ed3e4718a735",
+      "sha256": "e4a033dbe4f9cf60810a3f543ce7fa96191f5a8d2faef031872d84ffe349e7db",
       "title": "ActionAttempt"
     },
     "AlgorithmExecutionCommand": {
       "properties": [
-        "approval",
         "capability_id",
         "capability_version",
         "input_identity",
         "invocation_id",
         "parameters",
-        "preprocessing",
         "provider_call_id",
         "result_index",
         "spec_digest",
@@ -39,7 +37,7 @@
         "provider_call_id",
         "input_identity"
       ],
-      "sha256": "7a09d0ab261933e980c59b26cc1324ab52fcf4cb70b3d283cc5edb514152ed7f",
+      "sha256": "e3ac2d8d6ccce1010fb406e0a87fd3b545114f2ae9b2db4fe55e7ad29b07f366",
       "title": "AlgorithmExecutionCommand"
     },
     "AlgorithmResult": {
@@ -75,12 +73,13 @@
         "status",
         "provenance"
       ],
-      "sha256": "af3cfc553f80596c4baef2360e4459b01fe9c8e54bf54df09c0dfa5c4805827f",
+      "sha256": "6470c5ca45c5d5676f6995413b0fd0cf7d2b3530a21146db756bc4a7a690653d",
       "title": "AlgorithmResult"
     },
     "AlgorithmResultProvenance": {
       "properties": [
         "algorithm_runner_version",
+        "analysis_dataset_id",
         "attempt_count",
         "capability_id",
         "capability_version",
@@ -88,8 +87,7 @@
         "invocation_id",
         "job_id",
         "lease_epoch",
-        "preprocessing_plan_digest",
-        "preprocessing_recipe_digest",
+        "source_input_identity",
         "spec_digest"
       ],
       "required": [
@@ -99,7 +97,7 @@
         "input_identity",
         "spec_digest"
       ],
-      "sha256": "a95c390a3413302af9fa3d70a44d4c90ec389a7776b4d3b1726fb9da84ea8c73",
+      "sha256": "85172284aacd192d5ec17dd5dd349013a6fe6f28891aceab62e66b6ab7d6c45e",
       "title": "AlgorithmResultProvenance"
     },
     "DataIssue": {
@@ -165,7 +163,7 @@
         "variable_count"
       ],
       "required": [],
-      "sha256": "c380d5a9a0335a3ea2d02615d2312e6f5691be3c5f12052cd67e3a9b0c4bc2b1",
+      "sha256": "255efc66b0d713f12b59bd37f08be7f1c59553ab576b4b959a08d7839faf11bc",
       "title": "Diagnostics"
     },
     "EvidenceResult": {
@@ -242,6 +240,7 @@
     },
     "InvocationRecord": {
       "properties": [
+        "analysis_dataset_id",
         "attempt_count",
         "attempts",
         "event_step_id",
@@ -256,6 +255,7 @@
         "response_identity",
         "response_identity_source",
         "result_ref",
+        "source_input_identity",
         "tool_name",
         "worker_id"
       ],
@@ -267,11 +267,12 @@
         "tool_name",
         "final_status"
       ],
-      "sha256": "e7351c58aeb6f5a011bd3f0e9c1c14c30a285c928a938ca92039b1bab320b51c",
+      "sha256": "66a726781cacdc15d173da9d3517b58b1e0d0673e561694cc951477ef066fe9a",
       "title": "InvocationRecord"
     },
     "McpInvocationContext": {
       "properties": [
+        "analysis_dataset_id",
         "attempt_count",
         "expires_at",
         "input_snapshot_digest",
@@ -281,6 +282,7 @@
         "key_id",
         "lease_epoch",
         "session_id",
+        "source_input_identity",
         "user_id",
         "worker_id"
       ],
@@ -297,7 +299,7 @@
         "expires_at",
         "key_id"
       ],
-      "sha256": "d07f8d4b713ce44abb36454327ba09e8c91896551350922a55a541d96721246f",
+      "sha256": "8235d0c66da8b94c6919a05c1696822c24c5a4064360a7a2a657a9dd1863c743",
       "title": "McpInvocationContext"
     },
     "MethodDefinition": {
@@ -335,42 +337,6 @@
       "required": [],
       "sha256": "971d380a384df0d0e35a2bbda0c776c4a583793e43e3522ce1685586c358de02",
       "title": "MethodImplementation"
-    },
-    "PreprocessingApproval": {
-      "properties": [
-        "option_id",
-        "plan_digest",
-        "question_id"
-      ],
-      "required": [
-        "option_id",
-        "question_id",
-        "plan_digest"
-      ],
-      "sha256": "0b01a490548671a45600cf63dc9ab66ca91c4ee15d2a703be8e87d5a82aeabb5",
-      "title": "PreprocessingApproval"
-    },
-    "PreprocessingPlan": {
-      "properties": [
-        "protected_columns",
-        "steps",
-        "version"
-      ],
-      "required": [],
-      "sha256": "f5bfdaa17b654f1b8764c525a7ee520f207dbe5f7c679eb7b4aa3703aa2f9625",
-      "title": "PreprocessingPlan"
-    },
-    "PreprocessingStep": {
-      "properties": [
-        "columns",
-        "method",
-        "operation"
-      ],
-      "required": [
-        "operation"
-      ],
-      "sha256": "392d8a4ec9b1d0165e6202bef25f6472d91960222cad45c7f9a608cb86298f36",
-      "title": "PreprocessingStep"
     },
     "PublicDecision": {
       "properties": [
@@ -436,7 +402,7 @@
         "code",
         "message"
       ],
-      "sha256": "6f8f11fa9aa9b4f57e19b747e50b1b81004af6a3cb73bb8c645e84c6db215881",
+      "sha256": "f7eb121fdd4fa2bd6a26bf5c70ae39c0792e9259864a7c70cebc1e186279cf35",
       "title": "SafeWarning"
     },
     "ScientificConflict": {
@@ -494,24 +460,24 @@
       "title": "WebEvidenceResult"
     }
   },
-  "schema_version": "p1-v1",
+  "schema_version": "p2-v1",
   "tools": [
     {
       "capability_id": "causal.cdfm",
-      "schema_sha256": "ace96d517f904e9af7358615c12aef1b5c241d30667890b882196cef48a8b1f8",
-      "spec_digest": "9a950ea5a1095e7c3b5ec97c48b231718213b6f9ea2ceb448e8f71f9a8944e27",
+      "schema_sha256": "833fc380608aec4179772f57e361693471758572646524839cbd60374db80dc7",
+      "spec_digest": "8490f843bd67d09ddca05662689886016db4a3df35780942e1169d029c14220c",
       "tool_name": "causal_cdfm"
     },
     {
       "capability_id": "causal.direct_lingam",
-      "schema_sha256": "2f636c8b690dffef0af0d3da113aa690b480ab33205c088412ebaea5c87aaa81",
-      "spec_digest": "70fc8dfa9fc50e6fb934d6b4fea57b0b8c4e4732a70380c0e1305dfd8642e821",
+      "schema_sha256": "97654a33c42ade597f332000a44f260e2db45bc7ea5581c85df01e5f2332d4a7",
+      "spec_digest": "6fe17dc33c7f78d005bd14b2b14aaf01dfaf925c406547e34399b122a0f92b58",
       "tool_name": "causal_direct_lingam"
     },
     {
       "capability_id": "causal.pc",
-      "schema_sha256": "a21b01909fd3b2df3d8c753a64954f46312f41146d6fff65420143a00f35ae68",
-      "spec_digest": "e679ec00c83fce30a4672ac829dbff72652b5e070a1ce5763226d51cbcec34c9",
+      "schema_sha256": "3a54f6cda9165744432f7f48b6f90d9cca2f1313401af842422461cc89bc1148",
+      "spec_digest": "a9c74cd28ad8abea8e8fd10d5e1ad0f48699fb39947af8b87a580efb0d438953",
       "tool_name": "causal_pc"
     }
   ]

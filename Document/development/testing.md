@@ -42,7 +42,7 @@
 
 只改普通说明文档时，仅基础检查运行，其余组按路径结果跳过。结构化输出、流式配置和 schema 快照等用例统一由 `backend` 执行，没有独立的基础测试任务。`app/rag_eval/frontend/**` 只触发 `frontends` 和需要的契约检查，不因为位于 `app/` 下就启动后端组；`tests/contracts/**` 只触发 `contracts`。`ci-result` 汇总任务核对路径判断的预期结果和实际任务结果：应执行的失败、取消或意外跳过，以及路径判断失败都会使它失败。面向 `main` 的 Pull Request 要求常规组全部完成。
 
-**维护规则**：新增测试必须先放对层级，再更新 `.github/filters/paths.yaml`。跨模块测试要由它读取的生产文件触发，例如部署契约检查 Dockerfile，就必须在 Dockerfile 改变时运行，不能只在契约测试自身改变时运行。`loadtest/runner/**` 变化触发 backend 执行组，验证日志运行时与压测解析器之间的数据传递；共享 Shell 密钥读取器的行分隔符检查由部署契约组显式执行。共享 CI、路径规则和公共测试配置变化时，宁可触发全部常规组。`tests/contracts/deployment/test_staging_compose.py` 和 `test_searxng_compose.py` 需要 Docker CLI，缺少时只跳过并保留未执行结论。
+**维护规则**：新增测试必须先放对层级，再更新 `.github/filters/paths.yaml`。跨模块测试要由它读取的生产文件触发，例如部署契约检查 Dockerfile，就必须在 Dockerfile 改变时运行，不能只在契约测试自身改变时运行。`sandbox_controller/**` 变化触发 backend 与 contracts 执行组，Python 语法检查也覆盖该目录；处理镜像的 Dockerfile 与锁定依赖触发 BuildKit 检查。`loadtest/runner/**` 变化触发 backend 执行组，验证日志运行时与压测解析器之间的数据传递；共享 Shell 密钥读取器的行分隔符检查由部署契约组显式执行。共享 CI、路径规则和公共测试配置变化时，宁可触发全部常规组。`tests/contracts/deployment/test_staging_compose.py` 和 `test_searxng_compose.py` 需要 Docker CLI，缺少时只跳过并保留未执行结论。
 
 `main` 与 `develop` 的分支规则集 `mian and dev` 要求 `Python syntax`、`Pull request policy` 和 `CI result` 三个检查。删除或重命名工作流任务时，必须同时修改规则集的必需检查，否则 PR 会一直等待一个不会出现的检查。`CI result` 只在 Pull Request 上运行，push 与手动触发只做缓存预热。
 
@@ -60,6 +60,8 @@ Compose 校验只展开配置，不启动服务。静态 Dockerfile 按构建相
 docker compose --env-file .env.staging.example -f docker-compose.staging.yml config --quiet
 python -m pytest -p no:cacheprovider tests/contracts/deployment/test_staging_compose.py
 ~~~
+
+轻量 contracts 执行组中的 `tests/unit/config/test_secret_file.py` 只验证密钥文件与基础配置，不导入完整服务。控制服务导入及数据库密钥隔离由 [test_controller_configuration.py](../../tests/integration/config/test_controller_configuration.py) 在 backend 镜像中验证；`.github/filters/paths.yaml` 显式覆盖 `tests/integration/config/**`，新增同类测试时保持这一归属。
 
 ## 普通用户 Vue 前端
 
@@ -139,6 +141,65 @@ docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p
 ```
 
 ## Deep Agent 定向验证
+
+### OpenSandbox 数据处理验证
+
+数据处理验收必须连接真实 OpenSandbox API、真实沙盒主机和真实数据库，不能使用替代 Provider、模拟 API 响应或伪造外网阻断结果。先从真实沙盒验证 Python 3.11 镜像和固定依赖，再逐项检查创建、原始文件只读、脚本执行、输出回读、超时中断、销毁、MySQL 候选持久化/恢复、PostgreSQL 子图恢复以及真实 IPv4/IPv6 出站被拒绝。公网连接探测的超时本身不能作为防火墙配置证据；验收需同时检查沙盒主机上的 egress sidecar、Docker bridge 和转发规则。
+
+真实沙盒应使用独立 Compose project、网络、数据库和临时密钥文件，按 [沙盒部署说明](../../deploy/opensandbox/README.md) 准备固定镜像与代理路由。控制服务、OpenSandbox 和处理容器属于不同验证边界，必须分别检查实际连接和权限；数据库恢复、健康接口或静态检查不能代替完整沙盒验收。上线前还需在隔离环境执行完整模型、Worker 重启接管、MCP HTTP 和报告链路验收。
+
+统一密钥文件的代码与部署检查包括 `tests/unit/config/test_secret_file.py`、`tests/unit/config/test_sandbox_client.py`、`tests/integration/config/test_controller_configuration.py`、`tests/contracts/deployment/test_sandbox_compose.py` 和 `tests/contracts/deployment/test_release_preflight.py`。发布预检使用真实 Bash、Linux root 文件权限和 Docker Compose CLI，只解析配置，不启动服务。真实启动时，Worker、控制服务和 OpenSandbox 管理服务共享 `causalagent.env`，执行用户脚本的沙盒不得接收文件或密钥；两个认证值分别验证有凭据成功、无凭据及错误凭据拒绝。完整 Job 入口 `tests/acceptance/sandbox_upgrade_job.py` 通过 `FULL_JOB_SANDBOX_SECRET_FILE` 读取控制服务所用统一密钥文件中的两个认证值。
+
+方案确认还要验证确认版本与 Job 输入账本一致、用户修改或拒绝后旧方案不会执行、新语义答复或方案说明变化会使旧确认失效，以及已确认语义范围内的脚本修正可以安全恢复。只有真实 OpenSandbox、MySQL、PostgreSQL 和 Worker 的完整链路才能证明生产级恢复及网络隔离；当前工作区缺少这些验收服务时，必须明确保留未验证结论。
+
+无需外部服务的定向检查如下。生命周期测试直接运行真实 StateGraph、节点包装器和 InMemorySaver，覆盖连续提问、按中断 ID 恢复、重新编译图、校验重试及正常暂停不产生失败事件；语义快照测试使用真实校验器、ToolRuntime、本地 MCP 服务和算法进程，不证明数据库或 HTTP。
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps -T unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_sandbox_preview.py tests/unit/agent/test_processing_plan_public_events.py tests/unit/agent/test_cdfm_input_authority.py tests/unit/agent/test_deep_agent_state.py tests/integration/agent/test_data_processing_child_lifecycle.py tests/integration/agent/test_measurement_semantics_snapshot.py -q
+```
+
+参数提取证据与失败终态的回归检查如下。它使用真实 Pydantic、LangChain 工具调用解析器、提示词、StateGraph、worker 终态构造和公共事件白名单，检查缺失外层证据的准确下标、脱敏修正反馈、两层证据来源、参数修订以及处理失败不产生成功终态；不使用模型或数据库替身，也不证明真实模型纠错、数据库事务或浏览器链路。
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps -T unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_parameter_extraction_feedback.py tests/unit/agent/test_research_parameter_revisions.py tests/integration/agent/test_data_processing_failure_terminal.py tests/integration/agent/test_data_processing_child_lifecycle.py -q
+```
+
+研究参数与控制服务的定向检查如下。修订测试直接调用真实参数规则；恢复测试使用实际 StateGraph 和 InMemorySaver。协议和客户端配置测试不创建远端沙盒；Compose 与 schema 项只证明静态契约。
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps -T unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_research_parameter_revisions.py tests/integration/agent/test_research_parameter_recovery.py tests/unit/agent/test_sandbox_controller_protocol.py tests/unit/config/test_sandbox_client.py tests/unit/config/test_secret_file.py tests/contracts/database/test_sandbox_lifecycle_schema.py tests/contracts/deployment/test_sandbox_compose.py -q
+```
+
+真实 MySQL 生命周期检查位于 [test_sandbox_sessions_mysql.py](../../tests/e2e/database/test_sandbox_sessions_mysql.py)。它只接受显式启用的隔离数据库，按文件顶部说明设置 `SANDBOX_DATABASE_ACCEPTANCE=1`、专用主机名、数据库名与容器内密钥路径，再执行该文件。首次要求空库；已有验收数据库仅在明确设置 `SANDBOX_DATABASE_REUSE=1` 时续跑。该入口检查真实事务、竞争、fencing、操作幂等和迁移，不创建远端沙盒。资源记录不依赖业务级联删除，核查须同时覆盖业务删除后遗留记录仍可清理。
+
+[父图数据库检查](../../tests/e2e/database/test_deep_agent_parent_mysql.py) 与 [会话数据集清理检查](../../tests/e2e/database/test_chat_dataset_cleanup_mysql.py) 复用上述隔离边界。先在持久测试容器中初始化空库，再在同一容器设置 `SANDBOX_DATABASE_REUSE=1` 执行两个模块，保留容器内临时密钥文件：
+
+```bash
+python -m pytest -p no:cacheprovider tests/e2e/database/test_sandbox_sessions_mysql.py -k empty_upgrade_explicit_downgrade_and_schema_inspection -q
+SANDBOX_DATABASE_REUSE=1 python -m pytest -p no:cacheprovider tests/e2e/database/test_deep_agent_parent_mysql.py tests/e2e/database/test_chat_dataset_cleanup_mysql.py -q
+```
+
+这些检查使用真实 MySQL 候选保存、独立校验与绑定、父图强读及 Flask 删除事务，覆盖数据集身份、原生子图恢复、重试事件、checkpoint 清理入队和文件引用保护；子图 checkpoint 使用内存存储，不证明 PostgreSQL、外部模型、MCP HTTP 或 OpenSandbox。默认 CI 的离线 backend 组不运行这些数据库用例。
+
+控制 API 故障验收入口为 [sandbox_controller_http.py](../../tests/acceptance/sandbox_controller_http.py)：在同一隔离 MySQL 边界下显式设置 `SANDBOX_CONTROLLER_HTTP_ACCEPTANCE=1`，执行 `python tests/acceptance/sandbox_controller_http.py`。它使用真实 TCP HTTP、MySQL 和独立控制进程，并连接不可达的 `127.0.0.1:9` 注入上游连接失败，检查认证、请求限制、容量保留、租约撤销及命名锁丢失。报告保存在容器内 `/tmp/sandbox-controller-http/`；失败创建的记录保留且不自动释放。该入口不运行沙盒脚本，不证明真实 OpenSandbox 成功路径。
+
+真实上游入口为 [sandbox_controller_remote.py](../../tests/acceptance/sandbox_controller_remote.py)。它要求同一隔离 MySQL、已就绪的真实 OpenSandbox、容器内独立上游 key 文件与实际处理镜像 digest，同时显式设置 `SANDBOX_CONTROLLER_HTTP_ACCEPTANCE=1`、`SANDBOX_CONTROLLER_REMOTE_ACCEPTANCE=1` 和 `SANDBOX_CONTROLLER_ACCEPTANCE_IMAGE`。`python tests/acceptance/sandbox_controller_remote.py --scenario chain` 检查正式 Worker 客户端、断连创建、初始化、执行、回执、撤销和清理；`--scenario resilience` 检查真实 SIGKILL 后的启动清理及最后一个容量名额的并发。加上 `--upstream-fault` 时，在脚本输出 `stop_upstream` 或 `restore_upstream` 后，操作该次隔离 OpenSandbox 容器，并在对应报告目录创建同名 `.done` 文件确认已经实际停止或恢复；不能只写确认文件代替故障。报告与控制进程日志保留在隔离容器内；故障测试仅作用于该次创建的 Job、操作和远端沙盒。该入口不运行完整 Worker 调度、模型、RAG、MCP 或生成报告的 Job。
+
+真实数据库入口是 [data_processing_recovery.py](../../tests/acceptance/data_processing_recovery.py)，必须在专用内部 Docker 网络中连接全新空库，设置 `TERMINAL_ACCEPTANCE_MYSQL_HOST=recovery-mysql`、`TERMINAL_ACCEPTANCE_POSTGRES_HOST=recovery-postgres` 和唯一的 `DATA_RECOVERY_RUN_ID`，按脚本顶部说明运行。它执行正式 bootstrap、真实 Flask 注册/登录及文件和 Job 服务、方案输入账本、候选重复保存、校验绑定、上下文切换、旧租约写入拒绝和 PostgreSQL 重建连接池恢复；MCP 使用进程内服务和真实 MySQL 强读，检查二值语义拒绝 DirectLiNGAM。额外的原生子图检查在三次新建 PostgreSQL 连接池之间恢复两次提问。报告保存在验收容器 `/tmp/data-processing-recovery/`；同一容器续跑必须使用 `--resume`，另起一轮必须使用新的空库，数据库和原始报告保留。该入口不访问业务数据库，也不执行模型、沙盒脚本、Worker 故障接管或浏览器/HTTP 完整链路。
+
+2026-10-23 的隔离 MySQL/PostgreSQL 执行中，上述 13 个检查项全部通过，包含候选元组/JSON 数组重放返回相同 ID 和 revision、同上下文保留与跨上下文清除数据指针、旧租约拒绝保存/校验/绑定，以及从数据库恢复二值语义后拒绝 DirectLiNGAM。原生子图使用实际编译的 StateGraph，在三次新建 PostgreSQL 连接池之间完成两轮 interrupt/resume。数据库最初以空库创建，修复后在同一隔离环境续跑；这些结果不证明真实模型、OpenSandbox、HTTP、Worker 崩溃接管或生产网络隔离。
+
+新增参数恢复入口为 [research_parameter_recovery.py](../../tests/acceptance/research_parameter_recovery.py)，需先运行原恢复验收，并复用同一次专用环境。它使用明确构造的图输入和真实 MySQL/PostgreSQL，覆盖连续修订、重建连接池、最终上下文重放、候选参数身份、历史上下文保护与旧 checkpoint 拒绝。配套 [research_parameter_tool_sources.py](../../tests/acceptance/research_parameter_tool_sources.py) 通过真实 ToolNode、graph runner、事件写入和 resume 读取答复来源；默认连接不可达模型端口，只证明来源检查先于明确模型失败，不证明成功语义提取。
+
+[real_model_parameter_extraction.py](../../tests/acceptance/real_model_parameter_extraction.py) 验证初始提取、原澄清工具及方案确认自由文本入口的真实模型提取。在上述专用验收环境中，准备仅含模型配置的容器私有 JSON，通过 `--model-config` 指定交互提取模型；字段为 `model/base_url/api_key/use_responses_api/output_version/reasoning`，默认路径 `/tmp/research-parameter-model.json`。初始提取使用外层模型时，通过相同结构的 `--initial-model-config` 单独提供其配置；未指定则共用模型配置。执行 `python tests/acceptance/real_model_parameter_extraction.py --initial-model-config /tmp/initial-parameter-model.json --repetitions 3 --max-model-requests 144`，覆盖原始范围答复、范围改写、保留已有角色、明确指定、取消目标、取消两个角色、未提及角色及取消干预角色，每项分别经过三个入口并重复三次，共 72 项，报告逐项状态及实际成功次数。初始验收直接复用生产提示词、schema 和结构化调用入口，解析失败不能通过 fold 的空参数降级成为成功。交互验收保留真实 MySQL/PostgreSQL、原工具、来源检查、修订链与原 graph runner/event writer，不以模型替身提供提取结果。入口拒绝业务数据库，不加载根 `.env`；限制 HTTP 请求次数、输出 token 和单次工具等待时间。问题、工具调用及用户答复为明确的验收输入，只有结构化提取由真实模型执行；报告不含凭据、配置值或答复正文。这不能证明模型自主规划或上传至最终报告的完整 Job。
+
+[test_parameter_validation_feedback.py](../../tests/integration/agent/test_parameter_validation_feedback.py) 直接组合真实参数补丁规则、CSV 校验器和重试消息组装，检查缺席角色保留、显式 null 清空，以及错误、实际角色值、列名和算法兼容性从原报告完整进入内部重试消息；它不调用模型，不证明语义提取正确。
+
+[sandbox_upgrade_job.py](../../tests/acceptance/sandbox_upgrade_job.py) 用于完整隔离 Job：上传合成 CSV，经正式 Worker 和模型生成澄清、脚本与方案，提交显式测试答复及带版本的确认，然后执行真实沙盒、独立校验、数据绑定、MCP HTTP 算法和结构化报告。它在两次研究参数答复已保存后结束原 slot，启动新的正式 Worker 进程，再提交方案确认并恢复同一 Job。入口复用专用 MySQL/PostgreSQL；模型客户端必须单独允许外联，不能修改原内部数据库验收客户端的网络限制。控制服务另行连接该专用主库与 OpenSandbox，Worker 仅挂控制 token。
+
+显式设置 `FULL_JOB_SANDBOX_ACCEPTANCE=1`、`FULL_JOB_SANDBOX_CONTROLLER_URL`，并在客户端准备 `/tmp/full-job-controller.token` 及仅含模型配置的 `/tmp/full-job-models.json`，再执行 `python tests/acceptance/sandbox_upgrade_job.py --timeout-seconds 900`。模型配置包含 `outer/deep/context_window_tokens`，前两项各含 `model/base_url/api_key`；入口将真实模型密钥与隔离数据库凭据写入本次私有文件，不修改根 `.env` 或原验收密钥文件。MCP 使用客户端回环地址的 8080 端口，控制服务使用独立容器；报告只保留状态、计数和源码 hash，原始诊断留在容器 `/tmp/sandbox-upgrade-job/`。本场景关闭 Web，RAG 使用独立空目录并报告不可用，不包含浏览器、CDFM 推理、生产网络或生产部署验收。
+
+同一入口增加 `--scenario all-nodes`，默认仍运行原研究参数修订场景。新场景上传列名为 `0/1/2/3/4` 的合成连续数值 CSV，由真实模型提出字段范围问题，测试答复为“全部作为节点参与因果发现”，随后提交带版本的方案确认。验收要求该研究选择只问一次、最终角色均为空、实际列名保留，并通过正式 Worker、真实沙盒、独立校验、CSV 绑定、MCP PC 算法和结构化报告；该场景不要求参数修订次数或 Worker 重启。运行前须确认隔离控制服务及上游已就绪，并与提取验收顺序执行，避免两个 runner 竞争同一隔离 Job 队列。入口存在或提取矩阵通过均不能视为此完整 Job 验收通过。
 
 ### 工具可见性与 Web 开关
 
@@ -331,7 +392,7 @@ runner 通过 pytest 执行白名单内的测试文件，从而继承 `tests/con
 
 ## 迁移链验证
 
-空库升级和 migration graph 检查必须确认唯一 head 为 `e1f2a3b4c5d6`：
+空库升级和 migration graph 检查必须确认唯一 head 为 `x1y2z3a4b5c6`：
 
 ```bash
 python -m alembic heads
