@@ -45,6 +45,11 @@ py -3.12 -m venv .venv
 # 第五阶段：取消与 SSE 恢复专项
 .venv\Scripts\python.exe -m runner recovery
 
+# 沙盒数据处理：先跑单任务真实流程，再跑重复与并发阶梯
+.venv\Scripts\python.exe -m runner stage --stage sandbox_baseline
+.venv\Scripts\python.exe -m runner stage --stage sandbox_repeat
+.venv\Scripts\python.exe -m runner stage --stage sandbox_ladder
+
 # 导出本轮 job_id 清单，供服务器上逐 Job 主库核对
 # 默认写入最近一次运行所在的日期目录 local/runs/<date>/job-ids/
 .venv\Scripts\python.exe -m runner export-job-ids
@@ -73,6 +78,16 @@ sse 是客户端 SSE 订阅并发上限，create_budget 是每个账号累计成
 | multi_session_pressure | 10 × 2 | 20 | 20 | 600 s | 不限 |
 | cdfm_fixed | 1 × 1 | 不限 | 8 | 固定 4 项任务 | 不限 |
 | cdfm_rate | 1 × 1 | 不限 | 8 | 200 s，计划 20 次到达、0.1 次/s | 不限 |
+| sandbox_baseline | 1 × 1 | 1 | 1 | flows 1 | 不限 |
+| sandbox_repeat | 1 × 1 | 1 | 1 | flows 6 | 不限 |
+| sandbox_ladder | 8 × 1 | 按档位 1/2/4/8 | 8 | 每档 180 s | 不限 |
+| sandbox_rate | 4 × 1 | 不限 | 16 | 240 s，0.05 次/s，12 项任务 | 不限 |
+| sandbox_mixed | 4 × 1 | 4 | 8 | 300 s | 不限 |
+| sandbox_stability | 4 × 1 | 4 | 8 | 1800 s | 不限 |
+
+沙盒档位的并发起点是 1、2、4、8 个活动 Job，不复用旧档位的 20/30 账号规模。
+`sandbox_ladder` 在单次运行内逐档放宽活动 Job 上限，每档结束后等待已提交任务完成；
+数据规模在小、中、大三组之间单独调整，比较并发时保持同一组。
 
 同一账号的不同会话允许同时运行任务，同一会话仍遵守应用现有的活动 Job 约束。并发数量由
 服务器默认 worker 能力形成，客户端不提前限流；burst_ungated 与 queue_pressure 的 active_jobs
@@ -167,6 +182,38 @@ SSE 峰值只计成功收到 HTTP 200 响应头的连接，等待额度、等待
 桩、mock/fake 或合成运行替代。真实接口验证需要可用的测试账号、数据库、worker 与模型环境。
 
 ## 专项证据边界
+
+### 沙盒数据处理专项
+
+沙盒档位继承普通档位的 HTTP、SSE、账号、多会话和证据归档能力，只替换业务载荷与
+交互答复。`sandbox_baseline`、`sandbox_repeat`、`sandbox_ladder`、`sandbox_rate`、
+`sandbox_mixed` 与 `sandbox_stability` 使用固定种子的五列连续数据，场景预先声明观察
+单位（每行一台设备的一次独立测量）和允许的处理方式（保留全部行与 x1 至 x5）。
+
+交互答复由 `interaction_type` 决定：算法选项提交 `option_id`，研究语义问题提交场景
+文本，方案确认提交 `{"action":"confirm","plan_version":"<当前事件版本>"}`。未识别
+类型只记录缺口，不发送默认答复；方案的转换说明含聚合、筛选、删除或重命名，或变量
+范围与场景声明不一致时，记录为偏离并拒绝自动确认。每个 Job 的交互轮数与总时间分别
+受 `LOADTEST_MAX_INTERACTIONS` 和 `LOADTEST_INTERACTION_DEADLINE_SECONDS` 限制。
+同一问题重试复用同一幂等键，新问题使用新键。
+
+阶段的取消检查按真实前置条件触发：排队中、等待方案确认、等待沙盒容量、脚本执行中
+和取消与自然完成竞争。等待容量一项目前没有独立计时事件，因此保持未验证；执行中取消
+必须由主库沙盒会话的 `execute_started` 阶段时间确认，不能只凭创建成功推断。
+
+沙盒会话证据来自主库 `analysis_sandbox_sessions`：按本轮 Job 读取请求 ID、远端 ID、
+状态、执行状态、创建与关闭时间，并读取控制服务写入的 `reserve_committed`、
+`remote_created`、`initialized`、`execute_started`、`execute_finished` 阶段时间。
+一个 Job 可以创建多个沙盒会话，因此报告同时给出 Job 覆盖率与每 Job 会话数。动态容器
+按 Docker 标签 `application=causalagent` 与 `request` 归属；没有本轮会话映射的容器
+单列为其他请求或未归属，不按名称猜测。
+
+排空结论分四层：业务活动结束、Job 执行释放、沙盒资源释放与完整排空。完整排空要求
+身份核对完整、Job 已终结、执行已释放、全部会话已关闭并取得远端结束证据；缺少证据时
+显示未知，不沿用旧结论。旧产物没有这些字段时，报告显示未采集。
+
+Worker 本地并发等待与全局容量等待尚无独立计时，报告把“控制服务拒绝容量请求的次数”
+与“等待时长”分开表述；这两项不能互相替代。
 
 `runner recovery` 分别记录断线续传与同 Job 完整事件重放、同键幂等、确实观察到
 queued/running 后的业务取消、5 秒短窗口内状态不反转、实际触发 waiting_input 后恢复

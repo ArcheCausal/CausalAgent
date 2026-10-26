@@ -443,24 +443,25 @@ def _cmd_accounts(base_url: str, count: int, verify: bool) -> int:
 def _cmd_stage(args, server_baseline: dict | None) -> int:
     spec = dict(config.STAGES[args.stage])
     cdfm = spec["mode"] in ("cdfm_fixed", "cdfm_rate")
+    sandbox = str(spec["mode"]).startswith("sandbox") or spec["mode"] == "mixed"
     if args.users < 0 or not math.isfinite(args.duration) or args.duration < 0:
         print("users 必须为正整数，duration 必须为有限正数；0 表示使用档位默认值。")
         return 2
     for name in ("rows", "tasks"):
         value = getattr(args, name)
-        if value is not None and (not cdfm or value <= 0):
-            print(f"--{name} 只用于 CDFM 档位，且必须为正整数。")
+        if value is not None and ((not cdfm and not sandbox) or value <= 0):
+            print(f"--{name} 只用于 CDFM 与沙盒档位，且必须为正整数。")
             return 2
         if value is not None:
             spec[name] = value
     if args.seed is not None:
-        if not cdfm:
-            print("--seed 只用于 CDFM 档位。")
+        if not cdfm and not sandbox:
+            print("--seed 只用于 CDFM 与沙盒档位。")
             return 2
         spec["seed"] = args.seed
     if args.arrival_rate is not None:
-        if spec["mode"] != "cdfm_rate" or not math.isfinite(args.arrival_rate) or args.arrival_rate <= 0:
-            print("--arrival-rate 只用于 cdfm_rate，且必须为有限正数。")
+        if spec["mode"] not in {"cdfm_rate", "sandbox_rate"} or not math.isfinite(args.arrival_rate) or args.arrival_rate <= 0:
+            print("--arrival-rate 只用于 cdfm_rate 与 sandbox_rate，且必须为有限正数。")
             return 2
         spec["arrival_rate"] = args.arrival_rate
     if args.users:
@@ -470,7 +471,8 @@ def _cmd_stage(args, server_baseline: dict | None) -> int:
             print("cdfm_fixed 以 --tasks 指定任务量；持续时间请使用 cdfm_rate 的 --duration。")
             return 2
         spec["duration"] = args.duration
-        if not cdfm:
+        # 只有原本按持续时间运行的 mixed 档位才切换模式；沙盒与 full_flow 档保持各自流程。
+        if not cdfm and spec["mode"] == "mixed":
             spec["mode"] = "mixed"
     config.STAGES[args.stage] = spec
     accounts = load_accounts()

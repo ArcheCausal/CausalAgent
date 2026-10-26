@@ -91,6 +91,13 @@ class SandboxController:
                 self.ready = False
                 raise ControllerError("controller_authority_unavailable", 503) from None
 
+    async def _timing(self, request_id: str, stage: str) -> None:
+        """写入固定的阶段时间；观测失败不改变创建、执行或清理结果。"""
+        try:
+            await asyncio.to_thread(store.record_stage_timing, request_id, stage)
+        except Exception as exc:
+            logger.warning("sandbox stage timing not recorded: %s/%s", stage, type(exc).__name__)
+
     async def startup(self) -> None:
         await asyncio.to_thread(self.singleton.acquire)
         try:
@@ -118,6 +125,8 @@ class SandboxController:
                     store.reserve_session, identity, request_id=request_id, request_digest=digest,
                     source_hash=source_hash, capacity=self.settings.capacity, ttl_seconds=self.settings.remote.sandbox_ttl_seconds,
                 )
+                if created:
+                    await self._timing(request_id, "reserve_committed")
             if not created:
                 if row["status"] in {"active", "creating"} and row.get("remote_sandbox_id"):
                     return {"session_id": request_id, "state": row["status"]}
@@ -125,6 +134,7 @@ class SandboxController:
             sandbox = None
             try:
                 sandbox = await self.remote.create(request_id, str(identity["job_id"]))
+                await self._timing(request_id, "remote_created")
                 await self._update(request_id, status="creating", remote_sandbox_id=sandbox.id)
                 session = self.remote.session(sandbox, guard=_SessionGuard(self, request_id, identity))
                 self._sessions[request_id] = session
@@ -163,6 +173,7 @@ class SandboxController:
             try:
                 await session._initialize(data)
                 await session._ensure_active()
+                await self._timing(session_id, "initialized")
                 await self._update(session_id, status="active")
             except BaseException:
                 await self._update(session_id, status="deleting")
@@ -204,6 +215,7 @@ class SandboxController:
                 if row["operation_status"] == "succeeded":
                     return row["operation_result"]
                 raise ControllerError("operation_pending")
+            await self._timing(session_id, "execute_started")
             try:
                 session = await self._session(row, identity)
                 script = await session._read_bounded(PurePosixPath("/workspace/scripts/process.py"), self.settings.remote.max_command_bytes)
@@ -211,6 +223,7 @@ class SandboxController:
                     raise ControllerError("script_hash_mismatch", 422)
                 await asyncio.to_thread(store.require_plan_confirmation, session_id, execution_identity)
                 result = asdict(await session.run("python3 /workspace/scripts/process.py"))
+                await self._timing(session_id, "execute_finished")
                 await asyncio.to_thread(store.require_plan_confirmation, session_id, execution_identity)
                 await self._finish(session_id, operation_id, digest, result)
                 return result
