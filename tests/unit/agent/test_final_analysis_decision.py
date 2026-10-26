@@ -1,8 +1,10 @@
 """P2-U ToolStrategy 终态和 finalization retry 预算测试。"""
 
 import asyncio
+from types import SimpleNamespace
 from datetime import datetime, timezone
 import pytest
+from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import ToolRuntime
 
 from Agent.deep_agent import AgentRunContext, FinalizationGate, TrustedJobIdentity
@@ -22,6 +24,7 @@ from Agent.deep_agent.finalization import (
 )
 from Agent.causal_agent.graph import (
     _emit_public_final_decision,
+    _finalization_gate_node,
     _legacy_rag_evidence_result,
     _legacy_web_evidence_result,
 )
@@ -577,6 +580,40 @@ def test_finalization_gate_accepts_no_valid_algorithm_only_after_a_failed_call()
     )
 
     assert accepted.outcome == "no_valid_algorithm"
+
+
+def test_effect_rule_uses_one_retry_then_degrades() -> None:
+    identity, registry, result, ledger = _algorithm_execution()
+    gate = FinalizationGate(registry=registry)
+    runtime = SimpleNamespace(
+        context=AgentRunContext(execution_guard=None, trusted_identity=identity),
+        stream_writer=[].append,
+    )
+    state = {
+        "deep_agent_structured_response": _primary_decision(result),
+        "deep_agent_algorithm_results": {result.result_ref: result},
+        "deep_agent_action_ledger": {ledger.invocation_id: ledger},
+        "route_decision": "fold",
+        "analysis_parameters": _EFFECT_PARAMETERS,
+        "messages": [HumanMessage(content=_EFFECT_QUESTION)],
+    }
+
+    retried = asyncio.run(
+        _finalization_gate_node(state, runtime=runtime, config={}, gate=gate)
+    )
+    assert retried["finalization_retry_count"] == 1
+    assert "causal_ate" in retried["deep_agent_retry_instruction"]
+
+    degraded = asyncio.run(
+        _finalization_gate_node(
+            {**state, "finalization_retry_count": 1},
+            runtime=runtime,
+            config={},
+            gate=gate,
+        )
+    )
+    assert degraded["finalization_status"] == "degraded"
+    assert degraded["finalization_error"] == "FINALIZATION_CONTRACT_INVALID"
 
 
 def test_gate_rejects_evidence_reference_mixed_into_result_assessments() -> None:
