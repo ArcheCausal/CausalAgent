@@ -6,7 +6,7 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -62,6 +62,7 @@ class AdapterInput:
     execution_columns: tuple[str, ...] | None = None
     preprocessing: PreprocessingPlan | None = None
     approval: PreprocessingApproval | None = None
+    artifacts: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.input_identity or self.input_identity != self.input_identity.strip():
@@ -217,9 +218,12 @@ class BaseAlgorithmAdapter(ABC):
                 dataset_csv=csv_data,
                 missing_values_present=profile.has_missing_values,
                 dataset_authority_available=adapter_input.dataset_authority_available,
-                execution_columns=profile.column_names,
+                execution_columns=(
+                    adapter_input.execution_columns or profile.column_names
+                ),
                 preprocessing=None,
                 approval=adapter_input.approval,
+                artifacts=adapter_input.artifacts,
             ),
             view,
         )
@@ -567,6 +571,7 @@ class BaseAlgorithmAdapter(ABC):
             approval=approval,
             result_index=result_index,
             timeout_seconds=self.spec.default_timeout_seconds,
+            artifacts=dict(adapter_input.artifacts),
         )
         not_ready = self.validate_input(adapter_input)
         if not_ready is not None:
