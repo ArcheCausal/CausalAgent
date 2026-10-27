@@ -133,7 +133,7 @@ def test_runner_failure_emits_controlled_diagnostics_without_free_text(tmp_path,
     assert str(tmp_path) not in str(details)
 
 
-def _boom(csv_data, _parameters):
+def _boom(csv_data, _parameters, _artifacts):
     """真实文件读取失败；子进程只能输出异常类名。"""
     print("third-party-noise: /tmp/secret-path")
     from pathlib import Path

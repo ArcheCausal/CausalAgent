@@ -12,6 +12,7 @@ from pydantic.json_schema import WithJsonSchema
 from typing_extensions import Annotated
 
 from .models import (
+    CausalEffect,
     ContractModel,
     MethodDefinition,
     PublicDecision,
@@ -100,6 +101,23 @@ class CausalCdfmInput(ContractModel):
             raise ValueError("threshold must be a number or null")
         if not math.isfinite(float(value)):
             raise ValueError("threshold must be finite")
+        return value
+
+
+class CausalAteInput(ContractModel):
+    """后门调整 ATE 的模型可见参数；图只能通过结果引用提供。"""
+
+    graph_result_ref: str = Field(
+        description="本次运行中已发现且有效的因果图结果引用。",
+    )
+    treatment: str
+    outcome: str
+
+    @field_validator("graph_result_ref", "treatment", "outcome")
+    @classmethod
+    def validate_reference_strings(cls, value: str, info: Any) -> str:
+        if not value or not value.strip() or value != value.strip():
+            raise ValueError(f"{info.field_name} must be a non-blank string")
         return value
 
 
@@ -523,15 +541,67 @@ CDFM_SPEC = AlgorithmSpec(
 )
 
 
+CAUSAL_ATE_SPEC = AlgorithmSpec(
+    capability_id="causal.ate",
+    version="2.0",
+    tool_name="causal_ate",
+    public_name="因果效应估计（后门调整）",
+    description=(
+        "在后门调整下估计处理变量对结果变量的线性总效应。"
+        "必须引用本次运行中已经发现且有效的因果图；"
+        "不支持未定向边、双箭头边、有向环或处理变量不是结果变量祖先的图。"
+        "同一张图只能与产生它的数据版本一起使用。"
+    ),
+    model_input_schema=CausalAteInput,
+    requires=frozenset({"standardized_graph"}),
+    produces=frozenset(),
+    assumptions=(
+        "图包含查询的处理与结果变量，且无未定向边、双箭头边或有向环",
+        "处理变量、结果变量和处理变量的全部父节点为数值存储，无缺失、常数或非有限值",
+        "函数形式近似线性，效应按每 1 单位变化解释，不对非线性或交互建模",
+        "调整集取处理变量的全部父节点，不搜索其他有效调整集",
+    ),
+    result_contract=CausalEffect,
+    default_timeout_seconds=120,
+    concurrency_key="causal_ate",
+    default_concurrency=1,
+    kind="causal_estimation",
+    analysis_goal="在被引用的因果图上估计处理变量对结果变量的线性总效应",
+    description_source=("用途", "图引用要求", "线性假设", "不适用边界"),
+    data_requirements=(
+        "standardized_graph",
+        "处理变量、结果变量和全部调整变量为数值存储，不转换字符串数值",
+        "已声明为 category、ordinal、binary 的估计列不适用，不自动编码",
+        "无缺失值、空列、常数列或非有限值",
+    ),
+    requires_numeric_columns=True,
+    requires_complete_cases=True,
+    native_missing_handling="reject",
+    min_rows=3,
+    min_columns=2,
+    graph_semantics="causal_estimation_input",
+    matrix_convention="backdoor_ols",
+    edge_meanings={"directed": "后门调整所用的因果方向"},
+    limitations=(
+        "只做父节点调整",
+        "未声明的测量语义仍未充分确认，不根据整数类型或唯一值数量推断连续语义",
+        "不删除调整变量、不删除行、不填值、不编码或改变源图",
+        "不处理未观测混杂、选择偏倚或测量误差",
+        "不做 bootstrap，区间为线性模型内区间",
+    ),
+)
+
+
 DEFAULT_ALGORITHM_SPECS: tuple[AlgorithmSpec, ...] = (
     PC_SPEC,
     DIRECT_LINGAM_SPEC,
     CDFM_SPEC,
+    CAUSAL_ATE_SPEC,
 )
 
 
 def get_algorithm_spec(capability_id: str) -> AlgorithmSpec:
-    for spec in (*DEFAULT_ALGORITHM_SPECS, OLC_SPEC):
+    for spec in (*DEFAULT_ALGORITHM_SPECS, OLC_SPEC, CAUSAL_ATE_SPEC):
         if spec.capability_id == capability_id:
             return spec
     raise ValueError("unknown algorithm capability")

@@ -14,6 +14,11 @@ from typing import Any, Callable, Mapping
 
 from Agent.deep_agent_tools.error_codes import SafeErrorCode
 from Agent.deep_agent_tools.algorithm_specs import DEFAULT_ALGORITHM_SPECS
+from Agent.deep_agent_tools.ate_applicability import (
+    ATE_REASON_SUMMARIES,
+    check_ate_graph,
+    check_ate_profile,
+)
 from Agent.deep_agent_tools.normalization import (
     result_from_runner_payload, runner_method_metadata, standardize_runner_graph,
 )
@@ -22,12 +27,15 @@ from Agent.deep_agent_tools.models import (
     AlgorithmExecutionCommand,
     AlgorithmResult,
     AlgorithmResultProvenance,
+    AteApplicabilityCheck,
+    CausalEffect,
     DataViewSummary,
     Diagnostics,
     McpInvocationContext,
     StandardizedGraph,
     canonical_json_bytes,
 )
+from Agent.deep_agent_tools.graph_validation import validate_graph_structure
 from Agent.deep_agent_tools.preprocessing import build_data_profile_from_csv
 from Agent.measurement_semantics import (
     ValidatedAlgorithmInput, normalize_semantic_kinds,
@@ -240,6 +248,7 @@ def _error_result(
     *,
     code: SafeErrorCode,
     capability_version: str,
+    ate_check: AteApplicabilityCheck | None = None,
 ) -> AlgorithmResult:
     spec = next((spec for spec in DEFAULT_ALGORITHM_SPECS if spec.capability_id == command.capability_id), None)
     return AlgorithmResult(
@@ -252,9 +261,14 @@ def _error_result(
         capability_id=command.capability_id,
         capability_version=capability_version,
         status=_failure_status(code),
+        ate_check=ate_check,
         method=spec.method_definition() if spec is not None and spec.version == capability_version else None,
         diagnostics=Diagnostics(
-            summary="算法调用未产出可用结果。",
+            summary=(
+                ATE_REASON_SUMMARIES[ate_check.reason_code]
+                if ate_check is not None and ate_check.reason_code in ATE_REASON_SUMMARIES
+                else "算法调用未产出可用结果。"
+            ),
             safe_error_code=code,
         ),
         provenance=AlgorithmResultProvenance(
@@ -269,6 +283,91 @@ def _error_result(
             capability_id=command.capability_id,
             capability_version=capability_version,
             algorithm_runner_version=None,
+        ),
+    )
+
+
+def _estimation_result(
+    raw_result: Mapping[str, Any],
+    *,
+    command: AlgorithmExecutionCommand,
+    context: McpInvocationContext,
+    capability_version: str,
+    graph: StandardizedGraph,
+    data_view: DataViewSummary | None,
+    ate_check: AteApplicabilityCheck,
+) -> AlgorithmResult:
+    """估计能力的成功结果：图取入参图，效应取 runner 返回值。"""
+
+    effect_payload = raw_result.get("causal_effect")
+    if not isinstance(effect_payload, Mapping):
+        raise ValueError("estimation runner did not return causal_effect")
+    effect = CausalEffect.model_validate(
+        {
+            "graph_result_ref": command.parameters.get("graph_result_ref"),
+            **dict(effect_payload),
+        }
+    )
+    if (
+        effect.treatment != command.parameters.get("treatment")
+        or effect.outcome != command.parameters.get("outcome")
+        or effect.graph_result_ref != command.parameters.get("graph_result_ref")
+    ):
+        raise ValueError("estimation result does not match the requested pair")
+    if (
+        ate_check is None
+        or ate_check.applicability != "ready"
+        or effect.graph_result_ref != ate_check.graph_result_ref
+        or effect.treatment != ate_check.treatment
+        or effect.outcome != ate_check.outcome
+        or effect.adjustment_set != ate_check.adjustment_set
+    ):
+        raise ValueError("estimation result does not match the completed ATE check")
+    if data_view is not None and effect.n_rows != data_view.row_count:
+        raise ValueError("estimation result changed the checked sample count")
+    validation = validate_graph_structure(graph, graph_semantics=graph.graph_semantics)
+    if not validation.valid:
+        raise ValueError("input graph failed structural validation")
+    metadata = runner_method_metadata(raw_result, command.capability_id)
+    return AlgorithmResult(
+        result_ref=build_result_ref(
+            invocation_id=command.invocation_id,
+            result_index=command.result_index,
+        ),
+        invocation_id=command.invocation_id,
+        provider_call_id=command.provider_call_id,
+        capability_id=command.capability_id,
+        capability_version=capability_version,
+        status="valid",
+        **metadata,
+        standardized_graph=graph,
+        graph_validation=validation,
+        causal_effect=effect,
+        ate_check=ate_check,
+        summary="算法调用完成。",
+        data_view=data_view,
+        diagnostics=Diagnostics(
+            summary="后门调整估计完成。",
+            sample_count=effect.n_rows,
+            assumptions_checked=[
+                "all_edges_directed",
+                "acyclic",
+                "treatment_ancestor_of_outcome",
+            ],
+        ),
+        input_identity=command.input_identity,
+        provenance=AlgorithmResultProvenance(
+            job_id=context.job_id,
+            attempt_count=context.attempt_count,
+            lease_epoch=context.lease_epoch,
+            input_identity=command.input_identity,
+            source_input_identity=context.source_input_identity,
+            analysis_dataset_id=context.analysis_dataset_id,
+            spec_digest=command.spec_digest,
+            invocation_id=command.invocation_id,
+            capability_id=command.capability_id,
+            capability_version=capability_version,
+            algorithm_runner_version=metadata["implementation"].runner_version,
         ),
     )
 
@@ -436,6 +535,7 @@ class CausalMcpService:
     ) -> dict[str, Any]:
         command = request.command
         context = request.trusted_context
+        ate_check: AteApplicabilityCheck | None = None
         try:
             trusted_input = await self._read_authority(context)
             csv_data = trusted_input.csv_data
@@ -449,13 +549,45 @@ class CausalMcpService:
             parameters = spec.model_input_schema.model_validate(command.parameters).model_dump(
                 mode="json"
             )
+            artifacts = dict(command.artifacts)
+            if set(artifacts) - set(spec.requires):
+                raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID)
+            graph: StandardizedGraph | None = None
+            if "standardized_graph" in artifacts:
+                try:
+                    graph = StandardizedGraph.model_validate(
+                        artifacts["standardized_graph"]
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise McpServiceError(
+                        SafeErrorCode.ALGORITHM_INPUT_INVALID
+                    ) from exc
+            if spec.kind == "causal_estimation" and graph is None:
+                raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID)
+            if graph is not None and not validate_graph_structure(
+                graph, graph_semantics=graph.graph_semantics,
+            ).valid:
+                raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID)
             processed_profile = build_data_profile_from_csv(csv_data)
             semantic_kinds = normalize_semantic_kinds(
                 trusted_input.semantic_kinds, columns=processed_profile.column_names,
             )
-            applicability, _reason = spec.assess_applicability(
-                profile=processed_profile, semantic_kinds=semantic_kinds,
-            )
+            if command.capability_id == "causal.ate":
+                graph_check = check_ate_graph(
+                    graph=graph,
+                    graph_result_ref=parameters["graph_result_ref"],
+                    treatment=parameters["treatment"],
+                    outcome=parameters["outcome"],
+                )
+                ate_check = check_ate_profile(
+                    graph_check, profile=processed_profile, semantic_kinds=semantic_kinds,
+                )
+                applicability = ate_check.applicability
+            else:
+                applicability, _reason = spec.assess_applicability(
+                    profile=processed_profile,
+                    semantic_kinds=semantic_kinds,
+                )
             if applicability != "ready":
                 code = (
                     SafeErrorCode.ALGORITHM_NOT_APPLICABLE
@@ -482,6 +614,11 @@ class CausalMcpService:
                 context,
                 code=exc.safe_error_code,
                 capability_version=entry.version,
+                ate_check=(
+                    ate_check
+                    if exc.safe_error_code == SafeErrorCode.ALGORITHM_NOT_APPLICABLE
+                    else None
+                ),
             )
             return {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
         except Exception:
@@ -529,6 +666,7 @@ class CausalMcpService:
                     runner=entry.runner,
                     csv_data=csv_data,
                     parameters=parameters,
+                    artifacts=artifacts,
                     timeout_seconds=timeout_seconds,
                     concurrency=entry.concurrency,
                     before_start=before_process_start,
@@ -648,11 +786,21 @@ class CausalMcpService:
                 SafeErrorCode.ALGORITHM_TIMED_OUT,
                 SafeErrorCode.ALGORITHM_EXECUTION_FAILED,
             }:
+                # A completed check cannot authorize publishing under a stale lease.
+                try:
+                    await self._confirm_authority(context, trusted_input)
+                except McpServiceError as authority_error:
+                    result = _error_result(
+                        command, context, code=authority_error.safe_error_code,
+                        capability_version=entry.version,
+                    )
+                    return {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
                 result = _error_result(
                     command,
                     context,
                     code=exc.safe_error_code,
                     capability_version=entry.version,
+                    ate_check=ate_check,
                 )
                 return {
                     "ok": True,
@@ -694,12 +842,14 @@ class CausalMcpService:
             )
             return {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
         raw_result = outcome.value
+        completed_ate_check = ate_check
         if len(canonical_json_bytes(raw_result)) > self.config.result_max_bytes:
             result = _error_result(
                 command,
                 context,
                 code=SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID,
                 capability_version=entry.version,
+                ate_check=ate_check,
             )
             return {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
         if not isinstance(raw_result, Mapping):
@@ -708,18 +858,43 @@ class CausalMcpService:
                 context,
                 code=SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID,
                 capability_version=entry.version,
+                ate_check=ate_check,
             )
         elif raw_result.get("success") is not True:
             error_type = str(raw_result.get("error_type", ""))
             code = (
                 SafeErrorCode.ALGORITHM_INPUT_INVALID
                 if error_type == "InputValidationError"
+                else SafeErrorCode.ALGORITHM_TIMED_OUT
+                if error_type == "TimeoutError"
                 else SafeErrorCode.ALGORITHM_NOT_READY
                 if error_type == "DependencyUnavailableError"
+                else SafeErrorCode.ALGORITHM_NOT_APPLICABLE
+                if error_type == "NotApplicable"
                 else SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID
                 if error_type == "ResultValidationError"
                 else SafeErrorCode.ALGORITHM_EXECUTION_FAILED
             )
+            if command.capability_id == "causal.ate" and error_type == "NotApplicable":
+                reason = raw_result.get("reason_code")
+                if isinstance(reason, str) and reason in ATE_REASON_SUMMARIES and ate_check is not None:
+                    try:
+                        ate_check = AteApplicabilityCheck.model_validate({
+                            **ate_check.model_dump(),
+                            "applicability": "not_applicable",
+                            "reason_code": reason,
+                        })
+                    except ValueError:
+                        code = SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID
+                else:
+                    # Unknown exception text never becomes an applicability conclusion.
+                    code = SafeErrorCode.ALGORITHM_EXECUTION_FAILED
+            if ate_check is not None and code in {
+                SafeErrorCode.ALGORITHM_INPUT_INVALID,
+                SafeErrorCode.ALGORITHM_NOT_READY,
+            }:
+                # The trusted input already passed; a runner rejection is a later failure.
+                code = SafeErrorCode.ALGORITHM_EXECUTION_FAILED
             log_event(
                 LOGGER,
                 "mcp.runner.failed",
@@ -735,53 +910,79 @@ class CausalMcpService:
                 context,
                 code=code,
                 capability_version=entry.version,
+                ate_check=ate_check,
             )
-            result = result.model_copy(update=runner_method_metadata(raw_result, command.capability_id))
+            try:
+                result = AlgorithmResult.model_validate({
+                    **result.model_dump(),
+                    **runner_method_metadata(raw_result, command.capability_id),
+                })
+            except ValueError:
+                result = _error_result(
+                    command, context,
+                    code=SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID,
+                    capability_version=entry.version,
+                    ate_check=completed_ate_check,
+                )
         else:
             try:
                 metadata = runner_method_metadata(raw_result, command.capability_id)
-                normalized = result_from_runner_payload(
-                    raw_result, command=command, context=context,
-                    capability_version=entry.version,
-                    runner_version=metadata["implementation"].runner_version,
-                )
-                result = AlgorithmResult(
-                    result_ref=build_result_ref(
+                if spec.kind == "causal_estimation":
+                    if graph is None:
+                        raise ValueError("estimation requires a graph artifact")
+                    result = _estimation_result(
+                        raw_result,
+                        command=command,
+                        context=context,
+                        capability_version=entry.version,
+                        graph=graph,
+                        data_view=data_view,
+                        ate_check=ate_check,
+                    )
+                else:
+                    normalized = result_from_runner_payload(
+                        raw_result, command=command, context=context,
+                        capability_version=entry.version,
+                        runner_version=metadata["implementation"].runner_version,
+                    )
+                    result = AlgorithmResult(
+                        result_ref=build_result_ref(
+                            invocation_id=command.invocation_id,
+                            result_index=command.result_index,
+                        ),
                         invocation_id=command.invocation_id,
-                        result_index=command.result_index,
-                    ),
-                    invocation_id=command.invocation_id,
-                    provider_call_id=command.provider_call_id,
-                    capability_id=command.capability_id,
-                    capability_version=entry.version,
-                    status=normalized.status,
-                    **metadata,
-                    standardized_graph=normalized.standardized_graph,
-                    graph_validation=normalized.graph_validation,
-                    summary="算法调用完成。",
-                    data_view=data_view,
-                    diagnostics=normalized.diagnostics,
-                    input_identity=command.input_identity,
-                    provenance=AlgorithmResultProvenance(
-                        job_id=context.job_id,
-                        attempt_count=context.attempt_count,
-                        lease_epoch=context.lease_epoch,
-                        input_identity=command.input_identity,
-                        source_input_identity=context.source_input_identity,
-                        analysis_dataset_id=context.analysis_dataset_id,
-                        spec_digest=command.spec_digest,
-                        invocation_id=command.invocation_id,
+                        provider_call_id=command.provider_call_id,
                         capability_id=command.capability_id,
                         capability_version=entry.version,
-                        algorithm_runner_version=normalized.provenance.algorithm_runner_version,
-                    ),
-                )
+                        status=normalized.status,
+                        **metadata,
+                        standardized_graph=normalized.standardized_graph,
+                        graph_validation=normalized.graph_validation,
+                        summary="算法调用完成。",
+                        data_view=data_view,
+                        diagnostics=normalized.diagnostics,
+                        input_identity=command.input_identity,
+                        provenance=AlgorithmResultProvenance(
+                            job_id=context.job_id,
+                            attempt_count=context.attempt_count,
+                            lease_epoch=context.lease_epoch,
+                            input_identity=command.input_identity,
+                            source_input_identity=context.source_input_identity,
+                            analysis_dataset_id=context.analysis_dataset_id,
+                            spec_digest=command.spec_digest,
+                            invocation_id=command.invocation_id,
+                            capability_id=command.capability_id,
+                            capability_version=entry.version,
+                            algorithm_runner_version=normalized.provenance.algorithm_runner_version,
+                        ),
+                    )
             except Exception:
                 result = _error_result(
                     command,
                     context,
                     code=SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID,
                     capability_version=entry.version,
+                    ate_check=ate_check,
                 )
 
         duration_ms = int((time.perf_counter() - started_at) * 1000)
@@ -813,7 +1014,7 @@ class CausalMcpService:
                 },
             )
         response = {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
-        if isinstance(raw_result, Mapping):
+        if isinstance(raw_result, Mapping) and result.status != "timed_out":
             response["raw_payload"] = dict(raw_result)
         return response
 

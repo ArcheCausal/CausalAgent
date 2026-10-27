@@ -972,6 +972,8 @@ async def _finalization_gate_node(
             web_evidence=state.get("deep_agent_web_evidence"),
             route_decision=state.get("route_decision"),
             web_search_enabled=getattr(context, "web_search_enabled", None),
+            analysis_parameters=state.get("analysis_parameters"),
+            analysis_question=nodes._latest_human_text(state),
         )
     except StructuredResponseError as exc:
         if exc.rule is None:

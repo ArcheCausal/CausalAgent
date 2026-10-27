@@ -80,6 +80,14 @@ def test_development_mcp_is_private_and_worker_waits_for_health() -> None:
     _assert_worker_control_lane_config(worker)
 
 
+def test_development_mcp_uses_baked_cdfm_weights() -> None:
+    compose = (PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    mcp = _service_block(compose, "causal-mcp")
+    assert "- CDFM_MODEL_PATH=${CDFM_MODEL_PATH:-/opt/cdfm-weights-image}" in mcp
+    env_example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "CDFM_MODEL_PATH=/opt/cdfm-weights-image" in env_example
+
+
 def test_staging_and_production_mcp_keep_private_image_boundary() -> None:
     staging = (PROJECT_ROOT / "docker-compose.staging.yml").read_text(encoding="utf-8")
     production = (PROJECT_ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")

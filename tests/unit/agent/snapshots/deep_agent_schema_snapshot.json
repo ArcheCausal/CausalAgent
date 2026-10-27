@@ -19,6 +19,7 @@
     },
     "AlgorithmExecutionCommand": {
       "properties": [
+        "artifacts",
         "capability_id",
         "capability_version",
         "input_identity",
@@ -37,13 +38,15 @@
         "provider_call_id",
         "input_identity"
       ],
-      "sha256": "e3ac2d8d6ccce1010fb406e0a87fd3b545114f2ae9b2db4fe55e7ad29b07f366",
+      "sha256": "8fc12affa17d82b3dc952e3b7e5d627e1475dc405c990c40b9f3dd98d1caeb90",
       "title": "AlgorithmExecutionCommand"
     },
     "AlgorithmResult": {
       "properties": [
+        "ate_check",
         "capability_id",
         "capability_version",
+        "causal_effect",
         "data_view",
         "diagnostics",
         "graph_semantics",
@@ -73,7 +76,7 @@
         "status",
         "provenance"
       ],
-      "sha256": "6470c5ca45c5d5676f6995413b0fd0cf7d2b3530a21146db756bc4a7a690653d",
+      "sha256": "1a63a875419708e74a680eb7b633b0d1659265ded6b6b4f46fe838f661d78f7c",
       "title": "AlgorithmResult"
     },
     "AlgorithmResultProvenance": {
@@ -99,6 +102,52 @@
       ],
       "sha256": "85172284aacd192d5ec17dd5dd349013a6fe6f28891aceab62e66b6ab7d6c45e",
       "title": "AlgorithmResultProvenance"
+    },
+    "AteApplicabilityCheck": {
+      "properties": [
+        "adjustment_set",
+        "applicability",
+        "execution_columns",
+        "graph_result_ref",
+        "outcome",
+        "reason_code",
+        "treatment"
+      ],
+      "required": [
+        "graph_result_ref",
+        "treatment",
+        "outcome",
+        "adjustment_set",
+        "execution_columns",
+        "applicability"
+      ],
+      "sha256": "bc0a20b1e0d2f4ff47d4c0af5b96617c5ee16bb43fede72480ce0eaf3e5c4086",
+      "title": "AteApplicabilityCheck"
+    },
+    "CausalEffect": {
+      "properties": [
+        "adjustment_set",
+        "ci95",
+        "estimand",
+        "estimate",
+        "estimator",
+        "graph_result_ref",
+        "n_rows",
+        "outcome",
+        "standard_error",
+        "treatment"
+      ],
+      "required": [
+        "estimand",
+        "graph_result_ref",
+        "treatment",
+        "outcome",
+        "estimate",
+        "estimator",
+        "n_rows"
+      ],
+      "sha256": "7f9ecef33b4f54567592d955a6aaa1192b47b9cffb7da8dd05dc7670ee2ecdd2",
+      "title": "CausalEffect"
     },
     "DataIssue": {
       "properties": [
@@ -462,6 +511,12 @@
   },
   "schema_version": "p2-v1",
   "tools": [
+    {
+      "capability_id": "causal.ate",
+      "schema_sha256": "c4a28f8200bb34f1598d1e23dbc8495b2a9d29f4e811576073d95d31b2a9240c",
+      "spec_digest": "dc06cab6ee0707afa1520dd4143c8c490758becc628531a8b81867799d8af5bc",
+      "tool_name": "causal_ate"
+    },
     {
       "capability_id": "causal.cdfm",
       "schema_sha256": "833fc380608aec4179772f57e361693471758572646524839cbd60374db80dc7",

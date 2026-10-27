@@ -335,6 +335,18 @@ passed/skipped/failed；历史通过数量不能代替当前工作树证据。`t
 检查缺少 Docker CLI 时跳过并保留未执行结论。日志序列化兜底事件本身也不能作为生产观测
 链路已验收的证据。
 
+## 后门 OLS 适用性检查
+
+`tests/unit/agent/test_ate_applicability.py` 使用真实纯检查和内核验证完整调整集、参与列准入、数值编码分类语义拒绝、结构原因码与检查记录契约。`tests/integration/agent/test_ate_tool_checks.py` 使用固定输入图、正式 ToolRuntime/Adapter/MCP 服务与真实进程 runner，验证连续调整变量估计、非参与分类列、工具消息与账本一致、错误引用拒绝、变量对门禁、报告快照重新生成和预算身份收尾。`tests/integration/agent/test_ate_service_checks.py` 直接验证 MCP 使用实际 CSV 及保存语义复核，并保留内核共线等具体不适用理由。固定图是被测入口的已知输入，不代表因果发现准确性。
+
+调度 deadline 用例通过真实进程池初始化阶段的信号量屏障阻止 runner 开始，确定触发截止时间，并检查已完成的本地适用性记录只归属于对应调用。该用例不依赖 OLS 运行速度，不替换算法或 MCP 服务；它验证进程启动阶段超时，不表示回归已经开始执行。既有 FakeAlgorithmExecutor 用例仅检查传输无关的身份契约，默认结果和模板重绑定都必须从可信上下文复制来源身份及分析数据集 ID，不能作为真实算法链路证据。
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_ate_applicability.py tests/unit/agent/test_ate_kernel.py tests/unit/agent/test_ate_worker_gate.py tests/integration/agent/test_ate_tool_checks.py tests/integration/agent/test_ate_service_checks.py
+```
+
+上述进程内组件测试不访问 MySQL，不运行 HTTP MCP、PostgreSQL checkpoint 或完整模型 Job，不能替代真实环境验收。真实环境需另验证权威数据集绑定、HTTP 鉴权和传输、checkpoint 恢复后的记录、真实预算跳过及最终报告。缺少检查记录的旧结果应可读但不能满足新门禁；检查后超时可保留 `ready`，仍禁止成功图和 raw artifact；检查前失败及预算收尾不可生成记录。
+
 ## causal-mcp 纵向验证
 
 算法工具和 Gate 的执行回归分别位于 `tests/unit/agent/test_runtime_tool_state_updates.py` 与 `tests/unit/agent/test_final_analysis_decision.py`。其中算法路径使用 `tests/support/local_algorithm_execution.py`，通过正式 MCP 服务、真实进程池和 causal-learn PC 执行进程内冻结 CSV；`ToolRuntime.state` 必须携带从该 CSV 转换的 `data_profile`。成功、两行样本导致的真实执行失败、处理方案绑定、工具结果及终态 Ledger 和 Gate 校验分别断言。这些文件中其他既有用例仍按其各自依赖边界解释，不能把整个文件的通过数量当作真实外部服务验收。

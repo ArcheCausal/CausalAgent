@@ -52,8 +52,10 @@ class LocalAlgorithmExecutor:
 
     def __init__(
         self, csv_data: str = PC_CSV, *, semantic_kinds: Mapping[str, str] | None = None,
+        executor_pool: BoundedProcessPool | None = None,
     ) -> None:
         self.csv_data = csv_data
+        self.executor_pool = executor_pool
         self.data_profile = build_data_profile_from_csv(csv_data)
         kinds = normalize_semantic_kinds(
             {} if semantic_kinds is None else semantic_kinds,
@@ -86,7 +88,7 @@ class LocalAlgorithmExecutor:
     async def execute(self, command, trusted_context) -> AlgorithmExecutionResponse:
         validate_executor_command(command, trusted_context=trusted_context)
         self.calls.append(ExecutionCall(command.model_copy(deep=True), trusted_context.model_copy(deep=True)))
-        pool = BoundedProcessPool(process_workers=1)
+        pool = self.executor_pool if self.executor_pool is not None else BoundedProcessPool(process_workers=1)
         config = McpServerConfig(
             service_token=token_hex(16), signing_key_current=token_hex(16),
             signing_key_previous=None, signing_key_id=trusted_context.key_id,

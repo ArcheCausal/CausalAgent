@@ -6,7 +6,7 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -17,13 +17,16 @@ from ..algorithm_executor import (
     validate_executor_result,
 )
 from ..algorithm_specs import AlgorithmSpec
+from ..ate_applicability import ATE_REASON_SUMMARIES, check_ate_graph, check_ate_profile
 from ..error_codes import SafeErrorCode
 from ..identity import build_invocation_id, build_result_ref
+from ..runtime_updates import publish_ate_check
 from .normalization import result_from_runner_payload
 from ..models import (
     AlgorithmExecutionCommand,
     AlgorithmResult,
     AlgorithmResultProvenance,
+    AteApplicabilityCheck,
     DataViewSummary,
     DataProfile,
     Diagnostics,
@@ -31,6 +34,7 @@ from ..models import (
     RAW_RESULT_SERIALIZATION_VERSION,
     RawResultMetadata,
     SafeWarning,
+    StandardizedGraph,
     build_raw_result_metadata,
     canonical_json_bytes,
 )
@@ -55,6 +59,7 @@ class AdapterInput:
     dataset_authority_available: bool = False
     execution_columns: tuple[str, ...] | None = None
     semantic_kinds: Mapping[str, str] | None = None
+    artifacts: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.input_identity or self.input_identity != self.input_identity.strip():
@@ -117,6 +122,7 @@ class BaseAlgorithmAdapter(ABC):
         safe_error_code: SafeErrorCode | str | None = None,
         summary: str | None = None,
         data_view: DataViewSummary | None = None,
+        ate_check: AteApplicabilityCheck | None = None,
     ) -> AlgorithmResult:
         return AlgorithmResult(
             result_ref=build_result_ref(
@@ -128,6 +134,7 @@ class BaseAlgorithmAdapter(ABC):
             capability_id=command.capability_id,
             capability_version=command.capability_version,
             status=status,
+            ate_check=ate_check,
             method=self.spec.method_definition(),
             diagnostics=Diagnostics(
                 summary=summary,
@@ -147,6 +154,7 @@ class BaseAlgorithmAdapter(ABC):
             ),
             data_view=data_view,
         )
+
 
     @staticmethod
     def _expected_raw_result_ref(command: AlgorithmExecutionCommand) -> str:
@@ -341,11 +349,40 @@ class BaseAlgorithmAdapter(ABC):
             column_count=adapter_input.data_profile.column_count,
             columns=adapter_input.data_profile.column_names,
         )
-        applicability, reason = self.spec.assess_applicability(
-            profile=adapter_input.data_profile,
-            execution_columns=adapter_input.execution_columns,
-            semantic_kinds=adapter_input.semantic_kinds,
-        )
+        ate_check = None
+        if self.spec.capability_id == "causal.ate":
+            graph_payload = adapter_input.artifacts.get("standardized_graph")
+            if graph_payload is not None:
+                try:
+                    graph = StandardizedGraph.model_validate(graph_payload)
+                except (ValueError, TypeError):
+                    command = AlgorithmExecutionCommand(
+                        invocation_id=invocation_id, capability_id=self.spec.capability_id,
+                        capability_version=self.spec.version, spec_digest=self.spec.spec_digest,
+                        provider_call_id=provider_call_id, input_identity=adapter_input.input_identity,
+                        result_index=result_index, timeout_seconds=self.spec.default_timeout_seconds,
+                    )
+                    return self._base_result(
+                        command=command, context=context, status="invalid_input",
+                        safe_error_code=SafeErrorCode.ALGORITHM_INPUT_INVALID,
+                    )
+                ate_check = check_ate_graph(
+                    graph=graph, graph_result_ref=parsed_parameters.graph_result_ref,
+                    treatment=parsed_parameters.treatment, outcome=parsed_parameters.outcome,
+                )
+                ate_check = check_ate_profile(
+                    ate_check, profile=adapter_input.data_profile,
+                    semantic_kinds=adapter_input.semantic_kinds,
+                )
+                publish_ate_check(invocation_id, ate_check)
+            applicability = ate_check.applicability if ate_check else "ready"
+            reason = ATE_REASON_SUMMARIES.get(ate_check.reason_code) if ate_check else None
+        else:
+            applicability, reason = self.spec.assess_applicability(
+                profile=adapter_input.data_profile,
+                execution_columns=adapter_input.execution_columns,
+                semantic_kinds=adapter_input.semantic_kinds,
+            )
         if applicability == "not_applicable":
             invocation_id = build_invocation_id(
                 job_id=(
@@ -381,6 +418,7 @@ class BaseAlgorithmAdapter(ABC):
                 status=legacy_status,
                 safe_error_code=legacy_code,
                 summary=reason,
+                ate_check=ate_check,
             )
         command = AlgorithmExecutionCommand(
             invocation_id=invocation_id,
@@ -392,6 +430,7 @@ class BaseAlgorithmAdapter(ABC):
             parameters=parsed_parameters.model_dump(mode="json"),
             result_index=result_index,
             timeout_seconds=self.spec.default_timeout_seconds,
+            artifacts=dict(adapter_input.artifacts),
         )
         not_ready = self.validate_input(adapter_input)
         if not_ready is not None:
@@ -407,7 +446,16 @@ class BaseAlgorithmAdapter(ABC):
         try:
             active_executor = executor or self.executor
             active_raw_backend = raw_backend or self.raw_backend
-            execution_response = await active_executor.execute(command, context)
+            try:
+                execution_response = await active_executor.execute(command, context)
+            except (AlgorithmExecutorError, TimeoutError, JobExecutionRevoked):
+                raise
+            except Exception:
+                return self._base_result(
+                    command=command, context=context, status="execution_failed",
+                    safe_error_code=SafeErrorCode.ALGORITHM_EXECUTION_FAILED,
+                    summary="算法执行器未能完成调用。", ate_check=ate_check,
+                )
             raw_executor_payload = None
             if isinstance(execution_response, AlgorithmExecutionResponse):
                 result = execution_response.result
@@ -494,6 +542,7 @@ class BaseAlgorithmAdapter(ABC):
                 context=context,
                 status=status,
                 safe_error_code=exc.safe_error_code,
+                ate_check=(ate_check if status in {"execution_failed", "timed_out"} else None),
             )
         except TimeoutError:
             return self._base_result(
@@ -501,6 +550,7 @@ class BaseAlgorithmAdapter(ABC):
                 context=context,
                 status="timed_out",
                 safe_error_code=SafeErrorCode.ALGORITHM_TIMED_OUT,
+                ate_check=ate_check,
             )
         except Exception as exc:
             # Job revoke 是 worker 控制流；它继承 RuntimeError，必须先于
@@ -512,4 +562,5 @@ class BaseAlgorithmAdapter(ABC):
                 context=context,
                 status="execution_failed",
                 safe_error_code=SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID,
+                ate_check=ate_check,
             )

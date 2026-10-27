@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
+from .ate_applicability import ATE_GRAPH_REASON_CODES, check_ate_graph
 from .error_codes import SafeErrorCode
 from .identity import build_result_ref
 from .models import (
@@ -13,6 +14,7 @@ from .models import (
     AlgorithmResult,
     AlgorithmResultStatus,
     McpInvocationContext,
+    StandardizedGraph,
 )
 
 
@@ -113,6 +115,14 @@ def validate_executor_result(
             result.provenance.lease_epoch,
             trusted_context.lease_epoch,
         ),
+        "provenance.source_input_identity": (
+            result.provenance.source_input_identity,
+            trusted_context.source_input_identity,
+        ),
+        "provenance.analysis_dataset_id": (
+            result.provenance.analysis_dataset_id,
+            trusted_context.analysis_dataset_id,
+        ),
     }
     for field_name, (actual, expected) in checks.items():
         if actual != expected:
@@ -129,4 +139,41 @@ def validate_executor_result(
             "executor result contract mismatch: result_ref",
             safe_error_code=SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID,
         )
+    if command.capability_id == "causal.ate":
+        try:
+            # model_copy(update=...) 不触发 Pydantic 校验，入站边界重新验证。
+            result = AlgorithmResult.model_validate(result.model_dump())
+            check = result.ate_check
+            if result.status == "valid" and check is None:
+                raise ValueError("successful new ATE result requires ate_check")
+            if check is not None:
+                for field in ("graph_result_ref", "treatment", "outcome"):
+                    if getattr(check, field) != command.parameters.get(field):
+                        raise ValueError("ate_check does not match command parameters")
+                graph = StandardizedGraph.model_validate(command.artifacts["standardized_graph"])
+                expected = check_ate_graph(
+                    graph=graph, graph_result_ref=check.graph_result_ref,
+                    treatment=check.treatment, outcome=check.outcome,
+                )
+                if (
+                    expected.adjustment_set != check.adjustment_set
+                    or expected.execution_columns != check.execution_columns
+                    or (
+                        expected.applicability == "not_applicable"
+                        and (expected.applicability, expected.reason_code)
+                        != (check.applicability, check.reason_code)
+                    )
+                    or (
+                        expected.applicability == "ready"
+                        and check.reason_code in ATE_GRAPH_REASON_CODES
+                    )
+                ):
+                    raise ValueError("ate_check does not match command graph")
+                if result.status == "valid" and result.standardized_graph != graph:
+                    raise ValueError("successful ATE graph does not match command graph")
+        except (ValueError, TypeError, KeyError) as exc:
+            raise AlgorithmExecutorError(
+                "executor result contract mismatch: ate_check",
+                safe_error_code=SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID,
+            ) from exc
     return result

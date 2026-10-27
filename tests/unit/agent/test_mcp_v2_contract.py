@@ -51,6 +51,7 @@ def test_default_mcp_registry_does_not_expose_disabled_olc() -> None:
     registry = build_default_registry()
 
     assert [item[0] for item in registry.capability_summary()] == [
+        "causal.ate",
         "causal.cdfm",
         "causal.direct_lingam",
         "causal.pc",
@@ -108,7 +109,7 @@ def _config() -> McpServerConfig:
     )
 
 
-def _sleep_runner(_csv_data, parameters):
+def _sleep_runner(_csv_data, parameters, _artifacts):
     time.sleep(parameters["delay"])
     return {"ok": True, "delay": parameters["delay"]}
 
@@ -222,7 +223,7 @@ def test_service_logs_job_invocation_timeline_and_slow_threshold() -> None:
 
 
 def test_bounded_pool_times_out_before_returning_late_result() -> None:
-    def slow_runner(_csv_data, _parameters):
+    def slow_runner(_csv_data, _parameters, _artifacts):
         import time
 
         time.sleep(0.12)
@@ -264,13 +265,13 @@ def test_bounded_pool_times_out_before_returning_late_result() -> None:
 
 
 def test_bounded_pool_releases_capability_after_global_admission_timeout() -> None:
-    def slow_runner(_csv_data, _parameters):
+    def slow_runner(_csv_data, _parameters, _artifacts):
         import time
 
         time.sleep(0.08)
         return {"ok": True}
 
-    def quick_runner(_csv_data, _parameters):
+    def quick_runner(_csv_data, _parameters, _artifacts):
         return {"ok": True}
 
     async def scenario():
@@ -450,7 +451,7 @@ def test_service_rechecks_lease_before_process_start_and_after_result(revoke_on_
 
 def test_pc_runner_forwards_spec_alpha() -> None:
     csv_data = "A,B\n" + "0,0\n0,0\n1,1\n1,1\n" * 50
-    result = _pc(csv_data, {"alpha": 0.2, "test": "chisq"})
+    result = _pc(csv_data, {"alpha": 0.2, "test": "chisq"}, {})
     assert result["success"] is True
     assert result["diagnostics"]["alpha"] == 0.2
     assert result["diagnostics"]["independence_test"] == "chisq"

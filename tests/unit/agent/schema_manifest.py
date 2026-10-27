@@ -20,6 +20,8 @@ MODEL_NAMES = (
     "AlgorithmExecutionCommand",
     "AlgorithmResult",
     "AlgorithmResultProvenance",
+    "AteApplicabilityCheck",
+    "CausalEffect",
     "DataIssue",
     "DataProfile",
     "DataViewSummary",

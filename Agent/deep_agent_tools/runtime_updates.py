@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -19,10 +19,29 @@ from .identity import (
     build_invocation_id,
     current_input_identity,
 )
-from .models import ActionAttempt, InvocationRecord, PublicDecision, canonical_json_bytes
+from .models import ActionAttempt, AteApplicabilityCheck, InvocationRecord, PublicDecision, canonical_json_bytes
 
 
 _defer_algorithm_terminal = ContextVar("defer_algorithm_terminal", default=False)
+_ate_check_sink: ContextVar[Callable[[str, AteApplicabilityCheck], None] | None] = ContextVar(
+    "ate_check_sink", default=None,
+)
+
+
+@contextmanager
+def capture_ate_checks(sink: Callable[[str, AteApplicabilityCheck], None]):
+    """只在当前调度任务内收集程序已完成的检查，不写入模型参数或 State。"""
+    token = _ate_check_sink.set(sink)
+    try:
+        yield
+    finally:
+        _ate_check_sink.reset(token)
+
+
+def publish_ate_check(invocation_id: str, check: AteApplicabilityCheck) -> None:
+    sink = _ate_check_sink.get()
+    if sink is not None:
+        sink(invocation_id, check)
 
 
 @contextmanager

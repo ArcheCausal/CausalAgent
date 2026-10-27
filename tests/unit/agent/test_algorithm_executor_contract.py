@@ -28,6 +28,8 @@ def _context() -> McpInvocationContext:
         lease_epoch=9,
         worker_id="worker-1",
         input_snapshot_digest="snapshot",
+        source_input_identity="source-snapshot",
+        analysis_dataset_id=51,
         issued_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         expires_at=datetime(2026, 1, 1, 0, 5, tzinfo=timezone.utc),
         key_id="current",
@@ -45,13 +47,22 @@ def _command(context: McpInvocationContext) -> AlgorithmExecutionCommand:
     )
 
 
-def test_fake_executor_implements_transport_neutral_protocol() -> None:
+@pytest.mark.parametrize("use_template", [False, True])
+def test_fake_executor_implements_transport_neutral_protocol(use_template: bool) -> None:
     executor = FakeAlgorithmExecutor()
     assert isinstance(executor, AlgorithmExecutor)
     context = _context()
+    if use_template:
+        previous_context = context.model_copy(update={
+            "source_input_identity": "previous-source", "analysis_dataset_id": 50,
+        })
+        template = asyncio.run(executor.execute(_command(previous_context), previous_context))
+        executor = FakeAlgorithmExecutor(results={PC_SPEC.capability_id: template})
     result = asyncio.run(executor.execute(_command(context), context))
     assert result.invocation_id == context.invocation_id
     assert result.provider_call_id == "call-1"
+    assert result.provenance.source_input_identity == context.source_input_identity
+    assert result.provenance.analysis_dataset_id == context.analysis_dataset_id
     assert len(executor.calls) == 1
 
 

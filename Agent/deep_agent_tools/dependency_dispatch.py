@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 import json
 from typing import Any, Awaitable, Callable
 
-from .algorithm_specs import DEFAULT_ALGORITHM_SPECS
+from .algorithm_specs import DEFAULT_ALGORITHM_SPECS, get_algorithm_spec
 from .dependency_planner import (
     DependencyPlanningError,
     ToolCallRequest,
@@ -23,14 +23,20 @@ from .dependency_planner import (
     execute_dependency_plan,
 )
 from .runtime_updates import (
-    algorithm_terminal_command, defer_algorithm_terminal_events,
+    algorithm_terminal_command, capture_ate_checks, defer_algorithm_terminal_events,
     emit_public_decision_event, emit_tool_lifecycle_event, resolve_runtime_invocation,
 )
 from .models import (
-    ActionAttempt, AlgorithmResult, AlgorithmResultProvenance, DataProfile,
+    ActionAttempt, AlgorithmResult, AlgorithmResultProvenance, AteApplicabilityCheck, DataProfile,
     Diagnostics, InvocationRecord,
 )
-from .identity import build_invocation_id, build_result_ref, current_input_identity
+from .error_codes import SafeErrorCode
+from .identity import (
+    build_invocation_id,
+    build_result_ref,
+    current_input_identity,
+    provenance_matches_identity,
+)
 from .registry import AlgorithmRegistry
 
 from langchain.agents.middleware import AgentMiddleware
@@ -63,20 +69,41 @@ def _state_data_profile(state: Mapping[str, Any]) -> DataProfile | None:
     raise ValueError("data_profile must be a DataProfile or mapping")
 
 
-def _initial_artifacts(state: Mapping[str, Any]) -> frozenset[str]:
-    """只读取父子 State 边界已转换的画像，判断输入 artifact 是否存在。"""
+def _initial_artifacts(
+    state: Mapping[str, Any], *, trusted_identity: Any = None
+) -> frozenset[str]:
+    """读取画像与上一轮已发布的算法产物，判断本轮可用 artifact。"""
 
     profile = _state_data_profile(state)
     if profile is None or profile.row_count < 2 or profile.column_count < 2:
-        return frozenset()
-    artifacts = {"tabular_dataset"}
-    if (
-        not profile.categorical_columns
-        and len(profile.numeric_columns) == profile.column_count
-        and len(set(profile.column_names)) == profile.column_count
-        and set(profile.numeric_columns) == set(profile.column_names)
-    ):
-        artifacts.add("continuous_tabular_dataset")
+        artifacts: set[str] = set()
+    else:
+        artifacts = {"tabular_dataset"}
+        if (
+            not profile.categorical_columns
+            and len(profile.numeric_columns) == profile.column_count
+            and len(set(profile.column_names)) == profile.column_count
+            and set(profile.numeric_columns) == set(profile.column_names)
+        ):
+            artifacts.add("continuous_tabular_dataset")
+    if trusted_identity is not None:
+        for raw_result in (state.get("algorithm_results") or {}).values():
+            try:
+                result = (
+                    raw_result
+                    if isinstance(raw_result, AlgorithmResult)
+                    else AlgorithmResult.model_validate(raw_result)
+                )
+            except (TypeError, ValueError):
+                continue
+            if (
+                result.status == "valid"
+                and result.standardized_graph is not None
+                and provenance_matches_identity(result.provenance, trusted_identity)
+            ):
+                artifacts |= set(
+                    get_algorithm_spec(result.capability_id).produces
+                )
     return frozenset(artifacts)
 
 
@@ -155,6 +182,73 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                                  started_at=datetime.now(timezone.utc)),
             }})
         return {"action_ledger": records} if records else None
+
+    async def aafter_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        """收尾本轮被预算或跳转跳过、永远不会有终态的工具调用。"""
+
+        identity = runtime.context.trusted_identity
+        closing: dict[str, InvocationRecord] = {}
+        results: dict[str, AlgorithmResult] = {}
+        for invocation_id, raw in (state.get("action_ledger") or {}).items():
+            record = (
+                raw if isinstance(raw, InvocationRecord)
+                else InvocationRecord.model_validate(raw)
+            )
+            if record.final_status != "pending" or record.tool_name not in self._tool_names:
+                continue
+            if (
+                not provenance_matches_identity(record, identity)
+                or str(record.worker_id or "") != str(identity.worker_id)
+            ):
+                continue
+            spec = self.registry.get_by_tool_name(record.tool_name).spec
+            existing = next(iter(record.attempts.values()), None)
+            retry_ordinal = existing.retry_ordinal if existing is not None else 0
+            started_at = (
+                (existing.started_at if existing is not None else None)
+                or datetime.now(timezone.utc)
+            )
+            finished_at = datetime.now(timezone.utc)
+            result_ref = build_result_ref(
+                invocation_id=invocation_id, result_index=0
+            )
+            closing[str(invocation_id)] = record.model_copy(update={
+                "final_status": "failed",
+                "result_ref": result_ref,
+                "attempts": {retry_ordinal: ActionAttempt(
+                    retry_ordinal=retry_ordinal, revision=2, status="failed",
+                    started_at=started_at, finished_at=finished_at,
+                    safe_error_code=SafeErrorCode.ALGORITHM_CANCELED,
+                )},
+            })
+            results[result_ref] = AlgorithmResult(
+                result_ref=result_ref,
+                invocation_id=str(invocation_id),
+                provider_call_id=record.provider_call_id,
+                capability_id=spec.capability_id,
+                capability_version=spec.version,
+                status="execution_failed",
+                method=spec.method_definition(),
+                diagnostics=Diagnostics(
+                    summary="工具调用批次因预算上限被跳过，未执行。",
+                    safe_error_code=SafeErrorCode.ALGORITHM_CANCELED,
+                ),
+                provenance=AlgorithmResultProvenance(
+                    job_id=str(identity.job_id),
+                    attempt_count=int(identity.attempt_count),
+                    lease_epoch=int(identity.lease_epoch),
+                    input_identity=current_input_identity(identity),
+                    source_input_identity=record.source_input_identity,
+                    analysis_dataset_id=record.analysis_dataset_id,
+                    spec_digest=spec.spec_digest,
+                    invocation_id=str(invocation_id),
+                    capability_id=spec.capability_id,
+                    capability_version=spec.version,
+                ),
+            )
+        if not closing:
+            return None
+        return {"action_ledger": closing, "algorithm_results": results}
 
     @staticmethod
     def _run_key(request: Any, state: Mapping[str, Any]) -> tuple[str, str]:
@@ -272,6 +366,7 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
         )
         call_by_id = {str(call["id"]): call for call in calls}
         tool_by_name = self._tool_map(request.runtime)
+        completed_ate_checks: dict[str, AteApplicabilityCheck] = {}
 
         async def terminal_output(
             call_id: str, status: str, code: Any, *, summary: str | None = None,
@@ -293,6 +388,13 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                 invocation_id=invocation_id, provider_call_id=call_id,
                 capability_id=spec.capability_id, capability_version=spec.version,
                 status=status if status in {"timed_out", "not_ready", "not_applicable", "skipped"} else "execution_failed",
+                ate_check=(
+                    completed_ate_checks.get(invocation_id)
+                    if status in {"timed_out", "failed", "execution_failed"}
+                    and code != SafeErrorCode.ALGORITHM_CANCELED
+                    and getattr(completed_ate_checks.get(invocation_id), "applicability", None) == "ready"
+                    else None
+                ),
                 method=spec.method_definition(),
                 diagnostics=Diagnostics(
                     safe_error_code=code,
@@ -348,14 +450,19 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                 state=request.state,
                 runtime=tool_runtime,
             )
-            with defer_algorithm_terminal_events():
+            with defer_algorithm_terminal_events(), capture_ate_checks(completed_ate_checks.__setitem__):
                 return await handler(tool_request)
 
         try:
             plan = build_dependency_plan(
                 planner_requests,
                 registry=self.registry,
-                initial_artifacts=_initial_artifacts(state),
+                initial_artifacts=_initial_artifacts(
+                    state,
+                    trusted_identity=resolve_runtime_invocation(
+                        request.runtime
+                    ).runtime_context.trusted_identity,
+                ),
             )
             outcomes = await execute_dependency_plan(
                 plan,
