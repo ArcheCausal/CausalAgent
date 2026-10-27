@@ -75,16 +75,18 @@ def test_history_rejects_tampering(mutation):
         validate_parameter_history(final, history, job_id=JOB)
 
 
-def test_extraction_requires_literal_evidence_and_keeps_ambiguous_answer_uncommitted():
+def test_extraction_accepts_explanatory_evidence_and_keeps_ambiguous_answer_uncommitted():
     extracted = ParameterExtraction.model_validate({"updates": [
         {"field": "target", "value": None, "evidence": "不指定结果变量"},
     ]})
-    assert extraction_patch(extracted, answer_text="这次不指定结果变量") == {"target": None}
-    with pytest.raises(ParameterContractError):
-        extraction_patch(extracted, answer_text="其他答复")
+    assert extraction_patch(extracted) == {"target": None}
+    extracted = ParameterExtraction.model_validate({"updates": [
+        {"field": "target", "value": "收入", "evidence": "用户接受当前问题中的目标变量提议"},
+    ]})
+    assert extraction_patch(extracted) == {"target": "收入"}
     ambiguous = ParameterExtraction(needs_clarification=True, clarification_question="每天还是每周？",
                                     updates=extracted.updates)
-    assert extraction_patch(ambiguous, answer_text="不指定结果变量") == {}
+    assert extraction_patch(ambiguous) == {}
 
 
 def test_unknown_patch_fields_and_model_supplied_provenance_are_rejected():
@@ -103,7 +105,7 @@ def test_measurement_patch_preserves_other_columns_and_allows_explicit_clear():
         "field": "measurement_semantics", "evidence": "y实际是计数",
         "value": [{"column": "y", "kind": "count", "evidence": "y实际是计数"}],
     }]})
-    patch = extraction_patch(extraction, answer_text="y实际是计数", current_parameters=current)
+    patch = extraction_patch(extraction, current_parameters=current)
     final, history = revise(current, patch=patch)
     assert final["measurement_semantics"][0] == current["measurement_semantics"][0]
     assert final["measurement_semantics"][1]["kind"] == "count"

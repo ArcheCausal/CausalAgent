@@ -39,7 +39,7 @@ from Agent.data_processing.persistence import (
 )
 from Agent.data_processing.parameters import (
     ParameterExtraction, apply_parameter_patch, extraction_patch,
-    parameter_identity, sandbox_request_id,
+    parameter_identity, sandbox_request_id, validate_parameter_extraction,
 )
 from Agent.llm_structured_output import ainvoke_structured
 from Agent.data_processing.plans import (
@@ -203,7 +203,7 @@ def _description_tool() -> Any:
 
 
 def _parameter_extraction_prompt() -> ChatPromptTemplate:
-    """为两种答复入口提供同一份带完整证据示例的提取要求。"""
+    """为两种答复入口提供同一份参数职责、确认语义和证据说明要求。"""
     return ChatPromptTemplate.from_messages([
         ("system", "你只提取用户此次明确补充或修正的研究参数。未提及字段不要输出；明确清空时 value 为 null。"
          "target 表示用户指定的目标或结果变量；treatment 表示用户指定的处理或干预变量。"
@@ -212,11 +212,12 @@ def _parameter_extraction_prompt() -> ChatPromptTemplate:
          "全部变量参与结构发现可以与已指定的目标或干预角色并存。仅扩大参与分析的变量范围不等于撤销角色，不能据此输出角色的 null 修改；必须有本次明确取消该角色的依据。"
          "例如，‘目标变量是收入’只更新 target 为‘收入’；‘全部作为节点参与因果发现’只说明分析范围，不生成角色值，也不无条件清空已有角色；"
          "‘不指定目标变量’或‘取消之前的目标，只做无目标的结构发现’明确清空 target，但不自动清空 treatment。"
+         "value 保存用户本次指定、修正或接受的参数值，可以结合当前问题和已有参数理解。用户确认当前问题中的某个提议后，可以提取该提议中的具体参数；未接受的建议不能作为修改依据。"
          "updates 中每项修改必须包含 field、value、evidence，包含 value 为 null 的修改。"
          "measurement_semantics 只输出用户明确修订的列声明，代码会保留其他列；每条声明包含 column、kind、evidence，kind 只能为 count/ordinal/category/continuous/binary/unknown。"
-         "measurement_semantics 有两层必填证据：修改项的外层 evidence 与 value 中每条声明的内层 evidence，必须分别填写，不能相互替代。"
-         "所有 evidence 必须非空且逐字摘自本次答复，可以在两层复用同一原文。不要根据字段名推测语义。观察单位、时间范围、聚合范围分别写入 observation_unit、time_window、aggregation_scope。"
-         "如有歧义，设置 needs_clarification 和具体问题，不提交猜测。仅在处理含义或范围改变时设置 processing_scope_changed，脚本实现修正不改变范围。"),
+         "外层 evidence 解释本次答复为何支持这项参数修改，可以引用答复原文，也可以概括用户的确认关系；它不要求逐字出现在答复中。测量声明内层 evidence 解释对应列的测量类型依据，允许与外层 evidence 复用说明；两层 evidence 都必须是非空文本。不要根据字段名推测语义。观察单位、时间范围、聚合范围分别写入 observation_unit、time_window、aggregation_scope。"
+         "完整确认、部分确认和修改部分提议都只提取用户接受或修改的内容：如果当前问题提出 A 和 B，用户回复‘A 默认，B 默认’，提取 A、B 的具体提议值；用户回复‘A 默认’，只提取 A；用户回复‘A 默认，但 B 改为每周’，提取接受后的 A 和修改后的 B。未接受的提议不作为修改依据。"
+         "如有实际歧义，设置 needs_clarification 和具体问题，不提交猜测。不增加额外语义审核调用。仅在处理含义或范围改变时设置 processing_scope_changed，脚本实现修正不改变范围。"),
         ("human", "结构示例：用户答复为‘次数是计数变量’时，返回完整结构：{example}。示例只说明结构，不能当作当前答复的证据。"),
         ("human", "当前参数：{parameters}\n当前问题：{question}\n用户答复：{answer}"),
     ]).partial(example=json.dumps({
@@ -256,11 +257,10 @@ async def _apply_user_answer(
                 "question": question, "answer": answer_text},
         node_name="data_processing_parameter_extraction",
         retry_with_validation_feedback=True,
+        result_validator=validate_parameter_extraction,
     )
     await context.check_after_call()
-    patch = extraction_patch(
-        extracted, answer_text=answer_text, current_parameters=state["analysis_parameters"],
-    )
+    patch = extraction_patch(extracted, current_parameters=state["analysis_parameters"])
     parameters, history = apply_parameter_patch(
         state["analysis_parameters"], state["analysis_parameter_changes"], patch=patch,
         job_id=str(identity.job_id), source_input_id=source_input_id,
@@ -405,8 +405,11 @@ def _plan_confirmation_tool(*, model: Any) -> Any:
         semantic_identity = _semantic_identity(context, state)
         parameter_update = {}
         if matches is None:
+            plan_question = request.prompt + "\n当前展示的方案摘要：\n" + json.dumps(
+                request.plan.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"),
+            )
             parameter_update = await _apply_user_answer(
-                runtime, model=model, question_id=call_id, question=request.prompt, answer=answer,
+                runtime, model=model, question_id=call_id, question=plan_question, answer=answer,
             )
         return Command(
             update={
