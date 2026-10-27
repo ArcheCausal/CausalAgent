@@ -89,7 +89,7 @@ def _setup(*, kinds=None, edge_type="directed", csv_data=CSV, executor_pool=None
 
 def _call(context, registry, source, source_record, *, ref=None, treatment="x", outcome="y"):
     tool = next(item for item in build_algorithm_tools(registry, runtime_context=context)
-                if item.name == "causal_ate").to_langchain_tool()
+                if item.name == "causal_backdoor_ols").to_langchain_tool()
     runtime = ToolRuntime(
         tool_call_id="ate-call", state={"message_execution_id": "ate-check-response",
         "data_profile": context.algorithm_executor.data_profile,
@@ -200,7 +200,7 @@ def test_budget_closure_keeps_dataset_identity_without_claiming_a_check():
     runtime = ToolRuntime(tool_call_id="budget-ate-call",
         state={"message_execution_id": "budget-response"}, context=context,
         config={}, stream_writer=[].append, store=None)
-    pending = build_pending_invocation(identity=resolve_runtime_invocation(runtime), tool_name="causal_ate")
+    pending = build_pending_invocation(identity=resolve_runtime_invocation(runtime), tool_name="causal_backdoor_ols")
     middleware = build_algorithm_dependency_middleware(registry=registry)
     update = asyncio.run(middleware.aafter_agent({"action_ledger": {pending.invocation_id: pending}},
         Runtime(context=context)))
@@ -259,9 +259,9 @@ def test_dispatch_deadline_retains_completed_local_check_for_current_call():
     builder.add_edge(START, "tools")
     builder.add_edge("tools", END)
     initial_state = {
-        "messages": [AIMessage(content="", tool_calls=[{"name": "causal_ate",
+        "messages": [AIMessage(content="", tool_calls=[{"name": "causal_backdoor_ols",
             "args": {"graph_result_ref": source.result_ref, "treatment": "x", "outcome": "y"},
-            "id": "deadline-ate-call", "type": "tool_call"}, {"name": "causal_ate",
+            "id": "deadline-ate-call", "type": "tool_call"}, {"name": "causal_backdoor_ols",
             "args": {"graph_result_ref": "absent-source:0", "treatment": "x", "outcome": "y"},
             "id": "unchecked-ate-call", "type": "tool_call"}])],
         "message_execution_id": "deadline-response", "data_profile": context.algorithm_executor.data_profile,

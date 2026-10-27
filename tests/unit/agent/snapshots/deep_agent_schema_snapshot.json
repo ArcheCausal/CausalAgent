@@ -512,10 +512,10 @@
   "schema_version": "p2-v1",
   "tools": [
     {
-      "capability_id": "causal.ate",
+      "capability_id": "causal.backdoor_ols",
       "schema_sha256": "c4a28f8200bb34f1598d1e23dbc8495b2a9d29f4e811576073d95d31b2a9240c",
       "spec_digest": "dc06cab6ee0707afa1520dd4143c8c490758becc628531a8b81867799d8af5bc",
-      "tool_name": "causal_ate"
+      "tool_name": "causal_backdoor_ols"
     },
     {
       "capability_id": "causal.cdfm",

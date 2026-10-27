@@ -1,4 +1,4 @@
-"""AteAdapter：图 artifact 透传与本地初检。"""
+"""BackdoorOlsAdapter：图 artifact 透传与本地初检。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import asyncio
 
 from Agent.deep_agent import TrustedJobIdentity
 from Agent.deep_agent.memory import build_in_memory_backend
-from Agent.deep_agent_tools.adapters.ate import AteAdapter
+from Agent.deep_agent_tools.adapters.backdoor_ols import BackdoorOlsAdapter
 from Agent.deep_agent_tools.adapters.base import AdapterInput
 from Agent.deep_agent_tools.error_codes import SafeErrorCode
 from tests.support.local_algorithm_execution import LocalAlgorithmExecutor
@@ -47,7 +47,7 @@ def _profile(*, rows: int = 250) -> DataProfile:
 
 def test_adapter_forwards_graph_artifact_to_command() -> None:
     executor = LocalAlgorithmExecutor("z,x,y\n0,1,2\n1,3,7\n2,2,5\n3,5,11\n4,4,9\n")
-    adapter = AteAdapter(
+    adapter = BackdoorOlsAdapter(
         executor=executor,
         raw_backend=build_in_memory_backend(user_id=7),
     )
@@ -69,7 +69,7 @@ def test_adapter_forwards_graph_artifact_to_command() -> None:
 
 
 def test_adapter_refuses_missing_graph_artifact() -> None:
-    adapter = AteAdapter(executor=None)
+    adapter = BackdoorOlsAdapter(executor=None)
     status = adapter.validate_input(
         AdapterInput(data_profile=_profile(), input_identity="input-sha")
     )
@@ -77,7 +77,7 @@ def test_adapter_refuses_missing_graph_artifact() -> None:
 
 
 def test_adapter_accepts_ready_data_with_graph() -> None:
-    adapter = AteAdapter(executor=None)
+    adapter = BackdoorOlsAdapter(executor=None)
     status = adapter.validate_input(
         AdapterInput(
             data_profile=_profile(),
@@ -90,7 +90,7 @@ def test_adapter_accepts_ready_data_with_graph() -> None:
 
 
 def test_missing_executor_is_execution_failure_after_completed_check() -> None:
-    result = asyncio.run(AteAdapter(executor=None).run(
+    result = asyncio.run(BackdoorOlsAdapter(executor=None).run(
         parameters=PARAMETERS,
         adapter_input=AdapterInput(data_profile=_profile(), input_identity="input-sha",
             artifacts={"standardized_graph": GRAPH}),

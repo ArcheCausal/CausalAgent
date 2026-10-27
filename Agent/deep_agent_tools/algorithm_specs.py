@@ -104,7 +104,7 @@ class CausalCdfmInput(ContractModel):
         return value
 
 
-class CausalAteInput(ContractModel):
+class CausalBackdoorOlsInput(ContractModel):
     """后门调整 ATE 的模型可见参数；图只能通过结果引用提供。"""
 
     graph_result_ref: str = Field(
@@ -541,10 +541,10 @@ CDFM_SPEC = AlgorithmSpec(
 )
 
 
-CAUSAL_ATE_SPEC = AlgorithmSpec(
-    capability_id="causal.ate",
+CAUSAL_BACKDOOR_OLS_SPEC = AlgorithmSpec(
+    capability_id="causal.backdoor_ols",
     version="2.0",
-    tool_name="causal_ate",
+    tool_name="causal_backdoor_ols",
     public_name="因果效应估计（后门调整）",
     description=(
         "在后门调整下估计处理变量对结果变量的线性总效应。"
@@ -552,7 +552,7 @@ CAUSAL_ATE_SPEC = AlgorithmSpec(
         "不支持未定向边、双箭头边、有向环或处理变量不是结果变量祖先的图。"
         "同一张图只能与产生它的数据版本一起使用。"
     ),
-    model_input_schema=CausalAteInput,
+    model_input_schema=CausalBackdoorOlsInput,
     requires=frozenset({"standardized_graph"}),
     produces=frozenset(),
     assumptions=(
@@ -563,7 +563,7 @@ CAUSAL_ATE_SPEC = AlgorithmSpec(
     ),
     result_contract=CausalEffect,
     default_timeout_seconds=120,
-    concurrency_key="causal_ate",
+    concurrency_key="causal_backdoor_ols",
     default_concurrency=1,
     kind="causal_estimation",
     analysis_goal="在被引用的因果图上估计处理变量对结果变量的线性总效应",
@@ -596,12 +596,12 @@ DEFAULT_ALGORITHM_SPECS: tuple[AlgorithmSpec, ...] = (
     PC_SPEC,
     DIRECT_LINGAM_SPEC,
     CDFM_SPEC,
-    CAUSAL_ATE_SPEC,
+    CAUSAL_BACKDOOR_OLS_SPEC,
 )
 
 
 def get_algorithm_spec(capability_id: str) -> AlgorithmSpec:
-    for spec in (*DEFAULT_ALGORITHM_SPECS, OLC_SPEC, CAUSAL_ATE_SPEC):
+    for spec in (*DEFAULT_ALGORITHM_SPECS, OLC_SPEC, CAUSAL_BACKDOOR_OLS_SPEC):
         if spec.capability_id == capability_id:
             return spec
     raise ValueError("unknown algorithm capability")

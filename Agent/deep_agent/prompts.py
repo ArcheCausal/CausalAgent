@@ -61,7 +61,7 @@ MANDATORY_ALGORITHM_INSTRUCTION = (
     "未检出，不能据此排除非线性机制。"
     "若 analysis_parameters 中 target 与 treatment 都已指定，在获得有效标准图后"
     "必须引用本次同一数据集的一张有效发现图，以已绑定的 treatment 和 target（作为 outcome）"
-    "调用 causal_ate 并完成方法适用性检查，保留程序生成的 ate_check。"
+    "调用 causal_backdoor_ols 并完成方法适用性检查，保留程序生成的 ate_check。"
     "明确的不适用可以满足要求，不要求必须算出效应值；错图、另一变量对、未就绪、"
     "预算跳过或没有检查记录的普通失败均不能满足要求。改成 evidence_only 也不免除该要求。"
 )

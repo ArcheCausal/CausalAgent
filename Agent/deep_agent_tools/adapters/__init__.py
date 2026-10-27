@@ -1,8 +1,8 @@
-"""PC、OLC、DirectLiNGAM、CDFM、ATE 的应用侧 Adapter。"""
+"""PC、OLC、DirectLiNGAM、CDFM、后门 OLS 的应用侧 Adapter。"""
 
 from Agent.deep_agent_tools.algorithm_specs import DEFAULT_ALGORITHM_SPECS
 
-from .ate import AteAdapter
+from .backdoor_ols import BackdoorOlsAdapter
 from .base import AdapterInput, AlgorithmAdapter, BaseAlgorithmAdapter
 from .cdfm import CDFMAdapter
 from .direct_lingam import DirectLiNGAMAdapter
@@ -18,7 +18,7 @@ def build_default_adapters(*, executor, raw_backend=None) -> dict[str, BaseAlgor
         "causal.olc": OlcAdapter,
         "causal.direct_lingam": DirectLiNGAMAdapter,
         "causal.cdfm": CDFMAdapter,
-        "causal.ate": AteAdapter,
+        "causal.backdoor_ols": BackdoorOlsAdapter,
     }
     return {
         spec.capability_id: adapter_types[spec.capability_id](
@@ -31,7 +31,7 @@ def build_default_adapters(*, executor, raw_backend=None) -> dict[str, BaseAlgor
 __all__ = [
     "AdapterInput",
     "AlgorithmAdapter",
-    "AteAdapter",
+    "BackdoorOlsAdapter",
     "BaseAlgorithmAdapter",
     "CDFMAdapter",
     "build_default_adapters",

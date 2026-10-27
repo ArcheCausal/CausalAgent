@@ -21,9 +21,9 @@ import pytest
 from Agent.CausalAgentMCP.auth import sign_invocation
 from Agent.CausalAgentMCP.config import McpServerConfig
 from Agent.CausalAgentMCP.executor_pool import BoundedProcessPool
-from Agent.CausalAgentMCP.runner_registry import ATE_RUNNER_VERSION, _ate, build_default_registry
+from Agent.CausalAgentMCP.runner_registry import BACKDOOR_OLS_RUNNER_VERSION, _ate, build_default_registry
 from Agent.CausalAgentMCP.service import CausalMcpService, McpServiceError, _estimation_result
-from Agent.deep_agent_tools.algorithm_specs import CAUSAL_ATE_SPEC
+from Agent.deep_agent_tools.algorithm_specs import CAUSAL_BACKDOOR_OLS_SPEC
 from Agent.deep_agent_tools.ate_applicability import ATE_REASON_SUMMARIES, check_ate_graph, check_ate_profile
 from Agent.deep_agent_tools.error_codes import SafeErrorCode
 from Agent.deep_agent_tools.models import AlgorithmExecutionCommand, AlgorithmResult, McpInvocationContext, StandardizedGraph
@@ -68,8 +68,8 @@ def _request(csv_data: str, *, graph: dict | None = None):
         analysis_dataset_id=17, issued_at=now, expires_at=now + timedelta(minutes=5), key_id="current",
     )
     command = AlgorithmExecutionCommand(
-        invocation_id=context.invocation_id, capability_id=CAUSAL_ATE_SPEC.capability_id,
-        capability_version=CAUSAL_ATE_SPEC.version, spec_digest=CAUSAL_ATE_SPEC.spec_digest,
+        invocation_id=context.invocation_id, capability_id=CAUSAL_BACKDOOR_OLS_SPEC.capability_id,
+        capability_version=CAUSAL_BACKDOOR_OLS_SPEC.version, spec_digest=CAUSAL_BACKDOOR_OLS_SPEC.spec_digest,
         provider_call_id="ate-call", input_identity=digest, parameters=PARAMETERS,
         artifacts={"standardized_graph": deepcopy(GRAPH if graph is None else graph)},
     )
@@ -133,7 +133,7 @@ def test_continuous_confounder_runs_real_service_and_process_runner():
     assert result.causal_effect.outcome == result.ate_check.outcome
     assert abs(result.causal_effect.estimate - 2.0) < 0.2
     assert result.causal_effect.n_rows == len(_frame())
-    assert result.implementation.runner_version == ATE_RUNNER_VERSION == "ate-runner-v2"
+    assert result.implementation.runner_version == BACKDOOR_OLS_RUNNER_VERSION == "backdoor-ols-runner-v2"
     assert result.provenance.analysis_dataset_id == 17
     assert result.provenance.source_input_identity == "frozen-source-hash"
     assert response["trace"]["executor_slot_id"].startswith("process-")
@@ -240,7 +240,7 @@ def test_kernel_collinearity_updates_completed_record_and_controlled_diagnostic(
     assert result.ate_check.adjustment_set == ("z",)
     assert response["raw_payload"]["reason_code"] == result.ate_check.reason_code
     assert "message" not in response["raw_payload"]
-    assert result.implementation.runner_version == "ate-runner-v2"
+    assert result.implementation.runner_version == "backdoor-ols-runner-v2"
 
 
 def test_insufficient_dof_is_not_applicable_without_changing_rows_or_adjustments():
@@ -293,6 +293,6 @@ def test_success_adapter_rejects_effect_mismatching_real_completed_check(change)
     payload["causal_effect"].update(change)
     with pytest.raises(ValueError):
         _estimation_result(
-            payload, command=command, context=context, capability_version=CAUSAL_ATE_SPEC.version,
+            payload, command=command, context=context, capability_version=CAUSAL_BACKDOOR_OLS_SPEC.version,
             graph=graph, data_view=None, ate_check=check,
         )

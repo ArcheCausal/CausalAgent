@@ -374,7 +374,7 @@ class FinalizationGate:
         """只认可已通过身份与账本校验、针对当前源图和变量对的检查。"""
         for result in results.values():
             check = result.ate_check
-            if result.capability_id != "causal.ate" or check is None:
+            if result.capability_id != "causal.backdoor_ols" or check is None:
                 continue
             if result.status not in {"valid", "not_applicable", "execution_failed", "timed_out"}:
                 continue
@@ -620,7 +620,7 @@ class FinalizationGate:
             )
         ):
             raise StructuredResponseError(
-                "effect question requires a verified causal_ate applicability check",
+                "effect question requires a verified causal_backdoor_ols applicability check",
                 rule="effect_question_without_ate_attempt",
             )
 
@@ -731,7 +731,7 @@ FINALIZATION_RETRY_HINTS: dict[str, str] = {
     "no_valid_algorithm_with_valid_result": (
         "outcome=no_valid_algorithm 时不能存在有效算法结果。"
         "若本次 target 与 treatment 已绑定，还必须引用本次一张有效发现图，"
-        "使用该变量对调用 causal_ate 并完成方法适用性检查。"
+        "使用该变量对调用 causal_backdoor_ols 并完成方法适用性检查。"
         "若你认为已有有效结果不可用，请改用 evidence_only，"
         "并把每个有效结果标记为 discarded；这不免除已经触发的 ATE 检查。"
     ),
@@ -746,7 +746,7 @@ FINALIZATION_RETRY_HINTS: dict[str, str] = {
     "effect_question_without_ate_attempt": (
         "本次 target 与 treatment 已绑定，且已有有效因果图。"
         "请引用本次同一数据集的一张有效发现图，使用已绑定的 treatment 和 target（作为 outcome）"
-        "调用 causal_ate，完成方法适用性检查并保留程序生成的 ate_check。"
+        "调用 causal_backdoor_ols，完成方法适用性检查并保留程序生成的 ate_check。"
         "明确的不适用可以满足要求；错图、另一变量对、未就绪、预算跳过或没有检查记录的失败不能满足。"
         "改成 evidence_only 仍需完成这一步，不要求必须算出效应值。"
     ),

@@ -16,7 +16,7 @@ from Agent.deep_agent_tools.algorithm_executor import (
     AlgorithmExecutorError,
     validate_executor_result,
 )
-from Agent.deep_agent_tools.algorithm_specs import CAUSAL_ATE_SPEC
+from Agent.deep_agent_tools.algorithm_specs import CAUSAL_BACKDOOR_OLS_SPEC
 from Agent.deep_agent_tools.ate_applicability import (
     ATE_REASON_CODES,
     ATE_REASON_SUMMARIES,
@@ -80,8 +80,8 @@ def _execution():
         expires_at=now + timedelta(minutes=5), key_id="test-key",
     )
     command = AlgorithmExecutionCommand(
-        invocation_id=context.invocation_id, capability_id=CAUSAL_ATE_SPEC.capability_id,
-        capability_version=CAUSAL_ATE_SPEC.version, spec_digest=CAUSAL_ATE_SPEC.spec_digest,
+        invocation_id=context.invocation_id, capability_id=CAUSAL_BACKDOOR_OLS_SPEC.capability_id,
+        capability_version=CAUSAL_BACKDOOR_OLS_SPEC.version, spec_digest=CAUSAL_BACKDOOR_OLS_SPEC.spec_digest,
         provider_call_id="call-ate", input_identity=context.input_snapshot_digest,
         parameters={"graph_result_ref": GRAPH_REF, "treatment": "T", "outcome": "Y"},
         artifacts={"standardized_graph": _graph().model_dump(mode="json")},
@@ -448,8 +448,8 @@ def test_shared_module_import_has_no_runtime_dependencies():
 
 
 def test_contract_version_and_public_schema():
-    assert CAUSAL_ATE_SPEC.version == "2.0"
+    assert CAUSAL_BACKDOOR_OLS_SPEC.version == "2.0"
     schema = AlgorithmResult.model_json_schema()
     assert "ate_check" in schema["properties"]
     assert "AteApplicabilityCheck" in schema["$defs"]
-    assert "ate_check" not in CAUSAL_ATE_SPEC.model_input_schema.model_fields
+    assert "ate_check" not in CAUSAL_BACKDOOR_OLS_SPEC.model_input_schema.model_fields

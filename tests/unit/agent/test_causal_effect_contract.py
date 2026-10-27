@@ -40,7 +40,7 @@ def _result(**overrides) -> AlgorithmResult:
         result_ref="inv-1:0",
         invocation_id="inv-1",
         provider_call_id="call-1",
-        capability_id="causal.ate",
+        capability_id="causal.backdoor_ols",
         capability_version="1.0",
         status="valid",
         standardized_graph=StandardizedGraph(graph_semantics="pdag", nodes=["x", "y"]),
@@ -94,7 +94,7 @@ def test_result_accepts_effect_with_graph() -> None:
 def test_command_artifacts_default_to_empty_and_are_dumped() -> None:
     command = AlgorithmExecutionCommand(
         invocation_id="00000000-0000-0000-0000-000000000001",
-        capability_id="causal.ate",
+        capability_id="causal.backdoor_ols",
         capability_version="1.0",
         spec_digest="a" * 64,
         provider_call_id="call-1",

@@ -420,8 +420,8 @@ class AlgorithmResult(ContractModel):
     def validate_result_contract(self) -> "AlgorithmResult":
         validate_result_ref_for_invocation(self.result_ref, self.invocation_id)
         if self.ate_check is not None:
-            if self.capability_id != "causal.ate":
-                raise ValueError("ate_check is only valid for causal.ate")
+            if self.capability_id != "causal.backdoor_ols":
+                raise ValueError("ate_check is only valid for causal.backdoor_ols")
             check = self.ate_check
             if check.applicability == "not_applicable":
                 if (

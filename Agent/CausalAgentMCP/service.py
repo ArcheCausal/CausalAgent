@@ -572,7 +572,7 @@ class CausalMcpService:
             semantic_kinds = normalize_semantic_kinds(
                 trusted_input.semantic_kinds, columns=processed_profile.column_names,
             )
-            if command.capability_id == "causal.ate":
+            if command.capability_id == "causal.backdoor_ols":
                 graph_check = check_ate_graph(
                     graph=graph,
                     graph_result_ref=parameters["graph_result_ref"],
@@ -875,7 +875,7 @@ class CausalMcpService:
                 if error_type == "ResultValidationError"
                 else SafeErrorCode.ALGORITHM_EXECUTION_FAILED
             )
-            if command.capability_id == "causal.ate" and error_type == "NotApplicable":
+            if command.capability_id == "causal.backdoor_ols" and error_type == "NotApplicable":
                 reason = raw_result.get("reason_code")
                 if isinstance(reason, str) and reason in ATE_REASON_SUMMARIES and ate_check is not None:
                     try:

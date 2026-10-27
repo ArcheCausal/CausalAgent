@@ -197,9 +197,9 @@ _EFFECT_QUESTION = "请分析 x 对 y 的因果效应。"
 def _ate_attempt(identity, registry, *, status="not_ready"):
     """构造没有检查记录的旧终态契约，验证其不能满足新门禁。"""
 
-    spec = registry.get("causal.ate").spec
-    response_identity = "causal_ate-response-1"
-    provider_call_id = "causal_ate-call-1"
+    spec = registry.get("causal.backdoor_ols").spec
+    response_identity = "causal_backdoor_ols-response-1"
+    provider_call_id = "causal_backdoor_ols-call-1"
     invocation_id = build_invocation_id(
         job_id=identity.job_id,
         response_identity=response_identity,
@@ -235,7 +235,7 @@ def _ate_attempt(identity, registry, *, status="not_ready"):
         response_identity=response_identity,
         response_identity_source="message_execution_id",
         provider_call_id=provider_call_id,
-        tool_name="causal_ate",
+        tool_name="causal_backdoor_ols",
         final_status=status,
         job_id=str(identity.job_id),
         attempt_count=identity.attempt_count,
@@ -466,9 +466,9 @@ def test_finalization_gate_accepts_only_ledger_backed_primary_result() -> None:
 def _valid_ate_result(identity, registry):
     """构造一次有效的后门估计结果；图沿用源 DAG 语义。"""
 
-    spec = registry.get("causal.ate").spec
-    response_identity = "causal_ate-response-1"
-    provider_call_id = "causal_ate-call-1"
+    spec = registry.get("causal.backdoor_ols").spec
+    response_identity = "causal_backdoor_ols-response-1"
+    provider_call_id = "causal_backdoor_ols-call-1"
     invocation_id = build_invocation_id(
         job_id=identity.job_id,
         response_identity=response_identity,
@@ -517,7 +517,7 @@ def _valid_ate_result(identity, registry):
         response_identity=response_identity,
         response_identity_source="message_execution_id",
         provider_call_id=provider_call_id,
-        tool_name="causal_ate",
+        tool_name="causal_backdoor_ols",
         final_status="succeeded",
         job_id=str(identity.job_id),
         attempt_count=identity.attempt_count,
@@ -749,7 +749,7 @@ def test_effect_rule_uses_one_retry_then_degrades() -> None:
         _finalization_gate_node(state, runtime=runtime, config={}, gate=gate)
     )
     assert retried["finalization_retry_count"] == 1
-    assert "causal_ate" in retried["deep_agent_retry_instruction"]
+    assert "causal_backdoor_ols" in retried["deep_agent_retry_instruction"]
 
     degraded = asyncio.run(
         _finalization_gate_node(
@@ -793,7 +793,7 @@ def test_no_valid_algorithm_hint_still_demands_ate_for_effect_question() -> None
 
     assert failure.value.rule == "no_valid_algorithm_with_valid_result"
     instruction = build_finalization_retry_instruction(failure.value)
-    assert "causal_ate" in instruction
+    assert "causal_backdoor_ols" in instruction
 
 
 def test_gate_rejects_evidence_reference_mixed_into_result_assessments() -> None:
@@ -975,7 +975,7 @@ def test_gate_requires_ate_attempt_whenever_variables_are_bound(question) -> Non
 
     assert failure.value.rule == "effect_question_without_ate_attempt"
     instruction = build_finalization_retry_instruction(failure.value)
-    assert "causal_ate" in instruction
+    assert "causal_backdoor_ols" in instruction
     assert "evidence_only" in instruction
 
 

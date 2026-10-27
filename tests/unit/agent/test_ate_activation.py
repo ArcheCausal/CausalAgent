@@ -1,4 +1,4 @@
-"""causal.ate 激活后的注册面。"""
+"""causal.backdoor_ols 激活后的注册面。"""
 
 from __future__ import annotations
 
@@ -12,9 +12,9 @@ from Agent.CausalAgentMCP.executor_pool import ExecutionOutcome
 from Agent.CausalAgentMCP.runner_registry import RunnerRegistryError, build_default_registry
 from Agent.CausalAgentMCP.service import CausalMcpService
 from Agent.deep_agent_tools.adapters import build_default_adapters
-from Agent.deep_agent_tools.adapters.ate import AteAdapter
+from Agent.deep_agent_tools.adapters.backdoor_ols import BackdoorOlsAdapter
 from Agent.deep_agent_tools.algorithm_specs import (
-    CAUSAL_ATE_SPEC,
+    CAUSAL_BACKDOOR_OLS_SPEC,
     DEFAULT_ALGORITHM_SPECS,
     build_tool_schema_snapshot,
 )
@@ -33,34 +33,34 @@ GRAPH_PAYLOAD = {
 
 
 def test_spec_is_activated() -> None:
-    assert CAUSAL_ATE_SPEC in DEFAULT_ALGORITHM_SPECS
-    assert "causal.ate" in [
+    assert CAUSAL_BACKDOOR_OLS_SPEC in DEFAULT_ALGORITHM_SPECS
+    assert "causal.backdoor_ols" in [
         item["capability_id"] for item in build_tool_schema_snapshot()
     ]
 
 
 def test_mcp_registry_resolves_ate() -> None:
     entry = build_default_registry().resolve(
-        CAUSAL_ATE_SPEC.capability_id,
-        CAUSAL_ATE_SPEC.version,
-        CAUSAL_ATE_SPEC.spec_digest,
+        CAUSAL_BACKDOOR_OLS_SPEC.capability_id,
+        CAUSAL_BACKDOOR_OLS_SPEC.version,
+        CAUSAL_BACKDOOR_OLS_SPEC.spec_digest,
     )
-    assert entry.capability_id == "causal.ate"
+    assert entry.capability_id == "causal.backdoor_ols"
 
 
 def test_ate_v2_registry_handshake_rejects_old_version_and_changed_digest() -> None:
     registry = build_default_registry()
-    assert ("causal.ate", CAUSAL_ATE_SPEC.version, CAUSAL_ATE_SPEC.spec_digest) in registry.capability_summary()
-    assert CAUSAL_ATE_SPEC.version == "2.0"
-    for version, digest in (("1.0", CAUSAL_ATE_SPEC.spec_digest), ("2.0", "0" * 64)):
+    assert ("causal.backdoor_ols", CAUSAL_BACKDOOR_OLS_SPEC.version, CAUSAL_BACKDOOR_OLS_SPEC.spec_digest) in registry.capability_summary()
+    assert CAUSAL_BACKDOOR_OLS_SPEC.version == "2.0"
+    for version, digest in (("1.0", CAUSAL_BACKDOOR_OLS_SPEC.spec_digest), ("2.0", "0" * 64)):
         with pytest.raises(RunnerRegistryError) as failure:
-            registry.resolve("causal.ate", version, digest)
+            registry.resolve("causal.backdoor_ols", version, digest)
         assert failure.value.safe_error_code == "MCP_CAPABILITY_VERSION_UNSUPPORTED"
 
 
 def test_default_adapters_bind_ate() -> None:
     adapters = build_default_adapters(executor=FakeAlgorithmExecutor())
-    assert isinstance(adapters["causal.ate"], AteAdapter)
+    assert isinstance(adapters["causal.backdoor_ols"], BackdoorOlsAdapter)
 
 
 def test_service_rejects_undeclared_artifact_keys_before_execution() -> None:
@@ -92,9 +92,9 @@ def test_service_rejects_undeclared_artifact_keys_before_execution() -> None:
     )
     command = AlgorithmExecutionCommand(
         invocation_id=invocation_id,
-        capability_id=CAUSAL_ATE_SPEC.capability_id,
-        capability_version=CAUSAL_ATE_SPEC.version,
-        spec_digest=CAUSAL_ATE_SPEC.spec_digest,
+        capability_id=CAUSAL_BACKDOOR_OLS_SPEC.capability_id,
+        capability_version=CAUSAL_BACKDOOR_OLS_SPEC.version,
+        spec_digest=CAUSAL_BACKDOOR_OLS_SPEC.spec_digest,
         provider_call_id="call-1",
         input_identity="file-hash",
         parameters={"graph_result_ref": "inv-1:0", "treatment": "x", "outcome": "y"},
