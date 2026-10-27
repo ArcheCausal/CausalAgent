@@ -195,7 +195,7 @@ _EFFECT_QUESTION = "请分析 x 对 y 的因果效应。"
 
 
 def _ate_attempt(identity, registry, *, status="not_ready"):
-    """构造一次真实的 causal_ate 终态，用于覆盖“尝试即放行”。"""
+    """构造没有检查记录的旧终态契约，验证其不能满足新门禁。"""
 
     spec = registry.get("causal.ate").spec
     response_identity = "causal_ate-response-1"
@@ -980,27 +980,19 @@ def test_gate_requires_ate_attempt_whenever_variables_are_bound(question) -> Non
 
 
 @pytest.mark.parametrize("ate_status", ["not_ready", "not_applicable"])
-def test_gate_accepts_effect_question_after_ate_attempt(ate_status) -> None:
+def test_gate_rejects_ate_terminal_without_applicability_check(ate_status) -> None:
     identity, registry, result, ledger = _algorithm_execution()
     ate_result, ate_record = _ate_attempt(identity, registry, status=ate_status)
 
-    accepted = FinalizationGate(registry=registry).validate(
-        decision=_primary_decision(result),
-        algorithm_results={
-            result.result_ref: result,
-            ate_result.result_ref: ate_result,
-        },
-        action_ledger={
-            ledger.invocation_id: ledger,
-            ate_record.invocation_id: ate_record,
-        },
-        trusted_identity=identity,
-        route_decision="fold",
-        analysis_parameters=_EFFECT_PARAMETERS,
-        analysis_question=_EFFECT_QUESTION,
-    )
-
-    assert accepted.primary_result_ref == result.result_ref
+    with pytest.raises(StructuredResponseError) as failure:
+        FinalizationGate(registry=registry).validate(
+            decision=_primary_decision(result),
+            algorithm_results={result.result_ref: result, ate_result.result_ref: ate_result},
+            action_ledger={ledger.invocation_id: ledger, ate_record.invocation_id: ate_record},
+            trusted_identity=identity, route_decision="fold",
+            analysis_parameters=_EFFECT_PARAMETERS, analysis_question=_EFFECT_QUESTION,
+        )
+    assert failure.value.rule == "effect_question_without_ate_attempt"
 
 
 @pytest.mark.parametrize(

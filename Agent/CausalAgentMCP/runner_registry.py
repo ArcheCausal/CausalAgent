@@ -70,7 +70,7 @@ def _cdfm(
     return run_cdfm_analysis(csv_data, threshold=parameters.get("threshold"))
 
 
-ATE_RUNNER_VERSION = "ate-runner-v1"
+ATE_RUNNER_VERSION = "ate-runner-v2"
 
 
 def _ate(
@@ -83,6 +83,7 @@ def _ate(
     import pandas as pd
 
     from Agent.CausalAgentMCP.inference.ate import AteNotApplicable, estimate_ate
+    from Agent.deep_agent_tools.ate_applicability import ATE_REASON_SUMMARIES
     from Agent.deep_agent_tools.models import StandardizedGraph
 
     graph = StandardizedGraph.model_validate(artifacts["standardized_graph"])
@@ -101,7 +102,9 @@ def _ate(
             "algorithm": "backdoor_ols",
             "runner_version": ATE_RUNNER_VERSION,
             "error_type": "NotApplicable",
-            "message": str(exc),
+            "reason_code": (
+                exc.reason_code if exc.reason_code in ATE_REASON_SUMMARIES else None
+            ),
         }
     return {
         "schema_version": "causal_estimation_v1",

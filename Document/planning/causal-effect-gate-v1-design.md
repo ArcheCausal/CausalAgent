@@ -1,188 +1,37 @@
-# 因果效应门禁 v1 设计
+# 因果效应门禁设计
 
-**目标：** 用户明确要求估计处理变量对结果变量的效应时，本次运行必须留下一次真实的 `causal_ate` 调用记录；门禁只保证覆盖与可追溯，不保证估计成功，也不替模型选算法。
+文档职责：说明后门 OLS 适用性检查的设计边界与验收要求；当前运行事实统一见[Agent 运行时](../architecture/agent-runtime.md#后门-ols-适用性检查与最终门禁)。
 
-**上游文档：** `Document/planning/causal-effect-estimation-v1-design.md`、`Document/development/causal-effect-estimation-v1-plan.md`。
+适用范围：`causal.ate` 的图引用、完整调整集准入、检查记录和最终决策；不增加分类编码、其他估计器、自动补调或额外重试。
 
-**范围外：** 调度层自动补调、重试预算调整、强制 ATE 结果成为主结果、`no_valid_algorithm` 语义变更、CDFM 推理能力变更。
+## 触发与完成条件
 
----
+分析路由中，`analysis_parameters.treatment` 与 `target` 已绑定为不同变量，且本次认可的结果集合存在通过源算法结构校验的有效发现图时，必须完成一次针对该变量对的方法适用性检查。若参数提供非空列集合，两个角色还必须属于该集合。触发条件来自已绑定参数，与问题文本语言和关键词无关。
 
-## 1. 背景与实测事实
+仅有工具名称或终态不能说明是否完成检查。门禁读取程序生成的 `AlgorithmResult.ate_check`，沿用结果与账本的身份、终态和引用校验，并核对源图、数据版本、变量对及调整集。明确的 `not_applicable` 可以满足要求；普通失败或超时必须保留真实的 `ready` 检查记录。未知引用、未就绪、预算跳过和缺少记录的旧结果不能满足要求。改为 `evidence_only` 不免除已经触发的要求。
 
-2026-10-26 的 job `d4e0d62a-5c79-4f94-ad7f-bbb4304094e7`（问题："用因果知识分析上述数据集，并分析 T 到 Y 的因果效应"）暴露的问题：
+## 检查与执行边界
 
-| 事实 | 证据 |
+共享纯检查先判断图是否适用于当前方法，再取处理变量的全部父节点，生成有序的执行列集合。图不适用且无法生成调整集时，调整集与执行列为 `null`；只有确认为无需调整时才保存空调整集。
+
+Worker 使用可信绑定及其画像初查；MCP 使用权威数据读取、实际 CSV 画像和已保存语义复核。所有参与列都必须存在、采用数值存储且无缺失、常量和非有限值。明确声明为 `category`、`ordinal` 或 `binary` 的参与列返回不适用。不根据整数类型或唯一值数量推断测量语义，未声明语义保留未充分确认的限制。非参与分类列不影响当前估计。
+
+内核继续检查共线、自由度和数值有限性。检查失败不删除调整变量、不删除行、不填值、不改图。稳定原因码通过 runner 传递，MCP 只把受控白名单说明放入诊断。顶层继续使用共享错误分类。
+
+结果、工具消息和终态账本通过一个 `Command` 原子发布。预算收尾保留原调用的来源摘要和分析数据集身份，只记录未执行，不生成检查记录。
+
+## 修正与统计边界
+
+门禁沿用一次修正机会，失败后进入现有降级流程。提示说明需要完成的方法检查，不自动换图或补调算法。不要求估计成功，不要求估计结果成为主结果。
+
+检查通过不证明图方向正确、无未观测混杂或线性假设成立；估计仍只提供父节点调整下的线性总效应及模型内区间。
+
+## 分层验收
+
+| 层次 | 必须证明的行为 |
 |---|---|
-| fold 已抽取处理/结果变量 | `analysis_contexts` 行 `treatment=T, target=Y`；deep agent checkpoint 的 `analysis_parameters` 含同值 |
-| 工具白名单包含 ATE | deep agent 可见 `causal_pc / causal_direct_lingam / causal_cdfm / causal_ate` |
-| 模型从未调用 ATE | `action_ledger`：web×2、`causal_cdfm`(failed)、`causal_direct_lingam`(valid)、`causal_pc`(valid) |
-| 存在可用图 | 两张图 `status=valid` 且通过 `validate_graph_structure`（DirectLiNGAM 图含 T→age→Y） |
-| 最终降级 | 模型两次提交 `outcome=no_valid_algorithm`；第二次被 `no_valid_algorithm_with_valid_result` 拒绝后重试耗尽，`finalization_status=degraded` |
+| 纯函数与契约 | 全部父节点与列集合、语义及数据拒绝、图原因码、记录与结果交叉约束、旧结果可读 |
+| 实际组件 | Tool → Adapter → MCP → 真实 runner 的记录一致；错图与另一变量对不能通过；受控不适用能够通过；报告持久快照与重新生成保留理由；预算收尾身份完整 |
+| 真实环境 | HTTP MCP、MySQL 权威绑定、PostgreSQL checkpoint 恢复、预算跳过与完整 Job；环境不可用时明确保留未验收结论 |
 
-结论：确定性层当前只约束**顺序**（估计前必须有 valid 图）与**账本/决策一致性**，不约束**问题类型到工具覆盖**。本次在 finalization 层补齐覆盖门禁，与现有"分析路由必须调用 `web_evidence_search`"规则同构。
-
-## 2. 决策
-
-| 决策点 | 选择 | 理由 |
-|---|---|---|
-| 约束层 | finalization 硬门禁 | 模型选型保持自主；门禁只要求一次真实尝试 |
-| 触发条件 | `target`/`treatment` 都是真实列 + 问题含效应词 + 至少一张 eligible valid 图 | 避免误伤"分析 T 和 Y 的关系"；发现全失败时不白耗重试 |
-| 问题文本来源 | 父 State 里最新 HumanMessage | `analysis_context.analysis_question` 在上下文复用时会保留旧问题 |
-| 判定依据 | `action_ledger` 的终态记录 | 复用 `_has_current_terminal_tool_invocation`；`succeeded / not_ready / failed / timed_out / not_applicable` 都算尝试（`not_applicable` 仅对 ATE 规则放宽） |
-| 失败处理 | 复用现有单次重试 | 不新增循环；提示同时说明 `evidence_only` 的正确用法 |
-
-## 3. 触发谓词
-
-```python
-_EFFECT_INTENT_KEYWORDS = ("效应", "影响", "作用", "干预效果", "处理效应", "提升", "降低")
-
-def _requires_effect_estimation(parameters, question) -> bool:
-    if not isinstance(parameters, Mapping) or not isinstance(question, str):
-        return False
-    target = parameters.get("target")
-    treatment = parameters.get("treatment")
-    if not (
-        isinstance(target, str) and target.strip()
-        and isinstance(treatment, str) and treatment.strip()
-    ) or target == treatment:
-        return False
-    columns = parameters.get("columns")
-    if isinstance(columns, (list, tuple)) and columns and (
-        target not in columns or treatment not in columns
-    ):
-        return False
-    return any(keyword in question for keyword in _EFFECT_INTENT_KEYWORDS)
-```
-
-"至少一张 eligible valid 图"不进入谓词，由调用方用门禁已算出的 `valid_refs` 判定，避免重复实现图校验。
-
-## 4. 接口改动
-
-### 4.1 `Agent/deep_agent/finalization.py`
-
-`FinalizationGate.validate()` 新增两个可选关键字参数：
-
-```python
-def validate(
-    self,
-    *,
-    decision: Any,
-    algorithm_results: Mapping[str, Any] | None,
-    action_ledger: Mapping[str, Any] | None,
-    trusted_identity: Any,
-    rag_evidence: Mapping[str, Any] | None = None,
-    web_evidence: Mapping[str, Any] | None = None,
-    route_decision: str | None = None,
-    web_search_enabled: bool | None = None,
-    analysis_parameters: Mapping[str, Any] | None = None,
-    analysis_question: str | None = None,
-) -> FinalAnalysisDecision:
-```
-
-规则放在 `analysis_route_without_algorithm_result` 之后、`analysis_route_without_web_invocation` 之前：
-
-```python
-if (
-    route_decision == ANALYSIS_ROUTE
-    and valid_refs
-    and _requires_effect_estimation(analysis_parameters, analysis_question)
-    and not self._has_current_terminal_tool_invocation(
-        current_ledger,
-        tool_name="causal_ate",
-        job_id=job_id,
-        attempt_count=current_attempt,
-        lease_epoch=current_lease,
-        worker_id=current_worker,
-        input_identity=current_input,
-        terminal_statuses={
-            "succeeded", "not_ready", "failed", "timed_out", "not_applicable",
-        },
-    )
-):
-    raise StructuredResponseError(
-        "effect question requires a causal_ate attempt",
-        rule="effect_question_without_ate_attempt",
-    )
-```
-
-`FINALIZATION_RETRY_HINTS` 新增：
-
-```python
-"effect_question_without_ate_attempt": (
-    "本次问题要求估计处理变量对结果变量的效应，且已有有效因果图。"
-    "请携带其中一张图的 graph_result_ref、treatment、outcome 调用一次 causal_ate；"
-    "即使你认为该图不适用，也保留真实返回的未就绪/不适用/失败状态。"
-    "若最终不采用任何图，请改用 evidence_only 并把所有有效结果标记为 discarded。"
-),
-```
-
-同时修改既有提示：
-
-```python
-"no_valid_algorithm_with_valid_result": (
-    "outcome=no_valid_algorithm 时不能存在有效算法结果。"
-    "若本次问题要求估计处理变量对结果变量的效应，还必须先留下一次 causal_ate 尝试"
-    "（可引用其中一张有效图）。"
-    "若你认为已有有效结果不可用，请改用 evidence_only，"
-    "并把每个有效结果标记为 discarded。"
-),
-```
-
-### 4.2 `Agent/causal_agent/graph.py`
-
-`_finalization_gate_node` 调用处补传：
-
-```python
-analysis_parameters=state.get("analysis_parameters"),
-analysis_question=nodes._latest_human_text(state),
-```
-
-`graph.py` 已导入 `nodes`，无需新增依赖。
-
-### 4.3 `Agent/deep_agent/prompts.py`
-
-`MANDATORY_ALGORITHM_INSTRUCTION` 追加一句：
-
-> 若 `analysis_parameters` 中 target 与 treatment 都已指定，在获得有效标准图后必须调用 `causal_ate`；即使你认为该图不可信，也要保留一次真实的估计或不可估计结果。
-
-## 5. 部署配置修复
-
-`docker-compose.yml` 的 causal-mcp 服务：
-
-```yaml
-- CDFM_MODEL_PATH=${CDFM_MODEL_PATH:-/opt/cdfm-weights-image}
-```
-
-原因：镜像构建期已把校验过的权重写入 `/opt/cdfm-weights-image`，而 dev compose 默认值指向 HF Hub（`DMIRLAB/CDFM`），容器内访问受限导致 CDFM 每次 `LocalEntryNotFoundError`。staging 用命名卷 `/opt/cdfm-weights`，不受影响。
-
-生效方式：`docker compose up -d --no-deps causal-mcp`，无需重建镜像。
-
-## 6. 测试
-
-| 测试 | 位置 | 断言 |
-|---|---|---|
-| 触发规则 | `tests/unit/agent/test_final_analysis_decision.py` | 三条件成立且账本无 `causal_ate` → `effect_question_without_ate_attempt` |
-| 尝试即放行 | 同上 | `causal_ate` 终态为 `not_ready` 时通过 |
-| 不触发 | 同上 | 无效应词 / treatment 缺失 / 无 valid 图时通过 |
-| 重试路径 | 同上 | 首次失败返回重试指令，二次失败走现有 degraded |
-| 接线 | `tests/unit/agent/test_deep_agent_parent_graph.py` | `_finalization_gate_node` 把 `analysis_parameters` 与最新 human 文本传入 gate |
-| 部署配置 | `tests/contracts/deployment/test_mcp_compose.py` | dev compose 默认值为 `/opt/cdfm-weights-image` |
-
-既有 `FinalizationGate` 测试不传新参数，默认 `None` 时行为不变。
-
-## 7. 验证
-
-1. `docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p no:cacheprovider <测试路径> -q`
-2. `docker compose up -d --no-deps causal-mcp`，确认容器内 `CDFM_MODEL_PATH=/opt/cdfm-weights-image` 且 `/ready` 正常。
-3. 用同一数据集重跑"分析 T 到 Y 的因果效应"，检查：
-   - `action_ledger` 出现 `causal_ate` 终态记录；
-   - `finalization_status` 不为 `degraded`；
-   - 报告包含真实效应值，或 ATE 返回的结构化不可估计理由。
-
-## 8. 已知取舍
-
-- 模型若在还没有 valid 图时先调 ATE，会拿到 `not_ready`；按"尝试即放行"规则门禁不再拦截。这是覆盖型门禁的边界，不额外引入时序判定。
-- 效应词表是字符串匹配；"影响/作用"等词在少数结构性问题中可能误触发一次 ATE 尝试。代价是一次可解释的工具调用，不影响结论正确性。
-- 不修改重试预算（当前为 1）。提示文案已包含 `evidence_only` 指引，降低同一轮二次失败的概率。
-- ATE 返回 `not_applicable`（例如图中不存在 treatment→outcome 的有向路径）也算一次尝试；否则图结构上不可估计时会误判为未尝试。
+专项入口见[测试与验证](../development/testing.md#后门-ols-适用性检查)。构造输入用于验证已知条件，不用替代算法或外部服务来声称真实环境验收。

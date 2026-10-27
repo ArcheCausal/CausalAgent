@@ -23,11 +23,11 @@ from .dependency_planner import (
     execute_dependency_plan,
 )
 from .runtime_updates import (
-    algorithm_terminal_command, defer_algorithm_terminal_events,
+    algorithm_terminal_command, capture_ate_checks, defer_algorithm_terminal_events,
     emit_public_decision_event, emit_tool_lifecycle_event, resolve_runtime_invocation,
 )
 from .models import (
-    ActionAttempt, AlgorithmResult, AlgorithmResultProvenance, DataProfile,
+    ActionAttempt, AlgorithmResult, AlgorithmResultProvenance, AteApplicabilityCheck, DataProfile,
     Diagnostics, InvocationRecord,
 )
 from .error_codes import SafeErrorCode
@@ -238,6 +238,8 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                     attempt_count=int(identity.attempt_count),
                     lease_epoch=int(identity.lease_epoch),
                     input_identity=current_input_identity(identity),
+                    source_input_identity=record.source_input_identity,
+                    analysis_dataset_id=record.analysis_dataset_id,
                     spec_digest=spec.spec_digest,
                     invocation_id=str(invocation_id),
                     capability_id=spec.capability_id,
@@ -364,6 +366,7 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
         )
         call_by_id = {str(call["id"]): call for call in calls}
         tool_by_name = self._tool_map(request.runtime)
+        completed_ate_checks: dict[str, AteApplicabilityCheck] = {}
 
         async def terminal_output(
             call_id: str, status: str, code: Any, *, summary: str | None = None,
@@ -385,6 +388,13 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                 invocation_id=invocation_id, provider_call_id=call_id,
                 capability_id=spec.capability_id, capability_version=spec.version,
                 status=status if status in {"timed_out", "not_ready", "not_applicable", "skipped"} else "execution_failed",
+                ate_check=(
+                    completed_ate_checks.get(invocation_id)
+                    if status in {"timed_out", "failed", "execution_failed"}
+                    and code != SafeErrorCode.ALGORITHM_CANCELED
+                    and getattr(completed_ate_checks.get(invocation_id), "applicability", None) == "ready"
+                    else None
+                ),
                 method=spec.method_definition(),
                 diagnostics=Diagnostics(
                     safe_error_code=code,
@@ -440,7 +450,7 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                 state=request.state,
                 runtime=tool_runtime,
             )
-            with defer_algorithm_terminal_events():
+            with defer_algorithm_terminal_events(), capture_ate_checks(completed_ate_checks.__setitem__):
                 return await handler(tool_request)
 
         try:

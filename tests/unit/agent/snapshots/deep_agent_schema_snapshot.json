@@ -43,6 +43,7 @@
     },
     "AlgorithmResult": {
       "properties": [
+        "ate_check",
         "capability_id",
         "capability_version",
         "causal_effect",
@@ -75,7 +76,7 @@
         "status",
         "provenance"
       ],
-      "sha256": "314d4558eb5608d3629c333e1e90daf75beca360df5192482cb46ba17e5c467b",
+      "sha256": "1a63a875419708e74a680eb7b633b0d1659265ded6b6b4f46fe838f661d78f7c",
       "title": "AlgorithmResult"
     },
     "AlgorithmResultProvenance": {
@@ -101,6 +102,27 @@
       ],
       "sha256": "85172284aacd192d5ec17dd5dd349013a6fe6f28891aceab62e66b6ab7d6c45e",
       "title": "AlgorithmResultProvenance"
+    },
+    "AteApplicabilityCheck": {
+      "properties": [
+        "adjustment_set",
+        "applicability",
+        "execution_columns",
+        "graph_result_ref",
+        "outcome",
+        "reason_code",
+        "treatment"
+      ],
+      "required": [
+        "graph_result_ref",
+        "treatment",
+        "outcome",
+        "adjustment_set",
+        "execution_columns",
+        "applicability"
+      ],
+      "sha256": "bc0a20b1e0d2f4ff47d4c0af5b96617c5ee16bb43fede72480ce0eaf3e5c4086",
+      "title": "AteApplicabilityCheck"
     },
     "CausalEffect": {
       "properties": [
@@ -491,8 +513,8 @@
   "tools": [
     {
       "capability_id": "causal.ate",
-      "schema_sha256": "dec3a4d290a5e0f69648c1d0913deabcfc14ef423cbbf61899cad8088a8e5244",
-      "spec_digest": "a446ddd9179b44772c1627674d793708cb9864c53268271970bdb2c95b398170",
+      "schema_sha256": "c4a28f8200bb34f1598d1e23dbc8495b2a9d29f4e811576073d95d31b2a9240c",
+      "spec_digest": "dc06cab6ee0707afa1520dd4143c8c490758becc628531a8b81867799d8af5bc",
       "tool_name": "causal_ate"
     },
     {

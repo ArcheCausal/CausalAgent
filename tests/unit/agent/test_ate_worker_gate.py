@@ -101,7 +101,7 @@ def test_rejects_unknown_ref_and_lists_available() -> None:
     )
     assert artifacts == {}
     assert rejection is not None
-    assert rejection["status"] == "not_ready"
+    assert rejection["status"] == "invalid_input"
     assert rejection["available_graph_result_refs"] == ["inv-1:0"]
     assert rejection["next_action"]
 
@@ -183,6 +183,18 @@ def test_non_estimation_spec_ignores_gate() -> None:
     )
     assert rejection is None
     assert artifacts == {}
+
+
+def test_rejects_source_version_and_digest_before_estimation() -> None:
+    for change in ({"capability_version": "1.0"}, {"provenance":
+        _discovery_result().provenance.model_copy(update={"spec_digest": "0" * 64})}):
+        source = _discovery_result().model_copy(update=change)
+        rejection, artifacts = _resolve_graph_artifacts(
+            spec=CAUSAL_ATE_SPEC, state={"algorithm_results": {source.result_ref: source}},
+            arguments={"graph_result_ref": source.result_ref}, trusted_identity=IDENTITY,
+        )
+        assert rejection["status"] == "invalid_input"
+        assert artifacts == {}
 
 
 def test_initial_artifacts_include_published_graph() -> None:

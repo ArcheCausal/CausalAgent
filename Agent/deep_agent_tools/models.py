@@ -266,6 +266,52 @@ class GraphValidation(ContractModel):
     not_checked: list[str] = Field(default_factory=list)
 
 
+class AteApplicabilityCheck(ContractModel):
+    """程序生成的后门 OLS 检查记录；未知调整集与空调整集严格区分。"""
+
+    model_config = ContractModel.model_config | {"frozen": True}
+
+    graph_result_ref: str
+    treatment: str
+    outcome: str
+    adjustment_set: tuple[str, ...] | None
+    execution_columns: tuple[str, ...] | None
+    applicability: Literal["ready", "not_applicable"]
+    reason_code: str | None = None
+
+    @field_validator("graph_result_ref", "treatment", "outcome")
+    @classmethod
+    def validate_check_strings(cls, value: str, info: Any) -> str:
+        return _non_blank(value, field_name=info.field_name)
+
+    @model_validator(mode="after")
+    def validate_check_contract(self) -> "AteApplicabilityCheck":
+        from .ate_applicability import ATE_GRAPH_REASON_CODES, ATE_REASON_CODES
+
+        if self.applicability == "ready":
+            if self.reason_code is not None:
+                raise ValueError("ready ate_check cannot include a reason_code")
+        elif self.reason_code not in ATE_REASON_CODES:
+            raise ValueError("not-applicable ate_check requires a known reason_code")
+        if self.reason_code in ATE_GRAPH_REASON_CODES:
+            if self.adjustment_set is not None or self.execution_columns is not None:
+                raise ValueError("unresolved graph requires null adjustment_set and execution_columns")
+            return self
+        if self.adjustment_set is None or self.execution_columns is None:
+            raise ValueError("resolved graph requires complete adjustment_set and execution_columns")
+        if self.treatment == self.outcome:
+            raise ValueError("resolved ate_check requires distinct treatment and outcome")
+        for column in (*self.adjustment_set, *self.execution_columns):
+            _non_blank(column, field_name="ate_check column")
+        if self.adjustment_set != tuple(sorted(set(self.adjustment_set))):
+            raise ValueError("adjustment_set must be sorted and unique")
+        if {self.treatment, self.outcome} & set(self.adjustment_set):
+            raise ValueError("adjustment_set cannot include treatment or outcome")
+        if self.execution_columns != (self.treatment, self.outcome, *self.adjustment_set):
+            raise ValueError("execution_columns must include the complete ordered estimation columns")
+        return self
+
+
 class CausalEffect(ContractModel):
     """后门调整下的线性总效应；数值可追溯到所用图与数据版本。"""
 
@@ -351,6 +397,7 @@ class AlgorithmResult(ContractModel):
     implementation: MethodImplementation | None = None
     graph_validation: GraphValidation | None = None
     causal_effect: CausalEffect | None = None
+    ate_check: AteApplicabilityCheck | None = None
     provenance: AlgorithmResultProvenance
 
     @field_validator(
@@ -372,6 +419,37 @@ class AlgorithmResult(ContractModel):
     @model_validator(mode="after")
     def validate_result_contract(self) -> "AlgorithmResult":
         validate_result_ref_for_invocation(self.result_ref, self.invocation_id)
+        if self.ate_check is not None:
+            if self.capability_id != "causal.ate":
+                raise ValueError("ate_check is only valid for causal.ate")
+            check = self.ate_check
+            if check.applicability == "not_applicable":
+                if (
+                    self.status != "not_applicable"
+                    or self.diagnostics.safe_error_code != SafeErrorCode.ALGORITHM_NOT_APPLICABLE
+                ):
+                    raise ValueError("not-applicable ate_check requires matching result status and safe_error_code")
+            elif self.status not in {"valid", "execution_failed", "timed_out"}:
+                raise ValueError("ready ate_check requires valid, execution_failed or timed_out result")
+            elif self.diagnostics.safe_error_code in {
+                SafeErrorCode.ALGORITHM_CANCELED,
+                SafeErrorCode.ALGORITHM_NOT_READY,
+                SafeErrorCode.ALGORITHM_NOT_APPLICABLE,
+            }:
+                raise ValueError("ready ate_check cannot claim cancellation, not-ready or not-applicable")
+            if self.status != "valid" and self.causal_effect is not None:
+                raise ValueError("unsuccessful ATE cannot carry a causal_effect")
+            if self.status == "valid":
+                effect = self.causal_effect
+                if effect is None:
+                    raise ValueError("successful checked ATE requires causal_effect")
+                if any(
+                    getattr(effect, field) != getattr(check, field)
+                    for field in ("graph_result_ref", "treatment", "outcome", "adjustment_set")
+                ):
+                    raise ValueError("causal_effect does not match ate_check")
+                if self.diagnostics.safe_error_code is not None:
+                    raise ValueError("successful checked ATE cannot include safe_error_code")
         if self.method is not None and (
             self.method.capability_id != self.capability_id
             or self.method.contract_version != self.capability_version

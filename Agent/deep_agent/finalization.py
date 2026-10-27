@@ -8,6 +8,7 @@ from typing import Any
 
 from Agent.deep_agent_tools.identity import build_invocation_id, current_input_identity
 from Agent.deep_agent_tools.algorithm_specs import get_algorithm_spec
+from Agent.deep_agent_tools.ate_applicability import ATE_REASON_SUMMARIES, check_ate_graph
 from Agent.deep_agent_tools.graph_validation import validate_graph_structure
 from Agent.deep_agent_tools.runtime_updates import normalize_tool_status
 from Agent.deep_agent_tools.models import (
@@ -364,6 +365,70 @@ class FinalizationGate:
             raise StructuredResponseError("result spec digest is not registered")
         return entry.spec.tool_name
 
+    @staticmethod
+    def _has_ate_check(
+        results: Mapping[str, AlgorithmResult],
+        *,
+        parameters: Mapping[str, Any],
+    ) -> bool:
+        """只认可已通过身份与账本校验、针对当前源图和变量对的检查。"""
+        for result in results.values():
+            check = result.ate_check
+            if result.capability_id != "causal.ate" or check is None:
+                continue
+            if result.status not in {"valid", "not_applicable", "execution_failed", "timed_out"}:
+                continue
+            if check.treatment != parameters.get("treatment") or check.outcome != parameters.get("target"):
+                continue
+            source = results.get(check.graph_result_ref)
+            if source is None or source.status != "valid" or source.standardized_graph is None:
+                continue
+            spec = get_algorithm_spec(source.capability_id)
+            if spec.kind != "causal_discovery" or not validate_graph_structure(
+                source.standardized_graph, graph_semantics=spec.graph_semantics,
+            ).valid:
+                continue
+            if any(
+                getattr(source.provenance, key) != getattr(result.provenance, key)
+                for key in ("job_id", "attempt_count", "lease_epoch", "input_identity",
+                            "source_input_identity", "analysis_dataset_id")
+            ):
+                continue
+            graph_check = check_ate_graph(
+                graph=source.standardized_graph, graph_result_ref=source.result_ref,
+                treatment=check.treatment, outcome=check.outcome,
+            )
+            if (
+                check.adjustment_set != graph_check.adjustment_set
+                or check.execution_columns != graph_check.execution_columns
+            ):
+                continue
+            if graph_check.applicability == "not_applicable":
+                if result.status != "not_applicable" or check != graph_check:
+                    continue
+            elif check.applicability == "not_applicable":
+                if (
+                    result.status != "not_applicable"
+                    or check.reason_code not in ATE_REASON_SUMMARIES
+                    or check.reason_code.startswith("ATE_GRAPH_")
+                ):
+                    continue
+            elif check.reason_code is not None or result.status == "not_applicable":
+                continue
+            if result.status == "valid":
+                effect = result.causal_effect
+                if (
+                    result.standardized_graph != source.standardized_graph
+                    or effect is None
+                    or effect.graph_result_ref != check.graph_result_ref
+                    or effect.treatment != check.treatment
+                    or effect.outcome != check.outcome
+                    or effect.adjustment_set != check.adjustment_set
+                ):
+                    continue
+            return True
+        return False
+
     def validate(
         self,
         *,
@@ -544,28 +609,18 @@ class FinalizationGate:
                 rule="analysis_route_without_algorithm_result",
             )
 
-        # 用户明确要求估计效应时不替模型选算法，只要求留下一次真实的 ATE
-        # 尝试；图是否适用、估计是否成功都由工具真实返回决定。
+        # 角色已绑定且有合法发现图时，必须完成方法检查；不要求估计成功。
         if (
             route_decision == ANALYSIS_ROUTE
-            and valid_refs
+            and any(get_algorithm_spec(eligible[ref].capability_id).kind == "causal_discovery"
+                    for ref in valid_refs)
             and _requires_effect_estimation(analysis_parameters)
-            and not self._has_current_terminal_tool_invocation(
-                current_ledger,
-                tool_name="causal_ate",
-                job_id=job_id,
-                attempt_count=current_attempt,
-                lease_epoch=current_lease,
-                worker_id=current_worker,
-                input_identity=current_input,
-                terminal_statuses={
-                    "succeeded", "not_ready", "failed", "timed_out",
-                    "not_applicable",
-                },
+            and not self._has_ate_check(
+                eligible, parameters=analysis_parameters,
             )
         ):
             raise StructuredResponseError(
-                "effect question requires a causal_ate attempt",
+                "effect question requires a verified causal_ate applicability check",
                 rule="effect_question_without_ate_attempt",
             )
 
@@ -675,10 +730,10 @@ FINALIZATION_RETRY_HINTS: dict[str, str] = {
     ),
     "no_valid_algorithm_with_valid_result": (
         "outcome=no_valid_algorithm 时不能存在有效算法结果。"
-        "若本次问题要求估计处理变量对结果变量的效应，还必须先留下一次 causal_ate 尝试"
-        "（可引用其中一张有效图）。"
+        "若本次 target 与 treatment 已绑定，还必须引用本次一张有效发现图，"
+        "使用该变量对调用 causal_ate 并完成方法适用性检查。"
         "若你认为已有有效结果不可用，请改用 evidence_only，"
-        "并把每个有效结果标记为 discarded。"
+        "并把每个有效结果标记为 discarded；这不免除已经触发的 ATE 检查。"
     ),
     "no_valid_algorithm_without_invocation": (
         "outcome=no_valid_algorithm 必须建立在本次真实算法调用之上。"
@@ -689,10 +744,11 @@ FINALIZATION_RETRY_HINTS: dict[str, str] = {
         "取舍；如果算法工具返回未就绪或失败，按它的真实状态提交 outcome。"
     ),
     "effect_question_without_ate_attempt": (
-        "本次问题要求估计处理变量对结果变量的效应，且已有有效因果图。"
-        "请携带其中一张图的 graph_result_ref、treatment、outcome 调用一次 causal_ate；"
-        "即使你认为该图不适用，也保留真实返回的未就绪/不适用/失败状态。"
-        "若最终不采用任何图，请改用 evidence_only 并把所有有效结果标记为 discarded。"
+        "本次 target 与 treatment 已绑定，且已有有效因果图。"
+        "请引用本次同一数据集的一张有效发现图，使用已绑定的 treatment 和 target（作为 outcome）"
+        "调用 causal_ate，完成方法适用性检查并保留程序生成的 ate_check。"
+        "明确的不适用可以满足要求；错图、另一变量对、未就绪、预算跳过或没有检查记录的失败不能满足。"
+        "改成 evidence_only 仍需完成这一步，不要求必须算出效应值。"
     ),
     "analysis_route_without_web_invocation": (
         "本次运行已开启联网搜索。请先调用一次 web_evidence_search 并等待真实返回，"

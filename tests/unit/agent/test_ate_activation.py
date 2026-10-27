@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import pytest
 
 from Agent.CausalAgentMCP.auth import sign_invocation
 from Agent.CausalAgentMCP.config import McpServerConfig
 from Agent.CausalAgentMCP.executor_pool import ExecutionOutcome
-from Agent.CausalAgentMCP.runner_registry import build_default_registry
+from Agent.CausalAgentMCP.runner_registry import RunnerRegistryError, build_default_registry
 from Agent.CausalAgentMCP.service import CausalMcpService
 from Agent.deep_agent_tools.adapters import build_default_adapters
 from Agent.deep_agent_tools.adapters.ate import AteAdapter
@@ -45,6 +46,16 @@ def test_mcp_registry_resolves_ate() -> None:
         CAUSAL_ATE_SPEC.spec_digest,
     )
     assert entry.capability_id == "causal.ate"
+
+
+def test_ate_v2_registry_handshake_rejects_old_version_and_changed_digest() -> None:
+    registry = build_default_registry()
+    assert ("causal.ate", CAUSAL_ATE_SPEC.version, CAUSAL_ATE_SPEC.spec_digest) in registry.capability_summary()
+    assert CAUSAL_ATE_SPEC.version == "2.0"
+    for version, digest in (("1.0", CAUSAL_ATE_SPEC.spec_digest), ("2.0", "0" * 64)):
+        with pytest.raises(RunnerRegistryError) as failure:
+            registry.resolve("causal.ate", version, digest)
+        assert failure.value.safe_error_code == "MCP_CAPABILITY_VERSION_UNSUPPORTED"
 
 
 def test_default_adapters_bind_ate() -> None:

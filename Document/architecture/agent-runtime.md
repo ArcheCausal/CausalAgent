@@ -81,7 +81,7 @@ cleanup outbox 在同一次清理中删除父图 Job thread 和独立的 Deep Ag
 
 `Agent.deep_agent_tools` 包入口只导出错误码、数据模型、算法规格、执行协议、身份函数和 Registry 等轻量契约。MCP 与 Agent 运行时共用这些契约；依赖调度器、算法工具、RAG/Web 工具和测试执行器由调用者从对应子模块显式导入。MCP 导入契约不会加载 LangGraph、LangChain 或 `Agent.deep_agent`；`dependency_planner.py` 仍直接依赖 LangGraph 的 `Command` 并检查算法调用终态。
 
-模型看到的是由本地 `AlgorithmSpec` 生成的 LangChain function tools。当前默认 allowlist 包含 PC、DirectLiNGAM 和 CDFM；OLC 的 Spec、Adapter、runner 和算法代码仍保留，但不进入 worker Registry、MCP runner registry 或旧兼容 MCP 工具面。运行时不会调用远端 `list_tools()` 来动态扩展模型工具。CDFM 工具只公开可选 `threshold`，模型路径、CPU device、标准化和缺失值处理策略由 causal-mcp 固定。
+模型看到的是由本地 `AlgorithmSpec` 生成的 LangChain function tools。当前默认 allowlist 包含 PC、DirectLiNGAM、CDFM 和后门 OLS 估计 `causal.ate`；OLC 的 Spec、Adapter、runner 和算法代码仍保留，但不进入 worker Registry、MCP runner registry 或旧兼容 MCP 工具面。运行时不会调用远端 `list_tools()` 来动态扩展模型工具。CDFM 工具只公开可选 `threshold`，模型路径、CPU device、标准化和缺失值处理策略由 causal-mcp 固定。
 
 绑定经过独立校验的数据集后，分析准备阶段在 `analysis_parameters.data_profile` 保存该数据集的完整画像。`to_deep_agent_input()` 优先校验该字段，只有字段不存在时才读取父 State 顶层 `data_profile`；选中的画像存在但非法时明确失败，不使用其他来源掩盖错误。转换复制全部行列、列顺序、数值列、分类列、缺失、非有限值、空列、常数列和质量问题，不按 `column_profiles.inferred_type` 重新判断存储类型。两处完整画像都不存在时，历史 `column_profiles`、分析参数和 `file_summary` 只恢复可确认的行列事实，数值与分类类型保持未知。数值参与条件来自实际 dtype 和有限值分布，不再由旧 inferred_type 标签决定。文件摘要继续记录文件身份与基础事实。
 
@@ -126,6 +126,22 @@ CDFM v0.1 在 runner 内保持 `directed_graph` 和输入列顺序，按 `adjace
 `FinalizationGate` 继续校验当前 Job、attempt、lease、worker 和输入身份下完整的 terminal Action Ledger。同 attempt 的已完成记录可满足后续决策修正，未完成或终态不一致的记录不能满足检查；新 attempt 不能借用旧 attempt 的搜索记录。无结果、不可用等真实终态按原规则保存和校验，不要求必须取得证据。修正阶段公开说明为“复用已有结果，并补齐校验要求的步骤”。发布验收使用更新版本新建的 Job，本次不处理旧版本 Job 的兼容。RAG/Web 的异常只转换为受控状态和安全错误码，不把异常正文、查询参数或 provider 数据带入公共事件。
 
 旧 `build_graph()` 的固定 `mcp → rag → web_search` 子图只作为兼容路径保留，不是 worker 当前生产入口。
+
+## 后门 OLS 适用性检查与最终门禁
+
+`causal.ate` 方法契约为 `2.0`，runner 为 `ate-runner-v2`。模型只提交 `graph_result_ref`、`treatment` 和 `outcome`。Worker 先确认引用是本 Job、attempt、lease 和同一来源摘要、分析数据集及内容摘要的有效发现结果，并按当前源算法版本、规格摘要和图契约校验。未知、过期、身份不符、规格不兼容或结构不合法的引用返回 `invalid_input`；尚无图的依赖未就绪返回 `not_ready`。拒绝也使用 `algorithm_terminal_command()` 原子写入结果、工具消息和终态账本，顶层错误码保留输入或未就绪含义。
+
+共享轻量模块 `Agent/deep_agent_tools/ate_applicability.py` 不加载 LangChain、LangGraph 或数据库。Worker、MCP 与内核先判断图是否支持当前方法，再取处理变量的全部父节点作为调整集，实际执行列按 `treatment、outcome、排序后的调整变量` 生成。合法发现图包含未定向边、双箭头边、不支持边型或查询不满足当前结构要求时，返回带稳定理由的 `not_applicable`。源图结构校验与方法适用性是不同检查：有效 PDAG 仍可能不适用于后门 OLS。
+
+准入覆盖全部执行列，检查存在性、数值存储、缺失、空列、常数和非有限值。保存的测量语义为 `category`、`ordinal` 或 `binary` 时，参与估计的列返回不适用；未参与列不受此约束。不根据整数 dtype 或唯一值数量推断分类语义。未明确声明语义时沿用数值准入，并保留测量语义未充分确认的边界。MCP 使用当前权威数据集、实际 CSV 画像和保存的语义重新检查。内核继续检查设计矩阵共线、自由度和数值有限性，不自动删行、删变量、填值、编码或改变源图。
+
+`AlgorithmResult.ate_check` 由程序生成，包含源图引用、处理与结果变量、调整集、执行列、`applicability=ready|not_applicable` 和稳定 `reason_code`。图检查未通过且调整集无法确定时，调整集与执行列均为 `null`，不能用空集合表示未知。记录正文只保存在结果，账本继续保存调用身份、终态和结果引用。成功效应必须与记录中的引用、变量对和调整集一致；失败或超时只有完成检查后才保留 `ready` 记录，超时结果仍不得携带成功图或 raw artifact。缺少记录的旧结果可以读取，但不默认满足新门禁。
+
+runner 通过结构化原因码返回 `ATE_GRAPH_HAS_UNDIRECTED_EDGE`、`ATE_GRAPH_HAS_BIDIRECTED_EDGE`、`ATE_ADJUSTMENT_SEMANTICS_UNSUPPORTED`、`ATE_DESIGN_MATRIX_SINGULAR`、`ATE_INSUFFICIENT_DOF` 等具体原因。MCP 从白名单生成 `Diagnostics.summary`，顶层仍使用 `ALGORITHM_NOT_APPLICABLE` 等共享分类；任意异常正文不能进入受控诊断。报告事实投影与 AnalysisContext 快照同时保存检查记录和受控诊断，报告重新生成使用该快照。
+
+分析路由中，已绑定不同的 `treatment` 和 `target`，且当前认可结果中有结构合法的有效发现图时，最终门禁要求至少一份针对该变量对的有效检查记录；若提供非空列集合，两个角色必须属于其中。门禁先校验结果与账本身份、终态和引用，再核对检查引用的源图、数据集、变量对、调整集和状态原因一致性。`not_applicable` 可满足要求；检查后执行失败或超时也可满足。错误引用、另一变量对、未就绪、预算跳过和无记录的普通失败均不能满足，`evidence_only` 也不能免除要求。门禁只核对契约，不重新回归，不证明图方向、线性或混杂假设。
+
+门禁仍只给模型一次修正机会，随后沿用降级流程；不自动补调、换图或增加循环。Adapter 在实际执行前通过当前任务内的程序通道发布已完成检查，调度器按 invocation 收集；即使外层 deadline 取消工具，也可在超时结果中保留真实的 `ready` 记录。该临时通道不进入模型参数、State 或 checkpoint，独立调用之间不复用记录。执行器不可用属于执行失败，输出解析或 raw 校验损坏仍属于输出契约错误。预算收尾从原调用账本补齐 `source_input_identity` 与 `analysis_dataset_id`，记录真实未执行，不生成检查记录。
 
 ## 方法定义、图约束与数据画像
 

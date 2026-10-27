@@ -116,6 +116,7 @@ def normalize_algorithm_summary(
             if result.causal_effect is not None
             else None
         ),
+        "ate_check": result.ate_check.model_dump(mode="json") if result.ate_check else None,
         "diagnostics": diagnostics.model_dump(mode="json"),
         "warnings": [warning.model_dump(mode="json") for warning in result.warnings],
         "assumptions": list(diagnostics.assumptions_checked),

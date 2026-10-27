@@ -543,7 +543,7 @@ CDFM_SPEC = AlgorithmSpec(
 
 CAUSAL_ATE_SPEC = AlgorithmSpec(
     capability_id="causal.ate",
-    version="1.0",
+    version="2.0",
     tool_name="causal_ate",
     public_name="因果效应估计（后门调整）",
     description=(
@@ -557,7 +557,7 @@ CAUSAL_ATE_SPEC = AlgorithmSpec(
     produces=frozenset(),
     assumptions=(
         "图包含查询的处理与结果变量，且无未定向边、双箭头边或有向环",
-        "处理变量与结果变量为数值列，缺失值已在执行前处理",
+        "处理变量、结果变量和处理变量的全部父节点为数值存储，无缺失、常数或非有限值",
         "函数形式近似线性，效应按每 1 单位变化解释，不对非线性或交互建模",
         "调整集取处理变量的全部父节点，不搜索其他有效调整集",
     ),
@@ -570,7 +570,8 @@ CAUSAL_ATE_SPEC = AlgorithmSpec(
     description_source=("用途", "图引用要求", "线性假设", "不适用边界"),
     data_requirements=(
         "standardized_graph",
-        "处理变量与结果变量为数值列",
+        "处理变量、结果变量和全部调整变量为数值存储，不转换字符串数值",
+        "已声明为 category、ordinal、binary 的估计列不适用，不自动编码",
         "无缺失值、空列、常数列或非有限值",
     ),
     requires_numeric_columns=True,
@@ -583,6 +584,8 @@ CAUSAL_ATE_SPEC = AlgorithmSpec(
     edge_meanings={"directed": "后门调整所用的因果方向"},
     limitations=(
         "只做父节点调整",
+        "未声明的测量语义仍未充分确认，不根据整数类型或唯一值数量推断连续语义",
+        "不删除调整变量、不删除行、不填值、不编码或改变源图",
         "不处理未观测混杂、选择偏倚或测量误差",
         "不做 bootstrap，区间为线性模型内区间",
     ),
