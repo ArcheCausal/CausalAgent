@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any, Mapping, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Mapping, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -34,6 +34,7 @@ _CAUSE_CODE_BY_EXCEPTION = {
     "badrequesterror": "request_rejected",
     "internalservererror": "provider_error",
     "notoolcallerror": NO_TOOL_CALL_CAUSE_CODE,
+    "parameterextractionerror": "business_invalid",
 }
 
 # 统一入口只重试这类原因：模型本次产出的结构化结果不可用，重新调用有意义。
@@ -44,6 +45,7 @@ _RETRYABLE_CAUSE_CODES = frozenset(
         "schema_invalid",
         "json_invalid",
         "output_parser_error",
+        "business_invalid",
     }
 )
 
@@ -68,7 +70,9 @@ def classify_structured_output_cause(cause: BaseException) -> str:
     return _CAUSE_CODE_BY_EXCEPTION.get(name, "unknown")
 
 
-def _safe_location(loc: Any, *, extra_field: bool) -> str | None:
+def _safe_location(
+    loc: Any, *, extra_field: bool, max_segments: int = _MAX_LOC_SEGMENTS,
+) -> str | None:
     """把校验错误位置压缩成日志安全的字段路径。
 
     额外字段名由模型自行编造，因此遇到 extra_forbidden 时只保留父级路径，
@@ -80,12 +84,20 @@ def _safe_location(loc: Any, *, extra_field: bool) -> str | None:
     if extra_field and segments:
         segments = [*segments[:-1], "extra"]
     safe = [part for part in segments if _LOC_SEGMENT_PATTERN.fullmatch(part)]
-    location = ".".join(safe[:_MAX_LOC_SEGMENTS])[:64]
+    location = ".".join(safe[:max_segments])[:64]
     return location or None
 
 
 def _validation_summary(cause: BaseException) -> dict[str, Any] | None:
     """生成不含取值和异常正文的校验摘要。"""
+    if getattr(cause, "structured_output_retryable", False):
+        location = _safe_location(
+            str(getattr(cause, "field_path", "")).split("."),
+            extra_field=False, max_segments=8,
+        )
+        rule = str(getattr(cause, "rule", ""))[:160]
+        if location and rule:
+            return {"count": 1, "first_type": rule, "first_loc": location}
     if not isinstance(cause, ValidationError):
         return None
     errors = cause.errors()
@@ -106,7 +118,7 @@ def _validation_summary(cause: BaseException) -> dict[str, Any] | None:
 
 
 class StructuredOutputError(RuntimeError):
-    """封装结构化输出调用或 Pydantic 校验失败，并保留可审计元数据。"""
+    """封装结构化输出调用或结果校验失败，并保留可审计元数据。"""
 
     def __init__(
         self,
@@ -187,7 +199,7 @@ def _with_validation_feedback(prompt: Any, error: StructuredOutputError) -> Any:
     rule = summary.get("first_type", "schema_invalid")
     return prompt + [("human", (
         f"上次结构化输出未通过校验：字段路径 {location}，规则 {rule}。"
-        "请重新返回完整结构，补齐该层级的必填字段，继续遵守原有证据和来源要求。"
+        "请重新返回完整结构，补齐该层级的必填字段，并继续遵守原有参数提取规则。"
         "不要用内层同名字段替代外层必填字段，不要编造证据。"
     ))]
 
@@ -239,8 +251,9 @@ async def ainvoke_structured(
     node_name: str,
     config: Any = None,
     retry_with_validation_feedback: bool = False,
+    result_validator: Callable[[SchemaT], Any] | None = None,
 ) -> SchemaT:
-    """异步执行结构化调用：结果不可用时重试一次，随后抛出 StructuredOutputError。"""
+    """异步执行结构化调用，可选执行业务校验并共享一次有界纠错重试。"""
     attempts = 0
     while True:
         attempts += 1
@@ -251,7 +264,10 @@ async def ainvoke_structured(
                 prompt=prompt,
                 config=config,
             )
-            return _validate_result(await runnable.ainvoke(dict(inputs)), schema)
+            validated = _validate_result(await runnable.ainvoke(dict(inputs)), schema)
+            if result_validator is not None:
+                result_validator(validated)
+            return validated
         except JobExecutionRevoked:
             raise
         except Exception as exc:

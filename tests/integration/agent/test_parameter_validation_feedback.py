@@ -23,7 +23,7 @@ def test_absent_roles_and_explicit_null_use_existing_revision_contract(patch, ex
     extraction = ParameterExtraction.model_validate({"updates": [
         {"field": key, "value": value, "evidence": answer} for key, value in patch.items()
     ]})
-    actual_patch = extraction_patch(extraction, answer_text=answer, current_parameters=before)
+    actual_patch = extraction_patch(extraction, current_parameters=before)
     actual, changes = apply_parameter_patch(before, [], patch=actual_patch,
         job_id="00000000-0000-0000-0000-000000000963", source_input_id=1)
     assert actual == expected
