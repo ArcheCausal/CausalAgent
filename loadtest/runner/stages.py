@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import threading
 import time
@@ -110,6 +111,7 @@ def run_stage(
         f"每个会话最多一个活动 Job，账号级创建额度 "
         f"{spec.get('create_budget', '不限')}"
     )
+    recorder.note("配置快照: " + json.dumps(config_snapshot(spec, base_url), ensure_ascii=False))
 
     contexts = [
         UserContext(
@@ -207,6 +209,12 @@ def _run_user(
             user.run_cdfm_fixed(rounds)
         elif spec["mode"] == "cdfm_rate":
             _run_arrivals(user, recorder, stop, spec)
+        elif spec["mode"] == "sandbox_flow":
+            user.run_full_flow(int(spec["flows"]))
+        elif spec["mode"] == "sandbox_ladder":
+            _run_ladder(user, recorder, stop, spec)
+        elif spec["mode"] == "sandbox_rate":
+            _run_sandbox_rate(user, recorder, stop, spec)
         else:
             user.run_mixed(float(spec["duration"]))
     except Exception as exc:  # 单个账号失败不应中断整档负载
@@ -312,6 +320,111 @@ def _run_arrivals(user: VirtualUser, recorder: Recorder, stop: StopController, s
         for logical, ordinal in plan[tick:]:
             scheduled_at = None if started_at is None else started_at + ordinal / rate
             _arrival_not_sent(recorder, logical, reason, scheduled_at)
+
+
+def config_snapshot(spec: dict, base_url: str) -> dict:
+    """本轮可比较的运行配置；服务器实际 Worker 数与沙盒容量另行采集。
+
+    仓库默认值不能代替服务器有效值：这里的 worker/sandbox 容量来自环境变量和本次
+    运行参数，只有服务器采集才能证明运行时实际配置。
+    """
+    return {
+        "base_url": base_url,
+        "users": spec.get("users"), "sessions_per_user": spec.get("sessions_per_user", 1),
+        "active_jobs": spec.get("active_jobs"), "sse": spec.get("sse"),
+        "mode": spec.get("mode"), "duration_seconds": spec.get("duration"),
+        "rows": spec.get("rows"), "seed": spec.get("seed"),
+        "data_size": spec.get("data_size"),
+        "worker_slots_env": os.environ.get("JOB_WORKER_SLOTS"),
+        "sandbox_global_capacity_env": os.environ.get("CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY"),
+        "sandbox_local_concurrency_env": os.environ.get("CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER"),
+        "client_timeouts": {"http_seconds": config.HTTP_TIMEOUT_SECONDS,
+                            "sse_idle_seconds": config.SSE_IDLE_READ_TIMEOUT_SECONDS,
+                            "job_observe_seconds": config.JOB_OBSERVE_DEADLINE_SECONDS,
+                            "drain_seconds": config.DRAIN_DEADLINE_SECONDS},
+        "interaction_limits": {"max_rounds": config.MAX_INTERACTIONS_PER_JOB,
+                               "deadline_seconds": config.INTERACTION_DEADLINE_SECONDS},
+        "note": "仓库默认值不是服务器有效值；worker 数、沙盒容量与镜像 digest 以服务器采集为准",
+    }
+
+
+def _run_ladder(user: VirtualUser, recorder: Recorder, stop: StopController, spec: dict) -> None:
+    """按 1、2、4、8 个活动 Job 逐档增加；客户端只放行已到达档位的并发。
+
+    每档使用相同的账号、数据规模和研究语义，只改变并发；到达下一档前，本档的活动
+    Job 必须已经完成，否则提前停止并记录真实瓶颈。
+    """
+    rungs = [int(value) for value in spec.get("ladder") or [1]]
+    duration = float(spec.get("duration") or 180)
+    gate = user.job_gate
+    for rung in rungs:
+        if stop.triggered or not user._can_submit():
+            break
+        if gate is not None:
+            # 逐档放宽客户端活动 Job 上限；已经完成的 Job 不占用额度。
+            gate.capacity = rung
+            gate._semaphore = threading.Semaphore(rung)
+        recorder.note(f"沙盒并发档位：{rung} 个活动 Job，持续时间 {duration:.0f} 秒")
+        deadline = time.monotonic() + duration
+        user.set_submission_deadline(deadline)
+        while time.monotonic() < deadline and not stop.triggered:
+            user._submit_job()
+            user._pause(1.0)
+        user.wait_observers(deadline_seconds=config.JOB_OBSERVE_DEADLINE_SECONDS)
+
+
+def _run_sandbox_rate(user: VirtualUser, recorder: Recorder, stop: StopController, spec: dict) -> None:
+    """按固定到达率提交沙盒任务，保留未发送请求与调度延迟。"""
+    rate = float(spec.get("arrival_rate") or 0)
+    if rate <= 0:
+        raise ValueError("arrival_rate 必须大于零")
+    duration = float(spec.get("duration") or 0)
+    total = int(spec.get("tasks") or 0)
+    if total <= 0 or duration <= 0:
+        raise ValueError("sandbox_rate 需要正的 tasks 与 duration")
+    workers = int(spec.get("arrival_workers") or 2)
+    plan = [(str(uuid.uuid4()), ordinal)
+            for ordinal in range(user.ctx.index - 1, total, recorder.users)]
+    for logical, ordinal in plan:
+        recorder.register_request(logical, username=user.ctx.username, user_index=user.ctx.index,
+                                  scenario="sandbox_rate", arrival_ordinal=ordinal,
+                                  scheduled_at=None, admission="pending")
+    started_at = time.time()
+    started = time.monotonic()
+    deadline = started + duration
+    user.set_submission_deadline(deadline)
+    pending = set()
+    tick = 0
+    reason = "submission_stopped"
+    try:
+        user.prepare()
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"sandbox-{user.ctx.index}") as pool:
+            while tick < len(plan) and not stop.triggered:
+                logical, ordinal = plan[tick]
+                scheduled = started + ordinal / rate
+                now = time.monotonic()
+                if now >= deadline or scheduled >= deadline:
+                    reason = "outside_load_duration"
+                    break
+                if scheduled > now:
+                    time.sleep(min(scheduled - now, .1))
+                    continue
+                pending = {future for future in pending if not future.done()}
+                if len(pending) >= workers:
+                    _arrival_not_sent(recorder, logical, "client_submit_capacity",
+                                      started_at + ordinal / rate)
+                else:
+                    pending.add(pool.submit(_arrival, user, recorder, logical, scheduled,
+                                            started_at + ordinal / rate, deadline))
+                tick += 1
+            for future in pending:
+                future.result()
+    except Exception:
+        reason = "arrival_scheduler_failed"
+        raise
+    finally:
+        for logical, ordinal in plan[tick:]:
+            _arrival_not_sent(recorder, logical, reason, started_at + ordinal / rate)
 
 
 def _arrival_not_sent(recorder: Recorder, logical: str, reason: str,

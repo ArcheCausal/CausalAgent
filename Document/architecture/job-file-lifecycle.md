@@ -15,8 +15,11 @@
 | Job 事件 | MySQL `analysis_job_events` | SSE 时间线、生命周期事件和内部执行摘要 |
 | 文件对象 | MySQL `file_objects` | 按用户和 SHA-256 去重的不可变 BLOB |
 | 用户文件 | MySQL `user_files` | 用户可见文件名、访问统计和对象引用 |
+| 数据处理候选 | MySQL `analysis_job_datasets` | 每个 Job 的候选 CSV/脚本对象引用、revision、来源 hash 和独立校验状态 |
+| 沙盒生命周期 | MySQL `analysis_sandbox_sessions` | 记录创建、执行、心跳和清理事实，以 Job/worker/attempt/lease epoch fencing 执行 |
 | 父图 checkpoint | PostgreSQL 官方 LangGraph 表 | Job 的外层恢复状态；`thread_id` 是 `analysis_jobs.job_id` |
 | Deep Agent checkpoint | PostgreSQL 官方 LangGraph 表 | 内层消息、工具状态和 raw 文件；使用稳定的 `deep-agent:<uuid5(job_id)>` thread，当前独立调用实际保存在根 namespace |
+| 数据处理 checkpoint | PostgreSQL 官方 LangGraph 表 | 以 Job thread 和 `data_processing_v1:<run_hash>` namespace 保存处理子图恢复状态 |
 | 长期记忆 Store | PostgreSQL 官方 `AsyncPostgresStore` 表 | 按可信 `user_id` namespace 保存 Deep Agent 两份 memory 文件；不属于 Job checkpoint |
 | checkpoint cleanup outbox | MySQL `checkpoint_cleanup_outbox` | Job 父子图 checkpoint 删除请求的可靠账本，按 `thread_id` 唯一 |
 | 用户记忆 cleanup outbox | MySQL `user_memory_cleanup_outbox` | 用户长期记忆 Store 删除请求的可靠账本，按 `user_id` 唯一，不关联 `users` 外键 |
@@ -31,11 +34,27 @@
 
 文件预览、下载以及 Agent 真正读取文件内容都在主库事务内更新 `last_accessed_at` 和 `access_count`；命中已有对象的重复上传不计为访问。CSV 预览最多读取 256 KiB、100 行、50 列，单元格最多 1000 字符，并且只按文本处理。
 
+## 数据处理产物与分析输入
+
+容量策略来自控制服务启动配置。所有尚未确认关闭的资源均占用容量；心跳超时、TTL 经过或销毁请求失败不会释放占用。生命周期记录不关联业务级联外键，Job、Session 或用户删除后仍由控制服务核查并清理远端资源。具体状态机见 [沙盒控制服务](sandbox-controller.md)。
+
+新 Job 先冻结用户原始文件，再由数据处理 Agent 在独立 OpenSandbox 服务中生成候选 CSV 与可重放脚本。Worker 通过独立控制服务的受限 API 使用短期沙盒，不持有上游密钥，也不连接 Docker daemon。原始文件在沙盒内只读；每次创建请求默认拒绝所有出站规则，服务端网络和宿主防火墙还必须阻断沙盒 IPv4/IPv6 外连。候选文件、脚本和语义说明由 Worker 校验路径、大小与 Job/lease 身份后保存至 MySQL；模型不能直接访问数据库。
+
+每个候选都由 `analysis_job_datasets` 记录，文件内容存放在 `file_objects`，不创建 `user_files`，因此不会出现在用户文件列表。独立校验节点从 MySQL 强读候选对象；只有对象归属、hash、CSV 结构、处理语义和算法输入条件都通过后，服务端才把候选标为通过。绑定节点再锁定 Job 和候选，复核当前租约、来源及确认版本，在同一事务内更新 `analysis_jobs.prepared_dataset_id`。后续画像、摘要、图表和全部算法调用都使用该数据对象，并保留原始输入 hash 作为来源身份。
+
+`fold` 只提取初始参数，数据处理完成后由现有父节点使用最终参数确定分析上下文。切换文件或目标、处理变量导致上下文变化时，旧绑定会清除；同一上下文的重复绑定保留已处理数据。同一 Job 重启后从 MySQL 恢复数据集身份，重复保存相同候选返回同一个 ID 和 revision。已校验候选仍作为该 Job 的审计和恢复记录保留。文件对象回收时必须同时检查 `user_files` 与 `analysis_job_datasets` 引用，不能因用户删除原始文件而删除仍被 Job 使用的处理结果或脚本。
+
+执行前，服务端向用户展示方案说明和版本。方案版本绑定 Job、原始文件 hash、研究语义和方案说明。resume API 只在当前交互版本匹配时接受明确确认，并把确认写入输入账本；修改或拒绝的自由文本只作为 Agent 输入，不具有执行授权。新的语义答复或方案说明变化会清除确认；已确认语义范围内的脚本修正可以复用确认，脚本与候选文件仍分别校验内容 hash。沙盒执行前、候选 MySQL 事务、独立校验和最终绑定都检查当前 Job 租约及最新确认版本，防止旧方案在恢复或修订后继续执行。
+
+等待交互的截止时间由 MySQL 计算；日期格式串作为绑定参数传入，公开事件和 Job 的等待记录使用数据库时间。正常暂停保持活动会话约束并释放当前 worker 执行占用，确认后为同一 Job 追加恢复输入并重新排队。
+
+通过校验的报告显式保存输出字段及其 `semantic_kinds` 快照。恢复绑定、Adapter 检查和 MCP 强读都要求报告有效，不能从缺失快照推定连续测量语义。普通报告追问只使用报告及分析事实；新的 Job 不自动复用旧 Job 的处理产物。
+
 ## 分析上下文与上下文绑定
 
 `analysis_contexts` 是跨 Job 的业务事实来源，保存创建时的文件快照（`input_user_file_id`、`file_object_id`、`file_hash`、`filename`）、分析参数（`target`、`treatment`、`analysis_question`）、最新结构化算法摘要、RAG/Web 证据摘要和最新报告引用。同一个 Session 可以存在多个上下文，`sessions.active_analysis_context_id` 只表示当前默认上下文；`sessions` 指向上下文的一侧不建外键，避免与 `analysis_contexts` 到 `sessions` 的级联删除形成环，所有上下文写入都按 `user_id + session_id` 校验归属。
 
-创建 Job 时，服务端在同一个 MySQL 事务里按冻结文件复用当前 active 上下文或新建上下文，并把 `analysis_context_id` 同时写入 `analysis_jobs` 和 initial `analysis_job_inputs`；resume 输入记录当时的上下文。fold 解析出 target/treatment 后回填参数，参数与已绑定上下文不一致时先复用同一文件上参数一致的历史上下文，没有才新建并切换 active 指针。分析成功才在终态事务里写回算法摘要、证据摘要和报告引用，失败或澄清不覆盖原有有效结果。
+创建 Job 时，服务端在同一个 MySQL 事务里按冻结文件复用当前 active 上下文或新建上下文，并把 `analysis_context_id` 同时写入 `analysis_jobs` 和 initial `analysis_job_inputs`；resume 输入记录当时的上下文。数据处理子图保存结构化参数修订，现有父节点接收最终参数和候选后幂等回填上下文；尚未承载结果的上下文可以修订，已有历史结果时只有完整研究身份一致才复用，否则新建并切换 active 指针。target/treatment 为空不代表该上下文尚未确定。上下文切换先于最终数据集绑定。分析成功才在终态事务里写回算法摘要、证据摘要和报告引用，失败或澄清不覆盖原有有效结果。
 
 用户在会话里用自然语言切换分析上下文时，切换事务同时更新 Session 默认指针、当前 Job 和当前输入账本的上下文绑定，并校验 worker、attempt 和 lease epoch。如果目标上下文的文件与 Job 当前冻结文件不同，同一个事务还会重写 `analysis_jobs` 的冻结文件快照：这是服务端主动的重新冻结，等价于把本次执行的文件输入改为目标上下文引用的文件。冻结快照仍然只由服务端写入，浏览器草稿不会改变它；目标上下文引用的文件已经被删除时，切换直接失败并返回澄清，不写入失效指针。
 
@@ -79,6 +98,8 @@ checkpoint_ns = ""
 Deep Agent 的 checkpoint 与长期记忆共用 PostgreSQL 实例但不是同一类数据：父图以
 `thread_id=job_id` 保存外层 Job State；Deep Agent 子图以
 `thread_id=deep-agent:<uuid5(job_id)>` 保存内部 messages、工具状态和短期 raw 文件。
+数据处理子图也使用 `thread_id=job_id`，以
+`data_processing_v1:<run_hash>` namespace 隔离冻结输入；同一 Job 内参数修订不改变处理 namespace；同一 Job 的 checkpoint 清理会删除该 thread 的全部 namespace。
 父图传入的 namespace 配置是 `deep_agent_v1`，当前独立调用实际保存在根 namespace（空字符串）；
 读取应以实际持久化位置为准，正式中断恢复和故障接管的验证边界见
 [`agent-runtime.md`](agent-runtime.md#父图子图与持久化)。`AsyncPostgresStore` 另以
@@ -94,8 +115,8 @@ create-if-absent 初始化，不覆盖已有内容；运行时对象与 MCP sess
 回滚整个删除。单独删除 Session 或 Job 只登记 checkpoint 清理，不删除用户长期记忆。
 
 同一个 cleanup worker（`python -m Database.agent_persistence_cleanup_worker`）用租约轮转领取
-两张表，避免任何一类任务长期排在后面。checkpoint 任务在一次 attempt 内删除父图
-`thread_id=job_id` 和子图 `thread_id=deep-agent:<uuid5(job_id)>`，两者都成功才标记完成，
+两张表，避免任何一类任务长期排在后面。checkpoint 任务在一次 attempt 内删除父图和数据处理子图使用的
+Job thread，以及因果 Deep Agent 的 `thread_id=deep-agent:<uuid5(job_id)>`；全部删除都成功才标记完成，
 部分成功则整项重试并依赖官方删除接口的幂等性。记忆任务按
 `("causalagent", "memory", str(user_id))` 构造 namespace，用官方 Store API 逐条删除该
 namespace 下的全部条目，并在删除后重新查询确认 namespace 为空；checkpoint 任务不触碰

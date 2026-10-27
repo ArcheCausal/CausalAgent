@@ -283,7 +283,7 @@ def test_report_resources_carry_file_web_and_knowledge_base_sources() -> None:
     assert [item.description for item in index.evidence_refs] == [
         "知识库片段",
         "网页片段",
-        "data.csv 是本次因果分析使用的冻结数据文件。",
+        "data.csv 是用户提供的输入文件；报告中的数据概览描述算法实际接收的数据。",
     ]
     assert all(item.evidence_id.startswith("ev_") for item in index.evidence_refs)
     assert all(source.source_id.startswith("src_") for source in index.sources)
@@ -319,7 +319,7 @@ def test_report_resources_accept_state_evidence_objects_and_dicts_equally() -> N
     ]
     assert [item.description for item in as_object.evidence_refs] == [
         "知识库片段",
-        "data.csv 是本次因果分析使用的冻结数据文件。",
+        "data.csv 是用户提供的输入文件；报告中的数据概览描述算法实际接收的数据。",
     ]
     assert [item.model_dump(exclude={"evidence_id", "source_ids"}) for item in as_object.evidence_refs] == [
         item.model_dump(exclude={"evidence_id", "source_ids"}) for item in as_mapping.evidence_refs

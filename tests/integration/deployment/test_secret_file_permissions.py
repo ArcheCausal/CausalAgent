@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import subprocess
 import sys
 from pathlib import Path
@@ -45,7 +46,7 @@ def test_real_file_permissions_follow_environment(tmp_path, driver, environment,
 
     path = tmp_path / "causalagent.env"
     path.write_text(
-        "".join(f"{key}=permission-probe-{index}\n" for index, key in enumerate(REQUIRED_SECRET_KEYS)),
+        "".join(f"{key}={secrets.token_hex(32)}\n" for key in REQUIRED_SECRET_KEYS),
         encoding="utf-8",
     )
     path.chmod(mode)

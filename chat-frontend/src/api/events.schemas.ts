@@ -96,6 +96,14 @@ export const processingOptionSchema = z.object({
   risks: z.array(z.string()).optional(),
 }).passthrough()
 
+export const processingPlanSummarySchema = z.object({
+  summary: z.string().min(1),
+  observation_unit: z.string().min(1),
+  transformations: z.array(z.string()),
+  variable_semantics: z.record(z.string(), z.string()),
+  limitations: z.array(z.string()).optional(),
+}).passthrough()
+
 export const interactionPayloadSchema = z.object({
   type: z.literal('interaction'),
   interaction_type: z.string().min(1),
@@ -105,6 +113,8 @@ export const interactionPayloadSchema = z.object({
   expires_at: z.string().optional(),
   allow_other: z.boolean().optional(),
   options: z.array(processingOptionSchema).optional(),
+  plan_version: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  plan: processingPlanSummarySchema.optional(),
 }).passthrough()
 
 export const interruptEventSchema = z.object({

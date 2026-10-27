@@ -26,6 +26,7 @@ from app.db import (
 )
 from app.request_context import REQUEST_ID_PATTERN
 from config.settings import settings
+from Agent.data_processing.plans import plan_confirmation_matches
 from Database.analysis_contexts import (
     create_or_reuse_context_for_frozen_file,
     record_analysis_results,
@@ -293,9 +294,8 @@ def _with_db_expiry(
     if not isinstance(interaction, dict):
         return interaction
     cursor.execute(
-        "SELECT DATE_FORMAT(UTC_TIMESTAMP(6) + INTERVAL %s SECOND,"
-        " '%Y-%m-%dT%H:%i:%s.%fZ') AS expires_at",
-        (INPUT_WAIT_TIMEOUT_SECONDS,),
+        "SELECT DATE_FORMAT(UTC_TIMESTAMP(6) + INTERVAL %s SECOND, %s) AS expires_at",
+        (INPUT_WAIT_TIMEOUT_SECONDS, "%Y-%m-%dT%H:%i:%s.%fZ"),
     )
     row = cursor.fetchone() or {}
     expires_at = row.get("expires_at")
@@ -764,9 +764,8 @@ def _set_waiting_input_state(
 
     if isinstance(interaction, dict):
         cursor.execute(
-            "SELECT DATE_FORMAT(UTC_TIMESTAMP(6) + INTERVAL %s SECOND,"
-            " '%Y-%m-%dT%H:%i:%s.%fZ') AS expires_at",
-            (INPUT_WAIT_TIMEOUT_SECONDS,),
+            "SELECT DATE_FORMAT(UTC_TIMESTAMP(6) + INTERVAL %s SECOND, %s) AS expires_at",
+            (INPUT_WAIT_TIMEOUT_SECONDS, "%Y-%m-%dT%H:%i:%s.%fZ"),
         )
         row = cursor.fetchone() or {}
         if isinstance(row.get("expires_at"), str):
@@ -1814,6 +1813,15 @@ def resume_job(
                 raise JobStateConflictError("任务当前不在 waiting_input 状态", job)
             if job.get("current_question_id") != question_id:
                 raise JobStateConflictError("question_id 与当前等待问题不匹配", job)
+            plan_matches = plan_confirmation_matches(
+                job.get("current_interaction"),
+                _runtime_answer,
+            )
+            if plan_matches is False:
+                raise JobStateConflictError(
+                    "处理方案已变化或确认版本无效，请重新查看当前方案后提交",
+                    job,
+                )
 
             cursor.execute(
                 "SELECT COALESCE(MAX(sequence), -1) + 1 AS next_sequence FROM analysis_job_inputs WHERE job_id = %s",

@@ -9,10 +9,6 @@
             "USER_INPUT_SCHEMA_AMBIGUOUS",
             "USER_INPUT_REQUIRED_FIELD_MISSING",
             "ALGORITHM_INPUT_INVALID",
-            "PREPROCESSING_REQUIRED",
-            "PREPROCESSING_APPROVAL_REQUIRED",
-            "PREPROCESSING_PLAN_INVALID",
-            "PREPROCESSING_RESULT_REJECTED",
             "ALGORITHM_NOT_APPLICABLE",
             "ALGORITHM_NOT_READY",
             "ALGORITHM_EXECUTION_FAILED",
@@ -113,112 +109,6 @@
       "type": "object"
     },
     "AlgorithmExecutionCommand": {
-      "$defs": {
-        "PreprocessingApproval": {
-          "additionalProperties": false,
-          "description": "运行时注入的确认凭证；模型不能自行构造或改写。",
-          "properties": {
-            "option_id": {
-              "title": "Option Id",
-              "type": "string"
-            },
-            "question_id": {
-              "title": "Question Id",
-              "type": "string"
-            },
-            "plan_digest": {
-              "title": "Plan Digest",
-              "type": "string"
-            }
-          },
-          "required": [
-            "option_id",
-            "question_id",
-            "plan_digest"
-          ],
-          "title": "PreprocessingApproval",
-          "type": "object"
-        },
-        "PreprocessingPlan": {
-          "additionalProperties": false,
-          "description": "用户确认的确定性处理方案；顺序固定且不隐式补充操作。",
-          "properties": {
-            "version": {
-              "const": "data-preprocessing-v1",
-              "default": "data-preprocessing-v1",
-              "title": "Version",
-              "type": "string"
-            },
-            "steps": {
-              "default": [],
-              "items": {
-                "$ref": "#/$defs/PreprocessingStep"
-              },
-              "title": "Steps",
-              "type": "array"
-            },
-            "protected_columns": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "title": "Protected Columns",
-              "type": "array"
-            }
-          },
-          "title": "PreprocessingPlan",
-          "type": "object"
-        },
-        "PreprocessingStep": {
-          "additionalProperties": false,
-          "description": "一个已确认的数据处理步骤；只表达模型可理解的列与参数。",
-          "properties": {
-            "operation": {
-              "description": "处理操作：select_columns 选列，drop_rows 按列删除含缺失值的行，numeric_impute 数值插补，categorical_encode 分类编码。",
-              "enum": [
-                "select_columns",
-                "drop_rows",
-                "numeric_impute",
-                "categorical_encode"
-              ],
-              "title": "Operation",
-              "type": "string"
-            },
-            "columns": {
-              "default": [],
-              "description": "步骤作用的真实列名；删行和插补必须明确列出列名。",
-              "items": {
-                "type": "string"
-              },
-              "title": "Columns",
-              "type": "array"
-            },
-            "method": {
-              "anyOf": [
-                {
-                  "enum": [
-                    "mean",
-                    "median",
-                    "ordinal"
-                  ],
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "数值插补使用 mean 或 median；分类编码使用 ordinal；其他操作必须为 null。",
-              "title": "Method"
-            }
-          },
-          "required": [
-            "operation"
-          ],
-          "title": "PreprocessingStep",
-          "type": "object"
-        }
-      },
       "additionalProperties": false,
       "description": "传输无关的算法执行请求；可信身份不由模型参数提供。",
       "properties": {
@@ -250,28 +140,6 @@
           "additionalProperties": true,
           "title": "Parameters",
           "type": "object"
-        },
-        "preprocessing": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/PreprocessingPlan"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "approval": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/PreprocessingApproval"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         },
         "result_index": {
           "default": 0,
@@ -333,6 +201,31 @@
               "title": "Input Identity",
               "type": "string"
             },
+            "source_input_identity": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Source Input Identity"
+            },
+            "analysis_dataset_id": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Analysis Dataset Id"
+            },
             "spec_digest": {
               "title": "Spec Digest",
               "type": "string"
@@ -372,30 +265,6 @@
               ],
               "default": null,
               "title": "Capability Version"
-            },
-            "preprocessing_recipe_digest": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Preprocessing Recipe Digest"
-            },
-            "preprocessing_plan_digest": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Preprocessing Plan Digest"
             },
             "algorithm_runner_version": {
               "anyOf": [
@@ -892,10 +761,6 @@
             "USER_INPUT_SCHEMA_AMBIGUOUS",
             "USER_INPUT_REQUIRED_FIELD_MISSING",
             "ALGORITHM_INPUT_INVALID",
-            "PREPROCESSING_REQUIRED",
-            "PREPROCESSING_APPROVAL_REQUIRED",
-            "PREPROCESSING_PLAN_INVALID",
-            "PREPROCESSING_RESULT_REJECTED",
             "ALGORITHM_NOT_APPLICABLE",
             "ALGORITHM_NOT_READY",
             "ALGORITHM_EXECUTION_FAILED",
@@ -1207,6 +1072,31 @@
           "title": "Input Identity",
           "type": "string"
         },
+        "source_input_identity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Input Identity"
+        },
+        "analysis_dataset_id": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Analysis Dataset Id"
+        },
         "spec_digest": {
           "title": "Spec Digest",
           "type": "string"
@@ -1246,30 +1136,6 @@
           ],
           "default": null,
           "title": "Capability Version"
-        },
-        "preprocessing_recipe_digest": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Preprocessing Recipe Digest"
-        },
-        "preprocessing_plan_digest": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Preprocessing Plan Digest"
         },
         "algorithm_runner_version": {
           "anyOf": [
@@ -1625,10 +1491,6 @@
             "USER_INPUT_SCHEMA_AMBIGUOUS",
             "USER_INPUT_REQUIRED_FIELD_MISSING",
             "ALGORITHM_INPUT_INVALID",
-            "PREPROCESSING_REQUIRED",
-            "PREPROCESSING_APPROVAL_REQUIRED",
-            "PREPROCESSING_PLAN_INVALID",
-            "PREPROCESSING_RESULT_REJECTED",
             "ALGORITHM_NOT_APPLICABLE",
             "ALGORITHM_NOT_READY",
             "ALGORITHM_EXECUTION_FAILED",
@@ -2263,10 +2125,6 @@
             "USER_INPUT_SCHEMA_AMBIGUOUS",
             "USER_INPUT_REQUIRED_FIELD_MISSING",
             "ALGORITHM_INPUT_INVALID",
-            "PREPROCESSING_REQUIRED",
-            "PREPROCESSING_APPROVAL_REQUIRED",
-            "PREPROCESSING_PLAN_INVALID",
-            "PREPROCESSING_RESULT_REJECTED",
             "ALGORITHM_NOT_APPLICABLE",
             "ALGORITHM_NOT_READY",
             "ALGORITHM_EXECUTION_FAILED",
@@ -2427,6 +2285,31 @@
           "default": null,
           "title": "Input Identity"
         },
+        "source_input_identity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Input Identity"
+        },
+        "analysis_dataset_id": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Analysis Dataset Id"
+        },
         "event_step_id": {
           "anyOf": [
             {
@@ -2497,6 +2380,31 @@
         "input_snapshot_digest": {
           "title": "Input Snapshot Digest",
           "type": "string"
+        },
+        "source_input_identity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Input Identity"
+        },
+        "analysis_dataset_id": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Analysis Dataset Id"
         },
         "issued_at": {
           "format": "date-time",
@@ -2670,161 +2578,6 @@
       "title": "MethodImplementation",
       "type": "object"
     },
-    "PreprocessingApproval": {
-      "additionalProperties": false,
-      "description": "运行时注入的确认凭证；模型不能自行构造或改写。",
-      "properties": {
-        "option_id": {
-          "title": "Option Id",
-          "type": "string"
-        },
-        "question_id": {
-          "title": "Question Id",
-          "type": "string"
-        },
-        "plan_digest": {
-          "title": "Plan Digest",
-          "type": "string"
-        }
-      },
-      "required": [
-        "option_id",
-        "question_id",
-        "plan_digest"
-      ],
-      "title": "PreprocessingApproval",
-      "type": "object"
-    },
-    "PreprocessingPlan": {
-      "$defs": {
-        "PreprocessingStep": {
-          "additionalProperties": false,
-          "description": "一个已确认的数据处理步骤；只表达模型可理解的列与参数。",
-          "properties": {
-            "operation": {
-              "description": "处理操作：select_columns 选列，drop_rows 按列删除含缺失值的行，numeric_impute 数值插补，categorical_encode 分类编码。",
-              "enum": [
-                "select_columns",
-                "drop_rows",
-                "numeric_impute",
-                "categorical_encode"
-              ],
-              "title": "Operation",
-              "type": "string"
-            },
-            "columns": {
-              "default": [],
-              "description": "步骤作用的真实列名；删行和插补必须明确列出列名。",
-              "items": {
-                "type": "string"
-              },
-              "title": "Columns",
-              "type": "array"
-            },
-            "method": {
-              "anyOf": [
-                {
-                  "enum": [
-                    "mean",
-                    "median",
-                    "ordinal"
-                  ],
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "数值插补使用 mean 或 median；分类编码使用 ordinal；其他操作必须为 null。",
-              "title": "Method"
-            }
-          },
-          "required": [
-            "operation"
-          ],
-          "title": "PreprocessingStep",
-          "type": "object"
-        }
-      },
-      "additionalProperties": false,
-      "description": "用户确认的确定性处理方案；顺序固定且不隐式补充操作。",
-      "properties": {
-        "version": {
-          "const": "data-preprocessing-v1",
-          "default": "data-preprocessing-v1",
-          "title": "Version",
-          "type": "string"
-        },
-        "steps": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/PreprocessingStep"
-          },
-          "title": "Steps",
-          "type": "array"
-        },
-        "protected_columns": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "title": "Protected Columns",
-          "type": "array"
-        }
-      },
-      "title": "PreprocessingPlan",
-      "type": "object"
-    },
-    "PreprocessingStep": {
-      "additionalProperties": false,
-      "description": "一个已确认的数据处理步骤；只表达模型可理解的列与参数。",
-      "properties": {
-        "operation": {
-          "description": "处理操作：select_columns 选列，drop_rows 按列删除含缺失值的行，numeric_impute 数值插补，categorical_encode 分类编码。",
-          "enum": [
-            "select_columns",
-            "drop_rows",
-            "numeric_impute",
-            "categorical_encode"
-          ],
-          "title": "Operation",
-          "type": "string"
-        },
-        "columns": {
-          "default": [],
-          "description": "步骤作用的真实列名；删行和插补必须明确列出列名。",
-          "items": {
-            "type": "string"
-          },
-          "title": "Columns",
-          "type": "array"
-        },
-        "method": {
-          "anyOf": [
-            {
-              "enum": [
-                "mean",
-                "median",
-                "ordinal"
-              ],
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "数值插补使用 mean 或 median；分类编码使用 ordinal；其他操作必须为 null。",
-          "title": "Method"
-        }
-      },
-      "required": [
-        "operation"
-      ],
-      "title": "PreprocessingStep",
-      "type": "object"
-    },
     "PublicDecision": {
       "additionalProperties": false,
       "description": "模型在 Tool Call 中显式生成、可直接展示的简短决策说明。",
@@ -2955,10 +2708,6 @@
             "USER_INPUT_SCHEMA_AMBIGUOUS",
             "USER_INPUT_REQUIRED_FIELD_MISSING",
             "ALGORITHM_INPUT_INVALID",
-            "PREPROCESSING_REQUIRED",
-            "PREPROCESSING_APPROVAL_REQUIRED",
-            "PREPROCESSING_PLAN_INVALID",
-            "PREPROCESSING_RESULT_REJECTED",
             "ALGORITHM_NOT_APPLICABLE",
             "ALGORITHM_NOT_READY",
             "ALGORITHM_EXECUTION_FAILED",
@@ -3285,14 +3034,14 @@
       "type": "object"
     }
   },
-  "schema_version": "p1-v1",
+  "schema_version": "p2-v1",
   "tools": [
     {
       "capability_id": "causal.ate",
-      "spec_digest": "1364679f2d0597959312022cda50d3563359cefe03e44c1a0995097aaca6c414",
+      "spec_digest": "a446ddd9179b44772c1627674d793708cb9864c53268271970bdb2c95b398170",
       "tool": {
         "name": "causal_ate",
-        "description": "在后门调整下估计处理变量对结果变量的线性总效应。必须引用本次运行中已经发现且有效的因果图；不支持未定向边、双箭头边、有向环或处理变量不是结果变量祖先的图。同一张图只能与产生它的数据版本一起使用。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；可确认的处理操作：选列、按列删除含缺失值的行、数值插补；至少 3 行、2 列。\n方法假设：图包含查询的处理与结果变量，且无未定向边、双箭头边或有向环；处理变量与结果变量为数值列，缺失值已在执行前处理；函数形式近似线性，效应按每 1 单位变化解释，不对非线性或交互建模；调整集取处理变量的全部父节点，不搜索其他有效调整集。\n目标图：causal_estimation_input；矩阵约定：backdoor_ols。\n边语义：directed：后门调整所用的因果方向。\n适用边界：只做父节点调整；不处理未观测混杂、选择偏倚或测量误差；不做 bootstrap，区间为线性模型内区间。如果原始数据不满足要求，先调用 request_data_processing 让用户确认处理方案，再携带同一方案调用本工具；不要自行假设清洗步骤。",
+        "description": "在后门调整下估计处理变量对结果变量的线性总效应。必须引用本次运行中已经发现且有效的因果图；不支持未定向边、双箭头边、有向环或处理变量不是结果变量祖先的图。同一张图只能与产生它的数据版本一起使用。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；至少 3 行、2 列。\n方法假设：图包含查询的处理与结果变量，且无未定向边、双箭头边或有向环；处理变量与结果变量为数值列，缺失值已在执行前处理；函数形式近似线性，效应按每 1 单位变化解释，不对非线性或交互建模；调整集取处理变量的全部父节点，不搜索其他有效调整集。\n目标图：causal_estimation_input；矩阵约定：backdoor_ols。\n边语义：directed：后门调整所用的因果方向。\n适用边界：只做父节点调整；不处理未观测混杂、选择偏倚或测量误差；不做 bootstrap，区间为线性模型内区间。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
         "parameters": {
           "additionalProperties": false,
           "properties": {
@@ -3335,77 +3084,6 @@
               "default": null,
               "description": "面向当前用户公开的工具选择依据；应在同一次 Tool Call 中提供。该字段不属于算法科学参数或检索参数。",
               "title": "Public Decision"
-            },
-            "preprocessing": {
-              "anyOf": [
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "version": {
-                      "enum": [
-                        "data-preprocessing-v1"
-                      ],
-                      "type": "string"
-                    },
-                    "steps": {
-                      "items": {
-                        "additionalProperties": false,
-                        "properties": {
-                          "operation": {
-                            "enum": [
-                              "select_columns",
-                              "drop_rows",
-                              "numeric_impute",
-                              "categorical_encode"
-                            ],
-                            "type": "string"
-                          },
-                          "columns": {
-                            "items": {
-                              "type": "string"
-                            },
-                            "type": "array"
-                          },
-                          "method": {
-                            "enum": [
-                              "mean",
-                              "median",
-                              "ordinal",
-                              null
-                            ],
-                            "type": [
-                              "string",
-                              "null"
-                            ]
-                          }
-                        },
-                        "required": [
-                          "operation",
-                          "columns"
-                        ],
-                        "type": "object"
-                      },
-                      "type": "array"
-                    },
-                    "protected_columns": {
-                      "items": {
-                        "type": "string"
-                      },
-                      "type": "array"
-                    }
-                  },
-                  "required": [
-                    "steps"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "用户已经确认的处理方案。只填写 request_data_processing 返回的方案内容；运行时按 capability_id 与方案摘要核对，未获批或摘要不一致的方案不会执行。",
-              "title": "Preprocessing"
             }
           },
           "required": [
@@ -3420,10 +3098,10 @@
     },
     {
       "capability_id": "causal.cdfm",
-      "spec_digest": "9a950ea5a1095e7c3b5ec97c48b231718213b6f9ea2ceb448e8f71f9a8944e27",
+      "spec_digest": "8490f843bd67d09ddca05662689886016db4a3df35780942e1169d029c14220c",
       "tool": {
         "name": "causal_cdfm",
-        "description": "用预训练因果发现基础模型 CDFM 在数值表格数据上做零样本图推断，一次调用返回整张候选混合图。同一个 checkpoint 的训练机制包括线性、非线性、异方差、有序或离散观测、测量误差与潜在混杂等多类机制，因此机制未知或明显非线性时，可以作为候选方法，并与 PC、DirectLiNGAM 的结果分别对照。不传 threshold 时由服务端按模型自带校准器自动决定判决边界，传入 0 到 1 的数值可覆盖它。缺失值按 NaN/±Inf 掩码传递给模型；当前接收数值存储列，不接受未编码的非数值分类列。数值准入不证明测量语义连续，也不保证训练机制适用于当前分布。输出只有边及其方向，不包含权重和置信度：方向可能随阈值变化，不可识别场景下方向证据不足；成对的两个 1 解码为一条双箭头边，表示潜在共同原因候选，结果不构成准确率或生产能力证明。\n数据要求：全部输入变量必须是数值列；缺失值按原生掩码处理；非有限值仍需显式处理；可确认的处理操作：选列、按列删除含缺失值的行、数值插补；至少 2 行、2 列。\n方法假设：输入采用数值存储；实际测量语义和分布适用性须依据证据评估；零样本识别以预训练机制覆盖当前数据分布为前提；变量名、样本顺序和冻结输入身份由外层准入固定；CDFM checkpoint 可由 causal-mcp 服务端加载。\n目标图：acyclic_directed_mixed_graph；矩阵约定：row_to_column_pair_binary。\n边语义：directed：模型推断的候选因果方向；bidirected：潜在共同原因候选，不代表已经证实存在共同原因。\n适用边界：机制覆盖不保证当前数据上的可识别性或准确率；阈值可改变结构；边不携带效应量或置信度；不继承 LiNGAM 的线性、非高斯和无潜在混杂假设。如果原始数据不满足要求，先调用 request_data_processing 让用户确认处理方案，再携带同一方案调用本工具；不要自行假设清洗步骤。",
+        "description": "用预训练因果发现基础模型 CDFM 在数值表格数据上做零样本图推断，一次调用返回整张候选混合图。同一个 checkpoint 的训练机制包括线性、非线性、异方差、有序或离散观测、测量误差与潜在混杂等多类机制，因此机制未知或明显非线性时，可以作为候选方法，并与 PC、DirectLiNGAM 的结果分别对照。不传 threshold 时由服务端按模型自带校准器自动决定判决边界，传入 0 到 1 的数值可覆盖它。缺失值按 NaN/±Inf 掩码传递给模型；当前接收数值存储列，不接受未编码的非数值分类列。数值准入不证明测量语义连续，也不保证训练机制适用于当前分布。输出只有边及其方向，不包含权重和置信度：方向可能随阈值变化，不可识别场景下方向证据不足；成对的两个 1 解码为一条双箭头边，表示潜在共同原因候选，结果不构成准确率或生产能力证明。\n数据要求：全部输入变量必须是数值列；分类列必须先按确定性顺序编码；缺失值按原生掩码处理；非有限值仍需显式处理；至少 2 行、2 列。\n方法假设：输入采用数值存储；实际测量语义和分布适用性须依据证据评估；零样本识别以预训练机制覆盖当前数据分布为前提；变量名、样本顺序和冻结输入身份由外层准入固定；CDFM checkpoint 可由 causal-mcp 服务端加载。\n目标图：acyclic_directed_mixed_graph；矩阵约定：row_to_column_pair_binary。\n边语义：directed：模型推断的候选因果方向；bidirected：潜在共同原因候选，不代表已经证实存在共同原因。\n适用边界：机制覆盖不保证当前数据上的可识别性或准确率；阈值可改变结构；边不携带效应量或置信度；不继承 LiNGAM 的线性、非高斯和无潜在混杂假设。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
         "parameters": {
           "additionalProperties": false,
           "properties": {
@@ -3468,77 +3146,6 @@
               "default": null,
               "description": "面向当前用户公开的工具选择依据；应在同一次 Tool Call 中提供。该字段不属于算法科学参数或检索参数。",
               "title": "Public Decision"
-            },
-            "preprocessing": {
-              "anyOf": [
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "version": {
-                      "enum": [
-                        "data-preprocessing-v1"
-                      ],
-                      "type": "string"
-                    },
-                    "steps": {
-                      "items": {
-                        "additionalProperties": false,
-                        "properties": {
-                          "operation": {
-                            "enum": [
-                              "select_columns",
-                              "drop_rows",
-                              "numeric_impute",
-                              "categorical_encode"
-                            ],
-                            "type": "string"
-                          },
-                          "columns": {
-                            "items": {
-                              "type": "string"
-                            },
-                            "type": "array"
-                          },
-                          "method": {
-                            "enum": [
-                              "mean",
-                              "median",
-                              "ordinal",
-                              null
-                            ],
-                            "type": [
-                              "string",
-                              "null"
-                            ]
-                          }
-                        },
-                        "required": [
-                          "operation",
-                          "columns"
-                        ],
-                        "type": "object"
-                      },
-                      "type": "array"
-                    },
-                    "protected_columns": {
-                      "items": {
-                        "type": "string"
-                      },
-                      "type": "array"
-                    }
-                  },
-                  "required": [
-                    "steps"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "用户已经确认的处理方案。只填写 request_data_processing 返回的方案内容；运行时按 capability_id 与方案摘要核对，未获批或摘要不一致的方案不会执行。",
-              "title": "Preprocessing"
             }
           },
           "title": "CausalCdfmInputToolInput",
@@ -3548,10 +3155,10 @@
     },
     {
       "capability_id": "causal.direct_lingam",
-      "spec_digest": "70fc8dfa9fc50e6fb934d6b4fea57b0b8c4e4732a70380c0e1305dfd8642e821",
+      "spec_digest": "6fe17dc33c7f78d005bd14b2b14aaf01dfaf925c406547e34399b122a0f92b58",
       "tool": {
         "name": "causal_direct_lingam",
-        "description": "在连续数值数据上使用 DirectLiNGAM 估计有向无环因果结构。适用于线性、非高斯、误差独立且没有潜在混杂的场景。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；可确认的处理操作：选列、按列删除含缺失值的行、数值插补；至少 2 行、2 列。\n方法假设：输入为连续数值变量；因果机制近似线性且噪声非高斯；误差独立并且不存在潜在混杂。\n目标图：dag_target_to_source；矩阵约定：target_to_source。\n边语义：directed：线性结构方程中的候选直接作用；权重是系数而非置信度。\n适用边界：线性、非高斯、误差独立和无潜在混杂须分别检验或保持未检验；图中系数不是已识别的干预效应。如果原始数据不满足要求，先调用 request_data_processing 让用户确认处理方案，再携带同一方案调用本工具；不要自行假设清洗步骤。",
+        "description": "在连续数值数据上使用 DirectLiNGAM 估计有向无环因果结构。适用于线性、非高斯、误差独立且没有潜在混杂的场景。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；至少 2 行、2 列。\n方法假设：输入为连续数值变量；因果机制近似线性且噪声非高斯；误差独立并且不存在潜在混杂。\n目标图：dag_target_to_source；矩阵约定：target_to_source。\n边语义：directed：线性结构方程中的候选直接作用；权重是系数而非置信度。\n适用边界：线性、非高斯、误差独立和无潜在混杂须分别检验或保持未检验；图中系数不是已识别的干预效应。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
         "parameters": {
           "additionalProperties": false,
           "properties": {
@@ -3581,77 +3188,6 @@
               "default": null,
               "description": "面向当前用户公开的工具选择依据；应在同一次 Tool Call 中提供。该字段不属于算法科学参数或检索参数。",
               "title": "Public Decision"
-            },
-            "preprocessing": {
-              "anyOf": [
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "version": {
-                      "enum": [
-                        "data-preprocessing-v1"
-                      ],
-                      "type": "string"
-                    },
-                    "steps": {
-                      "items": {
-                        "additionalProperties": false,
-                        "properties": {
-                          "operation": {
-                            "enum": [
-                              "select_columns",
-                              "drop_rows",
-                              "numeric_impute",
-                              "categorical_encode"
-                            ],
-                            "type": "string"
-                          },
-                          "columns": {
-                            "items": {
-                              "type": "string"
-                            },
-                            "type": "array"
-                          },
-                          "method": {
-                            "enum": [
-                              "mean",
-                              "median",
-                              "ordinal",
-                              null
-                            ],
-                            "type": [
-                              "string",
-                              "null"
-                            ]
-                          }
-                        },
-                        "required": [
-                          "operation",
-                          "columns"
-                        ],
-                        "type": "object"
-                      },
-                      "type": "array"
-                    },
-                    "protected_columns": {
-                      "items": {
-                        "type": "string"
-                      },
-                      "type": "array"
-                    }
-                  },
-                  "required": [
-                    "steps"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "用户已经确认的处理方案。只填写 request_data_processing 返回的方案内容；运行时按 capability_id 与方案摘要核对，未获批或摘要不一致的方案不会执行。",
-              "title": "Preprocessing"
             }
           },
           "title": "CausalDirectLiNGAMInputToolInput",
@@ -3661,10 +3197,10 @@
     },
     {
       "capability_id": "causal.pc",
-      "spec_digest": "e679ec00c83fce30a4672ac829dbff72652b5e070a1ce5763226d51cbcec34c9",
+      "spec_digest": "a9c74cd28ad8abea8e8fd10d5e1ad0f48699fb39947af8b87a580efb0d438953",
       "tool": {
         "name": "causal_pc",
-        "description": "在表格数据上使用 PC 方法发现条件独立结构并生成部分有向图。适用于一般观测因果发现；需要数值或可确定性编码的表格数据，不应在明显存在潜在混杂且需要专门处理时作为唯一方法。\n数据要求：分类列必须先按确定性顺序编码；不允许存在缺失值、空列或非有限值；可确认的处理操作：选列、按列删除含缺失值的行、数值插补、分类编码；至少 2 行、2 列。\n方法假设：条件独立性检验适用于当前数据；因果马尔可夫性、忠实性和无潜在混杂的因果充分性；数据中的变量名和样本身份已经由外层准入冻结。\n目标图：pdag；矩阵约定：causal_learn_endpoints。\n边语义：directed：候选因果方向；undirected：方向尚未识别的相邻关系。\n适用边界：条件独立性检验和有限样本会影响结构；具体条件按实际 independence_test 判断；Fisher-Z 基于偏相关与高斯条件独立关系，不能因 PC 是通用算法就声称本次检验不受线性或分布条件限制；骨架相近不等于方向得到验证；不直接估计因果效应。如果原始数据不满足要求，先调用 request_data_processing 让用户确认处理方案，再携带同一方案调用本工具；不要自行假设清洗步骤。",
+        "description": "在表格数据上使用 PC 方法发现条件独立结构并生成部分有向图。适用于一般观测因果发现；需要数值或可确定性编码的表格数据，不应在明显存在潜在混杂且需要专门处理时作为唯一方法。\n数据要求：分类列必须先按确定性顺序编码；不允许存在缺失值、空列或非有限值；至少 2 行、2 列。\n方法假设：条件独立性检验适用于当前数据；因果马尔可夫性、忠实性和无潜在混杂的因果充分性；数据中的变量名和样本身份已经由外层准入冻结。\n目标图：pdag；矩阵约定：causal_learn_endpoints。\n边语义：directed：候选因果方向；undirected：方向尚未识别的相邻关系。\n适用边界：条件独立性检验和有限样本会影响结构；具体条件按实际 independence_test 判断；Fisher-Z 基于偏相关与高斯条件独立关系，不能因 PC 是通用算法就声称本次检验不受线性或分布条件限制；骨架相近不等于方向得到验证；不直接估计因果效应。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
         "parameters": {
           "additionalProperties": false,
           "properties": {
@@ -3712,77 +3248,6 @@
               "default": null,
               "description": "面向当前用户公开的工具选择依据；应在同一次 Tool Call 中提供。该字段不属于算法科学参数或检索参数。",
               "title": "Public Decision"
-            },
-            "preprocessing": {
-              "anyOf": [
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "version": {
-                      "enum": [
-                        "data-preprocessing-v1"
-                      ],
-                      "type": "string"
-                    },
-                    "steps": {
-                      "items": {
-                        "additionalProperties": false,
-                        "properties": {
-                          "operation": {
-                            "enum": [
-                              "select_columns",
-                              "drop_rows",
-                              "numeric_impute",
-                              "categorical_encode"
-                            ],
-                            "type": "string"
-                          },
-                          "columns": {
-                            "items": {
-                              "type": "string"
-                            },
-                            "type": "array"
-                          },
-                          "method": {
-                            "enum": [
-                              "mean",
-                              "median",
-                              "ordinal",
-                              null
-                            ],
-                            "type": [
-                              "string",
-                              "null"
-                            ]
-                          }
-                        },
-                        "required": [
-                          "operation",
-                          "columns"
-                        ],
-                        "type": "object"
-                      },
-                      "type": "array"
-                    },
-                    "protected_columns": {
-                      "items": {
-                        "type": "string"
-                      },
-                      "type": "array"
-                    }
-                  },
-                  "required": [
-                    "steps"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "用户已经确认的处理方案。只填写 request_data_processing 返回的方案内容；运行时按 capability_id 与方案摘要核对，未获批或摘要不一致的方案不会执行。",
-              "title": "Preprocessing"
             }
           },
           "title": "CausalPcInputToolInput",

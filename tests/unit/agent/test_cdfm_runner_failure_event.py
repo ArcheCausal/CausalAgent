@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+import importlib.util
+import logging
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
 
 import pytest
 
@@ -13,41 +13,14 @@ from Agent.CausalAgentMCP.auth import sign_invocation
 from Agent.CausalAgentMCP.config import McpServerConfig
 from Agent.CausalAgentMCP.executor_pool import (
     BoundedProcessPool,
-    ExecutionOutcome,
     PoolExecutionError,
     RunnerExecutionError,
 )
-from Agent.CausalAgentMCP.runner_registry import RunnerRegistry, RunnerSpec
+from Agent.CausalAgentMCP.runner_registry import build_default_registry
 from Agent.CausalAgentMCP.service import CausalMcpService
 from Agent.deep_agent_tools.algorithm_specs import CDFM_SPEC
 from Agent.deep_agent_tools.models import AlgorithmExecutionCommand, McpInvocationContext
-
-
-class _RunnerFailurePool:
-    """返回 runner 失败 payload 的执行池替身，不启动真实进程。"""
-
-    def ready(self) -> bool:
-        return True
-
-    async def execute(self, **kwargs):
-        await kwargs["before_start"](0.0)
-        return ExecutionOutcome(
-            value={
-                "schema_version": "causal_discovery_v1",
-                "success": False,
-                "algorithm": "cdfm",
-                "runner_version": "cdfm-runner-v1",
-                "error_type": "AlgorithmExecutionError",
-                "message": "CDFM 模型加载失败。",
-                "diagnostics": {
-                    "error_type": "FileNotFoundError",
-                    "error_message": "权重缺失",
-                    "model_path": "/opt/cdfm-weights",
-                    "model_source": "local_dir",
-                },
-            },
-            executor_slot_id="process-0",
-        )
+from tests.support.local_algorithm_execution import LocalAlgorithmExecutor
 
 
 def _context() -> McpInvocationContext:
@@ -80,76 +53,95 @@ def _command(context: McpInvocationContext) -> AlgorithmExecutionCommand:
     )
 
 
-def test_runner_failure_emits_controlled_diagnostics_without_free_text() -> None:
-    """runner 失败必须写稳定字段，且不能把异常自由文本带进事件详情。"""
+def test_runner_failure_emits_controlled_diagnostics_without_free_text(tmp_path, monkeypatch, caplog) -> None:
+    """真实进程执行 runner，分别验证缺依赖或空权重目录的失败合同。"""
+    # 只选择当前环境应满足的合同；两种环境都执行正式 runner，不跳过。
+    cdfm_available = importlib.util.find_spec("cdfm") is not None
+    monkeypatch.setenv("CDFM_MODEL_PATH", str(tmp_path))
+    local_input = LocalAlgorithmExecutor().validated_input
+    caplog.set_level(logging.INFO, logger="Agent.CausalAgentMCP.service")
 
-    context = _context()
-    command = _command(context)
-    registry = RunnerRegistry(
-        [
-            RunnerSpec(
-                capability_id=CDFM_SPEC.capability_id,
-                version=CDFM_SPEC.version,
-                spec_digest=CDFM_SPEC.spec_digest,
-                timeout_seconds=600,
-                concurrency=1,
-                runner=lambda *_: {},
-            )
-        ]
-    )
-    service = CausalMcpService(
-        config=McpServerConfig(
-            service_token="token",
-            signing_key_current="secret",
-            signing_key_previous=None,
-            signing_key_id="current",
-            signing_key_previous_id="previous",
-            process_workers=1,
-            queue_capacity=1,
-            enqueue_timeout_seconds=1.0,
-            algorithm_deadline_seconds=600,
-            slow_log_seconds=60.0,
-        ),
-        registry=registry,
-        executor_pool=_RunnerFailurePool(),
-        authority_reader=lambda _context: "A,B\n1,2\n3,4\n",
-        database_probe=lambda: True,
-    )
-    observed: list[tuple[str, dict | None]] = []
-
-    def capture(_logger, event_code, **kwargs):
-        observed.append((event_code, kwargs.get("details")))
-
-    with patch("Agent.CausalAgentMCP.service.log_event", side_effect=capture):
-        payload = asyncio.run(
-            service.execute_payload(
-                {
-                    "command": command.model_dump(mode="json"),
-                    "trusted_context": context.model_dump(mode="json"),
-                    "signature": sign_invocation(context, command, "secret"),
-                }
-            )
+    async def scenario():
+        context = _context()
+        command = _command(context)
+        pool = BoundedProcessPool(process_workers=1)
+        service = CausalMcpService(
+            config=McpServerConfig(
+                service_token="token", signing_key_current="secret", signing_key_previous=None,
+                signing_key_id="current", signing_key_previous_id="previous",
+            ),
+            registry=build_default_registry(), executor_pool=pool,
+            authority_reader=lambda _context: local_input,
         )
+        await pool.start()
+        try:
+            return await service.execute_payload({
+                "command": command.model_dump(mode="json"),
+                "trusted_context": context.model_dump(mode="json"),
+                "signature": sign_invocation(context, command, "secret"),
+            })
+        finally:
+            await pool.close()
 
+    payload = asyncio.run(scenario())
     assert payload["ok"] is True
-    assert payload["result"]["status"] == "execution_failed"
-    events = dict(observed)
-    assert "mcp.runner.failed" in events
-    details = events["mcp.runner.failed"]
-    assert details["capability"] == CDFM_SPEC.capability_id
-    assert details["error_type"] == "FileNotFoundError"
-    assert details["reason_code"] == "tool_error"
-    assert details["model_source"] == "local_dir"
-    assert "error_message" not in details
+    # raw_payload 来自真实子进程；不以测试构造的失败 payload 代替 runner。
+    raw = payload["raw_payload"]
+    assert raw["success"] is False
+    assert raw["schema_version"] == "causal_discovery_v1"
+    assert raw["algorithm"] == "cdfm"
+    if cdfm_available:
+        assert raw["error_type"] == "AlgorithmExecutionError"
+        assert raw["message"] == "CDFM 模型加载失败。"
+        diagnostics = raw["diagnostics"]
+        assert diagnostics["model_path"] == str(tmp_path)
+        assert diagnostics["model_source"] == "local_dir"
+        assert isinstance(diagnostics["error_message"], str)
+        assert diagnostics["error_message"]
+        error_type = diagnostics["error_type"]
+        assert isinstance(error_type, str) and error_type.isidentifier()
+        assert len(error_type) <= 64
+        expected_status = "execution_failed"
+        expected_code = "ALGORITHM_EXECUTION_FAILED"
+        expected_reason = "tool_error"
+        expected_source = "local_dir"
+    else:
+        assert raw["error_type"] == "DependencyUnavailableError"
+        assert raw["message"] == "CDFM 依赖不可用。"
+        assert "diagnostics" not in raw
+        error_type = "DependencyUnavailableError"
+        expected_status = "not_ready"
+        expected_code = "ALGORITHM_NOT_READY"
+        expected_reason = "readiness_failed"
+        expected_source = "unknown"
+
+    result = payload["result"]
+    assert result["status"] == expected_status
+    assert result["diagnostics"]["safe_error_code"] == expected_code
+    assert result["standardized_graph"] is None
+    assert result["raw_result_ref"] is None
+    assert raw["message"] not in str(result)
+    failures = [record for record in caplog.records if getattr(record, "event_code", None) == "mcp.runner.failed"]
+    assert len(failures) == 1
+    details = failures[0].details
+    assert details == {
+        "capability": CDFM_SPEC.capability_id,
+        "error_type": error_type,
+        "reason_code": expected_reason,
+        "model_source": expected_source,
+    }
+    assert str(tmp_path) not in str(details)
 
 
-def _boom(_csv_data, _parameters, _artifacts):
-    """模块级 runner 替身；抛异常时必须保留异常类名而不是输出正文。"""
+def _boom(csv_data, _parameters, _artifacts):
+    """真实文件读取失败；子进程只能输出异常类名。"""
     print("third-party-noise: /tmp/secret-path")
-    raise FileNotFoundError("weights missing")
+    from pathlib import Path
+
+    return Path(csv_data).read_text(encoding="utf-8")
 
 
-def test_runner_exception_surfaces_only_its_type() -> None:
+def test_runner_exception_surfaces_only_its_type(tmp_path) -> None:
     """runner 抛异常时只把异常类名带回调用方，子进程输出不进入错误对象。"""
 
     async def scenario():
@@ -157,14 +149,13 @@ def test_runner_exception_surfaces_only_its_type() -> None:
             process_workers=1,
             queue_capacity=1,
             enqueue_timeout_seconds=5,
-            executor_factory=ThreadPoolExecutor,
         )
         await pool.start()
         try:
             await pool.execute(
                 capability_id="unit-test",
                 runner=_boom,
-                csv_data="A,B\n1,2\n",
+                csv_data=str(tmp_path / "missing-weights"),
                 parameters={},
                 timeout_seconds=30,
                 concurrency=1,

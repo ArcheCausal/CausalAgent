@@ -16,10 +16,6 @@ from typing import Any
 from Agent.deep_agent_tools.identity import new_message_execution_id
 from Agent.deep_agent_tools.models import FinalAnalysisDecision
 from Agent.deep_agent_tools.registry import AlgorithmRegistry
-from Agent.deep_agent_tools.interaction import (
-    DATA_PROCESSING_TOOL_NAME,
-    DataProcessingTool,
-)
 from Agent.deep_agent_tools.dependency_dispatch import (
     _tool_calls_from_state,
     build_algorithm_dependency_middleware,
@@ -235,7 +231,7 @@ def _build_message_identity_middleware(
 
 
 def _register_harness_profile(profile_key: str) -> None:
-    """关闭 0.7.13 自动注入的 general-purpose subagent 和 ``task`` 工具。"""
+    """关闭自动通用子 Agent，并移除 Worker 不允许执行的内置工具。"""
 
     if not profile_key.strip():
         raise DeepAgentDependencyError("harness profile key must be non-blank")
@@ -250,7 +246,18 @@ def _register_harness_profile(profile_key: str) -> None:
     register_harness_profile(
         profile_key,
         HarnessProfile(
-            general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)
+            general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False),
+            excluded_tools=frozenset(
+                {
+                    "execute",
+                    "write_file",
+                    "delete",
+                    "ls",
+                    "glob",
+                    "grep",
+                    "task",
+                }
+            ),
         ),
     )
 
@@ -333,69 +340,6 @@ def build_deep_agent(
         _build_summarization_middleware(configured_model, profile),
         *build_budget_middlewares(profile),
     ]
-    try:
-        from langchain.agents.middleware import AgentMiddleware
-    except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover - 真实版本门禁
-        raise DeepAgentDependencyError("LangChain AgentMiddleware is not installed") from exc
-
-    interaction_tool = DataProcessingTool(registry=registry) if registry is not None else None
-
-    class InteractionTurnGuardMiddleware(AgentMiddleware):
-        """确认工具必须独占一个工具调用轮次。"""
-
-        @staticmethod
-        def _interaction_calls(state: Any) -> list[Any]:
-            messages = getattr(state, "get", lambda *_: None)("messages") or []
-            latest = next(
-                (message for message in reversed(messages) if getattr(message, "tool_calls", None)),
-                None,
-            )
-            return [
-                call
-                for call in (getattr(latest, "tool_calls", None) or [])
-                if isinstance(call, Mapping)
-                and call.get("name") == DATA_PROCESSING_TOOL_NAME
-            ]
-
-        async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
-            state = getattr(request, "state", None)
-            messages = state.get("messages") if isinstance(state, Mapping) else None
-            latest = next(
-                (
-                    message
-                    for message in reversed(messages or [])
-                    if getattr(message, "tool_calls", None)
-                ),
-                None,
-            )
-            all_calls = list(getattr(latest, "tool_calls", None) or [])
-            calls = [
-                call
-                for call in all_calls
-                if isinstance(call, Mapping)
-                and call.get("name") == DATA_PROCESSING_TOOL_NAME
-            ]
-            if calls and len(all_calls) > 1:
-                from langchain_core.messages import ToolMessage
-                import json
-
-                call_id = str(request.tool_call.get("id") or "")
-                return ToolMessage(
-                    content=json.dumps(
-                        {
-                            "status": "rejected",
-                            "message": (
-                                "request_data_processing 必须独占一个工具调用轮次；"
-                                "不要在同一次响应中同时请求确认和执行算法。"
-                            ),
-                        },
-                        ensure_ascii=False,
-                    ),
-                    tool_call_id=call_id,
-                    name=str(request.tool_call.get("name") or DATA_PROCESSING_TOOL_NAME),
-                    status="error",
-                )
-            return await handler(request)
     if registry is not None:
         middleware.append(
             build_algorithm_dependency_middleware(
@@ -404,7 +348,6 @@ def build_deep_agent(
                 timeout_seconds=profile.budget.tool_node_timeout_seconds,
             )
         )
-        middleware.append(InteractionTurnGuardMiddleware())
     # 放在会修改工具集合的项目 middleware 之后；框架后续的 MemoryMiddleware
     # 只修改提示词，ToolStrategy 单独追加结构化输出，不重新加入领域工具。
     middleware.append(ToolVisibilityMiddleware())
@@ -413,10 +356,7 @@ def build_deep_agent(
     middleware.append(_build_message_identity_middleware(registry=registry))
     kwargs: dict[str, Any] = {
         "model": configured_model,
-        "tools": [
-            *_materialize_domain_tools(domain_tools),
-            *([interaction_tool.to_langchain_tool()] if interaction_tool is not None else []),
-        ],
+        "tools": _materialize_domain_tools(domain_tools),
         "subagents": [],
         "memory": list(MEMORY_PATHS),
         "system_prompt": active_config.system_prompt,

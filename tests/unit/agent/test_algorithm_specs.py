@@ -104,7 +104,6 @@ def test_causal_ate_spec_is_activated() -> None:
         "treatment",
         "outcome",
         "public_decision",
-        "preprocessing",
     }
     assert "standardized_graph" not in schema["parameters"]["properties"]
 

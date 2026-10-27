@@ -195,6 +195,26 @@ def build_context_index(
     return entries
 
 
+def rebuild_context_index(
+    previous_index: Any, previous_context: Any, switched_to_id: str | None, *, limit: int = 8,
+) -> list:
+    """切换后保留旧上下文索引，并移除当前上下文，不额外读库。"""
+    entries: list = []
+    if isinstance(previous_context, dict) and previous_context.get("analysis_context_id"):
+        entries.extend(build_context_index([previous_context]))
+    if isinstance(previous_index, list):
+        entries.extend(entry for entry in previous_index if isinstance(entry, dict))
+    unique: list = []
+    seen: set = set()
+    for entry in entries:
+        context_id = entry.get("analysis_context_id")
+        if not context_id or context_id in seen or context_id == switched_to_id:
+            continue
+        seen.add(context_id)
+        unique.append(entry)
+    return unique[: max(0, int(limit))]
+
+
 def index_prompt_view(index: Sequence[Mapping[str, Any]] | None) -> str:
     """把历史上下文索引渲染成模型可读文本，只使用展示信息。"""
     lines: list[str] = []
@@ -428,7 +448,7 @@ def report_data_metadata(parameters: Any) -> dict[str, Any]:
     params = parameters if isinstance(parameters, Mapping) else {}
     profiles = params.get("column_profiles") or {}
     profiles = profiles if isinstance(profiles, Mapping) else {}
-    return {
+    result = {
         "n_rows": params.get("n_rows"), "n_cols": params.get("n_cols"),
         "columns": list(params.get("columns") or profiles.keys()),
         "column_profiles": {str(column): {key: copy.deepcopy(profile[key]) for key in _REPORT_PROFILE_FIELDS if key in profile}
@@ -438,6 +458,23 @@ def report_data_metadata(parameters: Any) -> dict[str, Any]:
                                if key in {"total_missing_ratio", "constant_columns", "high_missing_columns"}},
         "nonlinearity": copy.deepcopy(params.get("nonlinearity")),
     }
+    preparation = params.get("data_preparation")
+    if isinstance(preparation, Mapping):
+        result["data_preparation"] = {
+            key: copy.deepcopy(preparation[key])
+            for key in (
+                "source_filename",
+                "analysis_filename",
+                "row_count",
+                "column_count",
+                "observation_unit",
+                "processing_summary",
+                "transformations",
+                "limitations",
+            )
+            if key in preparation
+        }
+    return result
 
 
 def _report_result(result: AlgorithmResult, parameters: Any) -> dict[str, Any]:
@@ -469,11 +506,10 @@ def _data_view_comparison(results: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "status": "insufficient" if missing else "different" if len(distinct) > 1 else "same",
         "data_views_differ": None if missing else len(distinct) > 1,
-        "compared_fields": ["row_count", "column_count", "columns", "operations", "plan_digest",
-                            "dropped_row_count", "imputed_columns", "encoded_columns"],
+        "compared_fields": ["row_count", "column_count", "columns"],
         "missing_result_refs": missing,
         "runner_processing": runner_processing,
-        "comparison_boundary": "data_view 比较送入 runner 的数据；runner 内部标准化与缺失处理另列，不声称内部计算相同。",
+        "comparison_boundary": "data_view 比较所有算法共同使用的已校验分析数据集；算法不得按各自参数改写数据。",
     }
 
 

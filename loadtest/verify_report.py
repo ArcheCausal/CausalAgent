@@ -53,7 +53,8 @@ def verify(summary: dict, logcheck: dict | None = None) -> tuple[str, list[str]]
         problems.append("报告渲染修改了输入摘要")
     if logcheck != original_log:
         problems.append("报告渲染修改了输入日志证据")
-    for marker in ("容量口径 v2", "计时与分阶段吞吐", "仅完成样本 p95"):
+    for marker in ("容量口径 v2", "计时与分阶段吞吐", "仅完成样本 p95",
+                   "交互答复", "沙盒会话与阶段时间", "完整排空 complete_drained"):
         if marker not in body:
             problems.append(f"报告缺少 {marker}")
     capacity = enriched.get("capacity") or {}

@@ -278,8 +278,15 @@ def delete_file():
                 raise RuntimeError("逻辑文件删除影响行数异常")
 
             cursor.execute(
-                "SELECT COUNT(*) AS reference_count FROM user_files WHERE object_id = %s",
-                (file_row["object_id"],),
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM user_files WHERE object_id = %s)
+                    +
+                    (SELECT COUNT(*) FROM analysis_job_datasets
+                     WHERE data_object_id = %s OR script_object_id = %s)
+                    AS reference_count
+                """,
+                (file_row["object_id"], file_row["object_id"], file_row["object_id"]),
             )
             reference_count = int((cursor.fetchone() or {}).get("reference_count") or 0)
             blob_deleted = False

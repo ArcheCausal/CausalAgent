@@ -1,6 +1,7 @@
 """P2-U ToolStrategy 终态和 finalization retry 预算测试。"""
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from datetime import datetime, timezone
 import pytest
@@ -12,6 +13,7 @@ from Agent.deep_agent.memory import build_in_memory_backend
 from Agent.deep_agent_tools import build_default_registry
 from Agent.deep_agent_tools.adapters import build_default_adapters
 from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
+from tests.support.bound_analysis_input import bind_analysis_input
 from tests.support.local_algorithm_execution import LocalAlgorithmExecutor, PC_CSV, PC_INSUFFICIENT_SAMPLE_CSV
 
 from Agent.deep_agent.finalization import (
@@ -86,7 +88,9 @@ def _algorithm_execution(*, failure: bool = False):
         worker_id="worker-1",
         input_identity="input-sha",
     )
-    executor = LocalAlgorithmExecutor(PC_INSUFFICIENT_SAMPLE_CSV if failure else PC_CSV)
+    csv_data = PC_INSUFFICIENT_SAMPLE_CSV if failure else PC_CSV
+    identity = bind_analysis_input(identity, csv_data)
+    executor = LocalAlgorithmExecutor(csv_data)
     backend = build_in_memory_backend(user_id=7)
     context = AgentRunContext(
         execution_guard=None,
@@ -170,7 +174,9 @@ def _evidence_ledger(
         attempt_count=identity.attempt_count,
         lease_epoch=identity.lease_epoch,
         worker_id=identity.worker_id,
-        input_identity=identity.input_identity,
+        input_identity=identity.current_input_identity(),
+        source_input_identity=identity.source_input_identity(),
+        analysis_dataset_id=identity.analysis_input.dataset_id,
         attempts={
             0: ActionAttempt(
                 retry_ordinal=0,
@@ -214,7 +220,9 @@ def _ate_attempt(identity, registry, *, status="not_ready"):
             job_id=str(identity.job_id),
             attempt_count=identity.attempt_count,
             lease_epoch=identity.lease_epoch,
-            input_identity=identity.input_identity,
+            input_identity=identity.current_input_identity(),
+            source_input_identity=identity.source_input_identity(),
+            analysis_dataset_id=identity.analysis_input.dataset_id,
             spec_digest=spec.spec_digest,
             invocation_id=invocation_id,
             capability_id=spec.capability_id,
@@ -233,7 +241,9 @@ def _ate_attempt(identity, registry, *, status="not_ready"):
         attempt_count=identity.attempt_count,
         lease_epoch=identity.lease_epoch,
         worker_id=identity.worker_id,
-        input_identity=identity.input_identity,
+        input_identity=identity.current_input_identity(),
+        source_input_identity=identity.source_input_identity(),
+        analysis_dataset_id=identity.analysis_input.dataset_id,
         attempts={
             0: ActionAttempt(
                 retry_ordinal=0,
@@ -492,7 +502,9 @@ def _valid_ate_result(identity, registry):
             job_id=str(identity.job_id),
             attempt_count=identity.attempt_count,
             lease_epoch=identity.lease_epoch,
-            input_identity=identity.input_identity,
+            input_identity=identity.current_input_identity(),
+            source_input_identity=identity.source_input_identity(),
+            analysis_dataset_id=identity.analysis_input.dataset_id,
             spec_digest=spec.spec_digest,
             invocation_id=invocation_id,
             capability_id=spec.capability_id,
@@ -511,7 +523,9 @@ def _valid_ate_result(identity, registry):
         attempt_count=identity.attempt_count,
         lease_epoch=identity.lease_epoch,
         worker_id=identity.worker_id,
-        input_identity=identity.input_identity,
+        input_identity=identity.current_input_identity(),
+        source_input_identity=identity.source_input_identity(),
+        analysis_dataset_id=identity.analysis_input.dataset_id,
         attempts={
             0: ActionAttempt(
                 retry_ordinal=0,
@@ -550,6 +564,37 @@ def test_finalization_gate_accepts_estimation_result_as_primary() -> None:
     )
 
     assert accepted.primary_result_ref == result.result_ref
+
+
+@pytest.mark.parametrize("changed,reason", [
+    ("dataset", "analysis dataset identity mismatch"),
+    ("content", "no matching ledger record"),
+    ("source", "analysis dataset identity mismatch"),
+])
+def test_finalization_gate_rejects_results_after_analysis_input_changes(changed, reason) -> None:
+    identity, registry, result, ledger = _algorithm_execution()
+    decision = validate_structured_response({
+        **_decision(),
+        "primary_result_ref": result.result_ref,
+        "result_assessments": [{
+            "result_ref": result.result_ref, "disposition": "primary",
+            "rationale": "采用已完成的 PC 结果。",
+        }],
+    })
+    if changed == "dataset":
+        updated = bind_analysis_input(identity, dataset_id=2)
+    elif changed == "content":
+        rows = PC_CSV.splitlines()
+        updated = bind_analysis_input(identity, "\n".join([rows[0], *reversed(rows[1:])]) + "\n")
+    else:
+        updated = replace(identity, input_identity=identity.current_input_identity())
+    with pytest.raises(StructuredResponseError, match=reason):
+        FinalizationGate(registry=registry).validate(
+            decision=decision,
+            algorithm_results={result.result_ref: result},
+            action_ledger={ledger.invocation_id: ledger},
+            trusted_identity=updated,
+        )
 
 
 def test_gate_validated_decision_is_projected_with_public_algorithm_names() -> None:

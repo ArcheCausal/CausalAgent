@@ -8,12 +8,15 @@ State 会进入 checkpoint，而本模块中的对象只在一次 graph invocati
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from types import MappingProxyType
 from uuid import UUID
 
 from Agent.deep_agent_tools.models import McpInvocationContext
+from Agent.measurement_semantics import normalize_semantic_kinds
 
 
 def _canonical_uuid(value: str | UUID, *, field_name: str) -> str:
@@ -74,6 +77,45 @@ class FrozenInputRef:
         return True
 
 
+@dataclass(eq=False)
+class AnalysisInputRef:
+    """一次 Job 当前选中的已校验分析数据集身份。"""
+
+    dataset_id: int | None = None
+    object_id: int | None = None
+    content_hash: str | None = None
+    filename: str | None = None
+    _semantic_kinds: tuple[tuple[str, str], ...] | None = field(
+        default=None, init=False, repr=False,
+    )
+
+    @property
+    def semantic_kinds(self) -> Mapping[str, str] | None:
+        if self._semantic_kinds is None:
+            return None
+        return MappingProxyType(dict(self._semantic_kinds))
+
+    def bind(
+        self, *, dataset_id: int, object_id: int, content_hash: str, filename: str,
+        semantic_kinds: Mapping[str, str] | None = None,
+    ) -> None:
+        if dataset_id <= 0 or object_id <= 0:
+            raise ValueError("prepared dataset and object IDs must be positive")
+        if not content_hash or content_hash != content_hash.strip():
+            raise ValueError("prepared dataset hash must be a non-blank string")
+        if not filename or filename != filename.strip():
+            raise ValueError("prepared dataset filename must be a non-blank string")
+        snapshot = (
+            tuple(normalize_semantic_kinds(semantic_kinds).items())
+            if semantic_kinds is not None else None
+        )
+        self.dataset_id = dataset_id
+        self.object_id = object_id
+        self.content_hash = content_hash
+        self.filename = filename
+        self._semantic_kinds = snapshot
+
+
 @dataclass(frozen=True)
 class TrustedJobIdentity:
     """由 worker claim/lease 绑定的可信 Job 身份。
@@ -92,6 +134,14 @@ class TrustedJobIdentity:
     input_snapshot_digest: str | None = None
     # 可刷新的冻结输入引用；存在时 input_snapshot_digest 跟随它变化。
     frozen_input: FrozenInputRef | None = None
+    # 与用户原始文件身份分离；只在独立校验和 MySQL 绑定成功后写入。
+    analysis_input: AnalysisInputRef | None = None
+
+    def source_input_identity(self) -> str:
+        """返回用户最初冻结的上传文件摘要。"""
+        if self.frozen_input is not None:
+            return self.frozen_input.digest
+        return self.input_snapshot_digest or self.input_identity
 
     def current_input_identity(self) -> str:
         """返回当前有效的冻结输入摘要。
@@ -100,6 +150,8 @@ class TrustedJobIdentity:
         服务端最新提交的 hash，使 MCP 上下文、适配器校验和 provenance 校验保持一致。
         """
 
+        if self.analysis_input is not None and self.analysis_input.content_hash is not None:
+            return self.analysis_input.content_hash
         if self.frozen_input is not None:
             return self.frozen_input.digest
         return self.input_snapshot_digest or self.input_identity
@@ -156,6 +208,12 @@ class TrustedJobIdentity:
             lease_epoch=self.lease_epoch,
             worker_id=self.worker_id,
             input_snapshot_digest=digest,
+            source_input_identity=self.source_input_identity(),
+            analysis_dataset_id=(
+                self.analysis_input.dataset_id
+                if self.analysis_input is not None
+                else None
+            ),
             issued_at=issued_at,
             expires_at=issued_at + timedelta(seconds=ttl_seconds),
             key_id=key_id,
@@ -189,6 +247,13 @@ class AgentRunContext:
     # 父图 Deep Agent task 的 opaque step ID；只用于把 child tool 事件关联到
     # 已持久化的父阶段，不进入 State/checkpoint。
     deep_agent_step_id: str | None = None
+    # OpenSandbox client and data-preparation graph are process-scoped services.
+    # They are injected by the worker and never stored in State/checkpoints.
+    sandbox_provider: Any | None = None
+    data_processing_agent: Any | None = None
+    algorithm_registry: Any | None = None
+    # 由父图按当前分析目标与算法输入要求计算，只在本次调用内用于方案版本。
+    data_processing_goal_identity: str | None = None
 
     async def ensure_active(self) -> None:
         """在跨边界调用前复用已有 JobExecutionGuard 的资格检查。"""
@@ -233,6 +298,10 @@ class AgentRunContext:
                 "trusted_identity",
                 "event_sink",
                 "deep_agent_step_id",
+                "sandbox_provider",
+                "data_processing_agent",
+                "algorithm_registry",
+                "analysis_input",
             }
             leaked = forbidden.intersection(state)
             if leaked:

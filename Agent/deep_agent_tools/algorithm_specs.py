@@ -15,10 +15,6 @@ from .models import (
     CausalEffect,
     ContractModel,
     MethodDefinition,
-    PREPROCESSING_OPERATION_ORDER,
-    PreprocessingOperation,
-    PreprocessingPlan,
-    PreprocessingStep,
     PublicDecision,
     StandardizedGraph,
     canonical_json_bytes,
@@ -33,72 +29,16 @@ AlgorithmKind = Literal[
 
 Availability = Literal["available", "unavailable", "unknown"]
 
-_PREPROCESSING_LABELS: dict[str, str] = {
-    "select_columns": "选列",
-    "drop_rows": "按列删除含缺失值的行",
-    "numeric_impute": "数值插补",
-    "categorical_encode": "分类编码",
-}
-
-
 @lru_cache(maxsize=None)
 def build_model_tool_input_schema(
     base_schema: type[BaseModel],
-    *,
-    include_preprocessing: bool = False,
 ) -> type[BaseModel]:
-    """给模型工具 envelope 增加公开说明，不改变底层业务参数契约。
-
-    只有算法工具接受 preprocessing；证据检索工具不得出现该字段。
-    """
+    """给模型工具 envelope 增加公开选择说明，不改变科学参数契约。"""
 
     decision_schema = PublicDecision.model_json_schema()
     tolerant_decision_type = Annotated[Any, WithJsonSchema(decision_schema)]
-    # 模型可见 schema 手动内联，避免动态 envelope 引用无法解析的 $defs。
-    # 运行时仍由 PreprocessingPlan 做严格校验。
-    plan_schema: dict[str, Any] = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "version": {"type": "string", "enum": ["data-preprocessing-v1"]},
-            "steps": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "operation": {
-                            "type": "string",
-                            "enum": [
-                                "select_columns",
-                                "drop_rows",
-                                "numeric_impute",
-                                "categorical_encode",
-                            ],
-                        },
-                        "columns": {"type": "array", "items": {"type": "string"}},
-                        "method": {
-                            "type": ["string", "null"],
-                            "enum": ["mean", "median", "ordinal", None],
-                        },
-                    },
-                    "required": ["operation", "columns"],
-                },
-            },
-            "protected_columns": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": ["steps"],
-    }
-    tolerant_plan_type = Annotated[Any, WithJsonSchema(plan_schema)]
-    if include_preprocessing:
-        annotations = {
-            "public_decision": tolerant_decision_type | None,
-            "preprocessing": tolerant_plan_type | None,
-        }
-    else:
-        annotations = {"public_decision": tolerant_decision_type | None}
     namespace: dict[str, Any] = {
-        "__annotations__": annotations,
+        "__annotations__": {"public_decision": tolerant_decision_type | None},
         "__module__": base_schema.__module__,
         "public_decision": Field(
             default=None,
@@ -108,15 +48,6 @@ def build_model_tool_input_schema(
             ),
         ),
     }
-    if include_preprocessing:
-        namespace["preprocessing"] = Field(
-            default=None,
-            description=(
-                "用户已经确认的处理方案。只填写 request_data_processing "
-                "返回的方案内容；运行时按 capability_id 与方案摘要核对，"
-                "未获批或摘要不一致的方案不会执行。"
-            ),
-        )
     return type(
         f"{base_schema.__name__}ToolInput",
         (base_schema,),
@@ -219,7 +150,7 @@ class AlgorithmSpec(ContractModel):
     requires_numeric_columns: bool = False
     requires_complete_cases: bool = False
     native_missing_handling: Literal["reject", "mask"] = "reject"
-    allowed_preprocessing: tuple[PreprocessingOperation, ...] = ()
+    supports_encoded_categories: bool = False
     min_rows: int = Field(default=2, ge=1)
     min_columns: int = Field(default=2, ge=1)
     enabled: bool = True
@@ -277,17 +208,6 @@ class AlgorithmSpec(ContractModel):
             raise ValueError(
                 "a spec that requires complete cases cannot declare native masking"
             )
-        if self.native_missing_handling == "mask" and "drop_rows" not in self.allowed_preprocessing:
-            # 掩码算法仍然允许用户显式删行，但必须由方案声明，不能隐式处理。
-            pass
-        if len(set(self.allowed_preprocessing)) != len(self.allowed_preprocessing):
-            raise ValueError("allowed_preprocessing must not repeat operations")
-        order = [
-            PREPROCESSING_OPERATION_ORDER.index(operation)
-            for operation in self.allowed_preprocessing
-        ]
-        if order != sorted(order):
-            raise ValueError("allowed_preprocessing must follow the canonical order")
         return self
 
     def canonical_payload(self) -> dict[str, Any]:
@@ -303,7 +223,7 @@ class AlgorithmSpec(ContractModel):
             "requires_numeric_columns": self.requires_numeric_columns,
             "requires_complete_cases": self.requires_complete_cases,
             "native_missing_handling": self.native_missing_handling,
-            "allowed_preprocessing": list(self.allowed_preprocessing),
+            "supports_encoded_categories": self.supports_encoded_categories,
             "min_rows": self.min_rows,
             "min_columns": self.min_columns,
             "default_concurrency": self.default_concurrency,
@@ -336,7 +256,6 @@ class AlgorithmSpec(ContractModel):
             "description": self.model_description(),
             "parameters": build_model_tool_input_schema(
                 self.model_input_schema,
-                include_preprocessing=True,
             ).model_json_schema(),
         }
 
@@ -352,11 +271,6 @@ class AlgorithmSpec(ContractModel):
             requirements.append("不允许存在缺失值、空列或非有限值")
         elif self.native_missing_handling == "mask":
             requirements.append("缺失值按原生掩码处理；非有限值仍需显式处理")
-        if self.allowed_preprocessing:
-            requirements.append(
-                "可确认的处理操作："
-                + "、".join(_PREPROCESSING_LABELS[item] for item in self.allowed_preprocessing)
-            )
         requirements.append(f"至少 {self.min_rows} 行、{self.min_columns} 列")
         method = self.method_definition()
         return (
@@ -365,8 +279,7 @@ class AlgorithmSpec(ContractModel):
             f"\n目标图：{method.graph_semantics}；矩阵约定：{method.matrix_convention}。"
             f"\n边语义：{'；'.join(f'{key}：{value}' for key, value in method.edge_meanings.items())}。"
             f"\n适用边界：{'；'.join(method.limitations)}。"
-            "如果原始数据不满足要求，先调用 request_data_processing 让用户确认"
-            "处理方案，再携带同一方案调用本工具；不要自行假设清洗步骤。"
+            "所有数据整理工作在分析开始前完成；本工具不会修改输入数据。"
         )
 
     def method_definition(self) -> MethodDefinition:
@@ -381,135 +294,16 @@ class AlgorithmSpec(ContractModel):
     def categorical_allowed(self) -> bool:
         """只有声明分类编码的 Spec 才能接收离散变量。"""
 
-        return "categorical_encode" in self.allowed_preprocessing
-
-    def validate_profile(
-        self,
-        *,
-        profile: Any,
-        preprocessing: PreprocessingPlan | None,
-        execution_columns: tuple[str, ...] | None = None,
-    ) -> str | None:
-        """按 Spec 判断当前数据加工后能否直接执行，返回稳定诊断文本。
-
-        这是本地初检；它不替代 MCP 对真实 CSV 的复检。execution_columns
-        是处理步骤声明的目标列；没有处理方案时使用画像的全部列。
-        """
-
-        if profile is None:
-            return "缺少数据画像"
-        if profile.row_count < self.min_rows:
-            return "行数少于要求：" + str(profile.row_count)
-        if profile.column_count < self.min_columns:
-            return "列数少于要求：" + str(profile.column_count)
-
-        plan = preprocessing or PreprocessingPlan()
-        selected: tuple[str, ...] = profile.column_names
-        if "select_columns" in plan.operations():
-            select_step = next(
-                step for step in plan.steps if step.operation == "select_columns"
-            )
-            if len(select_step.columns) < self.min_columns:
-                return "选列后列数少于要求"
-            selected = select_step.columns
-        if execution_columns is not None:
-            missing = set(execution_columns) - set(selected)
-            if missing:
-                return "执行列不在数据画像中：" + "、".join(sorted(missing))
-
-        categorical = set(profile.categorical_columns) & set(selected)
-        if categorical and not self.categorical_allowed():
-            return "分类变量需要算法支持离散检验：" + "、".join(sorted(categorical))
-        if self.requires_numeric_columns:
-            non_numeric = set(selected) - set(profile.numeric_columns)
-            if non_numeric:
-                return "非数值变量不适用于本算法：" + "、".join(sorted(non_numeric))
-
-        empty = set(profile.empty_columns) & set(selected)
-        if empty:
-            return "存在完全缺失的列：" + "、".join(sorted(empty))
-        constant = set(profile.constant_columns) & set(selected)
-        if constant:
-            return "存在常数列：" + "、".join(sorted(constant))
-
-        imputed = {
-            column
-            for step in plan.steps
-            if step.operation == "numeric_impute"
-            for column in step.columns
-        }
-        dropped_missing = "drop_rows" in plan.operations()
-        missing = (set(profile.missing_columns) & set(selected)) - imputed
-        if missing and self.requires_complete_cases and not dropped_missing:
-            return "存在缺失值，需要先确认处理：" + "、".join(sorted(missing))
-        non_finite = (set(profile.non_finite_columns) & set(selected)) - (
-            imputed if dropped_missing else set()
-        )
-        if non_finite:
-            return "存在非有限值，需要先确认处理：" + "、".join(sorted(non_finite))
-        return None
-
-    def validate_preprocessing_plan(
-        self,
-        *,
-        plan: PreprocessingPlan,
-        profile: Any,
-        protected_columns: tuple[str, ...] = (),
-    ) -> None:
-        """校验确认前与 MCP 执行前共用的处理方案规则。
-
-        只检查方案本身是否可用于该算法，不判断真实 CSV 是否已经满足算法要求。
-        列类型来自画像；MCP 侧会基于处理后的真实数据重新建立画像并再次判断。
-        """
-
-        operations = set(plan.operations())
-        unsupported = operations - set(self.allowed_preprocessing)
-        if unsupported:
-            raise ValueError(
-                "该算法不允许的处理操作：" + "、".join(sorted(unsupported))
-            )
-        if profile is None:
-            raise ValueError("缺少数据画像，无法校验处理方案")
-        known_columns = set(profile.column_names)
-        for step in plan.steps:
-            unknown = set(step.columns) - known_columns
-            if unknown:
-                raise ValueError("处理方案引用了不存在的列：" + "、".join(sorted(unknown)))
-            if step.operation == "numeric_impute":
-                non_numeric = set(step.columns) - set(profile.numeric_columns)
-                if non_numeric:
-                    raise ValueError(
-                        "数值插补只能用于数值列：" + "、".join(sorted(non_numeric))
-                    )
-            if step.operation == "drop_rows" and set(step.columns) == known_columns:
-                raise ValueError("删行必须指定具体列，不能默认对全表删除")
-        for step in plan.steps:
-            if step.operation == "drop_rows" and set(protected_columns) & set(step.columns):
-                raise ValueError("不能按目标变量或处理变量的缺失值删除整行")
-
-    def required_processing_reason(
-        self,
-        *,
-        profile: Any,
-        preprocessing: PreprocessingPlan | None,
-    ) -> str | None:
-        """说明为什么必须在执行前取得用户确认，已满足时返回 None。"""
-
-        return self.validate_profile(profile=profile, preprocessing=preprocessing)
+        return self.supports_encoded_categories
 
     def assess_applicability(
         self,
         *,
         profile: Any,
-        preprocessing: PreprocessingPlan | None,
         execution_columns: tuple[str, ...] | None = None,
+        semantic_kinds: Mapping[str, str] | None = None,
     ) -> tuple[str, str | None]:
-        """返回 ready / needs_processing / not_applicable 三态判断。
-
-        结构性不适用（变量类型不受支持、全空列、常数列、样本或变量数量
-        不足）不能靠处理方案变成可用；缺失值、非有限值等则属于可由用户
-        确认处理的条件。
-        """
+        """基于实际处理后表格和测量语义判断输入是否满足算法契约。"""
 
         if profile is None:
             return "needs_processing", "缺少数据画像"
@@ -518,15 +312,11 @@ class AlgorithmSpec(ContractModel):
         if profile.column_count < self.min_columns:
             return "not_applicable", "列数少于算法要求：" + str(profile.column_count)
 
-        plan = preprocessing or PreprocessingPlan()
         selected: tuple[str, ...] = execution_columns or profile.column_names
-        if "select_columns" in plan.operations():
-            select_step = next(
-                step for step in plan.steps if step.operation == "select_columns"
-            )
-            if len(select_step.columns) < self.min_columns:
-                return "not_applicable", "选列后列数少于算法要求"
-            selected = select_step.columns
+        if len(selected) < self.min_columns:
+            return "not_applicable", "输入变量数少于算法要求"
+        if len(set(selected)) != len(selected) or set(selected) - set(profile.column_names):
+            return "not_applicable", "执行变量与数据字段不一致"
 
         empty = set(profile.empty_columns) & set(selected)
         if empty:
@@ -535,6 +325,11 @@ class AlgorithmSpec(ContractModel):
         if constant:
             return "not_applicable", "存在常数列：" + "、".join(sorted(constant))
         categorical = set(profile.categorical_columns) & set(selected)
+        categorical.update(
+            column
+            for column, kind in (semantic_kinds or {}).items()
+            if column in selected and kind in {"category", "ordinal", "binary"}
+        )
         if categorical and not self.categorical_allowed():
             return (
                 "not_applicable",
@@ -548,26 +343,19 @@ class AlgorithmSpec(ContractModel):
                     "非数值变量不适用于该算法：" + "、".join(sorted(non_numeric)),
                 )
 
-        imputed = {
-            column
-            for step in plan.steps
-            if step.operation == "numeric_impute"
-            for column in step.columns
-        }
-        dropped_missing = "drop_rows" in plan.operations()
-        missing = (set(profile.missing_columns) & set(selected)) - imputed
-        if missing and self.requires_complete_cases and not dropped_missing:
+        missing = set(profile.missing_columns) & set(selected)
+        if missing and (
+            self.requires_complete_cases or self.native_missing_handling == "reject"
+        ):
             return (
-                "needs_processing",
-                "存在缺失值，需要确认处理：" + "、".join(sorted(missing)),
+                "not_applicable",
+                "输入含有算法不接受的缺失值：" + "、".join(sorted(missing)),
             )
-        non_finite = (set(profile.non_finite_columns) & set(selected)) - (
-            imputed if dropped_missing else set()
-        )
+        non_finite = set(profile.non_finite_columns) & set(selected)
         if non_finite:
             return (
-                "needs_processing",
-                "存在非有限值，需要确认处理：" + "、".join(sorted(non_finite)),
+                "not_applicable",
+                "输入含有非有限值：" + "、".join(sorted(non_finite)),
             )
         return "ready", None
 
@@ -613,12 +401,7 @@ PC_SPEC = AlgorithmSpec(
     requires_numeric_columns=False,
     requires_complete_cases=True,
     native_missing_handling="reject",
-    allowed_preprocessing=(
-        "select_columns",
-        "drop_rows",
-        "numeric_impute",
-        "categorical_encode",
-    ),
+    supports_encoded_categories=True,
     min_rows=2,
     min_columns=2,
 )
@@ -659,7 +442,6 @@ OLC_SPEC = AlgorithmSpec(
     requires_numeric_columns=True,
     requires_complete_cases=True,
     native_missing_handling="reject",
-    allowed_preprocessing=("select_columns", "drop_rows", "numeric_impute"),
     min_rows=2,
     min_columns=2,
 )
@@ -696,7 +478,6 @@ DIRECT_LINGAM_SPEC = AlgorithmSpec(
     requires_numeric_columns=True,
     requires_complete_cases=True,
     native_missing_handling="reject",
-    allowed_preprocessing=("select_columns", "drop_rows", "numeric_impute"),
     min_rows=2,
     min_columns=2,
 )
@@ -754,7 +535,7 @@ CDFM_SPEC = AlgorithmSpec(
     requires_numeric_columns=True,
     requires_complete_cases=False,
     native_missing_handling="mask",
-    allowed_preprocessing=("select_columns", "drop_rows", "numeric_impute"),
+    supports_encoded_categories=True,
     min_rows=2,
     min_columns=2,
 )
@@ -795,7 +576,6 @@ CAUSAL_ATE_SPEC = AlgorithmSpec(
     requires_numeric_columns=True,
     requires_complete_cases=True,
     native_missing_handling="reject",
-    allowed_preprocessing=("select_columns", "drop_rows", "numeric_impute"),
     min_rows=3,
     min_columns=2,
     graph_semantics="causal_estimation_input",

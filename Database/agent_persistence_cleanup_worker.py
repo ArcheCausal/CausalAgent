@@ -128,7 +128,7 @@ async def _wait_for_store_schema(store) -> None:
 
 
 async def _cleanup_checkpoint_task(saver, item: dict) -> None:
-    """删除父图 thread 和 Deep Agent 子图 thread，两者都成功才算完成。"""
+    """删除 Job 父图、数据处理 namespace 和 Deep Agent 子图检查点。"""
     job_id = item["job_id"]
     await saver.adelete_thread(job_id)
     await saver.adelete_thread(build_deep_agent_run_id(job_id=job_id))

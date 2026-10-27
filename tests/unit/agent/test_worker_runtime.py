@@ -3,8 +3,12 @@
 import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
 import runpy
+from secrets import token_hex
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import MemorySaver
 
 from app.agent.worker.runtime import (
     McpClientResources,
@@ -341,6 +345,7 @@ def test_production_runtime_waits_for_both_mcp_lanes_before_executor(monkeypatch
         yield Mock(name="store")
 
     adapter = SimpleNamespace(raw_backend=Mock(name="backend"))
+    deep_model = ChatOpenAI(model="gpt-4o-mini", api_key=token_hex(16))
     monkeypatch.setenv("CAUSAL_MCP_SIGNING_KEY_CURRENT", "test-signing-key")
     with (
         patch("app.agent.worker.runtime.create_llm", return_value=Mock(name="llm")),
@@ -354,9 +359,9 @@ def test_production_runtime_waits_for_both_mcp_lanes_before_executor(monkeypatch
         patch("app.agent.worker.runtime.build_default_rag_evidence_tool", return_value=Mock()),
         patch("app.agent.worker.runtime.build_default_web_evidence_tool", return_value=Mock()),
         patch("app.agent.worker.runtime.inspect_rag_readiness", return_value=RagReadiness("rag_unavailable")),
-        patch("app.agent.worker.runtime.create_deep_agent_model", return_value=Mock()),
+        patch("app.agent.worker.runtime.create_deep_agent_model", return_value=deep_model),
         patch("app.agent.worker.runtime._required_positive_environment_integer", return_value=1000),
-        patch("app.agent.worker.runtime.build_checkpointer", return_value=Mock()),
+        patch("app.agent.worker.runtime.build_checkpointer", return_value=MemorySaver()),
         patch("app.agent.worker.runtime.build_deep_agent", return_value=Mock()),
         patch("Agent.causal_agent.graph.build_deep_agent_parent_graph", return_value=Mock()),
     ):

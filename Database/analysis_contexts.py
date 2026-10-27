@@ -18,6 +18,10 @@ from uuid import uuid4
 
 import mysql.connector
 
+from Agent.data_processing.parameters import (
+    parameter_identity, restore_parameter_binding,
+)
+
 from app.db import (
     get_read_connection,
     get_write_connection,
@@ -159,10 +163,14 @@ def _activate_context(
     cursor.execute(
         """
         UPDATE analysis_jobs
-        SET analysis_context_id = %s
+        SET prepared_dataset_id = CASE
+                WHEN analysis_context_id = %s THEN prepared_dataset_id
+                ELSE NULL
+            END,
+            analysis_context_id = %s
         WHERE job_id = %s
         """,
-        (context_id, job_id),
+        (context_id, context_id, job_id),
     )
     cursor.execute(
         """
@@ -186,7 +194,7 @@ def create_or_reuse_context_for_frozen_file(
     """在 Job 创建事务内按冻结文件创建或复用上下文。
 
     同一 Session 的当前 active 上下文如果指向同一个文件对象就继续复用；否则新建一个
-    参数为空的上下文并把它设为 active。target 与 treatment 由 fold 节点确定后回填。
+    参数为空的上下文并把它设为 active。参数由数据处理父节点在子图完成后回填。
     """
     file_object_id = snapshot.get("input_object_id")
     if not file_object_id:
@@ -366,33 +374,6 @@ def load_context(
     return _serialize_context_row(row, latest_report_title=row.get("latest_report_title"))
 
 
-def _find_context_by_parameters(
-    cursor,
-    *,
-    user_id: int,
-    session_id: str,
-    file_object_id: int,
-    target: str | None,
-    treatment: str | None,
-) -> str | None:
-    """按文件和分析参数查找已有的活动上下文。"""
-    cursor.execute(
-        """
-        SELECT analysis_context_id
-        FROM analysis_contexts
-        WHERE user_id = %s AND session_id = %s AND status = 'active'
-          AND file_object_id = %s
-          AND ((target IS NULL AND %s IS NULL) OR target = %s)
-          AND ((treatment IS NULL AND %s IS NULL) OR treatment = %s)
-        ORDER BY updated_at DESC, analysis_context_id DESC
-        LIMIT 1
-        """,
-        (user_id, session_id, file_object_id, target, target, treatment, treatment),
-    )
-    row = cursor.fetchone()
-    return str(row["analysis_context_id"]) if row else None
-
-
 def apply_fold_context(
     *,
     user_id: int,
@@ -404,13 +385,14 @@ def apply_fold_context(
     target: str | None,
     treatment: str | None,
     analysis_question: str | None,
+    analysis_parameters: dict[str, Any] | None = None,
+    dataset_id: int | None = None,
 ) -> dict[str, Any] | None:
-    """在 fold 确定分析参数后把 Job 绑定到正确的上下文。
-
-    规则：绑定上下文还没有参数时直接回填；参数一致时保持不动；参数不同时优先复用同一
-    文件上参数一致的历史上下文，没有才新建。整个过程在一个事务内完成，节点重复执行
-    得到同一个结果。
-    """
+    """按最终参数幂等绑定上下文；保留旧调用签名供既有调用者使用。"""
+    parameters = analysis_parameters if analysis_parameters is not None else {
+        "target": target, "treatment": treatment, "analysis_question": analysis_question,
+    }
+    final_identity = parameter_identity(parameters)
     connection = get_write_connection()
     try:
         cursor = connection.cursor(dictionary=True)
@@ -430,6 +412,17 @@ def apply_fold_context(
         if not file_object_id:
             connection.rollback()
             return None
+        if dataset_id is not None:
+            cursor.execute(
+                "SELECT metadata, source_hash FROM analysis_job_datasets WHERE id = %s AND job_id = %s",
+                (dataset_id, job_id),
+            )
+            candidate = cursor.fetchone()
+            if not candidate or candidate["source_hash"] != job["input_file_hash"]:
+                raise ValueError("final context candidate does not match the frozen Job input")
+            restored = restore_parameter_binding(_json_loads(candidate["metadata"]), job_id=job_id)
+            if parameter_identity(restored["analysis_parameters"]) != final_identity:
+                raise ValueError("final context parameters do not match the candidate")
 
         _lock_session(cursor, user_id=user_id, session_id=session_id)
         bound_context_id = job.get("analysis_context_id")
@@ -442,59 +435,61 @@ def apply_fold_context(
                 session_id=session_id,
                 context_id=target_context_id,
             )
-            bound_target = bound.get("target")
-            bound_treatment = bound.get("treatment")
-            if bound_target is None and bound_treatment is None:
+            cursor.execute(
+                "SELECT 1 FROM analysis_jobs WHERE analysis_context_id = %s "
+                "AND job_id <> %s AND status = 'succeeded' LIMIT 1",
+                (target_context_id, job_id),
+            )
+            has_history = cursor.fetchone() is not None or context_has_results(bound)
+            cursor.execute(
+                "SELECT j.job_id, d.metadata FROM analysis_jobs AS j "
+                "JOIN analysis_job_datasets AS d ON d.id = j.prepared_dataset_id "
+                "AND d.job_id = j.job_id AND d.status = 'validated' "
+                "WHERE j.analysis_context_id = %s AND j.job_id <> %s AND j.status = 'succeeded' "
+                "ORDER BY j.created_at DESC LIMIT 1",
+                (target_context_id, job_id),
+            )
+            historical_job = cursor.fetchone()
+            historical_identity = None
+            if historical_job and historical_job.get("metadata"):
+                historical_metadata = _json_loads(historical_job["metadata"])
+                if isinstance(historical_metadata, dict) and "analysis_parameter_identity" in historical_metadata:
+                    historical_identity = parameter_identity(restore_parameter_binding(
+                        historical_metadata, job_id=str(historical_job["job_id"]),
+                    )["analysis_parameters"])
+            action = final_context_action(
+                bound, parameters, has_history=has_history, historical_identity=historical_identity,
+                file_object_id=int(file_object_id),
+            )
+            if action == "updated":
                 cursor.execute(
                     """
                     UPDATE analysis_contexts
                     SET target = %s, treatment = %s,
-                        analysis_question = COALESCE(analysis_question, %s)
+                        analysis_question = %s
                     WHERE analysis_context_id = %s
                     """,
                     (target, treatment, analysis_question, target_context_id),
                 )
-                action = "backfilled"
-            elif bound_target == target and bound_treatment == treatment:
-                action = "unchanged"
-            else:
+            elif action == "created":
                 target_context_id = None
 
         if target_context_id is None:
-            existing = _find_context_by_parameters(
-                cursor,
-                user_id=user_id,
-                session_id=session_id,
-                file_object_id=int(file_object_id),
-                target=target,
-                treatment=treatment,
+            target_context_id = str(uuid4())
+            cursor.execute(
+                """
+                INSERT INTO analysis_contexts (
+                    analysis_context_id, session_id, user_id, status,
+                    input_user_file_id, file_object_id, file_hash, filename,
+                    target, treatment, analysis_question
+                ) VALUES (%s, %s, %s, 'active', %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    target_context_id, session_id, user_id, job.get("input_user_file_id"),
+                    file_object_id, job.get("input_file_hash"), job.get("input_filename"),
+                    target, treatment, analysis_question,
+                ),
             )
-            if existing:
-                target_context_id = existing
-                action = "reused"
-            else:
-                target_context_id = str(uuid4())
-                cursor.execute(
-                    """
-                    INSERT INTO analysis_contexts (
-                        analysis_context_id, session_id, user_id, status,
-                        input_user_file_id, file_object_id, file_hash, filename,
-                        target, treatment, analysis_question
-                    ) VALUES (%s, %s, %s, 'active', %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        target_context_id,
-                        session_id,
-                        user_id,
-                        job.get("input_user_file_id"),
-                        file_object_id,
-                        job.get("input_file_hash"),
-                        job.get("input_filename"),
-                        target,
-                        treatment,
-                        analysis_question,
-                    ),
-                )
 
         if str(target_context_id) != str(bound_context_id or ""):
             _activate_context(
@@ -533,6 +528,62 @@ def apply_fold_context(
         raise
     finally:
         connection.close()
+
+
+def context_has_results(context: dict[str, Any]) -> bool:
+    return any(context.get(key) is not None for key in (
+        "latest_algorithm_summary", "latest_rag_evidence", "latest_web_evidence",
+        "latest_report_id", "latest_report_message_id",
+    ))
+
+
+def final_context_action(
+    context: dict[str, Any], parameters: dict[str, Any], *, has_history: bool,
+    historical_identity: str | None, file_object_id: int,
+) -> str:
+    """空 target/treatment 也可代表已完成研究；历史语义不可改写。"""
+    same_file = context.get("file_object_id") == file_object_id and context.get("status") == "active"
+    same_core = all(context.get(key) == parameters.get(key)
+                    for key in ("target", "treatment", "analysis_question"))
+    if has_history:
+        if same_file and same_core and historical_identity == parameter_identity(parameters):
+            return "unchanged"
+        return "created"
+    if not same_file:
+        return "created"
+    return "unchanged" if same_core else "updated"
+
+
+def apply_final_parameters_context(
+    *, user_id: int, session_id: str, job_id: str, worker_id: str,
+    attempt_count: int, lease_epoch: int, analysis_parameters: dict[str, Any], dataset_id: int,
+) -> dict[str, Any] | None:
+    return apply_fold_context(
+        user_id=user_id, session_id=session_id, job_id=job_id, worker_id=worker_id,
+        attempt_count=attempt_count, lease_epoch=lease_epoch,
+        target=analysis_parameters.get("target"), treatment=analysis_parameters.get("treatment"),
+        analysis_question=analysis_parameters.get("analysis_question"),
+        analysis_parameters=analysis_parameters, dataset_id=dataset_id,
+    )
+
+
+def read_job_analysis_context(cursor, *, job: dict[str, Any]) -> dict[str, Any]:
+    """在调用者的 Job 锁事务内，按 Session→Context 顺序恢复当前绑定上下文。"""
+    context_id = job.get("analysis_context_id")
+    if not context_id:
+        raise ValueError("bound dataset Job has no analysis context")
+    _lock_session(cursor, user_id=int(job["user_id"]), session_id=str(job["session_id"]))
+    row = _lock_context(cursor, user_id=int(job["user_id"]), session_id=str(job["session_id"]),
+                        context_id=str(context_id))
+    if (row["status"] != "active" or row["file_object_id"] != job["input_object_id"]
+            or row["file_hash"] != job["input_file_hash"]):
+        raise ValueError("bound dataset Job context differs from its frozen input")
+    title = None
+    if row.get("latest_report_message_id") is not None:
+        cursor.execute("SELECT content FROM chat_messages WHERE id = %s", (row["latest_report_message_id"],))
+        message = cursor.fetchone()
+        title = message["content"] if message else None
+    return _serialize_context_row(row, latest_report_title=title)
 
 
 def record_analysis_results(
@@ -617,7 +668,8 @@ def _refreeze_job_input(cursor, *, job: dict[str, Any], snapshot: dict[str, Any]
         """
         UPDATE analysis_jobs
         SET input_user_file_id = %s, input_object_id = %s,
-            input_file_hash = %s, input_filename = %s
+            input_file_hash = %s, input_filename = %s,
+            prepared_dataset_id = NULL
         WHERE job_id = %s
         """,
         (

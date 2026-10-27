@@ -70,6 +70,13 @@ from Agent.deep_agent_tools.identity import (
     build_deep_agent_run_id,
     build_deep_agent_step_id,
 )
+from Agent.data_processing.graph import (
+    bind_dataset_node,
+    data_processing_parent_node,
+    dataset_failure_node,
+    validate_dataset_node,
+    validation_router,
+)
 from Agent.deep_agent_tools.models import (
     AlgorithmResult,
     EvidenceResult,
@@ -78,7 +85,9 @@ from Agent.deep_agent_tools.models import (
 )
 
 
-DEEP_AGENT_CHECKPOINT_NAMESPACE = "deep_agent_v1"
+# 独立调用的子图由稳定 thread 隔离，LangGraph 将它写入根 namespace。
+# 读取必须使用同一位置，才能恢复已有子图及 Gate 修正状态。
+DEEP_AGENT_CHECKPOINT_NAMESPACE = ""
 
 
 
@@ -611,11 +620,6 @@ def _publish_child_interrupt(interrupts: list[Any]) -> Any:
 
     from langgraph.types import interrupt
 
-    from Agent.deep_agent_tools.interaction import (
-        DATA_PROCESSING_INTERACTION_TYPE,
-        DataProcessingRequest,
-    )
-
     first = interrupts[0]
     raw_value = first.value if hasattr(first, "value") else first
     if isinstance(raw_value, str):
@@ -625,16 +629,7 @@ def _publish_child_interrupt(interrupts: list[Any]) -> Any:
             decoded = None
         if isinstance(decoded, Mapping):
             raw_value = decoded
-    public_payload: Any = raw_value
-    if (
-        isinstance(raw_value, Mapping)
-        and raw_value.get("type") == DATA_PROCESSING_INTERACTION_TYPE
-    ):
-        request = DataProcessingRequest.model_validate(raw_value)
-        # 子图中断载荷已经包含父图发布的 question_id 和截止时间，
-        # 这里原样重发，避免父图再生成一个不同的确认标识。
-        public_payload = request.model_dump(mode="json")
-    return interrupt(public_payload)
+    return interrupt(raw_value)
 
 
 
@@ -653,14 +648,39 @@ async def _deep_agent_parent_node(
     context = getattr(runtime, "context", None)
     if context is not None and hasattr(context, "ensure_active"):
         await context.ensure_active()
+    trusted_identity = getattr(context, "trusted_identity", None)
+    if trusted_identity is None:
+        raise RuntimeError("Deep Agent child requires a trusted Job identity")
+    from Agent.data_processing.persistence import read_bound_dataset_identity
+
+    bound_dataset = await asyncio.to_thread(
+        read_bound_dataset_identity,
+        trusted_identity,
+    )
+    if bound_dataset is None:
+        raise RuntimeError("因果分析前必须绑定经过独立校验的数据集。")
+    if context is not None and hasattr(context, "check_after_call"):
+        await context.check_after_call()
+    analysis_input = getattr(trusted_identity, "analysis_input", None)
+    if analysis_input is None:
+        raise RuntimeError("trusted Job identity has no analysis input reference")
+    expected_dataset_id = state.get("prepared_dataset_id")
+    if expected_dataset_id is not None and int(expected_dataset_id) != int(
+        bound_dataset["dataset_id"]
+    ):
+        raise RuntimeError("parent checkpoint dataset identity differs from MySQL binding")
+    analysis_input.bind(
+        dataset_id=int(bound_dataset["dataset_id"]),
+        object_id=int(bound_dataset["data_object_id"]),
+        content_hash=str(bound_dataset["data_hash"]),
+        filename=str(bound_dataset["filename"]),
+        semantic_kinds=bound_dataset["semantic_kinds"],
+    )
     await _ensure_official_memory_files(
         store=store,
         context=context,
         lock=memory_init_lock,
     )
-    trusted_identity = getattr(context, "trusted_identity", None)
-    if trusted_identity is None:
-        raise RuntimeError("Deep Agent child requires a trusted Job identity")
     job_id = str(trusted_identity.job_id)
     expected_child_run_id = build_deep_agent_run_id(job_id=trusted_identity.job_id)
     supplied_child_run_id = state.get("deep_agent_run_id")
@@ -669,6 +689,9 @@ async def _deep_agent_parent_node(
     child_run_id = expected_child_run_id
     child_config = dict(config or {})
     child_config["configurable"] = dict(child_config.get("configurable") or {})
+    # 父图的 checkpoint 位置不能选择独立 child thread 中的状态。
+    child_config["configurable"].pop("checkpoint_id", None)
+    child_config["configurable"].pop("checkpoint_map", None)
     child_config["configurable"]["thread_id"] = child_run_id
     child_config["configurable"]["checkpoint_ns"] = DEEP_AGENT_CHECKPOINT_NAMESPACE
     child_config["metadata"] = dict(child_config.get("metadata") or {})
@@ -1080,15 +1103,20 @@ def _finalization_router(state) -> str:
     )
 
 
+def _data_processing_router(state: Mapping[str, Any]) -> str:
+    return "failed" if state.get("data_processing_failure_code") else "validate"
+
+
 def build_deep_agent_parent_graph(
     *,
     llm: "ChatOpenAI",
     deep_agent: Any,
     registry: Any,
+    data_processing_agent: Any,
     checkpointer: Any,
     store: Any | None = None,
 ) -> Any:
-    """构建新 Job 路径：admission/preprocess → Deep Agent → Gate → report。
+    """构建新 Job 路径：原始输入 → 数据处理校验/绑定 → Deep Agent → Gate → report。
 
     旧 ``build_graph`` 保留给兼容链路；worker 新运行时显式使用本构造器，
     因而不会再加载 slot stdio MCP 或固定 mcp→rag→web 流水线。
@@ -1131,6 +1159,37 @@ def build_deep_agent_parent_graph(
             event_node_name="preprocess",
             timeout_ms=180_000,
         ),
+    )
+    workflow.add_node(
+        "data_processing",
+        bind_subgraph_node(
+            data_processing_parent_node,
+            event_node_name="data_processing",
+            agent=data_processing_agent,
+            registry=registry,
+        ),
+        timeout=timeout(run_timeout=1800, idle_timeout=300),
+    )
+    workflow.add_node(
+        "validate_dataset",
+        bind_node(
+            validate_dataset_node,
+            event_node_name="validate_dataset",
+            registry=registry,
+        ),
+        timeout=timeout(run_timeout=180, idle_timeout=80),
+    )
+    workflow.add_node(
+        "bind_dataset",
+        bind_node(
+            bind_dataset_node,
+            event_node_name="bind_dataset",
+        ),
+        timeout=timeout(run_timeout=120, idle_timeout=60),
+    )
+    workflow.add_node(
+        "data_processing_failed",
+        dataset_failure_node,
     )
     workflow.add_node(
         "deep_agent",
@@ -1234,11 +1293,26 @@ def build_deep_agent_parent_graph(
         "fold",
         guarded_router(edges.fold_router),
         {
-            "preprocess": "preprocess",
+            "preprocess": "data_processing",
             "agent": "agent",
             "normal_chat": "normal_chat",
         },
     )
+    workflow.add_conditional_edges(
+        "data_processing",
+        guarded_router(_data_processing_router),
+        {"validate": "validate_dataset", "failed": "data_processing_failed"},
+    )
+    workflow.add_conditional_edges(
+        "validate_dataset",
+        guarded_router(validation_router),
+        {
+            "bind": "bind_dataset",
+            "retry": "data_processing",
+            "failed": "data_processing_failed",
+        },
+    )
+    workflow.add_edge("bind_dataset", "preprocess")
     workflow.add_edge("preprocess", "deep_agent")
     workflow.add_edge("deep_agent", "finalization_gate")
     workflow.add_conditional_edges(
@@ -1247,6 +1321,7 @@ def build_deep_agent_parent_graph(
         {"deep_agent": "deep_agent", "report": "report"},
     )
     workflow.add_edge("report", END)
+    workflow.add_edge("data_processing_failed", END)
     workflow.add_edge("normal_chat", END)
     workflow.add_edge("inquiry_answer", END)
     return workflow.compile(checkpointer=checkpointer, store=store)

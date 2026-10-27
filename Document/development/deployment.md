@@ -29,7 +29,9 @@
 
 ## 开发部署
 
-默认 `docker-compose.yml` 是包含主系统、RAG 评测、联网搜索和可观测性的 15 服务开发拓扑；服务职责如下：
+默认 `docker-compose.yml` 是包含主系统、RAG 评测、联网搜索和可观测性的 17 服务开发拓扑；服务职责如下：
+
+四份入口按 `docker compose config --services` 解析的服务数分别为：开发 17、兼容副本 11、预发 19、生产 11。该数量包含一次性初始化服务，不代表同时长期运行的容器数。
 
 | 服务 | 作用 |
 | --- | --- |
@@ -38,6 +40,7 @@
 | `db-bootstrap` | 一次性 MySQL/Alembic/PostgreSQL 初始化 |
 | `app` | Flask Web，暴露 5001 |
 | `worker` | Agent Job worker |
+| `sandbox-controller` / `opensandbox` | 受限沙盒控制 API、MySQL 生命周期与同机临时容器 |
 | `causal-mcp` | 私有 Streamable HTTP 因果算法服务；只加入内部网络，不映射宿主端口 |
 | `monitor` | 数据库共享快照采集 |
 | `agent-persistence-cleanup` | 跨库删除 Job 父子图 checkpoint 和用户长期记忆 Store |
@@ -45,13 +48,13 @@
 | `searxng` / `valkey` | 固定版本的 SearXNG 联网学术搜索及其缓存/队列依赖 |
 | `loki` / `alloy` / `grafana` | 开发环境运行日志采集、存储和查看；只加入独立的 observability network |
 
-`app`、Agent worker、`causal-mcp`、monitor、RAG evaluation worker 和 agent-persistence-cleanup 依赖 `db-bootstrap` 成功退出；`causal-mcp` 另外等待 `mysql-primary` 健康，并以 `/health`/`/ready` 提供进程、MySQL strong read 和执行器就绪边界。`causal-mcp` 不映射宿主端口，算法在有界容量内按 invocation 使用独立子进程，因此控制面取消只终止目标算法，不回收并行 sibling；`CAUSAL_MCP_SLOW_LOG_SECONDS` 在开发、预发和生产 Compose 中默认 60 秒。因果 MCP 镜像先安装 CPU Torch，再安装固定版本 `cdfm-base==0.1.0` 与现有 CDMIR；构建末尾按写死的 revision 与逐文件 SHA-256 把 CDFM 权重下载到镜像内只读目录 `/opt/cdfm-weights-image`，任一项不合格都会让构建失败。开发 Compose 的 `CDFM_MODEL_PATH` 默认指向镜像内 `/opt/cdfm-weights-image`，仍可由环境变量覆盖；预发由一次性 `cdfm-weights-seed` 服务把镜像内容同步进命名卷 `rag_eval_staging_cdfm_weights`，`causal-mcp` 只读挂载 `/opt/cdfm-weights` 并设置 `HF_HUB_OFFLINE=1`，运行期不再访问网络。服务通过 `config/database_settings.py` 读取 MySQL 配置，通过统一密钥文件读取 Bearer/HMAC 材料。Compose 不向 MCP 直接注入应用或模型密钥环境变量，也不要求模型地址和名称；但挂载的完整文件会经过全局必需键检查，仍需包含应用和模型等必需密钥。当前 worker 新路径还依赖 `causal-mcp` healthy，启动时按“PostgreSQL checkpoint pool/schema → AsyncPostgresStore setup → 静态 Registry → 进程级 MCP Client pool handshake → RAG readiness → Deep Agent/父图编译”的顺序完成 fail-fast 初始化；slot 不再创建 stdio MCP session。`searxng` 依赖 Valkey 健康。联网搜索是 Job 级可选能力，worker readiness 不等待 SearXNG，运行期不可用时新 `web_evidence_search` 返回受控 unavailable/disabled 结果；非搜索 Job 不会因此阻止启动。开发拓扑当前不提供自动故障切换。启动命令见 [`setup.md`](setup.md)。
+`app`、Agent worker、`causal-mcp`、monitor、RAG evaluation worker 和 agent-persistence-cleanup 依赖 `db-bootstrap` 成功退出；`causal-mcp` 另外等待 `mysql-primary` 健康，并以 `/health`/`/ready` 提供进程、MySQL strong read 和执行器就绪边界。`causal-mcp` 不映射宿主端口，算法在有界容量内按 invocation 使用独立子进程，因此控制面取消只终止目标算法，不回收并行 sibling；`CAUSAL_MCP_SLOW_LOG_SECONDS` 在开发、预发和生产 Compose 中默认 60 秒。因果 MCP 镜像先安装 CPU Torch，再安装固定版本 `cdfm-base==0.1.0` 与现有 CDMIR；构建末尾按写死的 revision 与逐文件 SHA-256 把 CDFM 权重下载到镜像内只读目录 `/opt/cdfm-weights-image`，任一项不合格都会让构建失败。开发 Compose 的 `CDFM_MODEL_PATH` 默认指向镜像内 `/opt/cdfm-weights-image`，仍可由环境变量覆盖；预发由一次性 `cdfm-weights-seed` 服务把镜像内容同步进命名卷 `rag_eval_staging_cdfm_weights`，`causal-mcp` 只读挂载 `/opt/cdfm-weights` 并设置 `HF_HUB_OFFLINE=1`，运行期不再访问网络。服务通过 `config/database_settings.py` 读取 MySQL 配置，通过统一密钥文件读取 Bearer/HMAC 材料。Compose 不向 MCP 直接注入应用或模型密钥环境变量，也不要求模型地址和名称；但 MCP 认证入口仍调用默认完整必需键检查，挂载文件仍需包含应用和模型等必需密钥。当前 worker 新路径还依赖 `causal-mcp` healthy，启动时按“PostgreSQL checkpoint pool/schema → AsyncPostgresStore setup → 静态 Registry → 进程级 MCP Client pool handshake → RAG readiness → Deep Agent/父图编译”的顺序完成 fail-fast 初始化；slot 不再创建 stdio MCP session。`searxng` 依赖 Valkey 健康。联网搜索是 Job 级可选能力，worker readiness 不等待 SearXNG，运行期不可用时新 `web_evidence_search` 返回受控 unavailable/disabled 结果；非搜索 Job 不会因此阻止启动。开发拓扑当前不提供自动故障切换。启动命令见 [`setup.md`](setup.md)。
 
 ### 服务器密钥文件
 
-密码、令牌和签名密钥统一保存在服务器上的单个密钥文件里，默认路径为 `/etc/causalagent/secrets/causalagent.env`，可以用环境变量 `CAUSALAGENT_SECRET_FILE` 覆盖。服务器发布必须将文件设为 `0640`、属主设为 `root`、属组设为容器专用 GID `3000`。Compose 会把该组加入 MySQL、PostgreSQL、Grafana 和 SearXNG 容器；发布校验检查服务器权限，验收还需确认各容器的实际读取身份可读。单进程本地运行仍可使用 `0600` 或 `0400`。该文件不进入 Git、部署包或镜像。允许出现的键由 `config/secret_file.py` 的 `SECRET_KEYS` 定义，模板见 [`deploy/secrets/causalagent.env.example`](../../deploy/secrets/causalagent.env.example)；未知键、重复键、空值、缺键和权限不安全都会让进程启动失败。
+全部应用密码、数据库密码、令牌和签名密钥保存在统一的 `causalagent.env` 中，包括 `CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN` 和 `CAUSALAGENT_SANDBOX_API_KEY`。服务器默认路径为 `/etc/causalagent/secrets/causalagent.env`，由普通配置中的 `CAUSALAGENT_SECRET_FILE` 选择，也可通过宿主同名变量覆盖。服务器发布必须将文件设为 `0640`、属主设为 `root`、属组设为容器专用 GID `3000`。Compose 会把该组加入 MySQL、PostgreSQL、Grafana、SearXNG、控制服务和 OpenSandbox 等读取容器；发布校验检查服务器权限，验收还需确认各容器的实际读取身份可读。单进程本地运行仍可使用 `0600` 或 `0400`。该文件不进入 Git、部署包或镜像。允许出现的键由 `config/secret_file.py` 的 `SECRET_KEYS` 定义，模板见 [`deploy/secrets/causalagent.env.example`](../../deploy/secrets/causalagent.env.example)；未知键、重复键、空值、缺少入口必需键和权限不安全都会让进程启动失败。
 
-所有环境的容器通过 Compose secret 把该文件只读挂载到 `/run/secrets/causalagent.env`。应用、worker、MCP 和数据库配置由 `config/secret_file.py` 显式读取；加载器清除继承的密钥环境变量，不会把文件值重新写入进程环境。可选 LangSmith 集成会单独导出其 SDK 所需密钥。所有服务仍由 Compose 启动。Compose 负责选择镜像、提供普通环境变量并挂载密钥文件；镜像内的应用负责解释文件内容。项目 Python 服务直接调用密钥加载器；MySQL、PostgreSQL、SearXNG 和 Grafana 的上游入口不认识项目自定义的多键格式，由 `deploy/scripts/secret-env.sh` 只导出对应入口需要的变量，再执行上游入口。MySQL 主从使用基于官方 MySQL 构建的自有镜像，适配入口已写入镜像；镜像中的 mysql 用户属于 GID 3000，官方入口降权后仍可读取初始化所需密钥。离线开发工具 `Agent/knowledge_base/build_knowledge.py` 与 `Agent/knowledge_base/multimodal/cli.py` 可读取本地 `.env`，但不属于 app 或 worker 的生产启动路径。非敏感配置继续使用环境变量或非密钥配置文件。
+开发、兼容副本、预发和生产 Compose 均通过 `causalagent_env` 把该文件只读挂载到读取服务的 `/run/secrets/causalagent.env`。Worker、控制服务和 OpenSandbox 管理服务显式设置 `CAUSALAGENT_SECRET_FILE` 为该路径，其他 Python 服务沿用加载器的同一路径默认值。应用、worker、MCP、控制服务和数据库配置由 `config/secret_file.py` 显式读取；各入口只要求自身使用的键，加载器清除继承的密钥环境变量，不会把文件值重新写入进程环境。可选 LangSmith 集成会单独导出其 SDK 所需密钥。所有服务仍由 Compose 启动。Compose 负责选择镜像、提供普通环境变量并挂载密钥文件；镜像内的应用负责解释文件内容。项目 Python 服务直接调用密钥加载器；MySQL、PostgreSQL、SearXNG 和 Grafana 的上游入口不认识项目自定义的多键格式，由 `deploy/scripts/secret-env.sh` 只导出对应入口需要的变量，再执行上游入口。OpenSandbox 的 `server_entrypoint.py` 也调用统一加载器，只向官方 server 导出 `OPENSANDBOX_SERVER_API_KEY`。MySQL 主从使用基于官方 MySQL 构建的自有镜像，适配入口已写入镜像；镜像中的 mysql 用户属于 GID 3000，官方入口降权后仍可读取初始化所需密钥。离线开发工具 `Agent/knowledge_base/build_knowledge.py` 与 `Agent/knowledge_base/multimodal/cli.py` 可读取本地 `.env`，但不属于 app 或 worker 的生产启动路径。非敏感配置继续使用环境变量或非密钥配置文件。
 
 开发 Compose 使用仓库根目录的 `causalagent.env`（已加入 `.gitignore`）作为同一个密钥文件入口；首次启动前把它从 [`deploy/secrets/causalagent.env.example`](../../deploy/secrets/causalagent.env.example) 复制到仓库根目录并按需填写。
 
@@ -80,7 +83,7 @@ Shell 密钥读取器兼容 LF 和 CRLF 换行，只移除行尾属于分隔符�
 
 ### CI 与人工镜像发布
 
-`.github/workflows/lightweight-ci.yml` 只在面向 `main`/`develop` 的 PR 上运行门禁，并按改动路径选择后端单元测试、五个前端工程自检/构建、Compose 与预发部署合同、Alloy 配置验证和四个 Dockerfile 的 BuildKit 静态检查；面向 `main` 的 PR 无条件运行全部检查。`push` 到 `main`/`develop` 不运行门禁，只重建 Docker unit 测试镜像以导出层缓存。两处流程都不推送镜像。完整镜像构建只由 `.github/workflows/publish-staging-images.yml` 的 `workflow_dispatch` 触发，并拒绝 `develop` 以外的分支；它把 app、MCP、MySQL primary、MySQL replica 分别构建并直接推送 GHCR，不创建镜像 artifact，也不通过 SSH 部署服务器。每个镜像使用 `sha-<commit 前 7 位>` 标签，摘要中同时给出 `sha256` digest；服务器配置必须使用 digest。
+`.github/workflows/lightweight-ci.yml` 只在面向 `main`/`develop` 的 PR 上运行门禁，并按改动路径选择后端单元测试、五个前端工程自检/构建、Compose 与预发部署合同、Alloy 配置验证和五个 Dockerfile 的 BuildKit 静态检查；面向 `main` 的 PR 无条件运行全部检查。`push` 到 `main`/`develop` 不运行门禁，只重建 Docker unit 测试镜像以导出层缓存。两处流程都不推送镜像。完整镜像构建只由 `.github/workflows/publish-staging-images.yml` 的 `workflow_dispatch` 触发，并拒绝 `develop` 以外的分支；它把 app、MCP、MySQL primary、MySQL replica 和数据处理镜像分别构建并直接推送 GHCR，不创建镜像 artifact，也不通过 SSH 部署服务器。每个镜像使用 `sha-<commit 前 7 位>` 标签，摘要中同时给出 `sha256` digest；服务器配置必须使用 digest。数据处理镜像使用 `deploy/opensandbox/Dockerfile`、该目录的构建上下文和 `linux/amd64` 平台，构建成功后自动将完整 digest 引用传给部署包，无需人工填写 `sandbox_image`。
 
 仓库默认分支是 `main`，因此首次手动触发前，发布 workflow 文件必须先合并到 `main`；触发时在 Actions 页面选择 `develop`。公开仓库的公开 GHCR Container 镜像按 GitHub Packages 计费规则免费存储和传输（见 [GitHub Packages 计费说明](https://docs.github.com/en/billing/concepts/product-billing/github-packages)）。新建 GHCR 包后，维护者需在包设置中将可见性改为 Public，之后测试服务器才可匿名拉取。构建使用普通 `ubuntu-latest` runner，并在构建前后记录磁盘余量；MCP 首次构建是否能在 runner 可用磁盘内完成，以该次 workflow 实际结果为准。镜像直接推送 GHCR，不导出为 Actions artifact。
 
@@ -88,16 +91,16 @@ GitHub 当前的公开 Linux x64 标准 runner 配置为 4 核、16 GB 内存和
 
 服务器不执行 `git pull`，也不需要完整源码；它只解压部署包并使用服务器上的非密钥配置与密钥文件。
 
-首次部署时，在服务器上准备两份文件；模型名、地址等普通参数与密钥的分工见 [`setup.md`](setup.md#配置前提)：
+首次部署时，在服务器上人工准备以下两份配置与密钥文件；发布时还会生成 `images.env`，OpenSandbox 的 `config.toml` 也必须保留。模型名、地址等普通参数与密钥的分工见 [`setup.md`](setup.md#配置前提)：
 
-1. 非密钥配置 `/etc/causalagent/config/production.env`：从部署包的 `deploy/config/production.env.example` 复制，填入普通环境配置；
-2. 密钥文件 `/etc/causalagent/secrets/causalagent.env`：从 `deploy/secrets/causalagent.env.example` 复制，填入互不重复的真实随机值，并设置 `chown root:3000 /etc/causalagent/secrets/causalagent.env` 与 `chmod 640 /etc/causalagent/secrets/causalagent.env`。
+1. 非密钥配置 `/etc/causalagent/config/production.env`：从部署包的 `deploy/config/production.env.example` 复制，填入普通环境配置与密钥文件路径；
+2. 密钥文件 `/etc/causalagent/secrets/causalagent.env`：从 `deploy/secrets/causalagent.env.example` 复制，填写全部应用与数据库密钥，以及两个不同的沙盒认证值，并设置 `chown root:3000 /etc/causalagent/secrets/causalagent.env` 与 `chmod 640 /etc/causalagent/secrets/causalagent.env`。
 
 不要在服务器以外复制密钥文件，也不要把它提交到 Git；`.gitignore` 会排除 `causalagent.env` 与 `deploy/secrets/*.env`，`.dockerignore` 也会排除环境文件与本地数据，避免本地构建时把它们放进镜像上下文。
 
-部署前先下载 Actions 制品并解压其中的 `.tar.gz`。`deploy.sh` 接收已经解压的目录，复制到调用者指定的 `<releases_dir>/<release_id>`，从清单生成 `images.env`，更新 `current`，再执行 Compose `pull` 和 `up -d`。测试服务器的完整命令见下方[测试预发操作流程](#测试预发操作流程)；生产使用 `docker-compose.prod.yml` 和相应服务器配置。两种环境必须使用不同的 Compose project、配置和数据卷。
+部署前先下载 Actions 制品并解压其中的 `.tar.gz`。`deploy.sh` 接收已经解压的目录，复制到调用者指定的 `<releases_dir>/<release_id>`，从清单生成 `images.env`，通过预检后执行镜像拉取和 Compose `up -d`，命令成功返回后才更新 `current`。测试服务器的完整命令见下方[测试预发操作流程](#测试预发操作流程)；生产使用 `docker-compose.prod.yml` 和相应服务器配置。两种环境必须使用不同的 Compose project、配置和数据卷。
 
-脚本不负责下载和解压制品、创建服务器配置、镜像仓库登录、旧 RAG 数据迁移或最终验收。它在 `pull/up` 前切换 `current`，失败时不会自动恢复链接。部署完成后按 [`release-acceptance.md`](release-acceptance.md) 选择明确的 Compose 文件执行检查。
+脚本不负责下载和解压制品、创建服务器配置、镜像仓库登录、旧 RAG 数据迁移或最终验收。预检、拉取或 `up -d` 失败时保留原 `current` 链接，但不会自动撤销已发生的容器更新。部署完成后按 [`release-acceptance.md`](release-acceptance.md) 选择明确的 Compose 文件执行检查。
 
 需要验证 Compose 合并后的部署契约时，使用 `docker compose config`；不要运行 `docker compose down -v`，它会删除预发数据库、checkpoint、搜索、观测和正式 RAG 数据卷。首次启动后还需在云安全组与主机防火墙核实只有 gateway 端口对公网开放。
 
@@ -151,8 +154,8 @@ test -f "$BUNDLE_DIR/docker-compose.staging.yml" && echo "staging compose OK"
 
 | 文件 | 来源与用途 | 本节使用的服务器路径 |
 | --- | --- | --- |
-| 普通配置 | `deploy/config/production.env.example`；项目名、模型名、地址、数据库账号名和运行参数 | `/etc/causalagent/config/production.env` |
-| 密钥文件 | `deploy/secrets/causalagent.env.example`；密码、API key、令牌和签名密钥 | `/etc/causalagent/secrets/causalagent.env` |
+| 普通配置 | `deploy/config/production.env.example`；项目名、模型名、地址、数据库账号名、运行参数和密钥文件路径 | `/etc/causalagent/config/production.env` |
+| 密钥文件 | `deploy/secrets/causalagent.env.example`；全部应用与数据库密码、API key、令牌和签名密钥，包含两个沙盒认证值 | `/etc/causalagent/secrets/causalagent.env` |
 
 首次准备时从部署包的两个模板创建配置并填写真实值；已有文件时编辑现有文件，不用模板覆盖。普通配置中的 `COMPOSE_PROJECT_NAME` 必须与第 1 步一致，不能直接沿用模板的 `causalagent`。`production.env` 可以作为本次测试配置的文件名，环境由项目名、数据库、数据卷和所选 Compose 文件确定；若同一服务器还有生产服务，必须为两套服务配置不同的配置文件与密钥文件路径。
 
@@ -208,7 +211,7 @@ done
 bash "$BUNDLE_DIR/scripts/deploy.sh" "$BUNDLE_DIR" "$RELEASES_DIR"
 ```
 
-脚本把版本放入 `$RELEASES_DIR/<release_id>`，生成 `images.env` 并切换 `current`，随后执行 `pull`、`up -d`。拉取阶段旧容器继续运行；更新阶段按需停止并重建镜像或配置有变化的容器，可能短暂中断。项目名与卷定义一致时继续使用原卷，但 bootstrap 可能执行数据库迁移，卷保留不代表数据内容不变，也不保证进行中的任务无中断。项目名不同会尝试创建另一套资源，可能出现端口占用或新建空卷；不要为更新先执行 `down`，更不要执行 `down -v`。
+脚本把版本放入 `$RELEASES_DIR/<release_id>`，生成 `images.env` 并完成预检，随后拉取镜像、执行 `up -d`，成功返回后切换 `current`。拉取阶段旧容器继续运行；更新阶段按需停止并重建镜像或配置有变化的容器，可能短暂中断。项目名与卷定义一致时继续使用原卷，但 bootstrap 可能执行数据库迁移，卷保留不代表数据内容不变，也不保证进行中的任务无中断。项目名不同会尝试创建另一套资源，可能出现端口占用或新建空卷；不要为更新先执行 `down`，更不要执行 `down -v`。
 
 #### 6. 检查结果与失败处理
 
@@ -227,7 +230,7 @@ staging_compose ps --all
 
 确认 `db-bootstrap` 和 `cdfm-weights-seed` 成功退出，长期服务正常运行，有健康检查的服务应达到健康状态。`verify.sh` 成功只代表部分静态条件通过；继续按[发布验收清单](release-acceptance.md)检查实际镜像、密钥读取、数据库、MCP、真实任务、SSE 和 RAG。该清单的通用示例默认生产路径，使用时改为本节的项目名、staging Compose 与 `RELEASE_DIR`，不要直接覆盖为 `/opt/causalagent/releases/current`。
 
-部署失败时保留首次错误和本次版本目录。如果本次发布目录及 `images.env` 已生成，先执行本步的路径设置与函数定义，再使用 `staging_compose ps --all` 及 `staging_compose logs --tail 100 <服务名>` 在服务器本地排查；若尚未生成，则使用第 4 步按 Docker 项目标签查询的命令查看原容器。只分享脱敏后的诊断信息。`current` 在拉取前已经改变，不能用它判断发布成功，也不会自动回到旧版本；如果失败发生在 `up -d` 阶段，可能已有部分服务更新。回退前确认目标版本与当前数据库 schema、配置和密钥兼容；`rollback.sh` 按目录修改时间选择非当前目录，不等于上一成功版本，也不恢复数据。首次从旧目录迁入发布目录时，旧服务不会自动成为脚本可选的历史版本。
+部署失败时保留首次错误和本次版本目录。如果本次发布目录及 `images.env` 已生成，将 `RELEASE_DIR` 显式设置为 `$RELEASES_DIR/$RELEASE_ID`，再设置 `COMPOSE_FILE` 并定义本步的 `staging_compose` 函数，使用 `staging_compose ps --all` 及 `staging_compose logs --tail 100 <服务名>` 在服务器本地排查；若尚未生成，则使用第 4 步按 Docker 项目标签查询的命令查看原容器。只分享脱敏后的诊断信息。`current` 仅在 `up -d` 成功返回后改变，仍需独立确认服务健康；如果失败发生在 `up -d` 阶段，链接虽然保留旧值，部分服务可能已经更新。回退前确认目标版本与当前数据库 schema、配置和密钥兼容；`rollback.sh` 按目录修改时间选择非当前目录，不等于上一成功版本，也不恢复数据。首次从旧目录迁入发布目录时，旧服务不会自动成为脚本可选的历史版本。
 
 ### 服务器数据目录
 
@@ -247,18 +250,36 @@ staging_compose ps --all
 `docker-compose.prod.yml` 使用生产 MySQL、PostgreSQL checkpoint、统一 bootstrap、Web、Agent worker、独立 `causal-mcp`、monitor、checkpoint cleanup 和独立 `rag-eval-worker`；生产环境不挂载源代码，使用独立卷、网络和日志轮转设置。worker 通过进程级 MCP Client pool 调用私有服务，必须显式提供不可变 Deep Agent 配置和 MCP 鉴权材料；它依赖 `causal-mcp` healthy 后才开始 claim Job。`causal-mcp` 使用独立不可变镜像、单 ASGI worker、默认最多 2 个并行 invocation 和 4 个等待队列，不开放宿主端口；每个已运行 invocation 使用独立单进程 executor 以支持精确取消。镜像内的 CDMIR 与 `cdfm-base==0.1.0` 固定版本，并使用 CPU Torch 依赖闭合 `pip check`；CDFM 权重同样在构建期按固定 revision 下载到 `/opt/cdfm-weights-image` 并逐文件校验。生产 Compose 仍由部署环境通过 `CDFM_MODEL_PATH` 显式指定权重位置；命名卷入卷与 `HF_HUB_OFFLINE` 目前只在预发拓扑生效。RAG evaluation worker 与主系统进程隔离，并通过独立评测卷共享必要的运行产物；它不带开发可观测性标签，不应把评测日志混入主系统观测流。当前生产 Compose 是单独的生产配置，不能假设它自动提供开发 Compose 的 MySQL replica、SearXNG、Loki/Alloy/Grafana 或故障切换能力。
 当前生产 Compose 未定义 SearXNG 服务；如果生产环境启用 `web_search_enabled`，必须另外提供可访问的 `SEARXNG_URL` 和对应的搜索服务部署，搜索不可用时仍遵循 worker 运行期降级语义。生产 readiness 和发布证据必须按 [`testing.md`](testing.md) 重新执行并记录，不能用单元或静态 Compose 检查替代。
 
+## OpenSandbox 数据处理沙盒
+
+开发、兼容副本、预发和生产 Compose 均包含单实例 `sandbox-controller` 与同机 `opensandbox`。Worker 调用控制服务的受限 API，控制服务通过 MySQL 保存资源生命周期并管理 OpenSandbox；完整契约见 [沙盒控制服务](../architecture/sandbox-controller.md)。复用的服务配置、只读 TOML、固定发布引用、网络前提和密钥文件说明见 [deploy/opensandbox/README.md](../../deploy/opensandbox/README.md)。
+
+控制服务等待主库健康、bootstrap 成功和 OpenSandbox 健康后启动；启动核查全部未关闭记录，完成后才报告 `/healthz` 就绪。Worker 等待控制服务就绪。控制服务只有一个 API 进程，并持有 MySQL 命名锁；不得横向扩为多个副本。一个或多个 Worker 共享该服务，降低容量上限不终止已有任务。容量不足时客户端有界等待。
+
+Worker 使用 `CAUSALAGENT_SANDBOX_CONTROLLER_URL`、请求超时和本地并发配置，并从统一密钥文件读取 `CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN`。控制服务另读全局容量、心跳、核查、TTL、资源及文件限制。普通策略均在启动时读取；修改后通过受控重启生效。MySQL 不存容量配置，仅存创建意图、远端身份、执行状态、心跳、期限和清理回执。
+
+Worker、控制服务和 OpenSandbox 管理服务共享完整 `causalagent.env`，不要求服务之间的密钥隔离。`CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN` 和 `CAUSALAGENT_SANDBOX_API_KEY` 保留不同值，均为 32 至 4096 个无空白字符；分别用于控制 API 与上游管理 API 认证。控制服务直接读取同一文件中的数据库密码，数据库加载器只验证所需数据库键，仍不依赖应用模型配置；应用启动继续验证自身完整必需键。执行用户脚本的临时沙盒容器不得挂载该文件，也不得接收其中的密钥。独立 controller 数据库密钥来源与两个 token/key 文件来源配置已移除，不支持旧来源兼容。所有密钥只读挂载，不进入镜像、源码或普通环境模板；`config.toml` 仍保留为结构化运行配置。
+
+OpenSandbox server、execd、egress 与 Code Interpreter 基础镜像的核实引用保存在 [release-lock.json](../../deploy/opensandbox/release-lock.json)，全部固定为 digest。处理镜像由现有 [Dockerfile](../../deploy/opensandbox/Dockerfile) 和 hash 锁定依赖构建，仍须把实际发布产物的 digest 配置到 `CAUSALAGENT_SANDBOX_IMAGE`；缺失值会在控制服务监听前失败。不得用基础镜像或本地 image ID 冒充发布后的处理镜像。
+
+Worker 不加入上游网络，不持有 Docker socket。沙盒链路中只有 OpenSandbox 操作同机 Docker daemon；本轮按用户确认保留 Alloy 原有 Docker socket 日志采集权限。两个新服务均不映射宿主端口。OpenSandbox 使用默认 bridge、固定 egress sidecar、拒绝出站策略、禁用 IPv6 和空宿主挂载许可。控制服务使用 SDK server proxy，脚本执行和文件传输都经上游 API。默认只读 TOML 要求宿主 bridge 网关为 `172.17.0.1`；部署前必须检查实际网关，自定义网关应通过独立只读配置指定。Docker Desktop 与 Linux Engine 不能视为相同网络环境。
+
+远端 TTL、客户端心跳和后台核查分别工作；本轮不启用续期。所有非 closed 状态占用容量。创建响应丢失时不重发创建；销毁失败或远端状态不明时保留记录并核查，不能因请求失败、心跳超时或时间经过释放名额。资源记录不随 Job、Session 或用户删除级联消失。正常完成请求立即销毁，后台清理使用控制服务权限继续处理失联和已删除业务的资源。
+
+真实验收必须覆盖控制 API、沙盒代理、输入上传、非 root 执行、只读原始文件、有限日志、产物回读和销毁，并检查实际 IPv4/IPv6 出站与宿主转发规则。健康接口、Compose 静态解析和单元测试均不能替代这些证据。具体入口与未执行边界见 [测试说明](testing.md#opensandbox-数据处理验证)。
+
 ## 部署包与发布清单
 
 发布后的服务器验收命令见 [`release-acceptance.md`](release-acceptance.md)。
 
-服务器只部署部署包，不执行 `git pull`，也不需要完整源码。CI 用 `scripts/build_release_bundle.py` 在某个源码提交上生成部署包，包含：两个 Compose 文件、`deploy/` 下的网关与配置模板、`observability/` 的采集与看板配置，以及 `scripts/` 下的部署脚本。部署包不包含 Python、Vue、TypeScript 源码，也不包含真实密码、API key、数据库数据或 RAG 正式索引。
+服务器只部署部署包，不执行 `git pull`，也不需要完整源码。部署与校验脚本要求 Docker Compose 和宿主 Python 3.11 或更新版本，校验脚本使用标准库解析 OpenSandbox TOML。CI 用 `scripts/build_release_bundle.py` 在某个源码提交上生成部署包，包含：两个 Compose 文件、`deploy/` 下的网关与配置模板、`observability/` 的采集与看板配置，以及 `scripts/` 下的部署脚本。部署包不包含应用业务 Python、Vue、TypeScript 源码；Python 部署文件包括 OpenSandbox 启动适配器 `deploy/opensandbox/server_entrypoint.py` 及其使用的统一密钥加载器 `config/secret_file.py`。`controller.env.example` 不再是发布所需模板。部署包不包含真实密码、API key、数据库数据或 RAG 正式索引。
 
-镜像范围：应用代码、MCP 代码和 MySQL 自定义初始化逻辑进入自有镜像（`causalagent-app`、`causalagent-mcp`、`causalagent-mysql-primary`、`causalagent-mysql-replica`）；PostgreSQL、Nginx、SearXNG、Valkey、Loki、Alloy 和 Grafana 使用官方镜像。两类镜像都必须在 `images.lock.json` 与 `release.manifest.json` 中固定 digest；`scripts/resolve_official_images.py` 用 `docker buildx imagetools` 解析官方镜像 digest，未固定 digest 时构建直接失败。
+镜像范围：应用代码、MCP 代码、MySQL 自定义初始化逻辑和数据处理依赖进入自有镜像（`causalagent-app`、`causalagent-mcp`、`causalagent-mysql-primary`、`causalagent-mysql-replica`、`causalagent-data-preparation`）；PostgreSQL、Nginx、SearXNG、Valkey、Loki、Alloy 和 Grafana 使用官方镜像。固定 OpenSandbox server、execd、egress、Code Interpreter 基础镜像也登记在清单中。全部镜像都必须在 `images.lock.json` 与 `release.manifest.json` 中固定 digest；`scripts/resolve_official_images.py` 用 `docker buildx imagetools` 解析官方镜像 digest，未固定 digest 时构建直接失败。
 
 正常发布只需人工触发一次 Actions，镜像构建与部署包生成已自动衔接：
 
-1. 在 `develop` 上运行 `Publish staging images`，构建并推送 app、MCP、MySQL primary 和 MySQL replica 到 GHCR。四个构建全部成功后，工作流自动调用 `Build release bundle`，传入本次完整源码提交 SHA；任意构建失败时不生成部署包。这里的发布是推送容器仓库，不要求创建 GitHub Release。
-2. 打包工作流用该提交的 `sha-<前7位>` 标签查询四个 GHCR 镜像的 digest，并在不可变引用上核对各平台的 OCI revision。第三方镜像 digest 也由工作流自动查询；随后生成发布清单、镜像锁和压缩包并上传制品。发布标识默认由 UTC 日期、提交短 SHA、运行编号及重试次数组成，摘要显示完整提交和四个镜像引用。查询只读取镜像元数据，不下载完整镜像层。
+1. 在 `develop` 上运行 `Publish staging images`，无需填写镜像参数；工作流从本次提交并行构建并推送 app、MCP、MySQL primary、MySQL replica 和数据处理镜像到 GHCR。处理镜像构建执行 hash 锁定依赖安装、实际 import 与 `pip check`，并通过任务输出传递本次构建产生的完整 digest 引用。五个构建全部成功后，工作流自动调用 `Build release bundle`，传入本次完整源码提交 SHA 和该处理镜像引用；任意构建失败时不生成部署包。这里的发布是推送容器仓库，不要求创建 GitHub Release。
+2. 打包工作流用该提交的 `sha-<前7位>` 标签查询 app、MCP 和 MySQL 主从四个 GHCR 镜像的 digest，并在不可变引用上核对各平台的 OCI revision；处理镜像直接使用上一步的 digest 引用，并查询镜像仓库确认其存在且 digest 一致。第三方镜像 digest 也由工作流自动查询；随后生成发布清单、镜像锁和压缩包并上传制品。发布标识默认由 UTC 日期、提交短 SHA、运行编号及重试次数组成，各构建摘要给出镜像 digest，打包摘要显示完整提交及四个主服务镜像引用，完整镜像集合保存在部署包清单中。查询只读取镜像元数据，不下载完整镜像层。
 3. 下载 Actions 制品，把其中的压缩包传到服务器并解压。服务器配置与密钥保持独立；已有数据的存储迁移只在首次采用新卷结构时执行。
 4. 运行 `deploy.sh`。脚本把清单的镜像映射为 `APP_IMAGE`、`CAUSAL_MCP_IMAGE`、`MYSQL_IMAGE` 等变量，同时生成预发使用的 `STAGING_*` 别名，并写入发布目录的 `images.env`。
 5. 脚本以服务器普通配置和 `images.env` 两个 `--env-file` 启动 Compose，执行 `pull` 和 `up -d`。服务器不再需要逐项手填新发布的镜像 digest。部署 shell 不应保留旧的同名镜像环境变量，以免覆盖清单生成值。
@@ -266,21 +287,24 @@ staging_compose ps --all
 
 ```mermaid
 flowchart LR
-    A[人工运行镜像发布 Action] --> B[构建并推送四个镜像]
-    B --> C[查询同一提交的 digest 并校验 revision]
+    A[人工运行镜像发布 Action] --> B[构建并推送四个主服务镜像]
+    A --> P[构建并推送数据处理镜像]
+    P --> Q[输出本次构建的 digest 引用]
+    B --> C[校验主服务 revision 与处理镜像 digest]
+    Q --> C
     C --> D[自动生成清单和部署包]
     D --> E[人工下载、上传和解压]
     E --> F[服务器运行 deploy.sh]
     F --> G[Compose 拉取镜像并启动]
 ```
 
-需要复用已有镜像或修正人工发现的版本错误时，单独运行 `Build release bundle`。输入全部留空时，它通过 Actions API 选择最近一次成功的 `Publish staging images` 所对应的 `develop` 提交，不分别取四个仓库各自的最新镜像。`source_commit` 可填写 7–40 位提交 SHA；工作流 checkout 后记录完整 SHA，部署配置与镜像据此保持同一版本。`release_id` 可手填；四个 `*_sha256` 可分别填写 64 位十六进制 digest，允许 `sha256:` 前缀，未覆盖的项继续自动查询。手动 digest 同样必须属于所选源码提交；切换到另一提交的镜像时需同时修改 `source_commit`。所选提交须包含当前发布工具及对应部署结构，早期不支持部署包的提交不能直接按此方式打包。
+需要复用已有镜像或修正人工发现的版本错误时，单独运行 `Build release bundle`。`sandbox_image` 必须填写已经发布的处理镜像完整 digest 引用；`source_commit` 留空时，它通过 Actions API 选择最近一次成功的 `Publish staging images` 所对应的 `develop` 提交，不分别取四个仓库各自的最新镜像。`source_commit` 可填写 7–40 位提交 SHA；工作流 checkout 后记录完整 SHA，部署配置与镜像据此保持同一版本。`release_id` 可手填；四个 `*_sha256` 可分别填写 64 位十六进制 digest，允许 `sha256:` 前缀，未覆盖的项继续自动查询。手动 digest 同样必须属于所选源码提交；切换到另一提交的镜像时需同时修改 `source_commit`。所选提交须包含当前发布工具及对应部署结构，早期不支持部署包的提交不能直接按此方式打包。
 
 没有成功发布记录、任意镜像缺失、仓库访问失败、digest 无效或 OCI revision 不一致时，工作流立即失败，不生成部署包，不自动补建镜像，也不退回旧版本。单独打包不执行镜像构建和推送；新版本仍通过镜像发布 Action 生成。私有 GHCR 镜像需允许本仓库的 `GITHUB_TOKEN` 读取；服务器拉取私有镜像仍需预先执行 `docker login ghcr.io`。
 
 `production.env.example` 只提供服务器普通配置模板；填写后的 `production.env` 与自动生成的 `images.env` 是 Compose 的两个输入文件。参数先经 Compose 的 `environment` 声明进入对应容器，再由 `settings.py`、数据库配置类或 worker 的 `os.getenv` 读取；目前普通参数没有统一的 Python 读取入口。
 
-服务器目录为 `/opt/causalagent/releases/<release_id>/` 加一个 `current` 符号链接；`/etc/causalagent/config/production.env` 保存普通参数，`/etc/causalagent/secrets/causalagent.env` 保存密钥。`verify.sh` 只校验部分静态条件：镜像引用带 digest、密钥权限与必需键名，以及 Compose 配置可解析。它不检查运行中容器、密钥完整格式或部署文件摘要；调用时还需显式用标准 `COMPOSE_FILE` 环境变量选择目标文件，见验收清单。`rollback.sh` 按目录修改时间选择非当前目录并启动其中的 Compose，不记录上一成功发布，也不恢复数据库、密钥或 RAG 数据。
+服务器目录为 `/opt/causalagent/releases/<release_id>/` 加一个 `current` 符号链接；`/etc/causalagent/config/production.env` 保存普通参数与密钥路径，全部应用和数据库密钥统一保存在 `/etc/causalagent/secrets/causalagent.env`。`verify.sh` 按 `CAUSALAGENT_COMPOSE_FILE` 选择预发或生产文件，检查镜像锁与清单、实际解析的 Compose 镜像、沙盒部署文件摘要、统一密钥文件的权限和格式、两个沙盒认证值及上游配置引用。它不检查运行中容器、远端隔离或完整 Job；仍需执行服务器验收。`rollback.sh` 按目录修改时间选择非当前目录并启动其中的 Compose，不记录上一成功发布，也不恢复数据库、密钥或 RAG 数据。
 
 测试环境和生产环境使用同一个 `release.manifest.json`，只替换普通环境配置、密钥文件和数据卷；不替换 app 镜像、MCP 镜像、网关配置包、数据库迁移版本和已验收的第三方镜像 digest。
 
@@ -372,4 +396,4 @@ powershell -ExecutionPolicy Bypass -File .\windows-client\build.ps1 `
 
 ## 数据库发布顺序
 
-开发/预发空库或数据库环境重建时先启动依赖数据库，再运行 `Database.bootstrap` 完成 Alembic 和 checkpoint setup，确认成功后才启动 app/worker/monitor/agent-persistence-cleanup/rag-eval-worker。当前唯一 Alembic head 是 `e1f2a3b4c5d6`；清理 worker 还要求 Agent worker 至少完成一次启动以初始化官方 Store schema。具有破坏性的 checkpoint/file migration 不会自动回填旧数据，执行 downgrade 必须选择明确 revision，并在隔离环境先验证往返。迁移风险和 preflight 规则见 [`../database/migrations-checkpoints.md`](../database/migrations-checkpoints.md)。
+开发/预发空库或数据库环境重建时先启动依赖数据库，再运行 `Database.bootstrap` 完成 Alembic 和 checkpoint setup，确认成功后才启动 app/worker/monitor/agent-persistence-cleanup/rag-eval-worker。当前唯一 Alembic head 是 `x1y2z3a4b5c6`；清理 worker 还要求 Agent worker 至少完成一次启动以初始化官方 Store schema。具有破坏性的 checkpoint/file migration 不会自动回填旧数据，执行 downgrade 必须选择明确 revision，并在隔离环境先验证往返。迁移风险和 preflight 规则见 [`../database/migrations-checkpoints.md`](../database/migrations-checkpoints.md)。

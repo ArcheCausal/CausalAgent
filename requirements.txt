@@ -42,6 +42,7 @@ wincertstore==0.2
 # --- LangChain & RAG Dependencies ---
 
 deepagents==0.7.13
+opensandbox==1.1.1
 langchain==1.4.0
 langchain-core==1.6.3
 langchain-openai==1.6.2

@@ -9,6 +9,7 @@
     "typecheck": "vue-tsc -b",
     "test:unit": "vitest run tests/unit tests/contract",
     "test:components": "vitest run tests/components",
+    "test:interactions": "vitest run -c vitest.interactions.config.ts",
     "test:e2e:mock": "playwright test -c playwright.mock.config.ts",
     "build": "vue-tsc -b && vite build",
     "check": "npm run lint && npm run typecheck && npm run test:unit && npm run test:components && npm run test:e2e:mock && npm run build"

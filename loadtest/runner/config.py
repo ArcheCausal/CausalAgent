@@ -82,6 +82,35 @@ def base_url() -> str:
     return os.environ.get("LOADTEST_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
 
 
+CDFM_ROWS = 200
+CDFM_SEED = 20261020
+
+SANDBOX_MESSAGE = (
+    "请对上传数据做真实因果分析并生成完整报告，先使用 PC（fisherz）算法。"
+    "x1 至 x5 都是连续测量值，每一行是一台设备的一次独立测量，研究 x1 对 x2 的作用。"
+    "请先向我确认观察单位和变量范围，再记录保留全部行与五个原始列的处理方案并请求确认。"
+    "不聚合、不筛选行、不标准化、不增加字段；依据真实算法结果保守说明因果识别限制。"
+)
+
+# 沙盒专项的公共场景约束：观察单位、变量范围与允许的处理方式必须明确。
+SANDBOX_SCENARIO: dict = {
+    "message": SANDBOX_MESSAGE,
+    "research_answer": (
+        "每一行是一台设备的一次独立测量。保留全部数据行和 x1、x2、x3、x4、x5 五个原始连续变量，"
+        "不聚合、不筛选、不标准化、不新增字段。"
+    ),
+    "observation_unit": "每行是一台设备的一次独立测量",
+    "expected_columns": ["x1", "x2", "x3", "x4", "x5"],
+    "requires_full_rows": True,
+    "max_interactions": 6,
+    "interaction_deadline_seconds": 300,
+    # 数据规模分组：小、中、大，比较并发时固定同一组，单独改变规模时只改这一项。
+    "data_size": "small",
+    "seed": CDFM_SEED,
+}
+
+DATA_SIZES: dict[str, int] = {"small": 200, "medium": 5000, "large": 20000}
+
 # 分级负载表；flows 只在 full_flow 档使用，duration 只在 mixed 档使用。
 #
 # 字段含义：
@@ -149,6 +178,46 @@ STAGES: dict[str, dict] = {
         "arrival_workers": 8, "arrival_pending": 16,
         "score_group": "cdfm_rate",
     },
+    # 沙盒专项：单任务完整流程，固定数据与研究语义，用于确认交互协议、真实执行和清理。
+    "sandbox_baseline": {
+        **SANDBOX_SCENARIO,
+        "users": 1, "active_jobs": 1, "sse": 1,
+        "mode": "sandbox_flow", "flows": 1, "rows": 200,
+    },
+    # 连续重复处理：同一规模连续创建多个 Job，观察创建/销毁开销与资源是否累积。
+    "sandbox_repeat": {
+        **SANDBOX_SCENARIO,
+        "users": 1, "active_jobs": 1, "sse": 1,
+        "mode": "sandbox_flow", "flows": 6, "rows": 200,
+    },
+    # 并发阶梯：单档位内按 1、2、4、8 个活动 Job 逐档增加；每档独立运行并用 run_id 区分。
+    "sandbox_ladder": {
+        **SANDBOX_SCENARIO,
+        "users": 8, "active_jobs": 4, "sse": 8,
+        "mode": "sandbox_ladder", "duration": 180, "rows": 2000,
+        "ladder": [1, 2, 4, 8],
+    },
+    # 独立到达率：按前序实测确定的速率提交，客户端不设活动 Job 上限。
+    "sandbox_rate": {
+        **SANDBOX_SCENARIO,
+        "users": 4, "active_jobs": None, "sse": 16,
+        "mode": "sandbox_rate", "rows": 2000, "tasks": 12,
+        "arrival_rate": 0.05, "duration": 240,
+        "arrival_workers": 4, "arrival_pending": 8,
+    },
+    # 混合业务：沙盒任务与读取、页面、上传并行，观察沙盒压力是否拖慢普通业务。
+    "sandbox_mixed": {
+        **SANDBOX_SCENARIO,
+        "users": 4, "active_jobs": 4, "sse": 8,
+        "mode": "mixed", "duration": 300, "rows": 200,
+        "mix_weights": {"read": 0.45, "page": 0.15, "upload": 0.10, "create_job": 0.30},
+    },
+    # 稳定性：在已验证可持续的负载下持续运行，检查内存、容器与生命周期记录是否持续累积。
+    "sandbox_stability": {
+        **SANDBOX_SCENARIO,
+        "users": 4, "active_jobs": 4, "sse": 8,
+        "mode": "mixed", "duration": 1800, "rows": 200,
+    },
 }
 
 # 混合操作比例：查询、页面与登录状态、上传、创建 Job。
@@ -191,10 +260,23 @@ SSE_MAX_RECONNECTS = 3
 SSE_RECONNECT_DELAY_SECONDS = 0.5
 OBSERVATION_CHECK_INTERVAL_SECONDS = 0.05
 CREATE_MAX_ATTEMPTS = 3
-CDFM_ROWS = 200
-CDFM_SEED = 20261020
 ARRIVAL_WORKERS = 8
 ARRIVAL_PENDING = 16
+
+# 交互轮数与总时间上限：避免反复澄清占满整个观察窗口。
+MAX_INTERACTIONS_PER_JOB = int(os.environ.get("LOADTEST_MAX_INTERACTIONS", "6"))
+INTERACTION_DEADLINE_SECONDS = float(
+    os.environ.get("LOADTEST_INTERACTION_DEADLINE_SECONDS", "300")
+)
+
+# 沙盒阶段的取消触发条件；必须由真实证据确认，不能按提交后固定等待时间触发。
+CANCEL_TRIGGERS: dict[str, str] = {
+    "queued": "active_jobs.status == queued",
+    "waiting_plan": "current_interaction.interaction_type == data_processing_plan_confirmation",
+    "capacity_wait": "worker stage event sandbox_capacity_wait observed",
+    "executing": "worker stage event sandbox_execute_started observed",
+    "race": "cancel issued while Job is running",
+}
 CDFM_MESSAGE = (
     "请仅使用 CDFM（causal.cdfm）对上传文件全部五个连续数值变量进行因果发现，"
     "使用全部数据行，不抽样，不调用其他因果发现算法，不进行网络搜索，生成因果图和报告。"

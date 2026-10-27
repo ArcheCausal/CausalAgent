@@ -6,6 +6,8 @@ import types
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_openai import ChatOpenAI
+from secrets import token_hex
 
 
 for key, value in {
@@ -174,66 +176,33 @@ def test_mcp_protocol_failure_returns_to_agent_without_restarting_fold():
     assert decision["route_decision"] == "normal_chat"
 
 
-def test_fold_extraction_failure_uses_frozen_file_and_can_validate(monkeypatch):
-    """参数提取失败视为空值，仍使用 Job 冻结文件进行确定性校验。"""
-    async def fail_structured(**kwargs):
-        raise StructuredOutputError(
-            node_name="fold",
-            schema_name="foldQuery",
-            cause=ValueError("invalid"),
-        )
-
-    monkeypatch.setattr(nodes, "ainvoke_structured", fail_structured)
-    monkeypatch.setattr(
-        nodes,
-        "require_frozen_file_for_job",
-        lambda *args: {"file_content": b"A,B\n1,2\n"},
+def test_fold_extraction_failure_preserves_frozen_identity_without_reading_csv():
+    """真实连接被拒绝时使用空参数，CSV 读取和校验留给数据处理阶段。"""
+    llm = ChatOpenAI(
+        model="gpt-4o-mini", base_url="http://127.0.0.1:1/v1",
+        api_key=token_hex(16), timeout=0.2, max_retries=0,
     )
-    monkeypatch.setattr(
-        nodes,
-        "get_data_summary",
-        lambda df: {"n_rows": 2, "columns": ["A", "B"]},
-    )
-    monkeypatch.setattr(nodes, "validate_analysis", lambda *args, **kwargs: (1, [], []))
-
-    result = asyncio.run(nodes.fold_node(_state(), object()))
+    original = _state()
+    result = asyncio.run(nodes.fold_node(original, llm))
 
     assert result["fold_decision"] == "preprocess"
     assert result["analysis_parameters"]["target"] is None
     assert result["analysis_parameters"]["treatment"] is None
-    assert result["file_summary"]["rows"] == 2
+    assert result["analysis_parameters"]["measurement_semantics"] == []
+    assert result["analysis_parameter_changes"] == []
+    assert result["file_summary"] == {**original["file_summary"], "rows": None, "columns": []}
 
 
-@pytest.mark.parametrize("failure_stage", ["file", "validation"])
-def test_fold_resume_paths_return_to_agent(monkeypatch, failure_stage):
-    """文件错误恢复与参数补充恢复都写 fold_decision=agent。"""
-    async def extracted(**kwargs):
-        return nodes.foldQuery(target=None, treatment=None)
+@pytest.mark.parametrize("missing_field", ["user_file_id", "object_id"])
+def test_fold_missing_frozen_reference_returns_to_normal_chat(missing_field):
+    """缺少冻结输入引用时直接请求上传，不进入模型或数据处理。"""
+    state = _state()
+    state["file_summary"].pop(missing_field)
+    result = asyncio.run(nodes.fold_node(state, None))
 
-    monkeypatch.setattr(nodes, "ainvoke_structured", extracted)
-    monkeypatch.setattr(nodes, "interrupt", lambda question: "用户补充信息")
-    if failure_stage == "file":
-        monkeypatch.setattr(
-            nodes,
-            "require_frozen_file_for_job",
-            lambda *args: (_ for _ in ()).throw(FileNotFoundError("missing")),
-        )
-    else:
-        monkeypatch.setattr(
-            nodes,
-            "require_frozen_file_for_job",
-            lambda *args: {"file_content": b"A,B\n1,2\n"},
-        )
-        monkeypatch.setattr(nodes, "get_data_summary", lambda df: {"columns": ["A", "B"]})
-        monkeypatch.setattr(
-            nodes,
-            "validate_analysis",
-            lambda *args, **kwargs: (2, ["目标变量缺失"], []),
-        )
-
-    result = asyncio.run(nodes.fold_node(_state(), object()))
-
-    assert result["fold_decision"] == "agent"
+    assert result["fold_decision"] == "normal_chat"
+    assert "请先上传并选择一个 CSV 文件" in result["messages"][0].content
+    assert "analysis_parameters" not in result
     assert "awaiting_input" not in result
 
 

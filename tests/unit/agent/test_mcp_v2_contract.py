@@ -33,13 +33,11 @@ from Agent.deep_agent_tools.models import (
     AlgorithmResult,
     AlgorithmResultProvenance,
     McpInvocationContext,
-    PreprocessingApproval,
-    PreprocessingPlan,
-    PreprocessingStep,
     StandardizedGraph,
 )
 from Agent.deep_agent_tools.algorithm_executor import AlgorithmExecutionResponse
 from Agent.deep_agent_tools.mcp_algorithm_executor import McpAlgorithmExecutor
+from tests.support.local_algorithm_execution import LocalAlgorithmExecutor
 from app.agent.worker.mcp_client_pool import (
     McpClientPool,
     McpClientPoolConfig,
@@ -162,63 +160,12 @@ def test_service_returns_normalized_result_without_raw_runner_text() -> None:
     assert response.raw_payload["data"]["edges"]
 
 
-def test_service_rejects_plan_with_operation_the_algorithm_does_not_allow() -> None:
-    """MCP 在执行前复用确认阶段的方案规则，不接受不支持的分类编码。"""
+def test_algorithm_execution_contract_excludes_preprocessing_parameters() -> None:
+    properties = AlgorithmExecutionCommand.model_json_schema()["properties"]
 
-    class Pool:
-        def __init__(self) -> None:
-            self.calls: list[dict[str, object]] = []
-
-        def ready(self) -> bool:
-            return True
-
-        async def execute(self, **kwargs):
-            self.calls.append(kwargs)
-            return ExecutionOutcome(
-                value={"success": True, "data": {"nodes": [], "edges": []}},
-                executor_slot_id="process-0",
-            )
-
-    plan = PreprocessingPlan(
-        steps=(PreprocessingStep(operation="categorical_encode", columns=("B",), method="ordinal"),)
-    )
-    context = _context()
-    command = _command(context).model_copy(
-        update={
-            "capability_id": CDFM_SPEC.capability_id,
-            "capability_version": CDFM_SPEC.version,
-            "spec_digest": CDFM_SPEC.spec_digest,
-            "parameters": {},
-            "preprocessing": plan,
-            "approval": PreprocessingApproval(
-                option_id="opt_" + "a" * 24,
-                question_id="q-1",
-                plan_digest=plan.digest,
-            ),
-        }
-    )
-    pool = Pool()
-    service = CausalMcpService(
-        config=_config(),
-        registry=build_default_registry(),
-        executor_pool=pool,
-        authority_reader=lambda _context: "A,B\n1,x\n2,y\n",
-        database_probe=lambda: True,
-    )
-
-    payload = asyncio.run(
-        service.execute_payload(
-            {
-                "command": command.model_dump(mode="json"),
-                "trusted_context": context.model_dump(mode="json"),
-                "signature": sign_invocation(context, command, "secret"),
-            }
-        )
-    )
-
-    assert payload["result"]["status"] == "invalid_input"
-    assert payload["result"]["diagnostics"]["safe_error_code"] == "PREPROCESSING_PLAN_INVALID"
-    assert pool.calls == []
+    assert "preprocessing" not in properties
+    assert "approval" not in properties
+    assert "input_identity" in properties
 
 
 def test_service_logs_job_invocation_timeline_and_slow_threshold() -> None:
@@ -227,17 +174,18 @@ def test_service_logs_job_invocation_timeline_and_slow_threshold() -> None:
     import logging
 
     from observability.logging_runtime import JsonLogFormatter
-    from tests.support.local_algorithm_execution import PC_CSV
+    from tests.support.local_algorithm_execution import LocalAlgorithmExecutor
 
     async def scenario():
         context = _context()
         command = _command(context)
         pool = BoundedProcessPool(process_workers=1)
+        local_input = LocalAlgorithmExecutor().validated_input
         service = CausalMcpService(
             config=replace(_config(), slow_log_seconds=0.001),
             registry=build_default_registry(),
             executor_pool=pool,
-            authority_reader=lambda _context: PC_CSV,
+            authority_reader=lambda _context: local_input,
         )
         stream = io.StringIO()
         handler = logging.StreamHandler(stream)
@@ -428,124 +376,126 @@ def test_cancel_terminates_only_the_target_invocation_process() -> None:
 
 
 def test_authority_reader_failure_is_mapped_to_safe_transport_error() -> None:
-    class FakePool:
-        def ready(self) -> bool:
-            return True
-
     def broken_reader(_context):
         raise RuntimeError("driver connection details")
 
     async def scenario():
         context = _context()
         command = _command(context)
+        pool = BoundedProcessPool(process_workers=1)
         service = CausalMcpService(
-            config=_config(),
-            registry=build_default_registry(),
-            executor_pool=FakePool(),
-            authority_reader=broken_reader,
-            database_probe=lambda: True,
+            config=_config(), registry=build_default_registry(),
+            executor_pool=pool, authority_reader=broken_reader,
         )
-        return await service.execute_payload(
-            {
+        await pool.start()
+        try:
+            return await service.execute_payload({
                 "command": command.model_dump(mode="json"),
                 "trusted_context": context.model_dump(mode="json"),
                 "signature": sign_invocation(context, command, "secret"),
-            }
-        )
+            })
+        finally:
+            await pool.close()
 
     payload = asyncio.run(scenario())
     assert payload["ok"] is True
     assert payload["result"]["status"] == "execution_failed"
     assert payload["result"]["diagnostics"]["safe_error_code"] == "MCP_TRANSPORT_FAILED"
+    assert "driver connection details" not in str(payload)
 
 
-def test_service_rechecks_lease_before_process_start_and_after_result() -> None:
-    class FakePool:
-        def ready(self) -> bool:
-            return True
-
-        async def execute(self, **kwargs):
-            await kwargs["before_start"](0.01)
-            return ExecutionOutcome(
-                value={"success": True, "data": {"nodes": [], "edges": []}},
-                executor_slot_id="process-0",
-            )
-
+@pytest.mark.parametrize("revoke_on_read", [2, 3])
+def test_service_rechecks_lease_before_process_start_and_after_result(revoke_on_read, caplog) -> None:
+    """本地权威 reader 在执行前或完成后撤销资格；不证明 MySQL fencing。"""
+    local_input = LocalAlgorithmExecutor().validated_input
     calls = 0
+    caplog.set_level("INFO", logger="Agent.CausalAgentMCP.service")
 
     def authority_reader(_context):
         nonlocal calls
         calls += 1
-        if calls == 3:
+        if calls == revoke_on_read:
             raise McpServiceError(SafeErrorCode.MCP_LEASE_STALE)
-        return "A,B\n1,2\n3,4\n"
+        return local_input
 
     async def scenario():
         context = _context()
         command = _command(context)
+        pool = BoundedProcessPool(process_workers=1)
         service = CausalMcpService(
-            config=_config(),
-            registry=build_default_registry(),
-            executor_pool=FakePool(),
-            authority_reader=authority_reader,
-            database_probe=lambda: True,
+            config=_config(), registry=build_default_registry(),
+            executor_pool=pool, authority_reader=authority_reader,
         )
-        return await service.execute_payload(
-            {
+        await pool.start()
+        try:
+            return await service.execute_payload({
                 "command": command.model_dump(mode="json"),
                 "trusted_context": context.model_dump(mode="json"),
                 "signature": sign_invocation(context, command, "secret"),
-            }
-        )
+            })
+        finally:
+            await pool.close()
 
     payload = asyncio.run(scenario())
-    assert calls == 3
+    assert calls == revoke_on_read
+    assert payload["ok"] is True
     assert payload["result"]["status"] == "execution_failed"
     assert payload["result"]["diagnostics"]["safe_error_code"] == "MCP_LEASE_STALE"
+    assert payload["result"]["standardized_graph"] is None
+    assert payload["result"]["raw_result_ref"] is None
+    accepted = [record for record in caplog.records
+                if getattr(record, "event_code", None) == "mcp.request.accepted"]
+    # 第二次强读失败发生在提交进程前；第三次强读失败发生在实际执行后。
+    assert len(accepted) == (1 if revoke_on_read == 3 else 0)
 
 
-def test_pc_runner_forwards_spec_alpha(monkeypatch) -> None:
-    observed = {}
-
-    def fake_runner(csv_data, *, alpha, test="auto"):
-        observed.update(csv_data=csv_data, alpha=alpha, test=test)
-        return {"success": True}
-
-    monkeypatch.setattr("Agent.causal.causalachieve.run_pc_analysis", fake_runner)
-    assert _pc("A,B\n1,2\n", {"alpha": 0.2, "test": "chisq"}, {})["success"] is True
-    assert observed == {"csv_data": "A,B\n1,2\n", "alpha": 0.2, "test": "chisq"}
+def test_pc_runner_forwards_spec_alpha() -> None:
+    csv_data = "A,B\n" + "0,0\n0,0\n1,1\n1,1\n" * 50
+    result = _pc(csv_data, {"alpha": 0.2, "test": "chisq"}, {})
+    assert result["success"] is True
+    assert result["diagnostics"]["alpha"] == 0.2
+    assert result["diagnostics"]["independence_test"] == "chisq"
+    assert result["diagnostics"]["n_samples"] == 200
 
 
 def test_service_exposes_algorithm_timeout_as_result_status() -> None:
-    class TimeoutPool:
-        def ready(self) -> bool:
-            return True
+    """真实密集 PC 工作负载超过一秒 deadline；包括子进程启动时间。"""
+    import numpy as np
+    import pandas as pd
 
-        async def execute(self, **kwargs):
-            await kwargs["before_start"](0.01)
-            raise PoolExecutionError(SafeErrorCode.ALGORITHM_TIMED_OUT)
+    rng = np.random.default_rng(108)
+    source = rng.normal(size=(1000, 1))
+    frame = pd.DataFrame(
+        source + 0.05 * rng.normal(size=(1000, 200)),
+        columns=[f"x{index}" for index in range(200)],
+    )
+    local_input = LocalAlgorithmExecutor(frame.to_csv(index=False)).validated_input
 
     async def scenario():
         context = _context()
         command = _command(context)
+        pool = BoundedProcessPool(process_workers=1)
         service = CausalMcpService(
-            config=_config(),
-            registry=build_default_registry(),
-            executor_pool=TimeoutPool(),
-            authority_reader=lambda _context: "A,B\n1,2\n3,4\n",
-            database_probe=lambda: True,
+            config=replace(_config(), algorithm_deadline_seconds=1),
+            registry=build_default_registry(), executor_pool=pool,
+            authority_reader=lambda _context: local_input,
         )
-        return await service.execute_payload(
-            {
+        await pool.start()
+        try:
+            return await service.execute_payload({
                 "command": command.model_dump(mode="json"),
                 "trusted_context": context.model_dump(mode="json"),
                 "signature": sign_invocation(context, command, "secret"),
-            }
-        )
+            })
+        finally:
+            await pool.close()
 
     payload = asyncio.run(scenario())
     assert payload["ok"] is True
     assert payload["result"]["status"] == "timed_out"
+    assert payload["result"]["diagnostics"]["safe_error_code"] == "ALGORITHM_TIMED_OUT"
+    assert payload["result"]["standardized_graph"] is None
+    assert payload["result"]["raw_result_ref"] is None
 
 
 def test_service_cancel_is_identity_bound_and_idempotent() -> None:
@@ -570,7 +520,7 @@ def test_service_cancel_is_identity_bound_and_idempotent() -> None:
             config=_config(),
             registry=build_default_registry(),
             executor_pool=CancelPool(),
-            authority_reader=lambda _context: "A,B\n1,2\n",
+            authority_reader=lambda _context: LocalAlgorithmExecutor().validated_input,
             database_probe=lambda: True,
         )
         return await service.cancel_payload(

@@ -66,6 +66,19 @@ class CausalAgentState(TypedDict):
     session_id: str
     job_id: NotRequired[str]
     file_summary: NotRequired[Optional[FileSummary]]
+    analysis_file_summary: NotRequired[dict[str, Any]]
+    prepared_dataset_id: NotRequired[int]
+    prepared_dataset_hash: NotRequired[str]
+    prepared_dataset_metadata: NotRequired[dict[str, Any]]
+    dataset_validation_status: NotRequired[str]
+    dataset_validation_report: NotRequired[dict[str, Any]]
+    data_processing_run_id: NotRequired[str]
+    data_processing_candidate_id: NotRequired[int]
+    data_processing_candidate_revision: NotRequired[int]
+    data_processing_retry_count: NotRequired[int]
+    data_processing_retry_report: NotRequired[dict[str, Any] | None]
+    data_processing_failure_code: NotRequired[str | None]
+    data_processing_failure_message: NotRequired[str]
     data_profile: NotRequired[Optional[DataProfile]]
 
     route_decision: NotRequired[
@@ -83,6 +96,9 @@ class CausalAgentState(TypedDict):
     tool_call_request: Optional[bool]
 
     analysis_parameters: Optional[dict]
+    analysis_parameter_changes: NotRequired[list[dict[str, Any]]]
+    data_processing_semantic_identity: NotRequired[str]
+    data_processing_confirmed_plan_version: NotRequired[str | None]
 
     # Agent 的结构化意图判断结果；只保留意图、上下文提示和澄清问题，
     # 数据库 ID、文件 ID 和最终路由都由后端解析后写入。

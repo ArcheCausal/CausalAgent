@@ -473,6 +473,32 @@ def delete_session():
                     [str(row["job_id"]) for row in session_jobs],
                 )
 
+                cursor.execute(
+                    """
+                    SELECT d.data_object_id, d.script_object_id
+                    FROM analysis_job_datasets AS d
+                    JOIN analysis_jobs AS j ON j.job_id = d.job_id
+                    WHERE j.session_id = %s AND j.user_id = %s
+                    FOR UPDATE
+                    """,
+                    (session_id, user_id),
+                )
+                dataset_object_ids = {
+                    int(object_id)
+                    for row in cursor.fetchall()
+                    for object_id in (row["data_object_id"], row["script_object_id"])
+                    if object_id is not None
+                }
+                cursor.execute(
+                    """
+                    DELETE d
+                    FROM analysis_job_datasets AS d
+                    JOIN analysis_jobs AS j ON j.job_id = d.job_id
+                    WHERE j.session_id = %s AND j.user_id = %s
+                    """,
+                    (session_id, user_id),
+                )
+
                 # 2. 删除与该会话相关的附件 (通过连接 chat_messages)
                 # 这是为了处理 chat_attachments 和 chat_messages 之间没有直接外键的情况
                 sql_delete_attachments = """
@@ -488,6 +514,22 @@ def delete_session():
                 # 4. 删除会话本身（如果存在）
                 if session_exists:
                     cursor.execute("DELETE FROM sessions WHERE id = %s AND user_id = %s", (session_id, user_id))
+
+                for object_id in sorted(dataset_object_ids):
+                    cursor.execute(
+                        """
+                        SELECT
+                            (SELECT COUNT(*) FROM user_files WHERE object_id = %s)
+                            +
+                            (SELECT COUNT(*) FROM analysis_job_datasets
+                             WHERE data_object_id = %s OR script_object_id = %s)
+                            AS reference_count
+                        """,
+                        (object_id, object_id, object_id),
+                    )
+                    reference_count = int((cursor.fetchone() or {}).get("reference_count") or 0)
+                    if reference_count == 0:
+                        cursor.execute("DELETE FROM file_objects WHERE id = %s", (object_id,))
 
                 conn.commit()
                 return jsonify({

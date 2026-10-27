@@ -6,6 +6,34 @@ secrets:
     file: ${CAUSALAGENT_SECRET_FILE:-./causalagent.env}
 
 services:
+  sandbox-controller:
+    extends:
+      file: ./deploy/opensandbox/services.yml
+      service: sandbox-controller
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./sandbox_controller:/app/sandbox_controller:ro
+      - ./config/secret_file.py:/app/config/secret_file.py:ro
+    environment:
+      ENVIRONMENT: development
+      MYSQL_HOST: mysql-primary
+      MYSQL_WRITE_HOST: mysql-primary
+    networks: [causalagent_replica_network, sandbox_upstream]
+    depends_on:
+      mysql-primary: {condition: service_healthy}
+      db-bootstrap: {condition: service_completed_successfully}
+      opensandbox: {condition: service_healthy}
+
+  opensandbox:
+    extends:
+      file: ./deploy/opensandbox/services.yml
+      service: opensandbox
+    environment:
+      ENVIRONMENT: development
+    networks: [sandbox_upstream]
+
   mysql-primary:
     group_add:
       - "3000"
@@ -228,6 +256,11 @@ services:
       - JOB_STALE_AFTER_SECONDS=${JOB_STALE_AFTER_SECONDS:-120}
       - JOB_DRAIN_TIMEOUT_SECONDS=${JOB_DRAIN_TIMEOUT_SECONDS:-60}
       - JOB_MAX_ATTEMPTS=${JOB_MAX_ATTEMPTS:-3}
+      - CAUSALAGENT_SANDBOX_CONTROLLER_URL=${CAUSALAGENT_SANDBOX_CONTROLLER_URL:-http://sandbox-controller:8081}
+      - CAUSALAGENT_SECRET_FILE=/run/secrets/causalagent.env
+      - CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS=${CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS:-330}
+      - CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER=${CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER:-2}
+      - CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY_WAIT_SECONDS=${CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY_WAIT_SECONDS:-300}
       - RAG_EVAL_EVALUATION_WORKERS=${RAG_EVAL_EVALUATION_WORKERS:-5}
       - RAG_EVAL_EVALUATION_POLL_INTERVAL_SECONDS=${RAG_EVAL_EVALUATION_POLL_INTERVAL_SECONDS:-1}
       - RAG_EVAL_EVALUATION_HEARTBEAT_INTERVAL_SECONDS=${RAG_EVAL_EVALUATION_HEARTBEAT_INTERVAL_SECONDS:-10}
@@ -247,6 +280,7 @@ services:
       - ./Agent/knowledge_base/multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
       - ./Agent/knowledge_base/multimodal_runtime:/app/Agent/knowledge_base/multimodal_runtime
     depends_on:
+      sandbox-controller: {condition: service_healthy}
       mysql-primary:
         condition: service_healthy
       mysql-replica:
@@ -461,13 +495,19 @@ services:
     restart: unless-stopped
 
 networks:
+  sandbox_upstream: {driver: bridge}
   causalagent_replica_network:
     driver: bridge
 
 volumes:
+  opensandbox_state: {driver: local}
   mysql_primary_data:
     driver: local
   mysql_replica_data:
     driver: local
   postgres_checkpoint_data:
     driver: local
+
+configs:
+  opensandbox_config:
+    file: ${CAUSALAGENT_OPENSANDBOX_CONFIG_SOURCE:-./deploy/opensandbox/config.toml}

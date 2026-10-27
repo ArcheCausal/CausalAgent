@@ -1,0 +1,40 @@
+# OpenSandbox release-1.1.1, Linux Docker bridge gateway 172.17.0.1.
+# Change publish_host in a separate read-only config if the daemon uses another gateway.
+[server]
+host = "0.0.0.0"
+port = 8080
+max_sandbox_timeout_seconds = 3600
+
+[proxy]
+resolve_internal = false
+
+[runtime]
+type = "docker"
+execd_image = "docker.io/opensandbox/execd@sha256:cda2bc35409bbf57561599b316cafb899598f7dce671332e7ceda14eb1cfeded"
+
+[docker]
+network_mode = "bridge"
+host_ip = "host.docker.internal"
+publish_host = "172.17.0.1"
+port_range_min = 40000
+port_range_max = 40100
+drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
+no_new_privileges = true
+pids_limit = 4096
+sandbox_binds = []
+
+[egress]
+image = "docker.io/opensandbox/egress@sha256:bce2cc2e4dc3a3594678b91ac29efb0669fccebfdfc137727018d3b087fbb13a"
+mode = "dns+nft"
+disable_ipv6 = true
+readiness_timeout_seconds = 30.0
+
+[storage]
+allowed_host_paths = []
+
+[store]
+type = "sqlite"
+path = "/var/lib/opensandbox/opensandbox.db"
+
+[renew_intent]
+enabled = false

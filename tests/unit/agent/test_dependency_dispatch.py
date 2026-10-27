@@ -11,16 +11,14 @@ from langgraph.prebuilt import ToolNode
 from Agent.deep_agent import AgentRunContext, TrustedJobIdentity
 from Agent.deep_agent.memory import build_in_memory_backend
 from Agent.deep_agent.state import ProjectDeepAgentState
-from Agent.deep_agent_tools import (
-    DataProfile,
-    build_default_registry,
-)
+from Agent.deep_agent_tools import build_default_registry
 from Agent.deep_agent_tools.adapters import build_default_adapters
 from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
 from Agent.deep_agent_tools.dependency_dispatch import (
     build_algorithm_dependency_middleware,
 )
-from Agent.deep_agent_tools.fake_algorithm_executor import FakeAlgorithmExecutor
+from tests.support.local_algorithm_execution import LocalAlgorithmExecutor
+from tests.support.bound_analysis_input import bind_analysis_input
 
 
 IDENTITY = TrustedJobIdentity(
@@ -35,11 +33,15 @@ IDENTITY = TrustedJobIdentity(
 
 
 def test_tool_node_dispatches_each_algorithm_call_once() -> None:
-    executor = FakeAlgorithmExecutor()
+    executor = LocalAlgorithmExecutor(semantic_kinds={"x": "continuous", "y": "continuous"})
+    identity = bind_analysis_input(
+        IDENTITY, executor.csv_data, semantic_kinds=executor.validated_input.semantic_kinds,
+        dataset_id=11,
+    )
     events = []
     context = AgentRunContext(
         execution_guard=None,
-        trusted_identity=IDENTITY,
+        trusted_identity=identity,
         algorithm_executor=executor,
         filesystem_backend=build_in_memory_backend(user_id=7),
         event_sink=lambda payload: events.append(dict(payload)),
@@ -50,19 +52,13 @@ def test_tool_node_dispatches_each_algorithm_call_once() -> None:
             raw_backend=context.filesystem_backend,
         )
     )
-    profile = DataProfile(
-        row_count=300,
-        column_count=2,
-        column_names=("x", "y"),
-        numeric_columns=("x", "y"),
-    )
+    profile = executor.data_profile
     tools = [
         tool.to_langchain_tool()
         for tool in build_algorithm_tools(
             registry,
             runtime_context=context,
             data_profile=profile,
-            dataset_csv="x,y\n1,2\n2,3\n",
         )
     ]
     middleware = build_algorithm_dependency_middleware(registry=registry)
@@ -129,6 +125,10 @@ def test_tool_node_dispatches_each_algorithm_call_once() -> None:
     }
     assert len(state["algorithm_results"]) == 2
     assert all(result.status == "valid" for result in state["algorithm_results"].values())
+    for result in state["algorithm_results"].values():
+        assert result.provenance.analysis_dataset_id == identity.analysis_input.dataset_id
+        assert result.provenance.source_input_identity == IDENTITY.input_identity
+        assert result.provenance.input_identity == identity.current_input_identity()
     assert {
         record.provider_call_id for record in state["action_ledger"].values()
     } == {"dispatch-pc-1", "dispatch-direct-lingam-1"}

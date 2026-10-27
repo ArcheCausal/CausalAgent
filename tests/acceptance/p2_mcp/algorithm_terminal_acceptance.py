@@ -78,6 +78,7 @@ def source_digest() -> str:
 def generate_fixture(path: Path) -> dict[str, Any]:
     """Create only a new, explicitly named synthetic test CSV, never user input."""
     from Agent.deep_agent_tools.preprocessing import build_data_profile_from_csv
+    from tests.support.local_algorithm_execution import LocalAlgorithmExecutor
 
     rng = random.Random(20261020)
     with path.open("x", encoding="utf-8", newline="") as output:
@@ -88,11 +89,13 @@ def generate_fixture(path: Path) -> dict[str, Any]:
             b = 0.8 * a + rng.gauss(0, 0.6)
             c = 0.6 * b + rng.gauss(0, 0.8)
             writer.writerow((a, b, c, rng.gauss(0, 1)))
+    validation_report = LocalAlgorithmExecutor(path.read_text(encoding="utf-8")).validation_report
     return {
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "rows": 160, "columns": ["A", "B", "C", "D"],
         "data_profile": build_data_profile_from_csv(path.read_text(encoding="utf-8")).model_dump(mode="json"),
         "authority": "explicit generated local frozen test CSV; no database authority",
+        "validation_report": validation_report,
     }
 
 
@@ -119,6 +122,7 @@ async def serve(args: argparse.Namespace) -> None:
     from Agent.CausalAgentMCP.app import create_app
     from Agent.CausalAgentMCP.config import McpServerConfig
     from Agent.CausalAgentMCP.executor_pool import BoundedProcessPool
+    from Agent.measurement_semantics import ValidatedAlgorithmInput, semantic_kinds_from_validation_report
 
     # No environment/model/DB configuration is read from the workspace.
     os.environ["HF_HUB_OFFLINE"] = "1"
@@ -135,12 +139,15 @@ async def serve(args: argparse.Namespace) -> None:
 
     frozen_path = Path(args.fixture)
 
-    def read_frozen_authority(context: Any) -> str:
+    def read_frozen_authority(context: Any) -> ValidatedAlgorithmInput:
         content = frozen_path.read_bytes()
         digest = hashlib.sha256(content).hexdigest()
         if digest != fixture["sha256"] or digest != context.input_snapshot_digest:
             raise AcceptanceFailure("frozen_input_digest_changed")
-        return content.decode("utf-8")
+        return ValidatedAlgorithmInput(
+            csv_data=content.decode("utf-8"),
+            semantic_kinds=semantic_kinds_from_validation_report(fixture["validation_report"]),
+        )
 
     pool = BoundedProcessPool(process_workers=2, queue_capacity=2)
     config = McpServerConfig(
@@ -203,7 +210,8 @@ async def client(args: argparse.Namespace) -> dict[str, Any]:
     from langgraph.types import Command
     from Agent.Report.document import ReportDraft, build_report_document
     from Agent.causal_agent.nodes import _report_execution_summary
-    from Agent.deep_agent.context import AgentRunContext, TrustedJobIdentity
+    from Agent.deep_agent.context import AnalysisInputRef, AgentRunContext, TrustedJobIdentity
+    from Agent.measurement_semantics import semantic_kinds_from_validation_report
     from Agent.deep_agent.finalization import FinalizationGate
     from Agent.deep_agent.graph import _build_message_identity_middleware
     from Agent.deep_agent.memory import build_in_memory_backend
@@ -260,10 +268,16 @@ async def client(args: argparse.Namespace) -> dict[str, Any]:
         trusted_identity: TrustedJobIdentity | None = None,
         *, data_profile: DataProfile | None = None,
     ) -> dict[str, Any]:
+        analysis_input = AnalysisInputRef()
+        analysis_input.bind(
+            dataset_id=1, object_id=1, content_hash=fixture["sha256"], filename="local.csv",
+            semantic_kinds=semantic_kinds_from_validation_report(fixture["validation_report"]),
+        )
         identity = trusted_identity or TrustedJobIdentity(
             job_id=str(uuid4()), session_id=str(uuid4()), user_id=7,
             attempt_count=1, lease_epoch=1, worker_id="isolated-terminal-acceptance",
             input_identity=fixture["sha256"], input_snapshot_digest=fixture["sha256"],
+            analysis_input=analysis_input,
         )
         events: list[dict[str, Any]] = []
         commands: list[Any] = []

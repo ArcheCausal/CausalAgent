@@ -101,7 +101,6 @@ def test_parent_projection_does_not_copy_job_or_runtime_fields() -> None:
         "deep_agent_decision",
         "deep_agent_structured_response",
         "deep_agent_status",
-            "deep_agent_data_processing_approvals",
     }
 
 

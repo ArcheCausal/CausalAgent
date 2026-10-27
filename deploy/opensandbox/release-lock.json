@@ -1,0 +1,21 @@
+{
+  "verified_at": "2026-10-25",
+  "release": "release-1.1.1",
+  "published_at": "2026-10-09T15:09:23Z",
+  "git_commit": "6150f3642bbf9db47f06d6c42ca9c7bfae06b3e9",
+  "sources": {
+    "release": "https://github.com/opensandbox-group/OpenSandbox/releases/tag/release-1.1.1",
+    "bom": "https://raw.githubusercontent.com/opensandbox-group/OpenSandbox/release-1.1.1/docs/releases/1.1.1.yaml",
+    "config": "https://github.com/opensandbox-group/OpenSandbox/blob/release-1.1.1/server/configuration.md",
+    "compose": "https://github.com/opensandbox-group/OpenSandbox/blob/release-1.1.1/server/docker-compose.example.yaml",
+    "interpreter": "https://github.com/opensandbox-group/OpenSandbox/blob/release-1.1.1/sdks/code-interpreter/python/README.md"
+  },
+  "images": {
+    "server": "docker.io/opensandbox/server@sha256:bcd5f264101262cebfa7e1ff9cd0424403e42f31a6596e4364cf90d8cb5c936b",
+    "execd": "docker.io/opensandbox/execd@sha256:cda2bc35409bbf57561599b316cafb899598f7dce671332e7ceda14eb1cfeded",
+    "egress": "docker.io/opensandbox/egress@sha256:bce2cc2e4dc3a3594678b91ac29efb0669fccebfdfc137727018d3b087fbb13a",
+    "interpreter_base": "docker.io/opensandbox/code-interpreter@sha256:133a3c1720dd52291a019740c2987e7164ea6de79e23d8198798e58950ae2e6e"
+  },
+  "interpreter_tag": "v1.1.0",
+  "verification": "Official release BOM and live docker buildx imagetools inspect; all four locked images pulled. Isolated Docker Desktop runtime evidence and derived image build are documented in README.md."
+}

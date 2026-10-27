@@ -33,9 +33,6 @@ MODEL_NAMES = (
     "McpInvocationContext",
     "MethodDefinition",
     "MethodImplementation",
-    "PreprocessingApproval",
-    "PreprocessingPlan",
-    "PreprocessingStep",
     "PublicDecision",
     "RawResultMetadata",
     "ResultAssessment",
@@ -45,7 +42,7 @@ MODEL_NAMES = (
     "StandardizedGraph",
     "WebEvidenceResult",
 )
-SCHEMA_VERSION = "p1-v1"
+SCHEMA_VERSION = "p2-v1"
 
 
 def canonical_json(value: object) -> bytes:

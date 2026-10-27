@@ -50,6 +50,7 @@ from Agent.deep_agent_tools.algorithm_specs import (
 from Agent.deep_agent_tools.models import AlgorithmExecutionCommand, McpInvocationContext
 from Agent.CausalAgentMCP.auth import sign_invocation
 from app.agent.worker.mcp_client_pool import McpClientPool, McpClientPoolConfig
+from tests.support.local_algorithm_execution import LocalAlgorithmExecutor
 
 
 TOKEN = "p2-acceptance-token"
@@ -391,10 +392,11 @@ async def start_server(
     registry: RunnerRegistry | None = None,
     process_workers: int = 1,
 ) -> tuple[uvicorn.Server, asyncio.Task[Any]]:
+    local_input = LocalAlgorithmExecutor(csv_data).validated_input
     app = create_app(
         _config(process_workers=process_workers, queue_capacity=4),
         registry=registry,
-        authority_reader=lambda _context: csv_data,
+        authority_reader=lambda _context: local_input,
         database_probe=lambda: True,
     )
     server = uvicorn.Server(

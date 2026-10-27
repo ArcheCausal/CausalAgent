@@ -66,7 +66,6 @@ def test_adapter_forwards_graph_artifact_to_command() -> None:
     )
     assert result.status == "valid"
     assert executor.calls[0].command.artifacts == {"standardized_graph": GRAPH}
-    assert result.provenance.preprocessing_recipe_digest
 
 
 def test_adapter_refuses_missing_graph_artifact() -> None:

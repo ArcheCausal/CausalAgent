@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
-from langgraph.errors import NodeError
+from langgraph.errors import GraphBubbleUp, NodeError
 from langgraph.runtime import Runtime
 
 from app.agent.worker.execution_guard import (
@@ -178,7 +178,7 @@ def bind_node(func, *, event_node_name: str | None = None, **bound_kwargs):
                 if guard is not None:
                     await guard.check_after_call()
                 return result
-            except JobExecutionRevoked:
+            except (JobExecutionRevoked, GraphBubbleUp):
                 raise
             except Exception as exc:
                 if guard is not None:
@@ -222,7 +222,7 @@ def bind_runnable_node(runnable, *, event_node_name: str):
                 if guard is not None:
                     await guard.check_after_call()
                 return result
-            except JobExecutionRevoked:
+            except (JobExecutionRevoked, GraphBubbleUp):
                 raise
             except Exception as exc:
                 if guard is not None:
@@ -272,7 +272,7 @@ def bind_subgraph_node(func, *, event_node_name: str, **bound_kwargs):
                 if guard is not None:
                     await guard.check_after_call()
                 return result
-            except JobExecutionRevoked:
+            except (JobExecutionRevoked, GraphBubbleUp):
                 raise
             except Exception as exc:
                 if guard is not None:

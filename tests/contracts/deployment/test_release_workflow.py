@@ -21,10 +21,11 @@ def workflow(name):
     return yaml.load((ROOT / ".github/workflows" / name).read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
-def test_bundle_runs_only_after_all_four_images_have_been_published():
+def test_bundle_runs_only_after_all_five_images_have_been_published():
     publish = workflow("publish-staging-images.yml")
     bundle = publish["jobs"]["build-release-bundle"]
     assert "build-and-push" in bundle["needs"]
+    assert "build-processing-image" in bundle["needs"]
     assert "if" not in bundle  # 保留 needs 的默认成功条件，不能在构建失败后打包。
     assert bundle["uses"] == "./.github/workflows/build-release-bundle.yml"
     assert bundle["with"]["source_commit"] == "${{ github.sha }}"
@@ -54,6 +55,57 @@ def test_workflow_inputs_are_passed_as_data_instead_of_shell_source():
     for step in steps:
         assert "${{" not in step.get("run", "")
         assert "${{" not in step.get("with", {}).get("script", "")
+
+
+def test_processing_image_is_built_and_its_digest_is_forwarded_to_bundle():
+    publish = workflow("publish-staging-images.yml")
+    assert not (publish["on"]["workflow_dispatch"] or {}).get("inputs")
+    processing = publish["jobs"]["build-processing-image"]
+    assert set(processing["needs"]) == {"validate-source-ref", "prepare"}
+    assert "if" not in processing
+    assert processing["outputs"]["image"] == "${{ steps.reference.outputs.image }}"
+    steps = processing["steps"]
+    assert any(step.get("uses", "").startswith("actions/checkout@") for step in steps)
+    assert any(step.get("uses", "").startswith("docker/login-action@") for step in steps)
+    build = next(step for step in steps if step.get("id") == "build")
+    assert build["uses"].startswith("docker/build-push-action@")
+    settings = build["with"]
+    assert settings["context"] == "deploy/opensandbox"
+    assert (ROOT / settings["file"]).is_file()
+    assert settings["file"] == "deploy/opensandbox/Dockerfile"
+    assert settings["platforms"] == "linux/amd64"
+    assert settings["push"] == "true"
+    assert settings["tags"] == (
+        "ghcr.io/${{ needs.prepare.outputs.owner }}/causalagent-data-preparation:"
+        "sha-${{ needs.prepare.outputs.short_sha }}"
+    )
+    assert "org.opencontainers.image.revision=${{ github.sha }}" in settings["labels"]
+    reference = next(step for step in steps if step.get("id") == "reference")
+    assert reference["env"]["IMAGE_DIGEST"] == "${{ steps.build.outputs.digest }}"
+    assert reference["env"]["IMAGE_NAME"] == (
+        "ghcr.io/${{ needs.prepare.outputs.owner }}/causalagent-data-preparation"
+    )
+    assert '^sha256:[0-9a-f]{64}$' in reference["run"]
+    assert 'echo "image=$IMAGE_NAME@$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"' in reference["run"]
+    assert publish["jobs"]["build-release-bundle"]["with"]["sandbox_image"] == (
+        "${{ needs.build-processing-image.outputs.image }}"
+    )
+    for step in steps:
+        assert "continue-on-error" not in step
+        assert "${{" not in step.get("run", "")
+
+
+def test_processing_image_is_required_and_verified_when_packaging_existing_images():
+    bundle = workflow("build-release-bundle.yml")
+    for trigger in ("workflow_dispatch", "workflow_call"):
+        assert bundle["on"][trigger]["inputs"]["sandbox_image"]["required"] == "true"
+    steps = bundle["jobs"]["build-bundle"]["steps"]
+    registry = next(step for step in steps if step.get("name") == "Verify the published processing image")
+    assert registry["env"]["SANDBOX_IMAGE"] == "${{ inputs.sandbox_image }}"
+    assert '"imagetools", "inspect", reference' in registry["run"]
+    package = next(step for step in steps if step.get("name") == "Build the deployment bundle")
+    assert '--sandbox-image "$SANDBOX_IMAGE"' in package["run"]
+    assert package["env"]["SANDBOX_IMAGE"] == "${{ inputs.sandbox_image }}"
 
 
 @pytest.mark.parametrize("option,value", [

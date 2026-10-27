@@ -164,15 +164,37 @@ export interface ProcessingOption {
   risks: string[]
 }
 
+export interface ProcessingPlanSummary {
+  summary: string
+  observationUnit: string
+  transformations: string[]
+  variableSemantics: Record<string, string>
+  limitations: string[]
+}
+
 export interface WaitingInput {
+  status: 'waiting' | 'answered' | 'expired' | 'closed'
   questionId: string
+  interactionType: string | null
   prompt: string
   algorithmName: string
   expiresAt: string | null
   options: ProcessingOption[]
+  planVersion: string | null
+  plan: ProcessingPlanSummary | null
   allowOther: boolean
   selectedOptionId: string | null
   expired: boolean
+}
+
+export interface InteractionIdentity {
+  jobId: string
+  questionId: string
+  planVersion: string | null
+}
+
+export interface ProcessingOptionAction extends InteractionIdentity {
+  optionId: string
 }
 
 export type DetailTone = 'default' | 'error' | 'retry'

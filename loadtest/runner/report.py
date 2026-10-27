@@ -105,6 +105,14 @@ def _capacity_section(summary: dict) -> list[str]:
                      f"{_fmt(min(bounds) if bounds else None, ' ms')} ~ "
                      f"{_fmt(max(bounds) if bounds else None, ' ms')}")
     cdfm = capacity.get("cdfm") or {}
+    conclusion = capacity.get("conclusion") or {}
+    lines.extend(["", "### 容量结论", "",
+                  f"- 当前配置下可持续完成速率：客户端 {_fmt(conclusion.get('sustained_completion_per_second'))} 个/s；"
+                  f"主库 {_fmt(conclusion.get('sustained_server_completion_per_second'))} 个/s",
+                  f"- 满足延迟目标的活动 Job 范围：{_value(conclusion.get('active_job_range_within_latency_target'))}"
+                  f"（目标 server_total_ms ≤ {_value(conclusion.get('latency_target_ms'))} ms）",
+                  f"- 首先限制吞吐的组件：{_value(conclusion.get('first_limiting_component'))}",
+                  f"- 判定边界：{_value(conclusion.get('boundary'))}"])
     lines.extend(["", "### CDFM", "", f"- 状态：{_value(cdfm.get('status'))}"])
     for key, value in cdfm.items():
         if key != "status":
@@ -150,6 +158,15 @@ def _timing_section(summary: dict) -> list[str]:
                   f"执行释放 execution_released：{_value(drain.get('execution_released'))}",
                   f"- 主库核对当时已排空 server_drained_at_check：{_value(drain.get('server_drained_at_check'))}",
                   "客户端没有待观察 Job 只表示客户端观察结束；业务活动清空与执行释放分别以同轮主库覆盖和释放证据判定，unknown 表示尚不能判断。"])
+    lines.extend([
+        f"- 沙盒资源释放 sandbox_released：{_value(drain.get('sandbox_released'))}；"
+        f"沙盒证据状态 sandbox_evidence_status：{_value(drain.get('sandbox_evidence_status'))}；"
+        f"已关闭/未关闭/uncertain：{_value(drain.get('sandbox_sessions_closed'))}/"
+        f"{_value(drain.get('sandbox_sessions_open'))}/{_value(drain.get('sandbox_sessions_uncertain'))}",
+        f"- 完整排空 complete_drained：{_value(drain.get('complete_drained'))}；"
+        f"未知原因：{_value(drain.get('complete_drain_reason'))}",
+        "完整排空要求本轮身份核对完整、Job 已终结、执行已释放、全部沙盒会话已关闭并取得远端结束证据；"
+        "缺少任何一项时保持未知，不沿用旧排空结果推断。"])
     lines.extend(["", "user_wait_ms 从创建请求发出计至客户端收到终态；history_check_ms 单独统计历史核对耗时。"
                   "未收到终态时只给 wait_lower_bound_ms。主库核对发生在观察结束之后时，不能回填成实时收到终态。",
                   "普通 HTTP 默认 30 秒，SSE 空闲读取默认 45 秒，单 Job 总观察默认 1800 秒；"
@@ -157,6 +174,56 @@ def _timing_section(summary: dict) -> list[str]:
     if summary.get("schema_version") != "loadtest.run.v2":
         lines.extend(["旧产物兼容：未保存的逻辑请求时间点、完整事件 ID 集合和分阶段数据均标为未采集；"
                       "旧 SSE 峰值可能包含等待建连，不能解释为成功收到 HTTP 200 响应头的连接峰值。", ""])
+    return lines
+
+
+def _sandbox_section(summary: dict) -> list[str]:
+    """渲染本轮沙盒会话与阶段时间；旧产物没有该证据时显示未采集。"""
+    capacity = (summary.get("capacity") or {}).get("sandbox") or {}
+    status = capacity.get("status")
+    lines = ["## 沙盒会话与阶段时间", "",
+             "| 指标 | 数值 |", "| --- | --- |",
+             f"| 证据状态 | {_value(status if status != 'not_collected' else None)} |",
+             f"| 有会话记录的 Job / 本轮 Job | {_value(capacity.get('jobs_with_sessions'))} / "
+             f"{_value(capacity.get('job_denominator'))} |",
+             f"| Job 覆盖率 | {_rate(capacity.get('job_coverage'))} |",
+             f"| 会话数 / 每 Job 平均 | {_value(capacity.get('sessions'))} / "
+             f"{_value(capacity.get('sessions_per_job'))} |",
+             f"| 已关闭 / 未关闭 / uncertain | {_value(capacity.get('closed'))} / "
+             f"{_value(capacity.get('open'))} / {_value(capacity.get('uncertain'))} |",
+             f"| 执行成功 / pending | {_value(capacity.get('operation_succeeded'))} / "
+             f"{_value(capacity.get('operation_pending'))} |",
+             f"| 缺少远端标识的会话 | {_value(capacity.get('sessions_without_remote_id'))} |",
+             f"| 会话存活时间 p95 | {_fmt(capacity.get('lifetime_p95_ms'), ' ms')} |",
+             "", "一个 Job 可能创建多个沙盒会话，Job 数不能代替沙盒创建数。"
+             "阶段时间来自控制服务写入的 reserve_committed、remote_created、initialized、"
+             "execute_started 与 execute_finished，使用数据库时钟。"]
+    timings = capacity.get("timings")
+    if isinstance(timings, dict):
+        lines.extend(["", "| 阶段 | 已取得样本 | 首末间隔 ms |", "| --- | --- | --- |"])
+        for name, value in timings.items():
+            data = value if isinstance(value, dict) else {}
+            lines.append(f"| {name} | {_value(data.get('samples'))} | {_fmt(data.get('min_ms'))} |")
+    else:
+        lines.extend(["", "阶段时间：未采集（需要同轮主库核对产物包含 analysis_sandbox_sessions）。"])
+    lines.extend(["", "Worker 本地并发等待与全局容量等待的精确耗时目前没有独立计时事件；"
+                  "控制服务拒绝容量请求的次数只能证明发生过等待，不能给出等待时长。"])
+    return lines + [""]
+
+
+def _interaction_section(summary: dict) -> list[str]:
+    """渲染交互轮次与自动答复覆盖；未识别与偏离必须显式单列。"""
+    data = (summary.get("capacity") or {}).get("interaction") or {}
+    if data.get("status") == "not_collected":
+        return ["## 交互答复", "", "- 交互记录：未采集（旧产物没有 interaction 字段）", ""]
+    lines = ["## 交互答复", "",
+             f"- 交互轮次：{_value(data.get('rounds'))}；涉及 Job：{_value(data.get('jobs_with_interactions'))}",
+             f"- 已答复 / 未识别 / 偏离：{_value(data.get('answered'))} / "
+             f"{_value(data.get('unrecognized'))} / {_value(data.get('deviation'))}",
+             f"- 方案确认次数：{_value(data.get('plan_confirmations'))}",
+             f"- 答复等待 p95：{_fmt(data.get('pause_ms'), ' ms')}",
+             f"- 类型分布：{_value(data.get('types'))}",
+             "", "未识别交互不发送默认答复；方案超出场景允许的处理范围时记录偏离，不自动确认。", ""]
     return lines
 
 
@@ -487,7 +554,8 @@ def render_stage_report(summary: dict, logcheck: dict | None = None) -> str:
     ]
     # 容量结论先给分母、覆盖率和阶段，再展示资源与专项证据。
     resource_heading = lines[-3:]
-    lines[-3:] = _sse_states_section(sse) + _timing_section(summary) + _capacity_section(summary) + resource_heading
+    lines[-3:] = (_sse_states_section(sse) + _timing_section(summary) + _capacity_section(summary)
+                  + _interaction_section(summary) + _sandbox_section(summary) + resource_heading)
     lines.extend(resource.render(summary.get("resource_curve")))
     lines.extend(
         [
