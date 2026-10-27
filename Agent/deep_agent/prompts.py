@@ -60,10 +60,10 @@ MANDATORY_ALGORITHM_INSTRUCTION = (
     "（≥1 才算检出）：明显大于 1 时优先考虑非线性能力更强的算法；小于 1 只代表"
     "未检出，不能据此排除非线性机制。"
     "若 analysis_parameters 中 target 与 treatment 都已指定，在获得有效标准图后"
-    "必须引用本次同一数据集的一张有效发现图，以已绑定的 treatment 和 target（作为 outcome）"
-    "调用 causal_backdoor_ols 并完成方法适用性检查，保留程序生成的 ate_check。"
-    "明确的不适用可以满足要求，不要求必须算出效应值；错图、另一变量对、未就绪、"
-    "预算跳过或没有检查记录的普通失败均不能满足要求。改成 evidence_only 也不免除该要求。"
+    "必须先用该图的 graph_result_ref、treatment、outcome 调用 effect_diagnose；"
+    "诊断返回 succeeded 时，用同一张图和 recommended_estimator 完成一次真实估计调用，"
+    "并保留真实终态（成功、未就绪、不适用、失败都算一次尝试）；"
+    "诊断返回 not_applicable 时保留拒绝理由，不要再强制估计。"
 )
 
 

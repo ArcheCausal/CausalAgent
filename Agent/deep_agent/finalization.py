@@ -8,7 +8,6 @@ from typing import Any
 
 from Agent.deep_agent_tools.identity import build_invocation_id, current_input_identity
 from Agent.deep_agent_tools.algorithm_specs import get_algorithm_spec
-from Agent.deep_agent_tools.ate_applicability import ATE_REASON_SUMMARIES, check_ate_graph
 from Agent.deep_agent_tools.graph_validation import validate_graph_structure
 from Agent.deep_agent_tools.runtime_updates import normalize_tool_status
 from Agent.deep_agent_tools.models import (
@@ -106,6 +105,11 @@ class FinalizationGate:
             entry.spec.tool_name
             for entry in getattr(registry, "entries", ())
         )
+        self._estimation_tool_names = frozenset(
+            entry.spec.tool_name
+            for entry in getattr(registry, "entries", ())
+            if getattr(entry.spec, "kind", None) == "causal_estimation"
+        ) or frozenset({"causal_backdoor_ols", "causal_g_formula"})
 
     @staticmethod
     def _identity_value(identity: Any, name: str) -> Any:
@@ -290,6 +294,87 @@ class FinalizationGate:
                 return True
         return False
 
+    def _current_diagnose_records(
+        self,
+        ledger: Mapping[str, InvocationRecord],
+        *,
+        job_id: str,
+        attempt_count: int,
+        lease_epoch: int,
+        worker_id: str,
+        input_identity: str,
+        source_input_identity: str,
+        analysis_dataset_id: int,
+    ) -> list[InvocationRecord]:
+        """诊断记录不是算法记录，必须直接扫描完整 ledger。"""
+
+        records: list[InvocationRecord] = []
+        for record in ledger.values():
+            if record.tool_name != "effect_diagnose":
+                continue
+            try:
+                expected_id = build_invocation_id(
+                    job_id=job_id,
+                    response_identity=record.response_identity,
+                    provider_call_id=record.provider_call_id,
+                )
+            except (TypeError, ValueError) as exc:
+                raise StructuredResponseError("action ledger identity is invalid") from exc
+            if expected_id != record.invocation_id:
+                if record.job_id == job_id:
+                    raise StructuredResponseError("action ledger identity is invalid")
+                continue
+            if record.job_id != job_id:
+                raise StructuredResponseError("action ledger Job ownership mismatch")
+            if (
+                record.attempt_count != attempt_count
+                or record.lease_epoch != lease_epoch
+                or record.worker_id != worker_id
+                or record.input_identity != input_identity
+                or record.source_input_identity != source_input_identity
+                or record.analysis_dataset_id != analysis_dataset_id
+            ):
+                continue
+            if record.final_status == "pending" or not record.attempts:
+                raise StructuredResponseError("diagnose action ledger is not terminal")
+            latest = max(
+                record.attempts.values(),
+                key=lambda attempt: (attempt.retry_ordinal, attempt.revision),
+            )
+            if latest.status != record.final_status:
+                raise StructuredResponseError(
+                    "diagnose action ledger terminal status mismatch"
+                )
+            records.append(record)
+        return records
+
+    def _has_current_terminal_estimation(
+        self,
+        ledger: Mapping[str, InvocationRecord],
+        *,
+        job_id: str,
+        attempt_count: int,
+        lease_epoch: int,
+        worker_id: str,
+        input_identity: str,
+    ) -> bool:
+        return any(
+            self._has_current_terminal_tool_invocation(
+                ledger,
+                tool_name=name,
+                job_id=job_id,
+                attempt_count=attempt_count,
+                lease_epoch=lease_epoch,
+                worker_id=worker_id,
+                input_identity=input_identity,
+                terminal_statuses={
+                    "succeeded", "not_ready", "not_applicable",
+                    "failed", "timed_out",
+                },
+            )
+            for name in sorted(self._estimation_tool_names)
+        )
+
     def _validate_result_ledger_pair(
         self,
         result: AlgorithmResult,
@@ -364,70 +449,6 @@ class FinalizationGate:
         if result.provenance.spec_digest != entry.spec.spec_digest:
             raise StructuredResponseError("result spec digest is not registered")
         return entry.spec.tool_name
-
-    @staticmethod
-    def _has_ate_check(
-        results: Mapping[str, AlgorithmResult],
-        *,
-        parameters: Mapping[str, Any],
-    ) -> bool:
-        """只认可已通过身份与账本校验、针对当前源图和变量对的检查。"""
-        for result in results.values():
-            check = result.ate_check
-            if result.capability_id != "causal.backdoor_ols" or check is None:
-                continue
-            if result.status not in {"valid", "not_applicable", "execution_failed", "timed_out"}:
-                continue
-            if check.treatment != parameters.get("treatment") or check.outcome != parameters.get("target"):
-                continue
-            source = results.get(check.graph_result_ref)
-            if source is None or source.status != "valid" or source.standardized_graph is None:
-                continue
-            spec = get_algorithm_spec(source.capability_id)
-            if spec.kind != "causal_discovery" or not validate_graph_structure(
-                source.standardized_graph, graph_semantics=spec.graph_semantics,
-            ).valid:
-                continue
-            if any(
-                getattr(source.provenance, key) != getattr(result.provenance, key)
-                for key in ("job_id", "attempt_count", "lease_epoch", "input_identity",
-                            "source_input_identity", "analysis_dataset_id")
-            ):
-                continue
-            graph_check = check_ate_graph(
-                graph=source.standardized_graph, graph_result_ref=source.result_ref,
-                treatment=check.treatment, outcome=check.outcome,
-            )
-            if (
-                check.adjustment_set != graph_check.adjustment_set
-                or check.execution_columns != graph_check.execution_columns
-            ):
-                continue
-            if graph_check.applicability == "not_applicable":
-                if result.status != "not_applicable" or check != graph_check:
-                    continue
-            elif check.applicability == "not_applicable":
-                if (
-                    result.status != "not_applicable"
-                    or check.reason_code not in ATE_REASON_SUMMARIES
-                    or check.reason_code.startswith("ATE_GRAPH_")
-                ):
-                    continue
-            elif check.reason_code is not None or result.status == "not_applicable":
-                continue
-            if result.status == "valid":
-                effect = result.causal_effect
-                if (
-                    result.standardized_graph != source.standardized_graph
-                    or effect is None
-                    or effect.graph_result_ref != check.graph_result_ref
-                    or effect.treatment != check.treatment
-                    or effect.outcome != check.outcome
-                    or effect.adjustment_set != check.adjustment_set
-                ):
-                    continue
-            return True
-        return False
 
     def validate(
         self,
@@ -609,20 +630,75 @@ class FinalizationGate:
                 rule="analysis_route_without_algorithm_result",
             )
 
-        # 角色已绑定且有合法发现图时，必须完成方法检查；不要求估计成功。
-        if (
+        # 用户明确要求估计效应时不替模型选算法，只要求先留下诊断判定，
+        # 再按诊断结论决定是否必须有一次真实估计调用。
+        current_diagnoses = self._current_diagnose_records(
+            ledger,
+            job_id=job_id,
+            attempt_count=current_attempt,
+            lease_epoch=current_lease,
+            worker_id=current_worker,
+            input_identity=current_input,
+            source_input_identity=current_source,
+            analysis_dataset_id=current_dataset_id,
+        )
+        diagnose_statuses = {
+            normalize_tool_status(record.final_status)
+            for record in current_diagnoses
+        }
+        effect_question = (
             route_decision == ANALYSIS_ROUTE
-            and any(get_algorithm_spec(eligible[ref].capability_id).kind == "causal_discovery"
-                    for ref in valid_refs)
+            and bool(valid_refs)
             and _requires_effect_estimation(analysis_parameters)
-            and not self._has_ate_check(
-                eligible, parameters=analysis_parameters,
+        )
+        if effect_question and not diagnose_statuses & {"succeeded", "not_applicable"}:
+            raise StructuredResponseError(
+                "effect question requires an effect_diagnose decision",
+                rule="effect_question_without_diagnose",
+            )
+        if effect_question and "succeeded" in diagnose_statuses and not (
+            self._has_current_terminal_estimation(
+                current_ledger,
+                job_id=job_id,
+                attempt_count=current_attempt,
+                lease_epoch=current_lease,
+                worker_id=current_worker,
+                input_identity=current_input,
             )
         ):
             raise StructuredResponseError(
-                "effect question requires a verified causal_backdoor_ols applicability check",
-                rule="effect_question_without_ate_attempt",
+                "successful diagnosis requires a real estimation attempt",
+                rule="effect_question_without_estimation",
             )
+
+        estimation_refs = {
+            result.result_ref
+            for result in eligible.values()
+            if result.status == "valid"
+            and get_algorithm_spec(result.capability_id).kind == "causal_estimation"
+        }
+        if normalized_decision.outcome == "algorithm_supported" and estimation_refs:
+            primary_ref = normalized_decision.primary_result_ref
+            if primary_ref not in estimation_refs:
+                raise StructuredResponseError(
+                    "effect estimation result must be the primary result",
+                    rule="primary_not_estimation_result",
+                )
+            effect = eligible[primary_ref].causal_effect
+            if effect is None:
+                raise StructuredResponseError(
+                    "valid estimation result is missing causal_effect",
+                    rule="estimation_result_missing_effect",
+                )
+            if effect.graph_result_ref not in {
+                record.subject_ref
+                for record in current_diagnoses
+                if normalize_tool_status(record.final_status) == "succeeded"
+            }:
+                raise StructuredResponseError(
+                    "estimation source graph has no successful diagnosis",
+                    rule="estimation_graph_not_diagnosed",
+                )
 
         if (
             route_decision == ANALYSIS_ROUTE
@@ -730,8 +806,8 @@ FINALIZATION_RETRY_HINTS: dict[str, str] = {
     ),
     "no_valid_algorithm_with_valid_result": (
         "outcome=no_valid_algorithm 时不能存在有效算法结果。"
-        "若本次 target 与 treatment 已绑定，还必须引用本次一张有效发现图，"
-        "使用该变量对调用 causal_backdoor_ols 并完成方法适用性检查。"
+        "若本次问题要求估计处理变量对结果变量的效应，还必须先用有效图调用 "
+        "effect_diagnose，并在诊断 succeeded 后完成一次估计调用。"
         "若你认为已有有效结果不可用，请改用 evidence_only，"
         "并把每个有效结果标记为 discarded；这不免除已经触发的 ATE 检查。"
     ),
@@ -743,12 +819,24 @@ FINALIZATION_RETRY_HINTS: dict[str, str] = {
         "（例如 causal_pc 或 causal_direct_lingam），并在 result_assessments 中给出它的"
         "取舍；如果算法工具返回未就绪或失败，按它的真实状态提交 outcome。"
     ),
-    "effect_question_without_ate_attempt": (
-        "本次 target 与 treatment 已绑定，且已有有效因果图。"
-        "请引用本次同一数据集的一张有效发现图，使用已绑定的 treatment 和 target（作为 outcome）"
-        "调用 causal_backdoor_ols，完成方法适用性检查并保留程序生成的 ate_check。"
-        "明确的不适用可以满足要求；错图、另一变量对、未就绪、预算跳过或没有检查记录的失败不能满足。"
-        "改成 evidence_only 仍需完成这一步，不要求必须算出效应值。"
+    "effect_question_without_diagnose": (
+        "本次问题要求估计处理变量对结果变量的效应，且已有有效因果图。"
+        "请携带其中一张图的 graph_result_ref、treatment、outcome 调用一次 effect_diagnose；"
+        "即使诊断结论是不可估计，也保留真实返回的 succeeded/not_applicable 状态。"
+        "若最终不采用任何图，请改用 evidence_only 并把所有有效结果标记为 discarded。"
+    ),
+    "effect_question_without_estimation": (
+        "effect_diagnose 已判定该图可用于估计。请用同一张图的 graph_result_ref、相同的 "
+        "treatment/outcome 调用 recommended_estimator（causal_backdoor_ols 或 "
+        "causal_g_formula），并保留真实终态；不能只用文字结论代替估计调用。"
+    ),
+    "primary_not_estimation_result": (
+        "本次已产生有效的因果效应估计结果。主结果必须是该估计结果；"
+        "报告展示的因果图会随估计结果取回其源图。"
+    ),
+    "estimation_graph_not_diagnosed": (
+        "主结果所指的估计结果缺少对应的成功诊断记录。请先用同一张图调用 "
+        "effect_diagnose，待其返回 succeeded 后再用该图估计。"
     ),
     "analysis_route_without_web_invocation": (
         "本次运行已开启联网搜索。请先调用一次 web_evidence_search 并等待真实返回，"
