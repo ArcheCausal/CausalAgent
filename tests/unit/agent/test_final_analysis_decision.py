@@ -942,23 +942,24 @@ def test_deep_agent_evidence_projection_keeps_report_snippets_and_sources() -> N
     assert web_result["content"][0]["url"] == "https://example.invalid/web"
 
 
-def test_effect_predicate_requires_fields_keywords_and_distinct_variables() -> None:
-    assert _requires_effect_estimation(_EFFECT_PARAMETERS, _EFFECT_QUESTION)
-    assert not _requires_effect_estimation(_EFFECT_PARAMETERS, "请分析 x 和 y 的关系。")
-    assert not _requires_effect_estimation({"target": "y"}, _EFFECT_QUESTION)
+def test_effect_predicate_requires_distinct_bound_variables() -> None:
+    assert _requires_effect_estimation(_EFFECT_PARAMETERS)
+    assert not _requires_effect_estimation({"target": "y"})
+    assert not _requires_effect_estimation({"target": "y", "treatment": " "})
     assert not _requires_effect_estimation(
         {"target": "y", "treatment": "y", "columns": ["x", "y"]},
-        _EFFECT_QUESTION,
     )
     assert not _requires_effect_estimation(
         {"target": "y", "treatment": "z", "columns": ["x", "y"]},
-        _EFFECT_QUESTION,
     )
-    assert not _requires_effect_estimation(None, _EFFECT_QUESTION)
-    assert not _requires_effect_estimation(_EFFECT_PARAMETERS, None)
+    assert not _requires_effect_estimation(None)
 
 
-def test_gate_requires_ate_attempt_for_effect_question() -> None:
+@pytest.mark.parametrize(
+    "question",
+    [_EFFECT_QUESTION, "Estimate the causal effect of x on y.", None],
+)
+def test_gate_requires_ate_attempt_whenever_variables_are_bound(question) -> None:
     identity, registry, result, ledger = _algorithm_execution()
 
     with pytest.raises(StructuredResponseError) as failure:
@@ -969,7 +970,7 @@ def test_gate_requires_ate_attempt_for_effect_question() -> None:
             trusted_identity=identity,
             route_decision="fold",
             analysis_parameters=_EFFECT_PARAMETERS,
-            analysis_question=_EFFECT_QUESTION,
+            analysis_question=question,
         )
 
     assert failure.value.rule == "effect_question_without_ate_attempt"
@@ -1005,10 +1006,13 @@ def test_gate_accepts_effect_question_after_ate_attempt(ate_status) -> None:
 @pytest.mark.parametrize(
     "parameters,question",
     [
-        (_EFFECT_PARAMETERS, "请分析 x 和 y 的关系。"),
         ({"target": "y", "columns": ["x", "y"]}, _EFFECT_QUESTION),
         (
             {"target": "y", "treatment": "y", "columns": ["x", "y"]},
+            _EFFECT_QUESTION,
+        ),
+        (
+            {"target": "y", "treatment": "z", "columns": ["x", "y"]},
             _EFFECT_QUESTION,
         ),
     ],

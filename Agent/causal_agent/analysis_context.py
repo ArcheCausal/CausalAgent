@@ -111,6 +111,11 @@ def normalize_algorithm_summary(
             or (standardized.graph_semantics if standardized is not None else None)
         ),
         "graph": graph,
+        "causal_effect": (
+            result.causal_effect.model_dump(mode="json")
+            if result.causal_effect is not None
+            else None
+        ),
         "diagnostics": diagnostics.model_dump(mode="json"),
         "warnings": [warning.model_dump(mode="json") for warning in result.warnings],
         "assumptions": list(diagnostics.assumptions_checked),

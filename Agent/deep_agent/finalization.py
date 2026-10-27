@@ -549,7 +549,7 @@ class FinalizationGate:
         if (
             route_decision == ANALYSIS_ROUTE
             and valid_refs
-            and _requires_effect_estimation(analysis_parameters, analysis_question)
+            and _requires_effect_estimation(analysis_parameters)
             and not self._has_current_terminal_tool_invocation(
                 current_ledger,
                 tool_name="causal_ate",
@@ -614,16 +614,10 @@ class FinalizationRetryController:
         return self.retries_used
 
 
-_EFFECT_INTENT_KEYWORDS = ("效应", "影响", "作用", "干预效果", "处理效应", "提升", "降低")
+def _requires_effect_estimation(parameters: Mapping[str, Any] | None) -> bool:
+    """target 与 treatment 都已确定即视为效应问题，与提示词的强制估计条件一致。"""
 
-
-def _requires_effect_estimation(
-    parameters: Mapping[str, Any] | None,
-    question: str | None,
-) -> bool:
-    """判断本次问题是否明确要求估计处理变量对结果变量的效应。"""
-
-    if not isinstance(parameters, Mapping) or not isinstance(question, str):
+    if not isinstance(parameters, Mapping):
         return False
     target = parameters.get("target")
     treatment = parameters.get("treatment")
@@ -637,7 +631,7 @@ def _requires_effect_estimation(
         target not in columns or treatment not in columns
     ):
         return False
-    return any(keyword in question for keyword in _EFFECT_INTENT_KEYWORDS)
+    return True
 
 
 # Gate 失败规则到公开修正提示的映射。这里只写契约层面的可执行纠正，

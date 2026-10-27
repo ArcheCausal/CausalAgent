@@ -157,10 +157,25 @@ def test_estimation_primary_uses_source_graph_semantics_for_report():
 
     assert facts["primary_result_ref"] == estimate.result_ref
     assert facts["no_primary_reason"] is None
-    assert report_primary_result(facts)["result_ref"] == estimate.result_ref
+    primary = report_primary_result(facts)
+    assert primary["result_ref"] == estimate.result_ref
+    assert primary["causal_effect"] == {
+        "estimand": "ATE", "graph_result_ref": source.result_ref,
+        "treatment": "A", "outcome": "B", "adjustment_set": [],
+        "estimate": 1.0, "standard_error": None, "ci95": None,
+        "estimator": "backdoor_ols", "n_rows": 100,
+    }
     asset = _report_graph_asset(state)
     assert asset is not None
     assert asset.metadata["graph_semantics"] == "dag_target_to_source"
+
+    commit = json.loads(json.dumps(build_context_commit(state)))
+    restored = build_report_analysis_context({
+        "report_revision_mode": "full_regeneration_from_context",
+        "analysis_context": {"latest_algorithm_summary": commit["algorithm_summary"]},
+    })
+    assert restored == facts
+    assert report_primary_result(restored)["causal_effect"]["estimate"] == 1.0
 
 
 def test_graph_comparison_keeps_single_method_edges_distinct_from_opposite_directions():
