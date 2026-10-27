@@ -144,6 +144,14 @@ docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p
 
 ### OpenSandbox 数据处理验证
 
+方案、确认快照与执行说明的纯规则测试在 [test_data_processing_lifecycle.py](../../tests/unit/agent/test_data_processing_lifecycle.py)，真实 ToolNode、StateGraph 和 InMemorySaver 的状态传递检查在 [test_data_processing_plan_state.py](../../tests/integration/agent/test_data_processing_plan_state.py)。它们检查相同方案保留确认、方案变化清空绑定、脚本变化要求重新执行、执行说明事实绑定及结束纠正预算，不使用模型或外部服务替身，也不证明 MySQL、PostgreSQL 或 OpenSandbox 已验证。
+
+```bash
+docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_data_processing_lifecycle.py tests/integration/agent/test_data_processing_plan_state.py
+```
+
+真实 MySQL/PostgreSQL 入口 `data_processing_recovery.py` 额外覆盖候选保存后调用正式执行说明工具、确认保持有效、说明投影及后续独立校验与绑定。完整模型与 OpenSandbox 入口 `sandbox_upgrade_job.py --scenario execution-report --timeout-seconds 900` 要求真实模型在保存候选后调用说明工具，从子图 checkpoint 检查实际工具顺序，并检查仅确认一次、最终候选与说明一致以及独立校验成功。真实服务不可用时只能报告未执行，不能以离线结果代替。
+
 数据处理验收必须连接真实 OpenSandbox API、真实沙盒主机和真实数据库，不能使用替代 Provider、模拟 API 响应或伪造外网阻断结果。先从真实沙盒验证 Python 3.11 镜像和固定依赖，再逐项检查创建、原始文件只读、脚本执行、输出回读、超时中断、销毁、MySQL 候选持久化/恢复、PostgreSQL 子图恢复以及真实 IPv4/IPv6 出站被拒绝。公网连接探测的超时本身不能作为防火墙配置证据；验收需同时检查沙盒主机上的 egress sidecar、Docker bridge 和转发规则。
 
 真实沙盒应使用独立 Compose project、网络、数据库和临时密钥文件，按 [沙盒部署说明](../../deploy/opensandbox/README.md) 准备固定镜像与代理路由。控制服务、OpenSandbox 和处理容器属于不同验证边界，必须分别检查实际连接和权限；数据库恢复、健康接口或静态检查不能代替完整沙盒验收。上线前还需在隔离环境执行完整模型、Worker 重启接管、MCP HTTP 和报告链路验收。
@@ -197,7 +205,7 @@ SANDBOX_DATABASE_REUSE=1 python -m pytest -p no:cacheprovider tests/e2e/database
 
 [sandbox_upgrade_job.py](../../tests/acceptance/sandbox_upgrade_job.py) 用于完整隔离 Job：上传合成 CSV，经正式 Worker 和模型生成澄清、脚本与方案，提交显式测试答复及带版本的确认，然后执行真实沙盒、独立校验、数据绑定、MCP HTTP 算法和结构化报告。它在两次研究参数答复已保存后结束原 slot，启动新的正式 Worker 进程，再提交方案确认并恢复同一 Job。入口复用专用 MySQL/PostgreSQL；模型客户端必须单独允许外联，不能修改原内部数据库验收客户端的网络限制。控制服务另行连接该专用主库与 OpenSandbox，Worker 仅挂控制 token。
 
-显式设置 `FULL_JOB_SANDBOX_ACCEPTANCE=1`、`FULL_JOB_SANDBOX_CONTROLLER_URL`，并在客户端准备 `/tmp/full-job-controller.token` 及仅含模型配置的 `/tmp/full-job-models.json`，再执行 `python tests/acceptance/sandbox_upgrade_job.py --timeout-seconds 900`。模型配置包含 `outer/deep/context_window_tokens`，前两项各含 `model/base_url/api_key`；入口将真实模型密钥与隔离数据库凭据写入本次私有文件，不修改根 `.env` 或原验收密钥文件。MCP 使用客户端回环地址的 8080 端口，控制服务使用独立容器；报告只保留状态、计数和源码 hash，原始诊断留在容器 `/tmp/sandbox-upgrade-job/`。本场景关闭 Web，RAG 使用独立空目录并报告不可用，不包含浏览器、CDFM 推理、生产网络或生产部署验收。
+显式设置 `FULL_JOB_SANDBOX_ACCEPTANCE=1`、`FULL_JOB_SANDBOX_CONTROLLER_URL` 和指向控制服务统一密钥文件的 `FULL_JOB_SANDBOX_SECRET_FILE`，并在客户端准备仅含模型配置的 `/tmp/full-job-models.json`，再执行 `python tests/acceptance/sandbox_upgrade_job.py --timeout-seconds 900`。模型配置包含 `outer/deep/context_window_tokens`，前两项各含 `model/base_url/api_key`；入口将真实模型密钥与隔离数据库凭据写入本次私有文件，不修改根 `.env` 或原验收密钥文件。MCP 使用客户端回环地址的 8080 端口，控制服务使用独立容器；报告只保留状态、计数和源码 hash，原始诊断留在容器 `/tmp/sandbox-upgrade-job/`。本场景关闭 Web，RAG 使用独立空目录并报告不可用，不包含浏览器、CDFM 推理、生产网络或生产部署验收。
 
 同一入口增加 `--scenario all-nodes`，默认仍运行原研究参数修订场景。新场景上传列名为 `0/1/2/3/4` 的合成连续数值 CSV，由真实模型提出字段范围问题，测试答复为“全部作为节点参与因果发现”，随后提交带版本的方案确认。验收要求该研究选择只问一次、最终角色均为空、实际列名保留，并通过正式 Worker、真实沙盒、独立校验、CSV 绑定、MCP PC 算法和结构化报告；该场景不要求参数修订次数或 Worker 重启。运行前须确认隔离控制服务及上游已就绪，并与提取验收顺序执行，避免两个 runner 竞争同一隔离 Job 队列。入口存在或提取矩阵通过均不能视为此完整 Job 验收通过。
 

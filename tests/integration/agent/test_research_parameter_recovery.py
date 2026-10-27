@@ -113,3 +113,32 @@ def test_legacy_checkpoint_is_rejected_without_creating_a_replacement(namespace)
         assert count_before == len([row async for row in saver.alist({"configurable": {"thread_id": JOB}})
                                     if row.config["configurable"].get("checkpoint_ns")])
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("field,value", [
+    ("data_processing_confirmed_plan", None),
+    ("data_processing_execution_report", None),
+    ("data_processing_metadata", {}),
+    ("data_processing_draft_script", ""),
+    ("data_processing_candidate_id", 0),
+    ("data_processing_candidate_revision", 0),
+    ("data_processing_completion_retry_count", 0),
+])
+def test_parent_retry_cannot_overwrite_persisted_processing_bindings(field, value):
+    async def scenario():
+        saver = InMemorySaver()
+        parent, child = graphs(saver, retry=True, retry_update={field: value})
+        saved = {**initial(), "data_processing_confirmed_plan": {"summary": "保留观测"},
+                 "data_processing_execution_report": {"candidate_id": 12},
+                 "data_processing_candidate_id": 12, "data_processing_candidate_revision": 2,
+                 "data_processing_completion_retry_count": 2}
+        await child.aupdate_state(child_config(saver), saved, as_node="question_2")
+        with pytest.raises(ParameterContractError, match="cannot overwrite"):
+            await parent.ainvoke(initial(), {"configurable": {"thread_id": JOB}},
+                                 context=AgentRunContext(execution_guard=None))
+        snapshot = await child.aget_state(child_config(saver))
+        for key in ("data_processing_confirmed_plan", "data_processing_execution_report",
+                    "data_processing_candidate_id", "data_processing_candidate_revision",
+                    "data_processing_completion_retry_count"):
+            assert snapshot.values[key] == saved[key]
+    asyncio.run(scenario())

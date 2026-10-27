@@ -297,7 +297,8 @@ async def replay_stale_parent(job, candidate, old_context, report, *, bound):
     parameters = restore_parameter_binding(saved['metadata'], job_id=job['job_id'])
     run_id = build_data_processing_run_id(job_id=job['job_id'], source_input_identity=job['input_file_hash'])
     plan = saved['metadata']['processing_plan_identity']
-    child_state = {**parameters, 'data_processing_state_version': PROCESSING_STATE_VERSION,
+    from tests.acceptance.data_processing_recovery import candidate_checkpoint_state
+    child_state = {**parameters, **candidate_checkpoint_state(saved), 'data_processing_state_version': PROCESSING_STATE_VERSION,
         'data_processing_run_id': run_id, 'data_processing_candidate_id': candidate['dataset_id'],
         'data_processing_semantic_identity': plan['semantic_identity'],
         'data_processing_confirmed_plan_version': plan['plan_version']}
