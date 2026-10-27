@@ -2,7 +2,10 @@
 
 import asyncio
 import json
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
+from functools import partial
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -12,6 +15,7 @@ from langgraph.prebuilt import ToolRuntime
 from langgraph.runtime import Runtime
 
 from Agent.causal_agent.analysis_context import build_context_commit, build_report_analysis_context
+from Agent.CausalAgentMCP.executor_pool import BoundedProcessPool
 from Agent.deep_agent import AgentRunContext, FinalizationGate, TrustedJobIdentity
 from Agent.deep_agent.finalization import StructuredResponseError
 from Agent.deep_agent.memory import build_in_memory_backend
@@ -34,8 +38,12 @@ CSV = "z,x,y,other\n0,1,3,0\n1,3,8,1\n2,2,7,0\n3,5,14,1\n4,4,13,0\n5,7,20,1\n"
 PARAMETERS = {"target": "y", "treatment": "x", "columns": ["z", "x", "y", "other"]}
 
 
-def _setup(*, kinds=None, edge_type="directed", csv_data=CSV):
-    executor = LocalAlgorithmExecutor(csv_data, semantic_kinds=kinds)
+def _wait_for_process_start(start_gate):
+    start_gate.acquire()
+
+
+def _setup(*, kinds=None, edge_type="directed", csv_data=CSV, executor_pool=None):
+    executor = LocalAlgorithmExecutor(csv_data, semantic_kinds=kinds, executor_pool=executor_pool)
     identity = bind_analysis_input(TrustedJobIdentity(
         job_id="00000000-0000-0000-0000-000000000501",
         session_id="00000000-0000-0000-0000-000000000502", user_id=7,
@@ -235,15 +243,22 @@ def test_gate_independently_checks_record_source_and_full_adjustment(change):
 
 
 def test_dispatch_deadline_retains_completed_local_check_for_current_call():
-    context, registry, source, source_record = _setup()
+    # 用真实子进程的启动屏障固定超时条件，不依赖 OLS 计算速度或人工延时。
+    process_context = multiprocessing.get_context("spawn")
+    start_gate = process_context.Semaphore(0)
+    pool = BoundedProcessPool(process_workers=1, executor_factory=partial(
+        ProcessPoolExecutor, mp_context=process_context,
+        initializer=_wait_for_process_start, initargs=(start_gate,),
+    ))
+    context, registry, source, source_record = _setup(executor_pool=pool)
     tools = [item.to_langchain_tool() for item in build_algorithm_tools(registry, runtime_context=context)]
-    middleware = build_algorithm_dependency_middleware(registry=registry, timeout_seconds=0.1)
+    middleware = build_algorithm_dependency_middleware(registry=registry, timeout_seconds=1.0)
     builder = StateGraph(ProjectDeepAgentState, context_schema=AgentRunContext)
     builder.add_node("tools", ToolNode(tools, handle_tool_errors=False,
         awrap_tool_call=middleware.awrap_tool_call))
     builder.add_edge(START, "tools")
     builder.add_edge("tools", END)
-    state = asyncio.run(builder.compile().ainvoke({
+    initial_state = {
         "messages": [AIMessage(content="", tool_calls=[{"name": "causal_ate",
             "args": {"graph_result_ref": source.result_ref, "treatment": "x", "outcome": "y"},
             "id": "deadline-ate-call", "type": "tool_call"}, {"name": "causal_ate",
@@ -253,7 +268,11 @@ def test_dispatch_deadline_retains_completed_local_check_for_current_call():
         "algorithm_results": {source.result_ref: source},
         "action_ledger": {source_record.invocation_id: source_record},
         "rag_evidence": {}, "web_evidence": {},
-    }, context=context))
+    }
+    try:
+        state = asyncio.run(builder.compile().ainvoke(initial_state, context=context))
+    finally:
+        start_gate.release()
     result = next(item for item in state["algorithm_results"].values()
         if item.provider_call_id == "deadline-ate-call")
     unchecked = next(item for item in state["algorithm_results"].values()
