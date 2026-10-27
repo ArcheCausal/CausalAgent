@@ -633,6 +633,8 @@ FINALIZATION_RETRY_HINTS: dict[str, str] = {
     ),
     "no_valid_algorithm_with_valid_result": (
         "outcome=no_valid_algorithm 时不能存在有效算法结果。"
+        "若本次问题要求估计处理变量对结果变量的效应，还必须先留下一次 causal_ate 尝试"
+        "（可引用其中一张有效图）。"
         "若你认为已有有效结果不可用，请改用 evidence_only，"
         "并把每个有效结果标记为 discarded。"
     ),

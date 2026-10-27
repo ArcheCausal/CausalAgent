@@ -616,6 +616,39 @@ def test_effect_rule_uses_one_retry_then_degrades() -> None:
     assert degraded["finalization_error"] == "FINALIZATION_CONTRACT_INVALID"
 
 
+def test_no_valid_algorithm_hint_still_demands_ate_for_effect_question() -> None:
+    identity, registry, result, ledger = _algorithm_execution()
+    decision = validate_structured_response(
+        {
+            **_decision(),
+            "outcome": "no_valid_algorithm",
+            "primary_result_ref": None,
+            "result_assessments": [
+                {
+                    "result_ref": result.result_ref,
+                    "disposition": "discarded",
+                    "rationale": "该图不适用。",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(StructuredResponseError) as failure:
+        FinalizationGate(registry=registry).validate(
+            decision=decision,
+            algorithm_results={result.result_ref: result},
+            action_ledger={ledger.invocation_id: ledger},
+            trusted_identity=identity,
+            route_decision="fold",
+            analysis_parameters=_EFFECT_PARAMETERS,
+            analysis_question=_EFFECT_QUESTION,
+        )
+
+    assert failure.value.rule == "no_valid_algorithm_with_valid_result"
+    instruction = build_finalization_retry_instruction(failure.value)
+    assert "causal_ate" in instruction
+
+
 def test_gate_rejects_evidence_reference_mixed_into_result_assessments() -> None:
     """复现生产事故：证据引用写进 assessments，算法引用写进 evidence_refs。"""
 
