@@ -325,6 +325,9 @@ class CausalEffect(ContractModel):
     ci95: tuple[float, float] | None = None
     estimator: str
     n_rows: int = Field(ge=1)
+    contrast: tuple[float, float] | None = None
+    outcome_model: str | None = None
+    bootstrap_n: int | None = Field(default=None, ge=0)
 
     @field_validator("graph_result_ref", "treatment", "outcome", "estimator")
     @classmethod
@@ -345,6 +348,12 @@ class CausalEffect(ContractModel):
                 raise ValueError("ci95 bounds must be finite")
             if low > high:
                 raise ValueError("ci95 lower bound must not exceed upper bound")
+        if self.contrast is not None:
+            low, high = self.contrast
+            if not (math.isfinite(low) and math.isfinite(high)):
+                raise ValueError("contrast bounds must be finite")
+            if low == high:
+                raise ValueError("contrast bounds must differ")
         return self
 
 
