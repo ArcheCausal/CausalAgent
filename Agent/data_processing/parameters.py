@@ -25,13 +25,26 @@ class ParameterContractError(ValueError):
     """参数、修订链或候选身份不满足恢复契约。"""
 
 
+class ParameterExtractionError(ParameterContractError):
+    """模型提取结果不满足可纠正的确定性参数规则。"""
+
+    structured_output_retryable = True
+
+    def __init__(self, *, field_path: str, rule: str) -> None:
+        self.field_path = field_path
+        self.rule = rule
+        super().__init__("parameter extraction result violates a deterministic rule")
+
+
 class ParameterEdit(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     field: ParameterField
-    value: str | list[dict[str, str]] | None
+    value: str | list[dict[str, str]] | None = Field(
+        description="用户本次指定、修正或接受的参数值；可以结合当前问题和已有参数理解。",
+    )
     evidence: str = Field(
         min_length=1, max_length=4000,
-        description="本项参数修改的外层证据，必须逐字摘自本次用户答复；measurement_semantics 的内层 evidence 不能替代此字段。",
+        description="解释本次答复为何支持这项修改，可以引用原文或概括确认关系；必须为非空文本。",
     )
 
 
@@ -141,22 +154,85 @@ def apply_parameter_patch(
     return updated, history
 
 
+def validate_parameter_extraction(extraction: ParameterExtraction) -> None:
+    """检查模型提取结果的确定性业务规则，不修改模型输出。"""
+    patch_fields: set[str] = set()
+    for index, edit in enumerate(extraction.updates):
+        field_path = f"updates.{index}"
+        if edit.field in patch_fields:
+            raise ParameterExtractionError(
+                field_path=f"{field_path}.field",
+                rule="同一参数字段只能修改一次",
+            )
+        patch_fields.add(edit.field)
+        if not isinstance(edit.evidence, str) or not edit.evidence.strip():
+            raise ParameterExtractionError(
+                field_path=f"{field_path}.evidence",
+                rule="必须为非空文本",
+            )
+        if edit.field == "measurement_semantics":
+            if edit.value is not None and not isinstance(edit.value, list):
+                raise ParameterExtractionError(
+                    field_path=f"{field_path}.value",
+                    rule="测量声明必须为列表或 null",
+                )
+            if edit.value is None:
+                continue
+            for declaration_index, declaration in enumerate(edit.value):
+                declaration_path = f"{field_path}.value.{declaration_index}"
+                if set(declaration) != {"column", "kind", "evidence"}:
+                    raise ParameterExtractionError(
+                        field_path=declaration_path,
+                        rule="测量声明必须包含 column、kind 和 evidence，且不能包含其他字段",
+                    )
+                if not isinstance(declaration["column"], str) or not declaration["column"].strip():
+                    raise ParameterExtractionError(
+                        field_path=f"{declaration_path}.column",
+                        rule="列名必须为非空文本",
+                    )
+                if not isinstance(declaration["kind"], str) or declaration["kind"] not in {
+                    "count", "ordinal", "category", "continuous", "binary", "unknown",
+                }:
+                    raise ParameterExtractionError(
+                        field_path=f"{declaration_path}.kind",
+                        rule="测量类型必须属于允许的枚举",
+                    )
+                if not isinstance(declaration["evidence"], str) or not declaration["evidence"].strip():
+                    raise ParameterExtractionError(
+                        field_path=f"{declaration_path}.evidence",
+                        rule="必须为非空文本",
+                    )
+            try:
+                normalize_measurement_semantics(edit.value)
+            except ValueError as exc:
+                raise ParameterExtractionError(
+                    field_path=f"{field_path}.value",
+                    rule="同一列的测量声明不能冲突",
+                ) from exc
+        elif edit.value is not None and (
+            not isinstance(edit.value, str) or not edit.value.strip() or len(edit.value) > 6000
+        ):
+            raise ParameterExtractionError(
+                field_path=f"{field_path}.value",
+                rule="字段值必须为非空文本且不超过 6000 个字符，或为 null",
+            )
+    if extraction.needs_clarification and not extraction.clarification_question.strip():
+        raise ParameterExtractionError(
+            field_path="clarification_question",
+            rule="澄清状态必须包含具体问题",
+        )
+
+
 def extraction_patch(
-    extraction: ParameterExtraction, *, answer_text: str,
+    extraction: ParameterExtraction,
+    *,
     current_parameters: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    validate_parameter_extraction(extraction)
     if extraction.needs_clarification:
-        if not extraction.clarification_question.strip():
-            raise ParameterContractError("ambiguous answer requires a clarification question")
         return {}
     patch: dict[str, Any] = {}
     for edit in extraction.updates:
-        if edit.field in patch or edit.evidence not in answer_text:
-            raise ParameterContractError("parameter edit has duplicate fields or ungrounded evidence")
-        if isinstance(edit.value, list) and any(
-            item.get("evidence", "") not in answer_text for item in edit.value
-        ):
-            raise ParameterContractError("measurement declaration is not grounded in the answer")
         patch[edit.field] = edit.value
     declarations = patch.get("measurement_semantics")
     if isinstance(declarations, list) and current_parameters is not None:

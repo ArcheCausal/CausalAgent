@@ -3,7 +3,7 @@
 职责：验证初始提取和两个原工具入口，并重复统计研究角色语义场景。
 范围：仅使用 data_processing_recovery 专用配置；模型配置单独从容器私有 JSON 读取，
 不得加载根 .env 的数据库配置。报告不包含凭据、端点、模型配置值或答复正文。
-运行：python tests/acceptance/real_model_parameter_extraction.py --repetitions 2 --max-model-requests 96
+运行：python tests/acceptance/real_model_parameter_extraction.py --repetitions 2 --max-model-requests 144
 """
 
 from __future__ import annotations
@@ -53,6 +53,46 @@ SCENARIOS = (
     {'id': 'explicit_treatment_cancel', 'question': '需要如何修改研究参数？',
      'answer': '不指定干预变量。', 'expected': {'treatment': None},
      'initial': '目标是收入，不指定干预变量。', 'initial_roles': ('收入', None)},
+    {'id': 'proposal_full_confirmation',
+     'question': '当前方案提议 A：每个设备一行观测；B：每天一个时间窗口。请确认或修改。',
+     'answer': 'A 默认，B 默认',
+     'expected': {'observation_unit': '每个设备一行观测', 'time_window': '每天'},
+     'initial': '目标是收入，干预变量是培训。', 'initial_roles': ('收入', '培训'),
+     'parameters': {'observation_unit': '一行一个观测', 'time_window': '每周'},
+     'plan_metadata': {'summary': 'A 默认按设备聚合为每个设备一行观测；B 默认按每天一个时间窗口。',
+         'observation_unit': '每个设备一行观测', 'transformations': ['按每天聚合'],
+         'variable_semantics': {'device': '设备标识', 'value': '测量值'},
+         'limitations': ['每条记录需要包含设备和时间。']}},
+    {'id': 'proposal_partial_confirmation',
+     'question': '当前方案提议 A：每个设备一行观测；B：每天一个时间窗口。请确认或修改。',
+     'answer': 'A 默认',
+     'expected': {'observation_unit': '每个设备一行观测'},
+     'initial': '目标是收入，干预变量是培训。', 'initial_roles': ('收入', '培训'),
+     'parameters': {'observation_unit': '一行一个观测', 'time_window': '每周'},
+     'plan_metadata': {'summary': 'A 默认按设备聚合为每个设备一行观测；B 默认按每天一个时间窗口。',
+         'observation_unit': '每个设备一行观测', 'transformations': ['按每天聚合'],
+         'variable_semantics': {'device': '设备标识', 'value': '测量值'},
+         'limitations': ['每条记录需要包含设备和时间。']}},
+    {'id': 'proposal_partial_modification',
+     'question': '当前方案提议 A：每个设备一行观测；B：每天一个时间窗口。请确认或修改。',
+     'answer': 'A 默认，但 B 改为每周',
+     'expected': {'observation_unit': '每个设备一行观测', 'time_window': '每周'},
+     'initial': '目标是收入，干预变量是培训。', 'initial_roles': ('收入', '培训'),
+     'parameters': {'observation_unit': '一行一个观测', 'time_window': '每天'},
+     'plan_metadata': {'summary': 'A 默认按设备聚合为每个设备一行观测；B 默认按每天一个时间窗口。',
+         'observation_unit': '每个设备一行观测', 'transformations': ['按每天聚合'],
+         'variable_semantics': {'device': '设备标识', 'value': '测量值'},
+         'limitations': ['每条记录需要包含设备和时间。']}},
+    {'id': 'proposal_paraphrase_confirmation',
+     'question': '当前方案提议 A：每个设备一行观测；B：每天一个时间窗口。请确认或修改。',
+     'answer': '接受按设备聚合，并按每天汇总；其它保持不变。',
+     'expected': {'observation_unit': '每个设备一行观测', 'time_window': '每天'},
+     'initial': '目标是收入，干预变量是培训。', 'initial_roles': ('收入', '培训'),
+     'parameters': {'observation_unit': '一行一个观测', 'time_window': '每周'},
+     'plan_metadata': {'summary': 'A 默认按设备聚合为每个设备一行观测；B 默认按每天一个时间窗口。',
+         'observation_unit': '每个设备一行观测', 'transformations': ['按每天聚合'],
+         'variable_semantics': {'device': '设备标识', 'value': '测量值'},
+         'limitations': ['每条记录需要包含设备和时间。']}},
 )
 
 
@@ -160,7 +200,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model-config', type=Path, default=Path('/tmp/research-parameter-model.json'))
     parser.add_argument('--initial-model-config', type=Path)
-    parser.add_argument('--max-model-requests', type=int, choices=range(1, 385), default=96)
+    parser.add_argument('--max-model-requests', type=int, choices=range(1, 385), default=144)
     parser.add_argument('--repetitions', type=int, choices=range(1, 5), default=2)
     args = parser.parse_args()
     logging.disable(logging.CRITICAL)

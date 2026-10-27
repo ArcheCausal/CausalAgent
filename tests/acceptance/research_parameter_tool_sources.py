@@ -53,9 +53,10 @@ async def verify_tool_sources(report, new_job, *, model=None, real_model=False, 
             'data_processing_answer_receipts': {},
             'data_processing_draft_script': '# retained artifact; not executed',
             'data_processing_semantic_identity': 'a' * 64,
-            'data_processing_metadata': {'summary': 'Retain observed measurements.',
-                'observation_unit': 'one observation', 'transformations': ['preserve columns'],
-                'variable_semantics': {'x': 'measurement', 'y': 'outcome'}, 'limitations': []},
+            'data_processing_metadata': (scenario.get('plan_metadata') if scenario else None) or
+                {'summary': 'Retain observed measurements.',
+                 'observation_unit': 'one observation', 'transformations': ['preserve columns'],
+                 'variable_semantics': {'x': 'measurement', 'y': 'outcome'}, 'limitations': []},
             'messages': [AIMessage(content='', tool_calls=[{'id': tool_id, 'name': tool.name,
                 'args': {'question': scenario['question'] if scenario else 'Which observation unit?'}
                     if tool.name == 'ask_data_processing_question' else {}}])]}
