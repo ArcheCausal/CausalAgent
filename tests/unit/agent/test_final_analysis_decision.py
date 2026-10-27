@@ -33,9 +33,12 @@ from Agent.deep_agent_tools.models import (
     ActionAttempt,
     AlgorithmResult,
     AlgorithmResultProvenance,
+    CausalEffect,
     Diagnostics,
     EvidenceResult,
+    GraphEdge,
     InvocationRecord,
+    StandardizedGraph,
     WebEvidenceResult,
 )
 
@@ -444,6 +447,105 @@ def test_finalization_gate_accepts_only_ledger_backed_primary_result() -> None:
         decision=decision,
         algorithm_results={result.result_ref: result},
         action_ledger={ledger.invocation_id: ledger},
+        trusted_identity=identity,
+    )
+
+    assert accepted.primary_result_ref == result.result_ref
+
+
+def _valid_ate_result(identity, registry):
+    """构造一次有效的后门估计结果；图沿用源 DAG 语义。"""
+
+    spec = registry.get("causal.ate").spec
+    response_identity = "causal_ate-response-1"
+    provider_call_id = "causal_ate-call-1"
+    invocation_id = build_invocation_id(
+        job_id=identity.job_id,
+        response_identity=response_identity,
+        provider_call_id=provider_call_id,
+    )
+    result_ref = build_result_ref(invocation_id=invocation_id)
+    result = AlgorithmResult(
+        result_ref=result_ref,
+        invocation_id=invocation_id,
+        provider_call_id=provider_call_id,
+        capability_id=spec.capability_id,
+        capability_version=spec.version,
+        status="valid",
+        standardized_graph=StandardizedGraph(
+            graph_semantics="dag_target_to_source",
+            nodes=["x", "y"],
+            edges=[GraphEdge(source="x", target="y")],
+        ),
+        causal_effect=CausalEffect(
+            estimand="ATE",
+            graph_result_ref="source-result:0",
+            treatment="x",
+            outcome="y",
+            estimate=1.0,
+            standard_error=0.1,
+            ci95=(0.8, 1.2),
+            estimator="backdoor_ols",
+            n_rows=100,
+        ),
+        provenance=AlgorithmResultProvenance(
+            job_id=str(identity.job_id),
+            attempt_count=identity.attempt_count,
+            lease_epoch=identity.lease_epoch,
+            input_identity=identity.input_identity,
+            spec_digest=spec.spec_digest,
+            invocation_id=invocation_id,
+            capability_id=spec.capability_id,
+            capability_version=spec.version,
+        ),
+    )
+    started_at = datetime.now(timezone.utc)
+    record = InvocationRecord(
+        invocation_id=invocation_id,
+        response_identity=response_identity,
+        response_identity_source="message_execution_id",
+        provider_call_id=provider_call_id,
+        tool_name="causal_ate",
+        final_status="succeeded",
+        job_id=str(identity.job_id),
+        attempt_count=identity.attempt_count,
+        lease_epoch=identity.lease_epoch,
+        worker_id=identity.worker_id,
+        input_identity=identity.input_identity,
+        attempts={
+            0: ActionAttempt(
+                retry_ordinal=0,
+                revision=2,
+                status="succeeded",
+                started_at=started_at,
+                finished_at=started_at,
+            )
+        },
+    )
+    return result, record
+
+
+def test_finalization_gate_accepts_estimation_result_as_primary() -> None:
+    identity, registry, _result, _ledger = _algorithm_execution()
+    result, record = _valid_ate_result(identity, registry)
+    decision = validate_structured_response(
+        {
+            **_decision(),
+            "primary_result_ref": result.result_ref,
+            "result_assessments": [
+                {
+                    "result_ref": result.result_ref,
+                    "disposition": "primary",
+                    "rationale": "效应估计是本问题的主结果",
+                }
+            ],
+        }
+    )
+
+    accepted = FinalizationGate(registry=registry).validate(
+        decision=decision,
+        algorithm_results={result.result_ref: result},
+        action_ledger={record.invocation_id: record},
         trusted_identity=identity,
     )
 

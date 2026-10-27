@@ -18,6 +18,7 @@ from itertools import combinations
 from typing import Any
 
 from Agent.deep_agent_tools.models import AlgorithmResult, EvidenceResult, FinalAnalysisDecision, StandardizedGraph
+from Agent.deep_agent_tools.algorithm_specs import get_algorithm_spec
 from Agent.deep_agent_tools.graph_validation import validate_graph_structure
 
 
@@ -516,6 +517,20 @@ def _graph_comparisons(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return comparisons
 
 
+def _primary_graph_semantics(result: Mapping[str, Any]) -> Any:
+    """估计结果展示的是入参源图，只能按源图自身的语义校验。"""
+
+    method = result.get("method")
+    semantics = method.get("graph_semantics") if isinstance(method, Mapping) else None
+    try:
+        spec = get_algorithm_spec(str(result.get("algorithm") or ""))
+    except ValueError:
+        return semantics
+    if spec.kind == "causal_estimation":
+        return result.get("graph_semantics") or semantics
+    return semantics
+
+
 def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
     """完整 State 到报告事实的唯一安全投影；重新生成只读取对应保存快照。"""
     if state.get("report_revision_mode") == "full_regeneration_from_context":
@@ -559,7 +574,8 @@ def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
             primary = None
         else:
             validated = validate_graph_structure(StandardizedGraph(
-                graph_semantics=primary["graph_semantics"], **graph), graph_semantics=method["graph_semantics"])
+                graph_semantics=primary["graph_semantics"], **graph),
+                graph_semantics=_primary_graph_semantics(primary))
             if not validated.valid:
                 primary = None
     return {
@@ -585,7 +601,7 @@ def report_primary_result(facts: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     try:
         graph = StandardizedGraph(graph_semantics=selected["graph_semantics"], **selected["graph"])
-        validation = validate_graph_structure(graph, graph_semantics=selected["method"]["graph_semantics"])
+        validation = validate_graph_structure(graph, graph_semantics=_primary_graph_semantics(selected))
     except (KeyError, TypeError, ValueError):
         return None
     return selected if validation.valid else None

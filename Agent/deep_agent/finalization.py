@@ -406,16 +406,22 @@ class FinalizationGate:
             evidence_refs=evidence_refs,
         )
 
-        valid_refs = {
-            result.result_ref
-            for result in eligible.values()
-            if result.status == "valid"
-            and result.standardized_graph is not None
-            and validate_graph_structure(
-                result.standardized_graph,
-                graph_semantics=get_algorithm_spec(result.capability_id).graph_semantics,
-            ).valid
-        }
+        valid_refs: set[str] = set()
+        for result in eligible.values():
+            if result.status != "valid" or result.standardized_graph is None:
+                continue
+            spec = get_algorithm_spec(result.capability_id)
+            # 估计结果携带的是入参源图，图语义属于源算法，只能按图自身语义校验；
+            # 估计 capability 的 graph_semantics 描述的是输入要求，不是输出契约。
+            semantics = (
+                result.standardized_graph.graph_semantics
+                if spec.kind == "causal_estimation"
+                else spec.graph_semantics
+            )
+            if validate_graph_structure(
+                result.standardized_graph, graph_semantics=semantics
+            ).valid:
+                valid_refs.add(result.result_ref)
         # 预检查拒绝、上下文变化或用户选择诊断都可以是有依据的“不适用”；
         # 这类结果视为已结束，不再要求模型制造一次必然失败的算法执行。
         non_viable_refs = {

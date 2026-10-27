@@ -6,9 +6,9 @@ import pytest
 
 from Agent.causal_agent.analysis_context import build_context_commit, build_report_analysis_context, report_primary_result
 from Agent.causal_agent.nodes import _report_graph_asset, _report_execution_summary
-from Agent.deep_agent_tools.algorithm_specs import PC_SPEC, CDFM_SPEC
+from Agent.deep_agent_tools.algorithm_specs import PC_SPEC, CDFM_SPEC, CAUSAL_ATE_SPEC, DIRECT_LINGAM_SPEC
 from Agent.deep_agent_tools.models import (
-    AlgorithmResult, AlgorithmResultProvenance, DataViewSummary, Diagnostics,
+    AlgorithmResult, AlgorithmResultProvenance, CausalEffect, DataViewSummary, Diagnostics,
     FinalAnalysisDecision, GraphEdge, StandardizedGraph,
 )
 
@@ -127,6 +127,40 @@ def test_graph_comparison_distinguishes_absent_reversed_and_mixed_edges(edges, e
     assert pair["variables"] == ["A", "B"] and pair["relation"] == expected
     assert pair["left_edges"] == [{"source": "A", "target": "B", "edge_type": "directed"}]
     assert bool(pair["right_edges"]) == bool(edges)
+
+
+def test_estimation_primary_uses_source_graph_semantics_for_report():
+    source = result(DIRECT_LINGAM_SPEC, "lingam")
+    spec = CAUSAL_ATE_SPEC
+    estimate = AlgorithmResult(
+        result_ref="ate:0", invocation_id="ate", provider_call_id="ate",
+        capability_id=spec.capability_id, capability_version=spec.version, status="valid",
+        method=spec.method_definition(),
+        standardized_graph=StandardizedGraph(graph_semantics="dag_target_to_source", nodes=["A", "B"],
+            edges=[GraphEdge(source="A", target="B")]),
+        causal_effect=CausalEffect(estimand="ATE", graph_result_ref=source.result_ref,
+            treatment="A", outcome="B", estimate=1.0, estimator="backdoor_ols", n_rows=100),
+        diagnostics=Diagnostics(),
+        provenance=AlgorithmResultProvenance(job_id="job", attempt_count=1, lease_epoch=1,
+            input_identity="private-input", spec_digest=spec.spec_digest),
+    )
+    decision = FinalAnalysisDecision(outcome="algorithm_supported", primary_result_ref=estimate.result_ref,
+        result_assessments=[{"result_ref": estimate.result_ref, "disposition": "primary", "rationale": "效应估计"},
+                            {"result_ref": source.result_ref, "disposition": "supporting", "rationale": "输入图"}],
+        selection_rationale="由效应估计回答用户问题。", confidence="low",
+        confidence_basis=["方向未定"], conflict_status="none")
+    state = {"analysis_parameters": {"columns": ["A", "B"], "n_rows": 100, "n_cols": 2},
+        "deep_agent_algorithm_results": {source.result_ref: source, estimate.result_ref: estimate},
+        "deep_agent_decision": decision, "finalization_status": "valid"}
+
+    facts = build_report_analysis_context(state)
+
+    assert facts["primary_result_ref"] == estimate.result_ref
+    assert facts["no_primary_reason"] is None
+    assert report_primary_result(facts)["result_ref"] == estimate.result_ref
+    asset = _report_graph_asset(state)
+    assert asset is not None
+    assert asset.metadata["graph_semantics"] == "dag_target_to_source"
 
 
 def test_graph_comparison_keeps_single_method_edges_distinct_from_opposite_directions():
