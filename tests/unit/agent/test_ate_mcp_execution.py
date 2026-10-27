@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from Agent.CausalAgentMCP.executor_pool import _run_runner
-from Agent.CausalAgentMCP.runner_registry import BACKDOOR_OLS_RUNNER_VERSION, _ate
+from Agent.CausalAgentMCP.runner_registry import BACKDOOR_OLS_RUNNER_VERSION, _backdoor_ols
 from Agent.CausalAgentMCP.service import _estimation_result
 from Agent.deep_agent_tools.algorithm_specs import CAUSAL_BACKDOOR_OLS_SPEC
 from Agent.deep_agent_tools.ate_applicability import check_ate_graph, check_ate_profile
@@ -76,7 +76,7 @@ def _context(command: AlgorithmExecutionCommand) -> McpInvocationContext:
 
 def test_run_runner_passes_artifacts() -> None:
     envelope = _run_runner(
-        _ate, _frame().to_csv(index=False), PARAMETERS, {"standardized_graph": GRAPH_PAYLOAD}
+        _backdoor_ols, _frame().to_csv(index=False), PARAMETERS, {"standardized_graph": GRAPH_PAYLOAD}
     )
     assert envelope.value["success"] is True
     assert envelope.value["runner_version"] == BACKDOOR_OLS_RUNNER_VERSION == "backdoor-ols-runner-v2"
@@ -85,7 +85,7 @@ def test_run_runner_passes_artifacts() -> None:
 
 
 def test_ate_runner_estimates_from_artifact_graph() -> None:
-    payload = _ate(
+    payload = _backdoor_ols(
         _frame().to_csv(index=False),
         PARAMETERS,
         {"standardized_graph": GRAPH_PAYLOAD},
@@ -95,7 +95,7 @@ def test_ate_runner_estimates_from_artifact_graph() -> None:
 
 
 def test_ate_runner_reports_not_applicable() -> None:
-    payload = _ate(
+    payload = _backdoor_ols(
         _frame().to_csv(index=False),
         PARAMETERS,
         {
@@ -124,7 +124,7 @@ def test_estimation_result_reuses_input_graph_and_effect() -> None:
     graph = StandardizedGraph.model_validate(GRAPH_PAYLOAD)
     csv_data = _frame().to_csv(index=False)
     check = _completed_check(csv_data, graph)
-    payload = _ate(csv_data, PARAMETERS, {"standardized_graph": GRAPH_PAYLOAD})
+    payload = _backdoor_ols(csv_data, PARAMETERS, {"standardized_graph": GRAPH_PAYLOAD})
     result = _estimation_result(
         payload,
         command=command,
@@ -149,7 +149,7 @@ def test_estimation_result_rejects_mismatched_pair() -> None:
     command = _command()
     graph = StandardizedGraph.model_validate(GRAPH_PAYLOAD)
     csv_data = _frame().to_csv(index=False)
-    payload = _ate(csv_data, PARAMETERS, {"standardized_graph": GRAPH_PAYLOAD})
+    payload = _backdoor_ols(csv_data, PARAMETERS, {"standardized_graph": GRAPH_PAYLOAD})
     payload["causal_effect"]["treatment"] = "z"
     try:
         _estimation_result(

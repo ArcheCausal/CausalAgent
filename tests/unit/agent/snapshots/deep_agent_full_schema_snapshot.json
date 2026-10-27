@@ -289,6 +289,82 @@
           "title": "AlgorithmResultProvenance",
           "type": "object"
         },
+        "AteApplicabilityCheck": {
+          "additionalProperties": false,
+          "description": "程序生成的后门 OLS 检查记录；未知调整集与空调整集严格区分。",
+          "properties": {
+            "graph_result_ref": {
+              "title": "Graph Result Ref",
+              "type": "string"
+            },
+            "treatment": {
+              "title": "Treatment",
+              "type": "string"
+            },
+            "outcome": {
+              "title": "Outcome",
+              "type": "string"
+            },
+            "adjustment_set": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Adjustment Set"
+            },
+            "execution_columns": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Execution Columns"
+            },
+            "applicability": {
+              "enum": [
+                "ready",
+                "not_applicable"
+              ],
+              "title": "Applicability",
+              "type": "string"
+            },
+            "reason_code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reason Code"
+            }
+          },
+          "required": [
+            "graph_result_ref",
+            "treatment",
+            "outcome",
+            "adjustment_set",
+            "execution_columns",
+            "applicability"
+          ],
+          "title": "AteApplicabilityCheck",
+          "type": "object"
+        },
         "CausalEffect": {
           "additionalProperties": false,
           "description": "后门调整下的线性总效应；数值可追溯到所用图与数据版本。",
@@ -1081,6 +1157,17 @@
           ],
           "default": null
         },
+        "ate_check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AteApplicabilityCheck"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "provenance": {
           "$ref": "#/$defs/AlgorithmResultProvenance"
         }
@@ -1205,6 +1292,82 @@
         "spec_digest"
       ],
       "title": "AlgorithmResultProvenance",
+      "type": "object"
+    },
+    "AteApplicabilityCheck": {
+      "additionalProperties": false,
+      "description": "程序生成的后门 OLS 检查记录；未知调整集与空调整集严格区分。",
+      "properties": {
+        "graph_result_ref": {
+          "title": "Graph Result Ref",
+          "type": "string"
+        },
+        "treatment": {
+          "title": "Treatment",
+          "type": "string"
+        },
+        "outcome": {
+          "title": "Outcome",
+          "type": "string"
+        },
+        "adjustment_set": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Adjustment Set"
+        },
+        "execution_columns": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Execution Columns"
+        },
+        "applicability": {
+          "enum": [
+            "ready",
+            "not_applicable"
+          ],
+          "title": "Applicability",
+          "type": "string"
+        },
+        "reason_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason Code"
+        }
+      },
+      "required": [
+        "graph_result_ref",
+        "treatment",
+        "outcome",
+        "adjustment_set",
+        "execution_columns",
+        "applicability"
+      ],
+      "title": "AteApplicabilityCheck",
       "type": "object"
     },
     "CausalEffect": {
@@ -3144,10 +3307,10 @@
   "tools": [
     {
       "capability_id": "causal.backdoor_ols",
-      "spec_digest": "808814a92c4f7c4352f012a3f807bf369b21c5ff016900566efdeb321c73dec7",
+      "spec_digest": "0028098acaf85a189cdf822c54017d22b86b08e4e3942338be5c3ec9d6c01516",
       "tool": {
         "name": "causal_backdoor_ols",
-        "description": "在后门调整下估计处理变量对结果变量的线性总效应。必须引用本次运行中已经发现且有效的因果图；不支持未定向边、双箭头边、有向环或处理变量不是结果变量祖先的图。同一张图只能与产生它的数据版本一起使用。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；至少 3 行、2 列。\n方法假设：图包含查询的处理与结果变量，且无未定向边、双箭头边或有向环；处理变量与结果变量为数值列，缺失值已在执行前处理；函数形式近似线性，效应按每 1 单位变化解释，不对非线性或交互建模；调整集取处理变量的全部父节点，不搜索其他有效调整集。\n目标图：causal_estimation_input；矩阵约定：backdoor_ols。\n边语义：directed：后门调整所用的因果方向。\n适用边界：只做父节点调整；不处理未观测混杂、选择偏倚或测量误差；不做 bootstrap，区间为线性模型内区间。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
+        "description": "在后门调整下估计处理变量对结果变量的线性总效应。必须引用本次运行中已经发现且有效的因果图；不支持未定向边、双箭头边、有向环或处理变量不是结果变量祖先的图。同一张图只能与产生它的数据版本一起使用。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；至少 3 行、2 列。\n方法假设：图包含查询的处理与结果变量，且无未定向边、双箭头边或有向环；处理变量、结果变量和处理变量的全部父节点为数值存储，无缺失、常数或非有限值；函数形式近似线性，效应按每 1 单位变化解释，不对非线性或交互建模；调整集取处理变量的全部父节点，不搜索其他有效调整集。\n目标图：causal_estimation_input；矩阵约定：backdoor_ols。\n边语义：directed：后门调整所用的因果方向。\n适用边界：只做父节点调整；未声明的测量语义仍未充分确认，不根据整数类型或唯一值数量推断连续语义；不删除调整变量、不删除行、不填值、不编码或改变源图；不处理未观测混杂、选择偏倚或测量误差；不做 bootstrap，区间为线性模型内区间。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
         "parameters": {
           "additionalProperties": false,
           "properties": {

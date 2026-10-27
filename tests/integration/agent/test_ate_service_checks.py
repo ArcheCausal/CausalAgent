@@ -21,7 +21,7 @@ import pytest
 from Agent.CausalAgentMCP.auth import sign_invocation
 from Agent.CausalAgentMCP.config import McpServerConfig
 from Agent.CausalAgentMCP.executor_pool import BoundedProcessPool
-from Agent.CausalAgentMCP.runner_registry import BACKDOOR_OLS_RUNNER_VERSION, _ate, build_default_registry
+from Agent.CausalAgentMCP.runner_registry import BACKDOOR_OLS_RUNNER_VERSION, _backdoor_ols, build_default_registry
 from Agent.CausalAgentMCP.service import CausalMcpService, McpServiceError, _estimation_result
 from Agent.deep_agent_tools.algorithm_specs import CAUSAL_BACKDOOR_OLS_SPEC
 from Agent.deep_agent_tools.ate_applicability import ATE_REASON_SUMMARIES, check_ate_graph, check_ate_profile
@@ -289,7 +289,7 @@ def test_success_adapter_rejects_effect_mismatching_real_completed_check(change)
         check_ate_graph(graph=graph, **PARAMETERS),
         profile=build_data_profile_from_csv(csv_data), semantic_kinds={},
     )
-    payload = _ate(csv_data, PARAMETERS, {"standardized_graph": GRAPH})
+    payload = _backdoor_ols(csv_data, PARAMETERS, {"standardized_graph": GRAPH})
     payload["causal_effect"].update(change)
     with pytest.raises(ValueError):
         _estimation_result(

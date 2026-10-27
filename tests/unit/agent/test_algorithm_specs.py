@@ -142,4 +142,4 @@ def test_spec_requires_an_assumption_and_stable_result_schema() -> None:
 def test_old_capability_name_is_gone() -> None:
     assert get_algorithm_spec("causal.backdoor_ols") is CAUSAL_BACKDOOR_OLS_SPEC
     with pytest.raises(ValueError, match="unknown algorithm capability"):
-        get_algorithm_spec("causal.backdoor_ols")
+        get_algorithm_spec("causal.ate")

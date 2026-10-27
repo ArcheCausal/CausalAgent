@@ -11,8 +11,6 @@ from sklearn.linear_model import LinearRegression
 
 from Agent.deep_agent_tools.models import StandardizedGraph
 
-from .ate import AteNotApplicable, _is_ancestor, _topological_order
-
 
 class GFormulaNotApplicable(ValueError):
     """当前图或数据无法支撑 g-formula；消息面向模型，不含堆栈。"""
@@ -23,6 +21,26 @@ def _parents(graph: StandardizedGraph) -> dict[str, list[str]]:
     for edge in graph.edges:
         parents[edge.target].append(edge.source)
     return {node: sorted(values) for node, values in parents.items()}
+
+
+def _topological_order(parents: dict[str, list[str]]) -> list[str]:
+    children: dict[str, list[str]] = {node: [] for node in parents}
+    pending = {node: set(values) for node, values in parents.items()}
+    for node, values in parents.items():
+        for parent in values:
+            children[parent].append(node)
+    ready = [node for node, values in pending.items() if not values]
+    order: list[str] = []
+    while ready:
+        node = ready.pop()
+        order.append(node)
+        for child in children[node]:
+            pending[child].discard(node)
+            if not pending[child]:
+                ready.append(child)
+    if len(order) != len(parents):
+        raise GFormulaNotApplicable("因果图包含有向环，无法确定 g-formula 的因果顺序")
+    return order
 
 
 def _ancestors(parents: dict[str, list[str]], target: str) -> set[str]:
@@ -153,11 +171,9 @@ def estimate_g_formula(
         raise GFormulaNotApplicable("图中缺少处理变量或结果变量")
     if treatment == outcome:
         raise GFormulaNotApplicable("处理变量与结果变量不能相同")
-    try:
-        order = _topological_order(graph)
-    except AteNotApplicable as exc:
-        raise GFormulaNotApplicable(str(exc)) from exc
-    if not _is_ancestor(graph, treatment, outcome):
+    parents = _parents(graph)
+    order = _topological_order(parents)
+    if treatment not in _ancestors(parents, outcome):
         raise GFormulaNotApplicable("处理变量不是结果变量的祖先，效应不可识别")
     if outcome_model not in ("linear", "hgb"):
         raise GFormulaNotApplicable("不支持的结果方程模型")
@@ -168,7 +184,6 @@ def estimate_g_formula(
     if not all(np.isfinite(value) for value in contrast_values):
         raise GFormulaNotApplicable("对比取值必须是有限数值")
 
-    parents = _parents(graph)
     relevant = _ancestors(parents, outcome)
     missing = sorted(relevant - set(data.columns))
     if missing:

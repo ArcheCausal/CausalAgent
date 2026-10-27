@@ -43,6 +43,7 @@
     },
     "AlgorithmResult": {
       "properties": [
+        "ate_check",
         "capability_id",
         "capability_version",
         "causal_effect",
@@ -75,7 +76,7 @@
         "status",
         "provenance"
       ],
-      "sha256": "77aa8bddafd8b8166230dd6ebf730cf2370328127959fbcd3d7588df4fa446af",
+      "sha256": "1e3814023382251b3b16b2d1070a0d6f9b2f563b6a44d79893056004d76a8bc8",
       "title": "AlgorithmResult"
     },
     "AlgorithmResultProvenance": {
@@ -101,6 +102,27 @@
       ],
       "sha256": "85172284aacd192d5ec17dd5dd349013a6fe6f28891aceab62e66b6ab7d6c45e",
       "title": "AlgorithmResultProvenance"
+    },
+    "AteApplicabilityCheck": {
+      "properties": [
+        "adjustment_set",
+        "applicability",
+        "execution_columns",
+        "graph_result_ref",
+        "outcome",
+        "reason_code",
+        "treatment"
+      ],
+      "required": [
+        "graph_result_ref",
+        "treatment",
+        "outcome",
+        "adjustment_set",
+        "execution_columns",
+        "applicability"
+      ],
+      "sha256": "bc0a20b1e0d2f4ff47d4c0af5b96617c5ee16bb43fede72480ce0eaf3e5c4086",
+      "title": "AteApplicabilityCheck"
     },
     "CausalEffect": {
       "properties": [
@@ -495,8 +517,8 @@
   "tools": [
     {
       "capability_id": "causal.backdoor_ols",
-      "schema_sha256": "d31d8308eb4441f6005359a26822330b850361840a1610b764fd2481950c3305",
-      "spec_digest": "808814a92c4f7c4352f012a3f807bf369b21c5ff016900566efdeb321c73dec7",
+      "schema_sha256": "604300092cbe08c114a7f3be5334300f0107486eacc212fd00facec0e914b9be",
+      "spec_digest": "0028098acaf85a189cdf822c54017d22b86b08e4e3942338be5c3ec9d6c01516",
       "tool_name": "causal_backdoor_ols"
     },
     {

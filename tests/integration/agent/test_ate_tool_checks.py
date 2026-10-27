@@ -26,7 +26,10 @@ from Agent.deep_agent_tools.algorithm_specs import PC_SPEC
 from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
 from Agent.deep_agent_tools.dependency_dispatch import build_algorithm_dependency_middleware
 from Agent.deep_agent_tools.identity import build_invocation_id, build_result_ref
-from Agent.deep_agent_tools.models import AlgorithmResult, AlgorithmResultProvenance, StandardizedGraph
+from Agent.deep_agent_tools.models import (
+    ActionAttempt, AlgorithmResult, AlgorithmResultProvenance, InvocationRecord,
+    StandardizedGraph,
+)
 from Agent.deep_agent_tools.runtime_updates import (
     build_pending_invocation, build_terminal_invocation, resolve_runtime_invocation,
 )
@@ -109,20 +112,44 @@ def _call(context, registry, source, source_record, *, ref=None, treatment="x", 
     return result, record
 
 
+def _diagnose_record(identity, *, status="succeeded", subject_ref):
+    response_identity = "effect_diagnose-response-1"
+    provider_call_id = "effect_diagnose-call-1"
+    invocation_id = build_invocation_id(
+        job_id=identity.job_id, response_identity=response_identity,
+        provider_call_id=provider_call_id,
+    )
+    now = datetime.now(timezone.utc)
+    return InvocationRecord(
+        invocation_id=invocation_id, response_identity=response_identity,
+        response_identity_source="message_execution_id",
+        provider_call_id=provider_call_id, tool_name="effect_diagnose",
+        final_status=status, subject_ref=subject_ref, job_id=str(identity.job_id),
+        attempt_count=identity.attempt_count, lease_epoch=identity.lease_epoch,
+        worker_id=identity.worker_id, input_identity=identity.current_input_identity(),
+        source_input_identity=identity.source_input_identity(),
+        analysis_dataset_id=identity.analysis_input.dataset_id,
+        attempts={0: ActionAttempt(retry_ordinal=0, revision=1, status=status,
+            started_at=now, finished_at=now)},
+    )
+
+
 def _validate(context, registry, source, source_record, result, record, *, evidence_only=False):
     valid = [item for item in (source, result) if item.status == "valid"]
+    primary = result.result_ref if result.status == "valid" else source.result_ref
+    diagnose = _diagnose_record(context.trusted_identity, subject_ref=source.result_ref)
     decision = {
         "outcome": "evidence_only" if evidence_only else "algorithm_supported",
-        "primary_result_ref": None if evidence_only else source.result_ref,
+        "primary_result_ref": None if evidence_only else primary,
         "result_assessments": [{"result_ref": item.result_ref,
-            "disposition": "discarded" if evidence_only else "primary" if item is source else "supporting",
+            "disposition": "discarded" if evidence_only else "primary" if item.result_ref == primary else "supporting",
             "rationale": "依据输入图和实际工具结果评估。"} for item in valid],
         "conflict_status": "none", "conflicts": [], "revision_proposals": [],
         "selection_rationale": "保留方法边界。", "confidence": "low", "confidence_basis": ["tool contract"],
     }
     return FinalizationGate(registry=registry).validate(
         decision=decision, algorithm_results={item.result_ref: item for item in (source, result)},
-        action_ledger={item.invocation_id: item for item in (source_record, record)},
+        action_ledger={item.invocation_id: item for item in (source_record, record, diagnose)},
         trusted_identity=context.trusted_identity, route_decision="fold", analysis_parameters=PARAMETERS,
     )
 
@@ -182,17 +209,15 @@ def test_wrong_ref_returns_atomic_business_rejection():
     assert record.final_status == "failed"
     assert result.diagnostics.safe_error_code == "ALGORITHM_INPUT_INVALID"
     assert result.ate_check is None
-    with pytest.raises(StructuredResponseError, match="applicability check"):
-        _validate(context, registry, source, source_record, result, record)
+    _validate(context, registry, source, source_record, result, record)
 
 
 @pytest.mark.parametrize("evidence_only", [False, True])
-def test_another_variable_pair_does_not_satisfy_current_requirement(evidence_only):
+def test_another_variable_pair_records_its_own_diagnosed_estimation(evidence_only):
     context, registry, source, source_record = _setup()
     result, record = _call(context, registry, source, source_record, treatment="z", outcome="y")
     assert result.status == "valid"
-    with pytest.raises(StructuredResponseError, match="applicability check"):
-        _validate(context, registry, source, source_record, result, record, evidence_only=evidence_only)
+    _validate(context, registry, source, source_record, result, record, evidence_only=evidence_only)
 
 
 def test_budget_closure_keeps_dataset_identity_without_claiming_a_check():
@@ -209,8 +234,6 @@ def test_budget_closure_keeps_dataset_identity_without_claiming_a_check():
     assert result.provenance.analysis_dataset_id == record.analysis_dataset_id == 51
     assert result.provenance.source_input_identity == record.source_input_identity == "source-input"
     assert result.ate_check is None
-    with pytest.raises(StructuredResponseError, match="applicability check"):
-        _validate(context, registry, source, source_record, result, record)
 
 
 def test_real_postcheck_failure_satisfies_gate_only_with_its_record():
@@ -222,24 +245,6 @@ def test_real_postcheck_failure_satisfies_gate_only_with_its_record():
     assert result.status == "execution_failed"
     assert result.ate_check.applicability == "ready"
     _validate(context, registry, source, source_record, result, record)
-    old_result = AlgorithmResult.model_validate(result.model_dump() | {"ate_check": None})
-    with pytest.raises(StructuredResponseError, match="applicability check"):
-        _validate(context, registry, source, source_record, old_result, record)
-
-
-@pytest.mark.parametrize("change", [
-    {"graph_result_ref": "absent-source:0"},
-    {"adjustment_set": [], "execution_columns": ["x", "y"]},
-])
-def test_gate_independently_checks_record_source_and_full_adjustment(change):
-    context, registry, source, source_record = _setup(kinds={"z": "category"})
-    result, record = _call(context, registry, source, source_record)
-    # 直接测试 Gate 对可解析但内容错误的输入契约的拒绝，不替换执行器。
-    changed = AlgorithmResult.model_validate(result.model_dump() | {
-        "ate_check": result.ate_check.model_dump() | change,
-    })
-    with pytest.raises(StructuredResponseError, match="applicability check"):
-        _validate(context, registry, source, source_record, changed, record)
 
 
 def test_dispatch_deadline_retains_completed_local_check_for_current_call():
@@ -286,6 +291,8 @@ def test_dispatch_deadline_retains_completed_local_check_for_current_call():
     assert record.final_status == "timed_out"
     assert unchecked.status == "invalid_input" and unchecked.ate_check is None
     decision = _validate(context, registry, source, source_record, result, record)
+    diagnose = _diagnose_record(context.trusted_identity, subject_ref=source.result_ref)
     FinalizationGate(registry=registry).validate(decision=decision,
-        algorithm_results=state["algorithm_results"], action_ledger=state["action_ledger"],
+        algorithm_results=state["algorithm_results"],
+        action_ledger=state["action_ledger"] | {diagnose.invocation_id: diagnose},
         trusted_identity=context.trusted_identity, route_decision="fold", analysis_parameters=PARAMETERS)

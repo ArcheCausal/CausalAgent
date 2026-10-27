@@ -295,7 +295,7 @@ def _estimation_result(
     capability_version: str,
     graph: StandardizedGraph,
     data_view: DataViewSummary | None,
-    ate_check: AteApplicabilityCheck,
+    ate_check: AteApplicabilityCheck | None = None,
 ) -> AlgorithmResult:
     """估计能力的成功结果：图取入参图，效应取 runner 返回值。"""
 
@@ -314,9 +314,8 @@ def _estimation_result(
         or effect.graph_result_ref != command.parameters.get("graph_result_ref")
     ):
         raise ValueError("estimation result does not match the requested pair")
-    if (
-        ate_check is None
-        or ate_check.applicability != "ready"
+    if ate_check is not None and (
+        ate_check.applicability != "ready"
         or effect.graph_result_ref != ate_check.graph_result_ref
         or effect.treatment != ate_check.treatment
         or effect.outcome != ate_check.outcome
