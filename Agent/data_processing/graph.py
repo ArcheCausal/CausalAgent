@@ -246,6 +246,27 @@ def _emit_progress(runtime: Any, *, key: str, summary: str) -> None:
         )
 
 
+def _emit_validation_progress(
+    runtime: Any, *, job_attempt: int, dataset_id: int, accepted: bool,
+) -> None:
+    """按真实图任务区分校验阶段，并为同一任务保留稳定重放键。"""
+    writer = getattr(runtime, "stream_writer", None)
+    if callable(writer):
+        task_id = runtime.execution_info.task_id
+        writer(
+            {
+                "type": "progress",
+                "node_name": "validate_dataset",
+                "summary": (
+                    "候选数据集通过独立校验。"
+                    if accepted
+                    else "候选数据集未通过独立校验，正在按检查结果修正。"
+                ),
+                "_event_key": f"dataset-validation:{job_attempt}:{dataset_id}:{task_id}",
+            }
+        )
+
+
 async def run_data_processing_child(
     agent: Any,
     *,
@@ -605,20 +626,10 @@ async def validate_dataset_node(
     retry_count = int(state.get("data_processing_retry_count") or 0)
     if not report["accepted"]:
         retry_count += 1
-    writer = getattr(runtime, "stream_writer", None)
-    if callable(writer):
-        writer(
-            {
-                "type": "progress",
-                "node_name": "validate_dataset",
-                "summary": (
-                    "候选数据集通过独立校验。"
-                    if report["accepted"]
-                    else "候选数据集未通过独立校验，正在按检查结果修正。"
-                ),
-                "_event_key": f"dataset-validation:{identity.attempt_count}:{dataset_id}",
-            }
-        )
+    _emit_validation_progress(
+        runtime, job_attempt=identity.attempt_count, dataset_id=dataset_id,
+        accepted=bool(report["accepted"]),
+    )
     return {
         "dataset_validation_status": "accepted" if report["accepted"] else "rejected",
         "dataset_validation_report": report,

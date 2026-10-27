@@ -217,6 +217,8 @@ worker 使用 LangGraph v2 的 `updates`、`messages`、`custom` 和 `tasks` 流
 
 公共 payload 由 `event_adapter.py` 与 `public_events.py` 的白名单共同约束。`tool_call_result.status` 只允许受控状态；`safe_error_code` 必须符合固定格式。`finalization_status` 只出现在最终报告数据。事件写入由 Job、attempt、lease、worker 和稳定 `event_key` 保护；失去 lease 或收到取消的 worker 不能提交迟到结果。
 
+独立数据集校验的进度事件键包含 Job attempt、候选数据集 ID 和 LangGraph task ID。同一候选在修正循环中再次进入校验节点时，各任务使用独立事件键及阶段 ID；同一 attempt 内的同一任务重放保持原键和载荷。数据库继续拒绝同键不同载荷，内部事件键和 task ID 不进入公开 SSE。
+
 graph 终态失败的内部诊断由 `classify_graph_failure()` 生成：从外向内检查异常类名及基类、白名单 `safe_cause_code`，再沿包装对象的 `error`、显式 `__cause__` 或未被抑制的 `__context__` 查找原因；只遍历真实异常原因，按对象身份去重，最多检查 32 个对象。外层已有明确分类时保留该分类；结构化输出的供应商失败归入 `provider_error`，工具调用、schema、JSON、输出解析和截断失败归入 `protocol_error`；未识别时保留 `internal_error/node_error`。分类不读取异常正文，`exc_info` 始终保留传入异常及其原始 traceback；诊断只用于 worker 日志，不进入公共事件或数据库事件 payload。
 
 SSE 与会话历史都从 MySQL `analysis_job_events` 恢复。页面刷新先重放持久化事件并记录实际处理到的 Event ID，再从该位置续传；前端可以暂存早于父 `node_start` 到达的工具明细，并在相同 `step_id` 出现后补绘。`decision_delta` 与 `text_delta` 都按各自 `stream_id` 和批次序号增量更新；完整 `decision` 作为公开决策的回退/历史投影，实时页面不会再次复制已经完成的决策增量。普通问答和报告追问的正文通过 `text_delta` 实时渲染，历史回放直接使用已持久化的完整正文；结构化报告不走文字增量，而是在 `final_result` 一次性交付完整报告文档，并以 `report_document` 附件与消息在同一事务落库，刷新后由会话历史接口恢复成同一份载荷。展示速度不影响工具执行，也不产生逐字符数据库事件。
