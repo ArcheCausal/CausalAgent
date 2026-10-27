@@ -28,6 +28,9 @@ from Agent.deep_agent.memory import build_official_backend, trusted_memory_names
 from Agent.deep_agent.postgres_store import open_async_postgres_store
 from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
 from Agent.deep_agent_tools.adapters import build_default_adapters
+from Agent.deep_agent_tools.effect_diagnose_tool import (
+    build_default_effect_diagnose_tool,
+)
 from Agent.deep_agent_tools.mcp_algorithm_executor import McpAlgorithmExecutor
 from Agent.deep_agent_tools.rag_evidence_tool import build_default_rag_evidence_tool
 from Agent.deep_agent_tools.registry import build_default_registry
@@ -328,6 +331,7 @@ async def initialize_production_runtime(
     readiness = inspect_rag_readiness()
     domain_tools = (
         *build_algorithm_tools(registry),
+        build_default_effect_diagnose_tool().to_langchain_tool(),
         build_default_rag_evidence_tool(readiness=readiness),
         build_default_web_evidence_tool(web_search_enabled=True),
     )

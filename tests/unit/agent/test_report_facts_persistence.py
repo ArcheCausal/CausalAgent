@@ -164,6 +164,7 @@ def test_estimation_primary_uses_source_graph_semantics_for_report():
         "treatment": "A", "outcome": "B", "adjustment_set": [],
         "estimate": 1.0, "standard_error": None, "ci95": None,
         "estimator": "backdoor_ols", "n_rows": 100,
+        "contrast": None, "outcome_model": None, "bootstrap_n": None,
     }
     asset = _report_graph_asset(state)
     assert asset is not None
