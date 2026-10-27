@@ -29,7 +29,7 @@
 | 约束层 | finalization 硬门禁 | 模型选型保持自主；门禁只要求一次真实尝试 |
 | 触发条件 | `target`/`treatment` 都是真实列 + 问题含效应词 + 至少一张 eligible valid 图 | 避免误伤"分析 T 和 Y 的关系"；发现全失败时不白耗重试 |
 | 问题文本来源 | 父 State 里最新 HumanMessage | `analysis_context.analysis_question` 在上下文复用时会保留旧问题 |
-| 判定依据 | `action_ledger` 的终态记录 | 复用 `_has_current_terminal_tool_invocation`；`succeeded/not_ready/failed/timed_out` 都算尝试 |
+| 判定依据 | `action_ledger` 的终态记录 | 复用 `_has_current_terminal_tool_invocation`；`succeeded / not_ready / failed / timed_out / not_applicable` 都算尝试（`not_applicable` 仅对 ATE 规则放宽） |
 | 失败处理 | 复用现有单次重试 | 不新增循环；提示同时说明 `evidence_only` 的正确用法 |
 
 ## 3. 触发谓词
@@ -95,6 +95,9 @@ if (
         lease_epoch=current_lease,
         worker_id=current_worker,
         input_identity=current_input,
+        terminal_statuses={
+            "succeeded", "not_ready", "failed", "timed_out", "not_applicable",
+        },
     )
 ):
     raise StructuredResponseError(
@@ -108,7 +111,7 @@ if (
 ```python
 "effect_question_without_ate_attempt": (
     "本次问题要求估计处理变量对结果变量的效应，且已有有效因果图。"
-    "请携带其中一张图的 result_ref、treatment、outcome 调用一次 causal_ate；"
+    "请携带其中一张图的 graph_result_ref、treatment、outcome 调用一次 causal_ate；"
     "即使你认为该图不适用，也保留真实返回的未就绪/不适用/失败状态。"
     "若最终不采用任何图，请改用 evidence_only 并把所有有效结果标记为 discarded。"
 ),
@@ -119,6 +122,8 @@ if (
 ```python
 "no_valid_algorithm_with_valid_result": (
     "outcome=no_valid_algorithm 时不能存在有效算法结果。"
+    "若本次问题要求估计处理变量对结果变量的效应，还必须先留下一次 causal_ate 尝试"
+    "（可引用其中一张有效图）。"
     "若你认为已有有效结果不可用，请改用 evidence_only，"
     "并把每个有效结果标记为 discarded。"
 ),
@@ -180,3 +185,4 @@ analysis_question=nodes._latest_human_text(state),
 - 模型若在还没有 valid 图时先调 ATE，会拿到 `not_ready`；按"尝试即放行"规则门禁不再拦截。这是覆盖型门禁的边界，不额外引入时序判定。
 - 效应词表是字符串匹配；"影响/作用"等词在少数结构性问题中可能误触发一次 ATE 尝试。代价是一次可解释的工具调用，不影响结论正确性。
 - 不修改重试预算（当前为 1）。提示文案已包含 `evidence_only` 指引，降低同一轮二次失败的概率。
+- ATE 返回 `not_applicable`（例如图中不存在 treatment→outcome 的有向路径）也算一次尝试；否则图结构上不可估计时会误判为未尝试。
