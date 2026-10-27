@@ -2317,6 +2317,18 @@
           "default": null,
           "title": "Result Ref"
         },
+        "subject_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subject Ref"
+        },
         "job_id": {
           "anyOf": [
             {

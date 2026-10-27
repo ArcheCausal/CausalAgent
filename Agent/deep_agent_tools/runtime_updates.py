@@ -373,6 +373,7 @@ def build_terminal_invocation(
     started_at: datetime,
     retry_ordinal: int = 0,
     result_ref: str | None = None,
+    subject_ref: str | None = None,
     safe_error_code: str | None = None,
 ) -> InvocationRecord:
     """生成只写 terminal revision 的单调 Ledger 更新。"""
@@ -401,6 +402,7 @@ def build_terminal_invocation(
         tool_name=tool_name,
         final_status=final_status,
         result_ref=result_ref,
+        subject_ref=subject_ref,
         job_id=str(identity.runtime_context.trusted_identity.job_id),
         attempt_count=int(identity.runtime_context.trusted_identity.attempt_count),
         lease_epoch=int(identity.runtime_context.trusted_identity.lease_epoch),

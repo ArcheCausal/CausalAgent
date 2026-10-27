@@ -286,6 +286,7 @@
         "response_identity_source",
         "result_ref",
         "source_input_identity",
+        "subject_ref",
         "tool_name",
         "worker_id"
       ],
@@ -297,7 +298,7 @@
         "tool_name",
         "final_status"
       ],
-      "sha256": "66a726781cacdc15d173da9d3517b58b1e0d0673e561694cc951477ef066fe9a",
+      "sha256": "01f5dbaab35e47568b36f6cb2cb0d1fdff58bc46039cc0ddfa840a999c96e624",
       "title": "InvocationRecord"
     },
     "McpInvocationContext": {

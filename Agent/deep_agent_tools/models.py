@@ -559,6 +559,7 @@ class InvocationRecord(ContractModel):
     tool_name: str
     final_status: InvocationStatus
     result_ref: str | None = None
+    subject_ref: str | None = None
     # 这些字段允许旧 checkpoint 被读取，但 FinalizationGate 对缺失值
     # fail-closed。新产生的 Ledger 记录必须完整填写它们。
     job_id: str | None = None
@@ -585,6 +586,7 @@ class InvocationRecord(ContractModel):
         "provider_response_id",
         "provider_item_id",
         "result_ref",
+        "subject_ref",
         "job_id",
         "worker_id",
         "input_identity",
