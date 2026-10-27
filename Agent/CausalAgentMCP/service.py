@@ -347,7 +347,7 @@ def _estimation_result(
         summary="算法调用完成。",
         data_view=data_view,
         diagnostics=Diagnostics(
-            summary="后门调整估计完成。",
+            summary="效应估计完成。",
             sample_count=effect.n_rows,
             assumptions_checked=[
                 "all_edges_directed",

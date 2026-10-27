@@ -54,6 +54,7 @@ def test_default_mcp_registry_does_not_expose_disabled_olc() -> None:
         "causal.backdoor_ols",
         "causal.cdfm",
         "causal.direct_lingam",
+        "causal.g_formula",
         "causal.pc",
     ]
     assert registry.resolve(

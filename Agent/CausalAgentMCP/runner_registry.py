@@ -115,6 +115,54 @@ def _backdoor_ols(
     }
 
 
+G_FORMULA_RUNNER_VERSION = "g-formula-runner-v1"
+
+
+def _g_formula(
+    csv_data: str,
+    parameters: Mapping[str, Any],
+    artifacts: Mapping[str, Any],
+) -> dict[str, Any]:
+    import io
+
+    import pandas as pd
+
+    from Agent.CausalAgentMCP.inference.g_formula import (
+        GFormulaNotApplicable,
+        estimate_g_formula,
+    )
+    from Agent.deep_agent_tools.models import StandardizedGraph
+
+    graph = StandardizedGraph.model_validate(artifacts["standardized_graph"])
+    frame = pd.read_csv(io.StringIO(csv_data))
+    try:
+        effect = estimate_g_formula(
+            graph=graph,
+            data=frame,
+            treatment=str(parameters["treatment"]),
+            outcome=str(parameters["outcome"]),
+            contrast=tuple(parameters["contrast"]),
+            outcome_model=str(parameters.get("outcome_model") or "linear"),
+            bootstrap=int(parameters.get("bootstrap", 200)),
+        )
+    except GFormulaNotApplicable as exc:
+        return {
+            "schema_version": "causal_estimation_v1",
+            "success": False,
+            "algorithm": "g_formula",
+            "runner_version": G_FORMULA_RUNNER_VERSION,
+            "error_type": "NotApplicable",
+            "message": str(exc),
+        }
+    return {
+        "schema_version": "causal_estimation_v1",
+        "success": True,
+        "algorithm": "g_formula",
+        "runner_version": G_FORMULA_RUNNER_VERSION,
+        "causal_effect": effect,
+    }
+
+
 class RunnerRegistry:
     """Index the enabled reviewed capabilities and reject incompatible callers."""
 
@@ -150,6 +198,7 @@ def build_default_registry() -> RunnerRegistry:
         "causal.direct_lingam": _direct_lingam,
         "causal.cdfm": _cdfm,
         "causal.backdoor_ols": _backdoor_ols,
+        "causal.g_formula": _g_formula,
     }
     entries = [
         (spec, runners[spec.capability_id]) for spec in DEFAULT_ALGORITHM_SPECS

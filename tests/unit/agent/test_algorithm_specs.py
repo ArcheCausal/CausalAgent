@@ -11,8 +11,10 @@ from Agent.deep_agent_tools.algorithm_specs import (
     AlgorithmSpec,
     CausalBackdoorOlsInput,
     CausalCdfmInput,
+    CausalGFormulaInput,
     CausalPcInput,
     CAUSAL_BACKDOOR_OLS_SPEC,
+    CAUSAL_G_FORMULA_SPEC,
     CDFM_SPEC,
     DEFAULT_ALGORITHM_SPECS,
     OLC_SPEC,
@@ -29,6 +31,7 @@ def test_default_specs_only_enable_reviewed_runtime_capabilities() -> None:
         "causal.direct_lingam",
         "causal.cdfm",
         "causal.backdoor_ols",
+        "causal.g_formula",
     ]
     assert OLC_SPEC.capability_id == "causal.olc"
     assert OLC_SPEC not in DEFAULT_ALGORITHM_SPECS
@@ -42,6 +45,10 @@ def test_default_specs_only_enable_reviewed_runtime_capabilities() -> None:
     assert CDFM_SPEC.requires == frozenset({"continuous_tabular_dataset"})
     assert CDFM_SPEC.default_timeout_seconds == 600
     assert CDFM_SPEC.default_concurrency == 1
+    assert CAUSAL_G_FORMULA_SPEC.capability_id == "causal.g_formula"
+    assert CAUSAL_G_FORMULA_SPEC.tool_name == "causal_g_formula"
+    assert CAUSAL_G_FORMULA_SPEC.kind == "causal_estimation"
+    assert CAUSAL_G_FORMULA_SPEC.default_timeout_seconds == 600
 
 
 def test_spec_digest_and_tool_schema_are_stable() -> None:
@@ -66,6 +73,7 @@ def test_tool_snapshot_contains_capability_and_spec_identity() -> None:
         "causal.backdoor_ols",
         "causal.cdfm",
         "causal.direct_lingam",
+        "causal.g_formula",
         "causal.pc",
     ]
     assert all(len(item["spec_digest"]) == 64 for item in snapshot)

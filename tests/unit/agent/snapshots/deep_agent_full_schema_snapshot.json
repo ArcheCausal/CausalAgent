@@ -3290,6 +3290,98 @@
       }
     },
     {
+      "capability_id": "causal.g_formula",
+      "spec_digest": "2d502a921a9ab90df4b729cdadbf5b5ec7664ea61d24f2c61a11ed276c0e2dca",
+      "tool": {
+        "name": "causal_g_formula",
+        "description": "在给定因果图上用 g-computation 估计处理变量对比的因果效应。按拓扑序逐节点拟合条件方程并做 do 模拟，结局方程可选线性或梯度提升；不支持未定向边、双箭头边、有向环或处理变量不是结果变量祖先的图。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；至少 3 行、2 列。\n方法假设：图包含查询的处理与结果变量，且无未定向边、双箭头边或有向环；处理变量是结果变量的祖先；相关列均为有限数值，缺失值已在执行前处理；中间方程按线性建模；结局方程由 outcome_model 决定。\n目标图：causal_estimation_input；矩阵约定：g_formula。\n边语义：directed：g-computation 传播所用的因果方向。\n适用边界：中间方程固定线性；真实中介关系非线性时总效应有偏；不处理二值/计数/有序结局的尺度转换；bootstrap 为 percentile 区间，不做 BCa；不处理未观测混杂、选择偏倚或测量误差。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "graph_result_ref": {
+              "description": "本次运行中已发现且有效的因果图结果引用。",
+              "title": "Graph Result Ref",
+              "type": "string"
+            },
+            "treatment": {
+              "title": "Treatment",
+              "type": "string"
+            },
+            "outcome": {
+              "title": "Outcome",
+              "type": "string"
+            },
+            "contrast": {
+              "description": "要比较的两个处理取值 (x0, x1)，效应为 do(x1) 减 do(x0)。",
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "title": "Contrast",
+              "type": "array"
+            },
+            "outcome_model": {
+              "default": "linear",
+              "enum": [
+                "linear",
+                "hgb"
+              ],
+              "title": "Outcome Model",
+              "type": "string"
+            },
+            "bootstrap": {
+              "default": 200,
+              "maximum": 2000,
+              "minimum": 0,
+              "title": "Bootstrap",
+              "type": "integer"
+            },
+            "public_decision": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "description": "模型在 Tool Call 中显式生成、可直接展示的简短决策说明。",
+                  "properties": {
+                    "summary": {
+                      "maxLength": 400,
+                      "minLength": 1,
+                      "title": "Summary",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "summary"
+                  ],
+                  "title": "PublicDecision",
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "面向当前用户公开的工具选择依据；应在同一次 Tool Call 中提供。该字段不属于算法科学参数或检索参数。",
+              "title": "Public Decision"
+            }
+          },
+          "required": [
+            "graph_result_ref",
+            "treatment",
+            "outcome",
+            "contrast"
+          ],
+          "title": "CausalGFormulaInputToolInput",
+          "type": "object"
+        }
+      }
+    },
+    {
       "capability_id": "causal.pc",
       "spec_digest": "a9c74cd28ad8abea8e8fd10d5e1ad0f48699fb39947af8b87a580efb0d438953",
       "tool": {

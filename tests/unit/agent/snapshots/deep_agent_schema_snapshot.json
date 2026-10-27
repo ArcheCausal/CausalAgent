@@ -511,6 +511,12 @@
       "tool_name": "causal_direct_lingam"
     },
     {
+      "capability_id": "causal.g_formula",
+      "schema_sha256": "5b34b8fa806849a83b61646c537a52909752bda51024b3524bab682c6506ea56",
+      "spec_digest": "2d502a921a9ab90df4b729cdadbf5b5ec7664ea61d24f2c61a11ed276c0e2dca",
+      "tool_name": "causal_g_formula"
+    },
+    {
       "capability_id": "causal.pc",
       "schema_sha256": "3a54f6cda9165744432f7f48b6f90d9cca2f1313401af842422461cc89bc1148",
       "spec_digest": "a9c74cd28ad8abea8e8fd10d5e1ad0f48699fb39947af8b87a580efb0d438953",
