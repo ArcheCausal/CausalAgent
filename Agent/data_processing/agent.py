@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -33,9 +34,14 @@ from Agent.deep_agent_tools.interaction import (
 )
 from Agent.deep_agent_tools.models import ContractModel
 from Agent.data_processing.persistence import (
+    read_candidate,
     read_parameter_answer,
     require_current_plan_confirmation,
     save_candidate,
+)
+from Agent.data_processing.lifecycle import (
+    clear_candidate, confirmed_version, execution_report, invalidate_plan, require_candidate_binding,
+    update_plan, update_script,
 )
 from Agent.data_processing.parameters import (
     ParameterExtraction, apply_parameter_patch, extraction_patch,
@@ -60,14 +66,20 @@ class ScriptInput(ContractModel):
     script: str = Field(min_length=1, max_length=16000)
 
 
-class DescriptionInput(ContractModel):
-    """候选数据集的语义说明。"""
+class ProcessingPlanInput(ContractModel):
+    """供用户确认的处理方案；不接收执行后说明。"""
 
     summary: str = Field(min_length=1, max_length=1200)
     observation_unit: str = Field(min_length=1, max_length=500)
     transformations: tuple[str, ...] = Field(min_length=1, max_length=12)
     variable_semantics: dict[str, str] = Field(min_length=1, max_length=128)
     limitations: tuple[str, ...] = Field(default_factory=tuple, max_length=12)
+
+
+class ExecutionReportInput(ContractModel):
+    """当前候选的解释；文件事实由程序读取，不接收模型声明。"""
+
+    explanation: str = Field(min_length=1, max_length=4000)
 
 
 class QuestionInput(ContractModel):
@@ -104,11 +116,11 @@ async def _source_bytes(context: AgentRunContext) -> tuple[bytes, str]:
     return content, source_hash
 
 
-def _context(runtime: Any) -> AgentRunContext:
+def _context(runtime: Any, *, sandbox_required: bool = True) -> AgentRunContext:
     context = getattr(runtime, "context", None)
     if not isinstance(context, AgentRunContext):
         raise RuntimeError("data-processing tools require the worker runtime context")
-    if context.sandbox_provider is None or context.trusted_identity is None:
+    if context.trusted_identity is None or (sandbox_required and context.sandbox_provider is None):
         raise RuntimeError("OpenSandbox and trusted Job identity are required")
     return context
 
@@ -140,7 +152,7 @@ def _write_script_tool() -> Any:
                         ),
                     )
                 ],
-                "data_processing_draft_script": payload.script,
+                **update_script(runtime.state, payload.script),
             }
         )
 
@@ -161,43 +173,75 @@ def _write_script_tool() -> Any:
     )
 
 
-def _description_tool() -> Any:
+def _plan_tool() -> Any:
     async def call(runtime: Any, **kwargs: Any) -> Any:
-        payload = DescriptionInput.model_validate(kwargs)
+        payload = ProcessingPlanInput.model_validate(kwargs)
         metadata = payload.model_dump(mode="json")
-        state = getattr(runtime, "state", None)
-        confirmed_plan_version = (
-            state.get("data_processing_confirmed_plan_version")
-            if isinstance(state, dict)
-            and state.get("data_processing_metadata") == metadata
-            else None
-        )
         return Command(
             update={
                 "messages": [
                     _tool_message(
                         runtime,
-                        name="describe_prepared_dataset",
-                        content="数据集语义说明已保存到当前 Job checkpoint。",
+                        name="set_data_processing_plan",
+                        content="处理方案已保存。方案变化后须重新确认；执行说明请使用 save_data_processing_execution_report。",
                     )
                 ],
-                "data_processing_metadata": metadata,
-                "data_processing_confirmed_plan_version": confirmed_plan_version,
+                **update_plan(runtime.state, metadata),
             }
         )
 
     call.__annotations__["runtime"] = ToolRuntime
     return StructuredTool.from_function(
         coroutine=call,
-        name="describe_prepared_dataset",
+        name="set_data_processing_plan",
         description=(
-            "记录候选数据集的观察单位、字段含义、已执行转换和限制。"
+            "设置待确认处理方案的观察单位、字段含义、计划转换和限制。正文变化会清空确认与当前候选。"
+            "执行后补充说明必须使用 save_data_processing_execution_report，不得改写方案。"
             "只写你能从用户说明或实际脚本确认的内容；不要推测字段含义。"
         ),
         args_schema=with_tool_runtime_schema(
-            DescriptionInput,
-            tool_name="describe_prepared_dataset",
+            ProcessingPlanInput,
+            tool_name="set_data_processing_plan",
             tool_runtime_type=ToolRuntime,
+        ),
+    )
+
+
+def _execution_report_tool() -> Any:
+    async def call(runtime: Any, **kwargs: Any) -> Any:
+        payload = ExecutionReportInput.model_validate(kwargs)
+        context = _context(runtime, sandbox_required=False)
+        await context.ensure_active()
+        state = runtime.state
+        candidate_id = state.get("data_processing_candidate_id")
+        if not candidate_id:
+            return _tool_message(runtime, name="save_data_processing_execution_report",
+                                 content="当前没有已执行并保存的候选。请先执行当前脚本。")
+        identity = context.trusted_identity
+        candidate = await asyncio.to_thread(
+            read_candidate, context, dataset_id=candidate_id, source_hash=identity.source_input_identity(),
+        )
+        await context.check_after_call()
+        require_candidate_binding(state, candidate, job_id=str(identity.job_id),
+                                  source_hash=identity.source_input_identity())
+        report = execution_report(
+            candidate_id=candidate_id, revision=candidate["revision"],
+            plan_version=state["data_processing_confirmed_plan_version"],
+            source_hash=candidate["source_hash"], data_bytes=candidate["data_bytes"],
+            script_bytes=candidate["script_bytes"], explanation=payload.explanation,
+        )
+        return Command(update={
+            "data_processing_execution_report": report,
+            "messages": [_tool_message(runtime, name="save_data_processing_execution_report",
+                                       content="当前候选的执行说明已保存，方案确认保持有效；仍需独立校验。")],
+        })
+
+    call.__annotations__["runtime"] = ToolRuntime
+    return StructuredTool.from_function(
+        coroutine=call, name="save_data_processing_execution_report",
+        description="补充当前候选的执行解释。行数、列名和 hash 由程序读取实际产物生成；不修改处理方案、确认或候选 metadata。",
+        args_schema=with_tool_runtime_schema(
+            ExecutionReportInput, tool_name="save_data_processing_execution_report", tool_runtime_type=ToolRuntime,
         ),
     )
 
@@ -273,11 +317,11 @@ async def _apply_user_answer(
                                 "scope_answer_digest": answer_digest},
         )
     receipts[receipt_key] = {"answer_digest": answer_digest}
+    invalidated = changed or extracted.processing_scope_changed or extracted.needs_clarification
     return {
         "analysis_parameters": parameters, "analysis_parameter_changes": history,
         "data_processing_semantic_identity": semantic_identity,
-        "data_processing_confirmed_plan_version": (None if changed or extracted.processing_scope_changed
-            or extracted.needs_clarification else state.get("data_processing_confirmed_plan_version")),
+        **(invalidate_plan() if invalidated else {}),
         "data_processing_parameter_clarification_required": extracted.needs_clarification,
         "data_processing_parameter_clarification_question": extracted.clarification_question,
         "data_processing_answer_receipts": receipts,
@@ -394,6 +438,10 @@ def _plan_confirmation_tool(*, model: Any) -> Any:
             answer, ensure_ascii=False, separators=(",", ":")
         )
         if matches is True:
+            await asyncio.to_thread(
+                require_current_plan_confirmation, context, source_hash=source_hash, plan_version=plan_version,
+            )
+            await context.check_after_call()
             status = "confirmed"
             confirmation = plan_version
         elif matches is False:
@@ -426,7 +474,9 @@ def _plan_confirmation_tool(*, model: Any) -> Any:
                 ],
                 "data_processing_semantic_identity": semantic_identity,
                 **parameter_update,
+                **(invalidate_plan() if confirmation is None else {}),
                 "data_processing_confirmed_plan_version": confirmation,
+                "data_processing_confirmed_plan": deepcopy(metadata) if confirmation else None,
             }
         )
 
@@ -533,7 +583,9 @@ def _execute_script_tool() -> Any:
             semantic_identity=semantic_identity,
             metadata=metadata,
         )
-        if state.get("data_processing_parameter_clarification_required") or state.get("data_processing_confirmed_plan_version") != plan_version:
+        if state.get("data_processing_parameter_clarification_required") or confirmed_version(
+            state, job_id=str(identity.job_id), source_hash=source_hash,
+        ) != plan_version:
             return _tool_message(
                 runtime,
                 name="execute_processing_script",
@@ -569,7 +621,7 @@ def _execute_script_tool() -> Any:
             await session.write_script("scripts/process.py", script)
             result = await session.run("python3 /workspace/scripts/process.py")
             if result.exit_code != 0:
-                return _tool_message(
+                message = _tool_message(
                     runtime,
                     name="execute_processing_script",
                     content=json.dumps(
@@ -581,6 +633,7 @@ def _execute_script_tool() -> Any:
                         ensure_ascii=False,
                     ),
                 )
+                return Command(update={**clear_candidate(), "messages": [message]})
             output = await session.read_output("output/prepared.csv")
         await context.check_after_call()
         artifact = await asyncio.to_thread(
@@ -595,6 +648,7 @@ def _execute_script_tool() -> Any:
             analysis_parameters=state["analysis_parameters"],
             analysis_parameter_changes=state["analysis_parameter_changes"],
         )
+        await context.check_after_call()
         summary = {
             "status": "candidate_saved",
             "dataset_id": artifact["dataset_id"],
@@ -614,6 +668,11 @@ def _execute_script_tool() -> Any:
                 ],
                 "data_processing_candidate_id": int(artifact["dataset_id"]),
                 "data_processing_candidate_revision": int(artifact["revision"]),
+                "data_processing_execution_report": execution_report(
+                    candidate_id=int(artifact["dataset_id"]), revision=int(artifact["revision"]),
+                    plan_version=plan_version, source_hash=source_hash, data_bytes=output,
+                    script_bytes=script.encode("utf-8"),
+                ),
             }
         )
 
@@ -642,6 +701,7 @@ def build_data_processing_agent(
 ) -> Any:
     """Build the sandbox-only Data Processing Deep Agent with bounded model/tool calls."""
     profile: DeepAgentProfile = config.profile()
+    from Agent.data_processing.graph import DataProcessingCompletionMiddleware
     _register_harness_profile(config.harness_profile_key)
     filesystem_middleware = FilesystemMiddleware(tools=["read_file"])
     system_prompt = "\n".join(
@@ -650,7 +710,9 @@ def build_data_processing_agent(
             "先检查受限的数据预览，再结合用户目标和服务端提供的 AlgorithmSpec 输入要求判断数据含义。",
             "当观察单位、时间范围、聚合粒度或变量含义不明确，且该选择会改变研究问题时，使用 ask_data_processing_question 暂停并等待用户答复。不要按某个算法的枚举清洗步骤提问。",
             "脚本必须只读取 /workspace/raw/original.csv，并写入 /workspace/output/prepared.csv。不得访问其他路径、调用网络、安装依赖或尝试访问数据库；原始文件只读。",
-            "调用 describe_prepared_dataset 并保存完整脚本后，必须先调用 request_data_processing_plan_confirmation。只有用户确认当前方案版本后，execute_processing_script 才会运行。",
+            "调用 set_data_processing_plan 设置处理方案并保存完整脚本后，必须先调用 request_data_processing_plan_confirmation。只有用户确认当前方案版本后，execute_processing_script 才会运行。",
+            "方案草稿、已确认快照和执行说明分别保存。执行成功后用 save_data_processing_execution_report 补充解释，不得为补写说明而改写方案。行数、列名和 hash 由程序生成，解释不能代替独立校验。",
+            "同一轮只调用一个数据处理工具，等待其状态保存后再调用下一工具。修改脚本会清空当前候选，必须重新执行才可结束；方案正文或研究语义变化必须重新展示并等待确认。",
             "确认授权绑定当前 Job、冻结文件、研究语义和方案说明，不绑定脚本正文。用户拒绝或提出新研究语义、改变变量含义或扩大转换范围时，旧方案不得执行；先澄清、更新方案并重新请求确认。",
             "脚本运行失败或独立校验发现可修正的问题时，根据实际错误在已确认的语义和转换范围内修改脚本，并可复用当前确认后再次运行；不要声称未执行的转换已经成功。修复若需要新的语义选择或超出已确认范围，必须先向用户提问并重新确认。",
             "独立校验节点会检查实际输出文件。报告中的 target、treatment 是本次校验使用的参数，columns 是候选 CSV 的实际列名；角色为空本身不构成缺失错误。算法输入兼容不代表科学假设已经成立。",
@@ -664,7 +726,8 @@ def build_data_processing_agent(
         tools=[
             _inspect_input_tool(),
             _write_script_tool(),
-            _description_tool(),
+            _plan_tool(),
+            _execution_report_tool(),
             _question_tool(model=model),
             _plan_confirmation_tool(model=model),
             _execute_script_tool(),
@@ -672,7 +735,7 @@ def build_data_processing_agent(
         subagents=[],
         memory=[],
         system_prompt=system_prompt,
-        middleware=[filesystem_middleware, *build_budget_middlewares(profile)],
+        middleware=[DataProcessingCompletionMiddleware(), filesystem_middleware, *build_budget_middlewares(profile)],
         context_schema=AgentRunContext,
         state_schema=ProjectDeepAgentState,
         checkpointer=checkpointer,

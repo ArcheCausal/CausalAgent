@@ -828,7 +828,7 @@ def read_candidate(
             job = _lock_current_job(cursor, identity, source_hash)
             cursor.execute(
                 """
-                SELECT d.id, d.job_id, d.status, d.source_hash, d.data_hash, d.script_hash,
+                SELECT d.id, d.revision, d.job_id, d.status, d.source_hash, d.data_hash, d.script_hash,
                        d.data_object_id, d.script_object_id, d.metadata,
                        d.validation_report,
                        data.owner_user_id AS data_owner_id,
@@ -895,6 +895,7 @@ def read_candidate(
             connection.commit()
             return {
                 "dataset_id": int(row["id"]),
+                "revision": int(row["revision"]),
                 "source_hash": source_hash,
                 "data_hash": row["data_hash"],
                 "script_hash": row["script_hash"],

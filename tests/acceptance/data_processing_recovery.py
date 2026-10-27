@@ -43,6 +43,28 @@ def require(condition: Any, reason: str) -> None:
         raise AssertionError(reason)
 
 
+def candidate_checkpoint_state(saved):
+    """为验收构造已实际保存候选的 checkpoint，不用于旧生产 checkpoint 回填。"""
+    from Agent.data_processing.lifecycle import execution_report
+    from Agent.deep_agent_tools.interaction import DataProcessingPlanSummary
+
+    binding = saved['metadata']['processing_plan_identity']
+    plan = {key: saved['metadata'][key] for key in DataProcessingPlanSummary.model_fields}
+    return {
+        'data_processing_metadata': plan, 'data_processing_confirmed_plan': json.loads(json.dumps(plan)),
+        'data_processing_confirmed_plan_version': binding['plan_version'],
+        'data_processing_semantic_identity': binding['semantic_identity'],
+        'data_processing_draft_script': saved['script_bytes'].decode('utf-8'),
+        'data_processing_candidate_id': saved['dataset_id'],
+        'data_processing_candidate_revision': saved['revision'],
+        'data_processing_execution_report': execution_report(
+            candidate_id=saved['dataset_id'], revision=saved['revision'],
+            plan_version=binding['plan_version'], source_hash=saved['source_hash'],
+            data_bytes=saved['data_bytes'], script_bytes=saved['script_bytes']),
+        'data_processing_completion_retry_count': 0,
+    }
+
+
 def configure(resume: bool) -> None:
     from tests.acceptance.p2_mcp.terminal_persistence_acceptance import configure_isolated_databases
 
@@ -203,17 +225,22 @@ async def verify(report):
         saved = await asyncio.to_thread(persistence.read_candidate, runtime.context.trusted_identity,
             dataset_id=candidate['dataset_id'], source_hash=source_hash)
         require(saved['status'] == 'pending_validation', 'unbound_parent_candidate_not_pending')
-        return {**child_state, 'data_processing_candidate_id': saved['dataset_id'],
-            'data_processing_candidate_revision': candidate['revision'],
-            'data_processing_semantic_identity': saved['metadata']['processing_plan_identity']['semantic_identity'],
-            'data_processing_confirmed_plan_version': saved['metadata']['processing_plan_identity']['plan_version']}
+        from langchain_core.messages import AIMessage
+        return {**child_state, **candidate_checkpoint_state(saved), 'messages': [AIMessage(content='', tool_calls=[{
+            'id': 'explain-saved-candidate', 'name': 'save_data_processing_execution_report',
+            'args': {'explanation': 'Retained actual measurements; awaiting independent validation.'}}])]}
     load_saved_candidate.__annotations__['runtime'] = Runtime[AgentRunContext]
     async with open_checkpoint_pool() as pool:
         saver = build_checkpointer(pool)
-        child_builder = StateGraph(dict, context_schema=AgentRunContext)
+        from langgraph.prebuilt import ToolNode
+        from Agent.data_processing.agent import _execution_report_tool
+        from Agent.deep_agent.state import ProjectDeepAgentState
+        child_builder = StateGraph(ProjectDeepAgentState, context_schema=AgentRunContext)
         child_builder.add_node('read_actual_candidate', load_saved_candidate)
+        child_builder.add_node('explain_candidate', ToolNode([_execution_report_tool()], handle_tool_errors=False))
         child_builder.add_edge(START, 'read_actual_candidate')
-        child_builder.add_edge('read_actual_candidate', END)
+        child_builder.add_edge('read_actual_candidate', 'explain_candidate')
+        child_builder.add_edge('explain_candidate', END)
         child = child_builder.compile(checkpointer=saver)
         async def invoke_unbound_parent(parent_state, config, runtime):
             return await data_processing_parent_node(parent_state, runtime=runtime, config=config, agent=child, registry=registry)
@@ -242,6 +269,9 @@ async def verify(report):
     bound = await bind_dataset_node(state, runtime=runtime)
     state.update(bound)
     require(identity.current_input_identity() == source_hash, 'bound_identity_mismatch')
+    require(state['data_processing_execution_report']['explanation'], 'execution_explanation_not_projected')
+    require(state['data_processing_confirmed_plan_version'] == version, 'execution_explanation_cleared_confirmation')
+    report['save_then_explain_preserves_confirmation'] = True
     report['real_validation_record_and_binding'] = True
     report['active_test'] = 'new_identity_and_postgres_pool_recovery'
 
@@ -478,7 +508,7 @@ def main():
         names = ('first_run_empty_databases', 'formal_alembic_head_and_postgres_setup',
             'registered_login_session_file_job', 'final_parameters_context_bound_after_child',
             'unconfirmed_candidate_rejected', 'plan_confirmation_and_input_ledger',
-            'candidate_replay_tuple_and_json_lists', 'real_validation_record_and_binding',
+            'candidate_replay_tuple_and_json_lists', 'save_then_explain_preserves_confirmation', 'real_validation_record_and_binding',
             'new_identity_and_postgres_pool_recovery', 'mcp',
             'same_context_preserves_different_context_clears', 'old_lease_save_validate_bind_rejected',
             'native_child_postgres_recovery')

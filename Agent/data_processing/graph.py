@@ -8,8 +8,10 @@ import hashlib
 import json
 from collections.abc import Mapping
 from typing import Any
+from uuid import uuid4
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain.agents.middleware import AgentMiddleware, hook_config
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph._internal._constants import (
     CONFIG_KEY_CHECKPOINTER,
     CONFIG_KEY_CHECKPOINT_ID,
@@ -31,12 +33,14 @@ from Agent.deep_agent_tools.interaction import (
 )
 from Agent.deep_agent_tools.models import canonical_json_bytes
 from Agent.data_processing.persistence import (
+    require_current_plan_confirmation,
     require_candidate_parameters,
     bind_candidate,
     read_bound_dataset_identity,
     read_candidate,
     record_validation,
 )
+from Agent.data_processing.lifecycle import confirmed_version, require_candidate_binding
 from Agent.data_processing.parameters import (
     PROCESSING_STATE_VERSION, ParameterContractError, parameter_identity,
     research_parameters, validate_parameter_history,
@@ -49,6 +53,81 @@ from Agent.llm_structured_output import StructuredOutputError
 
 DATA_PROCESSING_CHECKPOINT_NAMESPACE = "data_processing_v1"
 MAX_VALIDATION_RETRIES = 3
+MAX_COMPLETION_RETRIES = 3
+
+
+class DataProcessingCompletionMiddleware(AgentMiddleware):
+    """在同一子图调用内纠正结束请求，保留现有模型和工具预算。"""
+
+    @hook_config(can_jump_to=["model"])
+    async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        messages = state.get("messages") or []
+        index = next((i for i in range(len(messages) - 1, -1, -1)
+                      if isinstance(messages[i], AIMessage)), None)
+        if index is None:
+            return None
+        answered = {message.tool_call_id for message in messages[index + 1:] if isinstance(message, ToolMessage)}
+        calls = [call for call in messages[index].tool_calls if call["id"] not in answered]
+        if len(calls) <= 1:
+            return None
+        count = int(state.get("data_processing_completion_retry_count") or 0)
+        if count >= MAX_COMPLETION_RETRIES:
+            raise ParameterContractError("processing tool sequencing correction limit exceeded")
+        # ToolNode 同批工具读取同一个 State，依赖前一步写入的调用必须分轮执行。
+        return {"jump_to": "model", "data_processing_completion_retry_count": count + 1, "messages": [
+            ToolMessage(tool_call_id=call["id"], name=call["name"], status="error",
+                        content="本批工具未执行。数据处理工具必须每轮只调用一个，保存状态后再继续。")
+            for call in calls
+        ]}
+
+    @hook_config(can_jump_to=["model", "tools"])
+    async def aafter_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        context = runtime.context
+        if not isinstance(context, AgentRunContext) or context.trusted_identity is None:
+            raise RuntimeError("processing completion requires trusted Job context")
+        await context.ensure_active()
+        identity = context.trusted_identity
+        source_hash = identity.source_input_identity()
+        version = confirmed_version(state, job_id=str(identity.job_id), source_hash=source_hash)
+        tool_name = None
+        args: dict[str, Any] = {}
+        if state.get("data_processing_parameter_clarification_required"):
+            tool_name = "ask_data_processing_question"
+            args = {"question": state["data_processing_parameter_clarification_question"]}
+        elif not state.get("data_processing_metadata") or not state.get("data_processing_draft_script"):
+            instruction = "请先使用 set_data_processing_plan 保存完整处理方案，并保存脚本，再展示方案请求确认。"
+        elif version is None:
+            tool_name = "request_data_processing_plan_confirmation"
+        else:
+            await asyncio.to_thread(
+                require_current_plan_confirmation, context, source_hash=source_hash, plan_version=version,
+            )
+            await context.check_after_call()
+            candidate_id = state.get("data_processing_candidate_id")
+            if not candidate_id:
+                instruction = "当前脚本尚未执行并保存候选。请调用 execute_processing_script，成功后才能结束；不得交付历史候选。"
+            else:
+                candidate = await asyncio.to_thread(
+                    read_candidate, context, dataset_id=candidate_id, source_hash=source_hash,
+                )
+                await context.check_after_call()
+                require_candidate_parameters(
+                    candidate["metadata"], job_id=str(identity.job_id),
+                    parameters=state.get("analysis_parameters"), changes=state.get("analysis_parameter_changes"),
+                )
+                require_candidate_binding(state, candidate, job_id=str(identity.job_id), source_hash=source_hash)
+                return None
+        count = int(state.get("data_processing_completion_retry_count") or 0)
+        if count >= MAX_COMPLETION_RETRIES:
+            raise ParameterContractError("processing completion correction limit exceeded")
+        update = {"data_processing_completion_retry_count": count + 1}
+        if tool_name:
+            update.update(jump_to="tools", messages=[AIMessage(content="", tool_calls=[{
+                "id": "processing-completion-" + uuid4().hex, "name": tool_name, "args": args,
+            }])])
+        else:
+            update.update(jump_to="model", messages=[HumanMessage(content=instruction)])
+        return update
 
 
 def _validation_retry_message(candidate_id: Any, report: Mapping[str, Any]) -> HumanMessage:
@@ -233,6 +312,10 @@ async def run_data_processing_child(
     elif isinstance(values, Mapping) and values:
         protected = {"analysis_parameters", "analysis_parameter_changes",
                      "data_processing_semantic_identity", "data_processing_confirmed_plan_version",
+                     "data_processing_confirmed_plan", "data_processing_metadata",
+                     "data_processing_draft_script", "data_processing_candidate_id",
+                     "data_processing_candidate_revision", "data_processing_execution_report",
+                     "data_processing_completion_retry_count",
                      "data_processing_state_version", "data_processing_run_id",
                      "data_processing_answer_receipts"}
         if retry_input and protected.intersection(retry_input):
@@ -281,6 +364,14 @@ async def data_processing_parent_node(
     if bound is not None:
         await context.check_after_call()
         plan_binding = bound["metadata"]["processing_plan_identity"]
+        execution_report = state.get("data_processing_execution_report")
+        if execution_report is not None and (
+            execution_report.get("candidate_id") != bound["dataset_id"]
+            or execution_report.get("data_hash") != bound["data_hash"]
+            or execution_report.get("source_hash") != source_hash
+            or execution_report.get("plan_version") != plan_binding["plan_version"]
+        ):
+            raise ParameterContractError("restored execution report conflicts with bound dataset")
         return {
             "analysis_parameters": bound["analysis_parameters"],
             "analysis_parameter_changes": bound["analysis_parameter_changes"],
@@ -296,6 +387,7 @@ async def data_processing_parent_node(
             "prepared_dataset_id": int(bound["dataset_id"]),
             "prepared_dataset_hash": str(bound["data_hash"]),
             "data_processing_candidate_id": int(bound["dataset_id"]),
+            "data_processing_execution_report": execution_report,
             "dataset_validation_status": "accepted",
             "data_processing_run_id": run_id,
         }
@@ -329,6 +421,9 @@ async def data_processing_parent_node(
         "data_processing_metadata": {},
         "data_processing_semantic_identity": semantic_identity,
         "data_processing_confirmed_plan_version": None,
+        "data_processing_confirmed_plan": None,
+        "data_processing_execution_report": None,
+        "data_processing_completion_retry_count": 0,
     }
     retry_report = state.get("data_processing_retry_report")
     retry_input = None
@@ -400,6 +495,7 @@ async def data_processing_parent_node(
     if (binding["semantic_identity"] != child_state.get("data_processing_semantic_identity")
             or binding["plan_version"] != child_state.get("data_processing_confirmed_plan_version")):
         raise ParameterContractError("candidate belongs to an earlier processing plan")
+    require_candidate_binding(child_state, candidate, job_id=str(identity.job_id), source_hash=source_hash)
     result = await asyncio.to_thread(
         apply_final_parameters_context, user_id=identity.user_id, session_id=str(identity.session_id),
         job_id=str(identity.job_id), worker_id=identity.worker_id,
@@ -426,6 +522,7 @@ async def data_processing_parent_node(
         "data_processing_candidate_revision": int(
             child_state.get("data_processing_candidate_revision") or 0
         ),
+        "data_processing_execution_report": child_state["data_processing_execution_report"],
         "data_processing_failure_code": None,
         "data_processing_retry_report": None,
     }
