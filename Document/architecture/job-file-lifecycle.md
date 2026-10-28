@@ -52,6 +52,8 @@
 
 通过校验的报告显式保存输出字段及其 `semantic_kinds` 快照。恢复绑定、Adapter 检查和 MCP 强读都要求报告有效，不能从缺失快照推定连续测量语义。普通报告追问只使用报告及分析事实；新的 Job 不自动复用旧 Job 的处理产物。
 
+方案 metadata 的 `role_columns` 保存研究角色到处理后列名的映射，并参与现有方案版本计算；映射变化按方案变化清除确认与当前候选引用。研究参数快照仍保留用户角色名称，独立校验报告分别保存原始角色与实际执行列。恢复后，数据摘要、算法输入与最终决策校验从已绑定候选的同一映射生成执行参数副本，不改写研究参数修订链。
+
 ## 分析上下文与上下文绑定
 
 `analysis_contexts` 是跨 Job 的业务事实来源，保存创建时的文件快照（`input_user_file_id`、`file_object_id`、`file_hash`、`filename`）、分析参数（`target`、`treatment`、`analysis_question`）、最新结构化算法摘要、RAG/Web 证据摘要和最新报告引用。同一个 Session 可以存在多个上下文，`sessions.active_analysis_context_id` 只表示当前默认上下文；`sessions` 指向上下文的一侧不建外键，避免与 `analysis_contexts` 到 `sessions` 的级联删除形成环，所有上下文写入都按 `user_id + session_id` 校验归属。

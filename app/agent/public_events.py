@@ -125,10 +125,18 @@ def _public_processing_plan(value: Any) -> dict[str, Any] | None:
     if not variable_semantics:
         return None
 
-    return {
+    public = {
         "summary": summary[:1200],
         "observation_unit": observation_unit[:500],
         "transformations": transformations,
         "variable_semantics": variable_semantics,
         "limitations": _public_plan_strings(value.get("limitations")),
     }
+    if isinstance(value.get("role_columns"), dict):
+        public["role_columns"] = {
+            role: column
+            for role, column in value["role_columns"].items()
+            if role in {"target", "treatment"}
+            and (column is None or isinstance(column, str) and 0 < len(column) <= 255)
+        }
+    return public

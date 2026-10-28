@@ -77,6 +77,7 @@ from Agent.data_processing.graph import (
     validate_dataset_node,
     validation_router,
 )
+from Agent.data_processing.parameters import execution_parameters
 from Agent.deep_agent_tools.models import (
     AlgorithmResult,
     EvidenceResult,
@@ -972,7 +973,9 @@ async def _finalization_gate_node(
             web_evidence=state.get("deep_agent_web_evidence"),
             route_decision=state.get("route_decision"),
             web_search_enabled=getattr(context, "web_search_enabled", None),
-            analysis_parameters=state.get("analysis_parameters"),
+            analysis_parameters=execution_parameters(
+                state.get("analysis_parameters") or {}, state.get("prepared_dataset_metadata") or {},
+            ),
             analysis_question=nodes._latest_human_text(state),
         )
     except StructuredResponseError as exc:

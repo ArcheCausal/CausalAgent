@@ -137,14 +137,17 @@ def _validation_retry_message(candidate_id: Any, report: Mapping[str, Any]) -> H
         "errors": report.get("errors", []),
         "target": report.get("target"),
         "treatment": report.get("treatment"),
+        "research_roles": report.get("research_roles", {}),
+        "role_columns": report.get("role_columns", {}),
         "columns": report.get("columns", []),
         "algorithm_compatibility": report.get("algorithm_compatibility", []),
     }
     return HumanMessage(
         id=f"validation-retry-{candidate_id}",
         content=(
-            "独立校验未通过。以下是本次校验使用的角色参数、候选 CSV 实际列名和确定性错误。"
-            "请先判断是脚本遗漏已确认字段、用户信息不足，还是参数提取与已有明确答复矛盾。"
+            "独立校验未通过。以下是研究角色、方案角色列映射、本次执行列名、候选 CSV 实际列名和确定性错误。"
+            "研究角色名称与实际列名不同或映射错误时，使用 set_data_processing_plan 修正 role_columns，确认后重新执行；不要改写原始研究角色或让用户重复选择。"
+            "请判断是角色列映射缺失或错误、脚本遗漏已确认字段、用户信息不足，还是参数提取与已有明确答复矛盾。"
             "脚本遗漏可在原确认范围内修复；有新的语义歧义才向用户澄清。"
             "参数提取错误不代表校验器强制要求角色，不要要求用户重复作同一个选择，"
             "也不要声称现有工具已修订参数。不得忽略校验或默认清空角色继续分析；"
