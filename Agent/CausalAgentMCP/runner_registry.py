@@ -115,7 +115,7 @@ def _backdoor_ols(
     }
 
 
-G_FORMULA_RUNNER_VERSION = "g-formula-runner-v1"
+G_FORMULA_RUNNER_VERSION = "g-formula-runner-v2"
 
 
 def _g_formula(

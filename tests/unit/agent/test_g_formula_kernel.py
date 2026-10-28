@@ -50,6 +50,7 @@ def test_linear_g_formula_matches_backdoor_ols() -> None:
     assert g_formula["standard_error"] is None
     assert g_formula["ci95"] is None
     assert g_formula["bootstrap_n"] == 0
+    assert "difference_se" not in g_formula["diagnostics_metrics"]
 
 
 def test_flexible_model_captures_nonlinear_effect() -> None:
@@ -86,6 +87,44 @@ def test_bootstrap_is_reproducible_and_contains_point_estimate() -> None:
     low, high = first["ci95"]
     assert low < high
     assert low <= first["estimate"] <= high
+    assert first["diagnostics_metrics"]["difference_se"] is not None
+
+
+def test_linear_dag_difference_is_zero_with_finite_se() -> None:
+    graph, frame = _linear_dag()
+    result = estimate_g_formula(
+        graph=graph, data=frame.head(1500), treatment="x", outcome="y",
+        contrast=(0.0, 1.0), bootstrap=20,
+    )
+    metrics = result["diagnostics_metrics"]
+    assert abs(metrics["effect_difference"]) < 0.05
+    assert metrics["difference_se"] >= 0.0
+    assert np.isfinite(metrics["difference_se"])
+
+
+def test_nonlinear_outcome_has_large_difference() -> None:
+    rng = np.random.default_rng(31)
+    x = rng.normal(size=1200)
+    y = 3.0 * x**2 + 0.3 * rng.normal(size=1200)
+    graph = _graph(["x", "y"], [("x", "y")])
+    result = estimate_g_formula(
+        graph=graph, data=pd.DataFrame({"x": x, "y": y}),
+        treatment="x", outcome="y", contrast=(0.0, 1.0),
+        outcome_model="hgb", bootstrap=40,
+    )
+    metrics = result["diagnostics_metrics"]
+    assert abs(metrics["effect_difference"]) > 1.0
+    assert np.isfinite(metrics["difference_se"])
+
+
+def test_linear_estimate_scales_with_contrast() -> None:
+    graph, frame = _linear_dag()
+    result = estimate_g_formula(
+        graph=graph, data=frame.head(1500), treatment="x", outcome="y",
+        contrast=(1.0, 3.0), bootstrap=0,
+    )
+    assert result["diagnostics_metrics"]["linear_estimate"] == pytest.approx(4.0, abs=0.1)
+    assert "difference_se" not in result["diagnostics_metrics"]
 
 
 @pytest.mark.parametrize(

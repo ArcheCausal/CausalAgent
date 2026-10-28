@@ -151,6 +151,25 @@ def _effect(
     return high - low
 
 
+def _linear_effect(
+    frame: pd.DataFrame,
+    *,
+    parents: dict[str, list[str]],
+    treatment: str,
+    outcome: str,
+    contrast: tuple[float, float],
+) -> float:
+    """与 backdoor_ols 同式同列，按对比区间缩放的线性效应。"""
+
+    columns = [treatment, *parents[treatment]]
+    values = frame[columns].to_numpy(dtype=float)
+    design = np.column_stack([np.ones(len(values)), values])
+    coefficients, *_ = np.linalg.lstsq(
+        design, frame[outcome].to_numpy(dtype=float), rcond=None
+    )
+    return float(coefficients[1]) * (contrast[1] - contrast[0])
+
+
 def estimate_g_formula(
     *,
     graph: StandardizedGraph,
@@ -205,13 +224,28 @@ def estimate_g_formula(
     if not np.isfinite(estimate):
         raise ValueError("估计结果不是有限值")
 
+    linear_estimate = _linear_effect(
+        frame, parents=parents, treatment=treatment, outcome=outcome,
+        contrast=contrast_values,
+    )
+    diagnostics_metrics: dict[str, float] = {
+        "linear_estimate": linear_estimate,
+        "effect_difference": linear_estimate - estimate,
+    }
+
     standard_error: float | None = None
     ci95: tuple[float, float] | None = None
+    difference_se: float | None = None
     if bootstrap >= 2:
         rng = np.random.default_rng(0)
-        effects = [
-            _effect(
-                frame.iloc[rng.integers(0, len(frame), len(frame))].reset_index(drop=True),
+        effects: list[float] = []
+        differences: list[float] = []
+        for _ in range(bootstrap):
+            sample = frame.iloc[
+                rng.integers(0, len(frame), len(frame))
+            ].reset_index(drop=True)
+            flexible = _effect(
+                sample,
                 order=relevant_order,
                 parents=parents,
                 treatment=treatment,
@@ -219,11 +253,21 @@ def estimate_g_formula(
                 contrast=contrast_values,
                 outcome_model=outcome_model,
             )
-            for _ in range(bootstrap)
-        ]
+            effects.append(flexible)
+            differences.append(
+                _linear_effect(
+                    sample, parents=parents, treatment=treatment,
+                    outcome=outcome, contrast=contrast_values,
+                ) - flexible
+            )
         standard_error = float(np.std(effects, ddof=1))
         low, high = np.percentile(effects, [2.5, 97.5])
         ci95 = (float(low), float(high))
+        finite_differences = [value for value in differences if np.isfinite(value)]
+        if len(finite_differences) >= 2:
+            difference_se = float(np.std(finite_differences, ddof=1))
+    if difference_se is not None:
+        diagnostics_metrics["difference_se"] = difference_se
 
     return {
         "estimand": "ATE",
@@ -237,4 +281,5 @@ def estimate_g_formula(
         "contrast": contrast_values,
         "outcome_model": outcome_model,
         "bootstrap_n": int(bootstrap),
+        "diagnostics_metrics": diagnostics_metrics,
     }

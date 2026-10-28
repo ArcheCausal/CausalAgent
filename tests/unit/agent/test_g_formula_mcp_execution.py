@@ -111,7 +111,7 @@ def test_estimation_result_injects_source_graph_ref_and_controls() -> None:
     payload = {
         "success": True,
         "algorithm": "g_formula",
-        "runner_version": "g-formula-runner-v1",
+        "runner_version": "g-formula-runner-v2",
         "causal_effect": {
             "estimand": "ATE",
             "treatment": "x",
