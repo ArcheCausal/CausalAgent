@@ -49,7 +49,7 @@ def candidate_checkpoint_state(saved):
     from Agent.deep_agent_tools.interaction import DataProcessingPlanSummary
 
     binding = saved['metadata']['processing_plan_identity']
-    plan = {key: saved['metadata'][key] for key in DataProcessingPlanSummary.model_fields}
+    plan = {key: saved['metadata'][key] for key in DataProcessingPlanSummary.model_fields if key in saved['metadata']}
     return {
         'data_processing_metadata': plan, 'data_processing_confirmed_plan': json.loads(json.dumps(plan)),
         'data_processing_confirmed_plan_version': binding['plan_version'],
@@ -260,7 +260,14 @@ async def verify(report):
     report['final_parameters_context_bound_after_child'] = True
     state = {**unbound, 'data_processing_candidate_id': candidate['dataset_id']}
     runtime = Runtime(context=context_for(identity))
-    validation = await validate_dataset_node(state, runtime=runtime, registry=registry)
+    async def validate_actual_candidate(state, runtime: Runtime[AgentRunContext]):
+        return await validate_dataset_node(state, runtime=runtime, registry=registry)
+    validate_actual_candidate.__annotations__['runtime'] = Runtime[AgentRunContext]
+    validation_builder = StateGraph(dict, context_schema=AgentRunContext)
+    validation_builder.add_node('validate_dataset', validate_actual_candidate)
+    validation_builder.add_edge(START, 'validate_dataset')
+    validation_builder.add_edge('validate_dataset', END)
+    validation = await validation_builder.compile().ainvoke(state, context=runtime.context)
     require(validation['dataset_validation_status'] == 'accepted', 'real_candidate_validation_rejected')
     require(validation['dataset_validation_report']['semantic_kinds'] == {'flag': 'binary'}, 'validated_semantics_missing')
     state.update(validation)

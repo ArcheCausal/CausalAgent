@@ -151,7 +151,14 @@ function parseProcessingPlan(value: unknown): ProcessingPlanSummary | null {
   const limitations = Array.isArray(item.limitations)
     ? item.limitations.filter((entry): entry is string => typeof entry === 'string')
     : []
-  return { summary: item.summary, observationUnit: item.observation_unit, transformations, variableSemantics, limitations }
+  const columns = typeof item.role_columns === 'object' && item.role_columns !== null
+    ? item.role_columns as Record<string, unknown>
+    : {}
+  const roleColumns = {
+    target: typeof columns.target === 'string' ? columns.target : null,
+    treatment: typeof columns.treatment === 'string' ? columns.treatment : null,
+  }
+  return { summary: item.summary, observationUnit: item.observation_unit, transformations, variableSemantics, roleColumns, limitations }
 }
 
 export function waitingInputFromInteraction(

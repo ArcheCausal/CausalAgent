@@ -21,6 +21,7 @@ def _plan() -> dict:
         "observation_unit": "设备-日期",
         "transformations": ["按设备和日期分组并计数"],
         "variable_semantics": {"alarm_count": "该设备当天的告警次数"},
+        "role_columns": {},
         "limitations": ["不包含未触发告警的设备日期"],
     }
 
@@ -214,6 +215,7 @@ def test_plan_text_and_collection_limits(extra_length: int) -> None:
             for index in range(128 + extra_length)
         },
         "limitations": ["限" * (600 + extra_length)] * (12 + extra_length),
+        "role_columns": {},
     }
 
     public = public_event_payload("interrupt", {"interaction": _interaction(plan=plan)})
@@ -223,6 +225,7 @@ def test_plan_text_and_collection_limits(extra_length: int) -> None:
         "observation_unit": "观" * 500,
         "transformations": ["转" * 600] * 12,
         "variable_semantics": {f"column_{index}": "义" * 600 for index in range(128)},
+        "role_columns": {},
         "limitations": ["限" * 600] * 12,
     }
     assert public["interaction"]["plan"] == expected
@@ -236,6 +239,13 @@ def test_oversized_variable_names_are_dropped_without_name_collisions() -> None:
     public = public_event_payload("interrupt", {"interaction": _interaction(plan=plan)})
 
     assert public["interaction"]["plan"]["variable_semantics"] == {name: "保留"}
+
+
+def test_role_columns_survive_confirmation_projection_without_internal_fields() -> None:
+    plan = {**_plan(), "role_columns": {"target": "alarm_count", "treatment": None, "script": "private"}}
+    public = public_event_payload("interrupt", {"interaction": _interaction(plan=plan)})
+    assert public["interaction"]["plan"]["role_columns"] == {"target": "alarm_count", "treatment": None}
+    assert "private" not in json.dumps(public)
 
 
 def test_projection_is_idempotent_and_does_not_share_mutable_plan_containers() -> None:
