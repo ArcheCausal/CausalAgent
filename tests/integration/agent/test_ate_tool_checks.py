@@ -7,6 +7,8 @@ from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 from functools import partial
 
+import numpy as np
+import pandas as pd
 import pytest
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
@@ -162,7 +164,10 @@ def test_continuous_confounder_runs_real_ols_and_passes_gate():
     assert result.ate_check.execution_columns == ("x", "y", "z")
     assert result.causal_effect.estimate == pytest.approx(2)
     assert len(context.algorithm_executor.calls) == 1
-    _validate(context, registry, source, source_record, result, record)
+    flex, flex_record = _call_g_formula(context, registry, source, source_record)
+    _validate_with_estimations(context, registry, source, source_record,
+        [(result, record), (flex, flex_record)],
+        primary_ref=result.result_ref, parameters=PARAMETERS)
 
 
 @pytest.mark.parametrize("kind", ["category", "ordinal", "binary"])
@@ -189,7 +194,10 @@ def test_unused_category_does_not_block_real_estimation():
     context, registry, source, source_record = _setup(kinds={"other": "category"})
     result, record = _call(context, registry, source, source_record)
     assert result.status == "valid"
-    _validate(context, registry, source, source_record, result, record)
+    flex, flex_record = _call_g_formula(context, registry, source, source_record)
+    _validate_with_estimations(context, registry, source, source_record,
+        [(result, record), (flex, flex_record)],
+        primary_ref=result.result_ref, parameters=PARAMETERS)
 
 
 def test_undirected_graph_has_controlled_reason_and_null_adjustment():
@@ -296,3 +304,96 @@ def test_dispatch_deadline_retains_completed_local_check_for_current_call():
         algorithm_results=state["algorithm_results"],
         action_ledger=state["action_ledger"] | {diagnose.invocation_id: diagnose},
         trusted_identity=context.trusted_identity, route_decision="fold", analysis_parameters=PARAMETERS)
+
+
+TRIGGERED = {**PARAMETERS, "nonlinearity": {"ratio": 1.5, "verdict": "nonlinear"}}
+
+
+def _nonlinear_csv(n=400):
+    rng = np.random.default_rng(29)
+    z = rng.normal(size=n)
+    x = 0.8 * z + rng.normal(size=n)
+    y = 3.0 * x**2 + 0.5 * z + 0.3 * rng.normal(size=n)
+    return pd.DataFrame({"z": z, "x": x, "y": y, "other": np.arange(n) % 2}).to_csv(index=False)
+
+
+def _call_g_formula(context, registry, source, source_record, *, contrast=(0.0, 1.0),
+                    outcome_model="linear", bootstrap=20):
+    tool = next(item for item in build_algorithm_tools(registry, runtime_context=context)
+                if item.name == "causal_g_formula").to_langchain_tool()
+    runtime = ToolRuntime(
+        tool_call_id="g-formula-call",
+        state={"message_execution_id": "g-formula-response",
+               "data_profile": context.algorithm_executor.data_profile,
+               "algorithm_results": {source.result_ref: source},
+               "action_ledger": {source_record.invocation_id: source_record}},
+        context=context, config={}, stream_writer=[].append, store=None,
+    )
+    command = asyncio.run(tool.coroutine(
+        runtime=runtime, graph_result_ref=source.result_ref, treatment="x", outcome="y",
+        contrast=contrast, outcome_model=outcome_model, bootstrap=bootstrap))
+    result = next(iter(command.update["algorithm_results"].values()))
+    record = next(iter(command.update["action_ledger"].values()))
+    return result, record
+
+
+def _validate_with_estimations(context, registry, source, source_record, entries, *,
+                               primary_ref, parameters):
+    diagnose = _diagnose_record(context.trusted_identity, subject_ref=source.result_ref)
+    results = {source.result_ref: source, **{result.result_ref: result for result, _ in entries}}
+    ledger = {
+        source_record.invocation_id: source_record,
+        **{record.invocation_id: record for _, record in entries},
+        diagnose.invocation_id: diagnose,
+    }
+    decision = {
+        "outcome": "algorithm_supported",
+        "primary_result_ref": primary_ref,
+        "result_assessments": [
+            {"result_ref": ref,
+             "disposition": "primary" if ref == primary_ref else (
+                 "supporting" if item.status == "valid" else "discarded"),
+             "rationale": "依据真实执行状态评估。"}
+            for ref, item in results.items()
+        ],
+        "conflict_status": "none", "conflicts": [], "revision_proposals": [],
+        "selection_rationale": "保留方法边界。", "confidence": "low",
+        "confidence_basis": ["tool contract"],
+    }
+    return FinalizationGate(registry=registry).validate(
+        decision=decision, algorithm_results=results, action_ledger=ledger,
+        trusted_identity=context.trusted_identity, route_decision="fold",
+        analysis_parameters=parameters,
+    )
+
+
+def test_gate_requires_flexible_check_when_signal_triggered():
+    context, registry, source, source_record = _setup()
+    ols, ols_record = _call(context, registry, source, source_record)
+    with pytest.raises(StructuredResponseError) as failure:
+        _validate_with_estimations(context, registry, source, source_record,
+            [(ols, ols_record)], primary_ref=ols.result_ref, parameters=TRIGGERED)
+    assert failure.value.rule == "form_check_not_attempted"
+
+
+def test_gate_rejects_linear_primary_when_verdict_is_nonlinear():
+    context, registry, source, source_record = _setup(csv_data=_nonlinear_csv())
+    ols, ols_record = _call(context, registry, source, source_record)
+    flex, flex_record = _call_g_formula(context, registry, source, source_record,
+        outcome_model="hgb", bootstrap=20)
+    assert ols.status == "valid" and flex.status == "valid"
+    with pytest.raises(StructuredResponseError) as failure:
+        _validate_with_estimations(context, registry, source, source_record,
+            [(ols, ols_record), (flex, flex_record)],
+            primary_ref=ols.result_ref, parameters=TRIGGERED)
+    assert failure.value.rule == "linear_primary_despite_nonlinear_verdict"
+
+
+def test_gate_allows_undetermined_flex_failure_with_graph_primary():
+    context, registry, source, source_record = _setup(edge_type="undirected")
+    ols, ols_record = _call(context, registry, source, source_record)
+    flex, flex_record = _call_g_formula(context, registry, source, source_record)
+    assert ols.status == "not_applicable" and flex.status == "not_applicable"
+    _validate_with_estimations(context, registry, source, source_record,
+        [(ols, ols_record), (flex, flex_record)],
+        primary_ref=source.result_ref, parameters=TRIGGERED)

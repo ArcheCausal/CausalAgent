@@ -8,6 +8,16 @@ from typing import Any
 
 from Agent.deep_agent_tools.identity import build_invocation_id, current_input_identity
 from Agent.deep_agent_tools.algorithm_specs import get_algorithm_spec
+from Agent.deep_agent_tools.functional_form import (
+    FLEX_CAPABILITY,
+    FLEX_TOOL_NAME,
+    OLS_CAPABILITY,
+    assess_functional_form,
+    estimation_pair,
+    flex_status_from_results,
+    select_result,
+    signal_triggered,
+)
 from Agent.deep_agent_tools.graph_validation import validate_graph_structure
 from Agent.deep_agent_tools.runtime_updates import normalize_tool_status
 from Agent.deep_agent_tools.models import (
@@ -700,6 +710,60 @@ class FinalizationGate:
                     rule="estimation_graph_not_diagnosed",
                 )
 
+        # 函数形式判定：信号触发就必须真的跑过一次灵活路；非线性结论要求
+        # 灵活估计成为主结果。两条规则都从程序事实重算，不信任模型自述。
+        pair = estimation_pair(analysis_parameters)
+        if effect_question and pair is not None:
+            treatment, outcome = pair
+            nonlinearity = (
+                analysis_parameters.get("nonlinearity")
+                if isinstance(analysis_parameters, Mapping) else None
+            )
+            ols = select_result(
+                eligible.values(), capability=OLS_CAPABILITY,
+                treatment=treatment, outcome=outcome,
+            )
+            flex = select_result(
+                eligible.values(), capability=FLEX_CAPABILITY,
+                treatment=treatment, outcome=outcome,
+            )
+            assessment = assess_functional_form(
+                nonlinearity=nonlinearity if isinstance(nonlinearity, Mapping) else None,
+                ols_metrics=ols.diagnostics.metrics if ols is not None else None,
+                flex_metrics=flex.diagnostics.metrics if flex is not None else None,
+                flex_status=(
+                    "valid" if flex is not None
+                    else flex_status_from_results(
+                        eligible.values(), treatment=treatment, outcome=outcome,
+                    )
+                ),
+            )
+            flex_attempted = self._has_current_terminal_tool_invocation(
+                current_ledger,
+                tool_name=FLEX_TOOL_NAME,
+                job_id=job_id,
+                attempt_count=current_attempt,
+                lease_epoch=current_lease,
+                worker_id=current_worker,
+                input_identity=current_input,
+                terminal_statuses={"succeeded", "not_applicable", "failed", "timed_out"},
+            )
+            if signal_triggered(assessment["signals"]) and not flex_attempted:
+                raise StructuredResponseError(
+                    "nonlinearity signal requires a flexible check",
+                    rule="form_check_not_attempted",
+                )
+            if (
+                assessment["verdict"] == "nonlinear"
+                and flex is not None
+                and normalized_decision.outcome == "algorithm_supported"
+                and normalized_decision.primary_result_ref != flex.result_ref
+            ):
+                raise StructuredResponseError(
+                    "nonlinear verdict requires the flexible estimate as primary",
+                    rule="linear_primary_despite_nonlinear_verdict",
+                )
+
         if (
             route_decision == ANALYSIS_ROUTE
             and web_search_enabled is True
@@ -837,6 +901,14 @@ FINALIZATION_RETRY_HINTS: dict[str, str] = {
     "estimation_graph_not_diagnosed": (
         "主结果所指的估计结果缺少对应的成功诊断记录。请先用同一张图调用 "
         "effect_diagnose，待其返回 succeeded 后再用该图估计。"
+    ),
+    "form_check_not_attempted": (
+        "当前数据或残差显示可能存在非线性。请用同一张图、相同 treatment/outcome "
+        "调用 causal_g_formula，contrast 使用 (0, 1) 与线性估计同尺度，保留真实终态后再提交最终决策。"
+    ),
+    "linear_primary_despite_nonlinear_verdict": (
+        "线性与灵活估计已出现实质差异。主结果必须采用 causal_g_formula 的灵活估计结果，"
+        "不能用线性估计作为主结果。"
     ),
     "analysis_route_without_web_invocation": (
         "本次运行已开启联网搜索。请先调用一次 web_evidence_search 并等待真实返回，"

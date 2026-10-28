@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from Agent.analysis_principles import CAUSAL_ANALYSIS_PRINCIPLES
+from Agent.deep_agent_tools.functional_form import RATIO_LINE, SIGNAL_FLOOR
 
 
 DEEP_AGENT_SYSTEM_PROMPT = CAUSAL_ANALYSIS_PRINCIPLES + """
@@ -64,6 +65,11 @@ MANDATORY_ALGORITHM_INSTRUCTION = (
     "诊断返回 succeeded 时，用同一张图和 recommended_estimator 完成一次真实估计调用，"
     "并保留真实终态（成功、未就绪、不适用、失败都算一次尝试）；"
     "诊断返回 not_applicable 时保留拒绝理由，不要再强制估计。"
+    f"若估计结果的 diagnostics.metrics 中 residual_spearman_max 或 "
+    f"residual_abs_spearman_max 达到 {SIGNAL_FLOOR}，或 "
+    f"analysis_parameters.nonlinearity.ratio 达到 {RATIO_LINE}，"
+    f"必须用同一张图、相同 treatment/outcome 再调用 causal_g_formula，"
+    f"contrast 固定为 (0, 1) 以与线性估计同尺度；其余情况不要为比较而额外调用。"
 )
 
 
