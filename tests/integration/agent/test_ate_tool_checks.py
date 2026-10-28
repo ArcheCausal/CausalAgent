@@ -397,3 +397,33 @@ def test_gate_allows_undetermined_flex_failure_with_graph_primary():
     _validate_with_estimations(context, registry, source, source_record,
         [(ols, ols_record), (flex, flex_record)],
         primary_ref=source.result_ref, parameters=TRIGGERED)
+
+
+def test_report_facts_carry_functional_form_and_survive_regeneration():
+    context, registry, source, source_record = _setup(csv_data=_nonlinear_csv())
+    ols, ols_record = _call(context, registry, source, source_record)
+    flex, flex_record = _call_g_formula(context, registry, source, source_record,
+        outcome_model="hgb", bootstrap=20)
+    decision = _validate_with_estimations(
+        context, registry, source, source_record,
+        [(ols, ols_record), (flex, flex_record)],
+        primary_ref=flex.result_ref, parameters=TRIGGERED,
+    )
+    state = {
+        "deep_agent_algorithm_results": {
+            source.result_ref: source, ols.result_ref: ols, flex.result_ref: flex,
+        },
+        "analysis_parameters": TRIGGERED,
+        "deep_agent_decision": decision,
+        "finalization_status": "valid",
+    }
+    facts = build_report_analysis_context(state)
+    assert facts["functional_form"]["verdict"] == "nonlinear"
+    assert facts["functional_form"]["comparison"]["difference_se"] > 0
+    assert facts["functional_form"]["signals"]["dataset_ratio"] == 1.5
+    commit = json.loads(json.dumps(build_context_commit(state)))
+    restored = build_report_analysis_context({
+        "report_revision_mode": "full_regeneration_from_context",
+        "analysis_context": {"latest_algorithm_summary": commit["algorithm_summary"]},
+    })
+    assert restored == facts
