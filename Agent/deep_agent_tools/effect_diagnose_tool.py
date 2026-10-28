@@ -13,6 +13,7 @@ from Agent.execution_control import JobExecutionRevoked
 from pydantic import field_validator
 
 from .identity import provenance_matches_identity
+from .functional_form import build_effect_request
 from .models import AlgorithmResult, ContractModel, StandardizedGraph
 from .runtime_updates import (
     build_terminal_invocation,
@@ -112,8 +113,9 @@ class EffectDiagnoseTool:
     name: str = "effect_diagnose"
     description: str = (
         "在本次运行已获得的有效因果图上检查处理变量对结果变量的效应是否可估计。"
-        "只做结构诊断并推荐估计器，不执行估计。verdict=proceed 可以调用 "
-        "recommended_estimator；verdict=reject 表示该图不适用，应保留 reasons 且不再强制估计；"
+        "只做结构诊断并推荐估计器，不执行估计。verdict=proceed 时可以调用工具 "
+        "recommended_tool_name（能力 ID 见 recommended_capability_id）；"
+        "verdict=reject 表示该图不适用，应保留 reasons 且不再强制估计；"
         "verdict=error 表示引用、身份或内部校验失败。"
     )
 
@@ -146,7 +148,8 @@ class EffectDiagnoseTool:
                 "n_rows": n_rows,
                 "checks": checks,
                 "reasons": reasons,
-                "recommended_estimator": "causal.backdoor_ols",
+                "recommended_capability_id": "causal.backdoor_ols",
+                "recommended_tool_name": "causal_backdoor_ols",
                 "graph_result_ref": graph_result_ref,
                 "treatment": treatment,
                 "outcome": outcome,
@@ -293,7 +296,8 @@ class EffectDiagnoseTool:
                         "code": "diagnose_internal_error",
                         "message": "诊断无法完成。",
                     }],
-                    "recommended_estimator": "causal.backdoor_ols",
+                    "recommended_capability_id": "causal.backdoor_ols",
+                    "recommended_tool_name": "causal_backdoor_ols",
                     "graph_result_ref": graph_result_ref,
                     "treatment": treatment,
                     "outcome": outcome,
@@ -313,6 +317,11 @@ class EffectDiagnoseTool:
                 attempt_status=attempt_status,
                 started_at=started_at,
                 subject_ref=graph_result_ref,
+                effect_query=build_effect_request(
+                    graph_result_ref=graph_result_ref,
+                    treatment=treatment,
+                    outcome=outcome,
+                ),
                 safe_error_code=safe_error_code,
             )
             return build_tool_command(

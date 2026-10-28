@@ -62,14 +62,16 @@ MANDATORY_ALGORITHM_INSTRUCTION = (
     "未检出，不能据此排除非线性机制。"
     "若 analysis_parameters 中 target 与 treatment 都已指定，在获得有效标准图后"
     "必须先用该图的 graph_result_ref、treatment、outcome 调用 effect_diagnose；"
-    "诊断返回 succeeded 时，用同一张图和 recommended_estimator 完成一次真实估计调用，"
+    "诊断结论按 verdict 读取：proceed 时用同一张图和 recommended_tool_name"
+    "（recommended_capability_id 是能力 ID，不是工具名）完成一次真实估计调用，"
     "并保留真实终态（成功、未就绪、不适用、失败都算一次尝试）；"
-    "诊断返回 not_applicable 时保留拒绝理由，不要再强制估计。"
+    "verdict=reject 时保留拒绝理由，不要再强制估计；verdict=error 表示诊断本身未完成。"
+    "succeeded/not_applicable 只是账本状态，不能替代 verdict 的含义。"
     f"若估计结果的 diagnostics.metrics 中 residual_spearman_max 或 "
     f"residual_abs_spearman_max 达到 {SIGNAL_FLOOR}，或 "
     f"analysis_parameters.nonlinearity.ratio 达到 {RATIO_LINE}，"
     f"必须用同一张图、相同 treatment/outcome 再调用 causal_g_formula，"
-    f"contrast 固定为 (0, 1) 以与线性估计同尺度；其余情况不要为比较而额外调用。"
+    f"contrast 固定为 (0, 1)、outcome_model 明确指定 hgb；其余情况不要为比较而额外调用。"
 )
 
 

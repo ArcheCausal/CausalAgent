@@ -25,6 +25,7 @@ from .models import (
     InvocationRecord,
 )
 from .error_codes import SafeErrorCode
+from .functional_form import build_effect_query
 from .graph_validation import validate_graph_structure
 from .identity import (
     build_invocation_id,
@@ -453,6 +454,9 @@ class AlgorithmTool:
             if not isinstance(state, Mapping):
                 raise RuntimeError("ToolRuntime.state must be a mapping")
             started_at = datetime.now(timezone.utc)
+            effect_query = build_effect_query(
+                capability_id=self.entry.spec.capability_id, parameters=kwargs,
+            )
             runtime_adapter_input = self._adapter_input_from_runtime(runtime)
             active_adapter_input = runtime_adapter_input
             graph_rejection, graph_artifacts = _resolve_graph_artifacts(
@@ -493,7 +497,7 @@ class AlgorithmTool:
                 )
                 return await algorithm_terminal_command(
                     runtime, identity=identity, tool_name=self.name,
-                    result=result, started_at=started_at,
+                    result=result, started_at=started_at, effect_query=effect_query,
                 )
             if graph_artifacts:
                 active_adapter_input = replace(
@@ -523,7 +527,7 @@ class AlgorithmTool:
             )
             return await algorithm_terminal_command(
                 runtime, identity=identity, tool_name=self.name,
-                result=result, started_at=started_at,
+                result=result, started_at=started_at, effect_query=effect_query,
             )
 
         # StructuredTool 会把 ToolRuntime 识别为 injected arg；显式 args_schema

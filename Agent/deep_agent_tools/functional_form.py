@@ -6,6 +6,8 @@ import math
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from Agent.deep_agent_tools.models import EffectQuery
+
 SIGNAL_FLOOR = 0.1
 RATIO_LINE = 1.0
 DIFF_RATIO = 0.5
@@ -13,7 +15,65 @@ DIFF_RATIO = 0.5
 OLS_CAPABILITY = "causal.backdoor_ols"
 FLEX_CAPABILITY = "causal.g_formula"
 FLEX_TOOL_NAME = "causal_g_formula"
+OLS_TOOL_NAME = "causal_backdoor_ols"
+CAPABILITY_TOOL_NAMES = {
+    OLS_CAPABILITY: OLS_TOOL_NAME,
+    FLEX_CAPABILITY: FLEX_TOOL_NAME,
+}
 _FLEX_TERMINAL_REASONS = frozenset({"not_applicable", "timed_out", "failed"})
+
+
+def build_effect_query(
+    *, capability_id: str, parameters: Mapping[str, Any] | None,
+) -> Any | None:
+    """从已校验的工具参数生成效应请求；只有估计与诊断调用带该信息。"""
+    if capability_id not in CAPABILITY_TOOL_NAMES or not isinstance(parameters, Mapping):
+        return None
+    contrast = None
+    outcome_model = None
+    if capability_id == FLEX_CAPABILITY:
+        raw_contrast = parameters.get("contrast")
+        if isinstance(raw_contrast, (list, tuple)) and len(raw_contrast) == 2:
+            try:
+                contrast = (float(raw_contrast[0]), float(raw_contrast[1]))
+            except (TypeError, ValueError):
+                return None
+        model = parameters.get("outcome_model")
+        outcome_model = str(model) if isinstance(model, str) and model else "linear"
+    return build_effect_request(
+        graph_result_ref=parameters.get("graph_result_ref"),
+        treatment=parameters.get("treatment"),
+        outcome=parameters.get("outcome"),
+        contrast=contrast,
+        outcome_model=outcome_model,
+    )
+
+
+def build_effect_request(
+    *,
+    graph_result_ref: Any,
+    treatment: Any,
+    outcome: Any,
+    contrast: tuple[float, float] | None = None,
+    outcome_model: str | None = None,
+) -> Any | None:
+    """校验字符串身份后构造效应请求；调用方只传入程序解析出的值。"""
+
+    if not all(
+        isinstance(value, str) and value.strip() and value == value.strip()
+        for value in (graph_result_ref, treatment, outcome)
+    ):
+        return None
+    try:
+        return EffectQuery(
+            graph_result_ref=graph_result_ref,
+            treatment=treatment,
+            outcome=outcome,
+            contrast=contrast,
+            outcome_model=outcome_model,
+        )
+    except ValueError:
+        return None
 
 
 def _finite(value: Any) -> bool:

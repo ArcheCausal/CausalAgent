@@ -1021,6 +1021,11 @@ async def preprocess_node(
     summary.update(
         {
             **source_parameters,
+            # 原始研究角色与解析后的执行列同时保留；报告只展示研究角色。
+            "research_roles": {
+                "target": source_parameters.get("target"),
+                "treatment": source_parameters.get("treatment"),
+            },
             "role_columns": prepared_metadata.get("role_columns", {}),
             "transformations": prepared_metadata.get("transformations", []),
             "variable_semantics": prepared_metadata.get("variable_semantics", {}),

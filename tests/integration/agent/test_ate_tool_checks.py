@@ -28,6 +28,7 @@ from Agent.deep_agent_tools.algorithm_specs import PC_SPEC
 from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
 from Agent.deep_agent_tools.dependency_dispatch import build_algorithm_dependency_middleware
 from Agent.deep_agent_tools.identity import build_invocation_id, build_result_ref
+from Agent.deep_agent_tools.functional_form import build_effect_request
 from Agent.deep_agent_tools.models import (
     ActionAttempt, AlgorithmResult, AlgorithmResultProvenance, InvocationRecord,
     StandardizedGraph,
@@ -92,14 +93,19 @@ def _setup(*, kinds=None, edge_type="directed", csv_data=CSV, executor_pool=None
     return context, registry, source, source_record
 
 
-def _call(context, registry, source, source_record, *, ref=None, treatment="x", outcome="y"):
+def _call(
+    context, registry, source, source_record, *, ref=None, treatment="x", outcome="y",
+    ledger=None, execution_id="ate-check-response", call_id="ate-call",
+):
     tool = next(item for item in build_algorithm_tools(registry, runtime_context=context)
                 if item.name == "causal_backdoor_ols").to_langchain_tool()
     runtime = ToolRuntime(
-        tool_call_id="ate-call", state={"message_execution_id": "ate-check-response",
+        tool_call_id=call_id, state={"message_execution_id": execution_id,
         "data_profile": context.algorithm_executor.data_profile,
         "algorithm_results": {source.result_ref: source},
-        "action_ledger": {source_record.invocation_id: source_record}},
+        "action_ledger": {
+            source_record.invocation_id: source_record, **(ledger or {}),
+        }},
         context=context, config={}, stream_writer=[].append, store=None,
     )
     command = asyncio.run(tool.coroutine(runtime=runtime, graph_result_ref=ref or source.result_ref,
@@ -114,7 +120,10 @@ def _call(context, registry, source, source_record, *, ref=None, treatment="x", 
     return result, record
 
 
-def _diagnose_record(identity, *, status="succeeded", subject_ref):
+def _diagnose_record(
+    identity, *, status="succeeded", subject_ref, treatment="x", outcome="y",
+    effect_query=True,
+):
     response_identity = "effect_diagnose-response-1"
     provider_call_id = "effect_diagnose-call-1"
     invocation_id = build_invocation_id(
@@ -127,6 +136,12 @@ def _diagnose_record(identity, *, status="succeeded", subject_ref):
         response_identity_source="message_execution_id",
         provider_call_id=provider_call_id, tool_name="effect_diagnose",
         final_status=status, subject_ref=subject_ref, job_id=str(identity.job_id),
+        effect_query=(
+            build_effect_request(
+                graph_result_ref=subject_ref, treatment=treatment, outcome=outcome,
+            )
+            if effect_query else None
+        ),
         attempt_count=identity.attempt_count, lease_epoch=identity.lease_epoch,
         worker_id=identity.worker_id, input_identity=identity.current_input_identity(),
         source_input_identity=identity.source_input_identity(),
@@ -136,10 +151,22 @@ def _diagnose_record(identity, *, status="succeeded", subject_ref):
     )
 
 
-def _validate(context, registry, source, source_record, result, record, *, evidence_only=False):
+def _validate(
+    context, registry, source, source_record, result, record, *, evidence_only=False,
+    require_diagnosis=True,
+):
+    """按真实工具留下的效应请求校验当前查询；不在这里补造缺失的查询证明。"""
+
     valid = [item for item in (source, result) if item.status == "valid"]
     primary = result.result_ref if result.status == "valid" else source.result_ref
-    diagnose = _diagnose_record(context.trusted_identity, subject_ref=source.result_ref)
+    query = record.effect_query
+    if query is None:
+        diagnose = None
+    else:
+        diagnose = _diagnose_record(
+            context.trusted_identity, subject_ref=query.graph_result_ref,
+            treatment=query.treatment, outcome=query.outcome,
+        )
     decision = {
         "outcome": "evidence_only" if evidence_only else "algorithm_supported",
         "primary_result_ref": None if evidence_only else primary,
@@ -149,9 +176,12 @@ def _validate(context, registry, source, source_record, result, record, *, evide
         "conflict_status": "none", "conflicts": [], "revision_proposals": [],
         "selection_rationale": "保留方法边界。", "confidence": "low", "confidence_basis": ["tool contract"],
     }
+    ledger = {item.invocation_id: item for item in (source_record, record)}
+    if diagnose is not None and require_diagnosis:
+        ledger[diagnose.invocation_id] = diagnose
     return FinalizationGate(registry=registry).validate(
         decision=decision, algorithm_results={item.result_ref: item for item in (source, result)},
-        action_ledger={item.invocation_id: item for item in (source_record, record, diagnose)},
+        action_ledger=ledger,
         trusted_identity=context.trusted_identity, route_decision="fold", analysis_parameters=PARAMETERS,
     )
 
@@ -164,10 +194,14 @@ def test_continuous_confounder_runs_real_ols_and_passes_gate():
     assert result.ate_check.execution_columns == ("x", "y", "z")
     assert result.causal_effect.estimate == pytest.approx(2)
     assert len(context.algorithm_executor.calls) == 1
-    flex, flex_record = _call_g_formula(context, registry, source, source_record)
+    flex, flex_record = _call_g_formula(
+        context, registry, source, source_record, outcome_model="hgb",
+    )
+    assert flex.status == "valid"
+    # 小样本上 OLS 残差与调整变量相关，程序判定要求灵活估计作主结果。
     _validate_with_estimations(context, registry, source, source_record,
         [(result, record), (flex, flex_record)],
-        primary_ref=result.result_ref, parameters=PARAMETERS)
+        primary_ref=flex.result_ref, parameters=PARAMETERS)
 
 
 @pytest.mark.parametrize("kind", ["category", "ordinal", "binary"])
@@ -194,7 +228,9 @@ def test_unused_category_does_not_block_real_estimation():
     context, registry, source, source_record = _setup(kinds={"other": "category"})
     result, record = _call(context, registry, source, source_record)
     assert result.status == "valid"
-    flex, flex_record = _call_g_formula(context, registry, source, source_record)
+    flex, flex_record = _call_g_formula(
+        context, registry, source, source_record, outcome_model="hgb",
+    )
     _validate_with_estimations(context, registry, source, source_record,
         [(result, record), (flex, flex_record)],
         primary_ref=result.result_ref, parameters=PARAMETERS)
@@ -221,11 +257,110 @@ def test_wrong_ref_returns_atomic_business_rejection():
 
 
 @pytest.mark.parametrize("evidence_only", [False, True])
-def test_another_variable_pair_records_its_own_diagnosed_estimation(evidence_only):
+def test_another_variable_pair_does_not_satisfy_current_query(evidence_only):
+    """另一变量对的诊断与估计记录不能代替当前查询。"""
+
     context, registry, source, source_record = _setup()
-    result, record = _call(context, registry, source, source_record, treatment="z", outcome="y")
+    result, record = _call(context, registry, source, source_record)
     assert result.status == "valid"
-    _validate(context, registry, source, source_record, result, record, evidence_only=evidence_only)
+    current = record.effect_query
+    assert current is not None and (current.treatment, current.outcome) == ("x", "y")
+    other_result, other_record = _call(
+        context, registry, source, source_record, treatment="z", outcome="y",
+        ledger={record.invocation_id: record},
+        execution_id="other-pair-response", call_id="other-pair-call",
+    )
+    assert other_result.status == "valid"
+    other = _diagnose_record(
+        context.trusted_identity, subject_ref=source.result_ref,
+        treatment="z", outcome="y",
+    )
+    decision = {
+        "outcome": "evidence_only" if evidence_only else "algorithm_supported",
+        "primary_result_ref": None if evidence_only else result.result_ref,
+        "result_assessments": [{"result_ref": item.result_ref,
+            "disposition": (
+                "discarded" if evidence_only
+                else "primary" if item.result_ref == result.result_ref
+                else "supporting"
+            ),
+            "rationale": "依据真实执行状态评估。"}
+            for item in (source, result, other_result) if item.status == "valid"],
+        "conflict_status": "none", "conflicts": [], "revision_proposals": [],
+        "selection_rationale": "保留方法边界。", "confidence": "low",
+        "confidence_basis": ["tool contract"],
+    }
+    with pytest.raises(StructuredResponseError) as failure:
+        FinalizationGate(registry=registry).validate(
+            decision=decision,
+            algorithm_results={
+                source.result_ref: source,
+                result.result_ref: result,
+                other_result.result_ref: other_result,
+            },
+            action_ledger={
+                source_record.invocation_id: source_record,
+                record.invocation_id: record,
+                other_record.invocation_id: other_record,
+                other.invocation_id: other,
+            },
+            trusted_identity=context.trusted_identity,
+            route_decision="fold", analysis_parameters=PARAMETERS,
+        )
+    assert failure.value.rule == "effect_question_without_diagnose"
+
+    # 补上当前查询自己的诊断后，同一组记录可以通过门禁。
+    current = _diagnose_record(context.trusted_identity, subject_ref=source.result_ref)
+    flex, flex_record = _call_g_formula(
+        context, registry, source, source_record, outcome_model="hgb",
+    )
+    assert flex.status == "valid"
+    accepted = FinalizationGate(registry=registry).validate(
+        decision={
+            "outcome": "algorithm_supported",
+            "primary_result_ref": flex.result_ref,
+            "result_assessments": [
+                {"result_ref": item.result_ref,
+                 "disposition": "primary" if item is flex else "supporting",
+                 "rationale": "依据真实执行状态评估。"}
+                for item in (source, result, other_result, flex)
+            ],
+            "conflict_status": "none", "conflicts": [], "revision_proposals": [],
+            "selection_rationale": "保留方法边界。", "confidence": "low",
+            "confidence_basis": ["tool contract"],
+        },
+        algorithm_results={
+            source.result_ref: source,
+            result.result_ref: result,
+            other_result.result_ref: other_result,
+            flex.result_ref: flex,
+        },
+        action_ledger={
+            source_record.invocation_id: source_record,
+            record.invocation_id: record,
+            other_record.invocation_id: other_record,
+            other.invocation_id: other,
+            current.invocation_id: current,
+            flex_record.invocation_id: flex_record,
+        },
+        trusted_identity=context.trusted_identity,
+        route_decision="fold", analysis_parameters=PARAMETERS,
+    )
+    assert accepted.primary_result_ref == flex.result_ref
+
+
+def test_estimate_without_query_proof_cannot_satisfy_gate():
+    """旧 checkpoint 缺少效应请求时不能被猜测补齐。"""
+
+    context, registry, source, source_record = _setup()
+    result, record = _call(context, registry, source, source_record)
+    assert result.status == "valid"
+    legacy = record.model_copy(update={"effect_query": None}, deep=True)
+    with pytest.raises(StructuredResponseError) as failure:
+        _validate(
+            context, registry, source, source_record, result, legacy,
+        )
+    assert failure.value.rule == "effect_question_without_diagnose"
 
 
 def test_budget_closure_keeps_dataset_identity_without_claiming_a_check():
@@ -376,6 +511,27 @@ def test_gate_requires_flexible_check_when_signal_triggered():
     assert failure.value.rule == "form_check_not_attempted"
 
 
+@pytest.mark.parametrize("contrast,outcome_model", [((1.0, 3.0), "hgb"), ((0.0, 1.0), "linear")])
+def test_flexible_check_with_other_scale_or_linear_model_does_not_count(
+    contrast, outcome_model,
+):
+    """只有 (0, 1) 对比区间加 hgb 结局模型的调用才满足函数形式检查。"""
+
+    context, registry, source, source_record = _setup()
+    ols, ols_record = _call(context, registry, source, source_record)
+    flex, flex_record = _call_g_formula(
+        context, registry, source, source_record,
+        contrast=contrast, outcome_model=outcome_model,
+    )
+    with pytest.raises(StructuredResponseError) as failure:
+        _validate_with_estimations(
+            context, registry, source, source_record,
+            [(ols, ols_record), (flex, flex_record)],
+            primary_ref=ols.result_ref, parameters=TRIGGERED,
+        )
+    assert failure.value.rule == "form_check_not_attempted"
+
+
 def test_gate_rejects_linear_primary_when_verdict_is_nonlinear():
     context, registry, source, source_record = _setup(csv_data=_nonlinear_csv())
     ols, ols_record = _call(context, registry, source, source_record)
@@ -392,11 +548,41 @@ def test_gate_rejects_linear_primary_when_verdict_is_nonlinear():
 def test_gate_allows_undetermined_flex_failure_with_graph_primary():
     context, registry, source, source_record = _setup(edge_type="undirected")
     ols, ols_record = _call(context, registry, source, source_record)
-    flex, flex_record = _call_g_formula(context, registry, source, source_record)
+    flex, flex_record = _call_g_formula(
+        context, registry, source, source_record, outcome_model="hgb",
+    )
     assert ols.status == "not_applicable" and flex.status == "not_applicable"
-    _validate_with_estimations(context, registry, source, source_record,
-        [(ols, ols_record), (flex, flex_record)],
-        primary_ref=source.result_ref, parameters=TRIGGERED)
+    rejected = _diagnose_record(
+        context.trusted_identity, status="not_applicable",
+        subject_ref=source.result_ref,
+    )
+    decision = {
+        "outcome": "algorithm_supported", "primary_result_ref": source.result_ref,
+        "result_assessments": [
+            {"result_ref": result.result_ref,
+             "disposition": "primary" if result is source else "discarded",
+             "rationale": "依据真实执行状态评估。"}
+            for result in (source, ols, flex)
+        ],
+        "conflict_status": "none", "conflicts": [], "revision_proposals": [],
+        "selection_rationale": "保留方法边界。", "confidence": "low",
+        "confidence_basis": ["tool contract"],
+    }
+    accepted = FinalizationGate(registry=registry).validate(
+        decision=decision,
+        algorithm_results={
+            source.result_ref: source, ols.result_ref: ols, flex.result_ref: flex,
+        },
+        action_ledger={
+            source_record.invocation_id: source_record,
+            ols_record.invocation_id: ols_record,
+            flex_record.invocation_id: flex_record,
+            rejected.invocation_id: rejected,
+        },
+        trusted_identity=context.trusted_identity,
+        route_decision="fold", analysis_parameters=TRIGGERED,
+    )
+    assert accepted.primary_result_ref == source.result_ref
 
 
 def test_report_facts_carry_functional_form_and_survive_regeneration():
@@ -412,6 +598,10 @@ def test_report_facts_carry_functional_form_and_survive_regeneration():
     state = {
         "deep_agent_algorithm_results": {
             source.result_ref: source, ols.result_ref: ols, flex.result_ref: flex,
+        },
+        "deep_agent_action_ledger": {
+            ols_record.invocation_id: ols_record,
+            flex_record.invocation_id: flex_record,
         },
         "analysis_parameters": TRIGGERED,
         "deep_agent_decision": decision,

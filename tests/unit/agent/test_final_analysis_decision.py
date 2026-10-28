@@ -36,6 +36,7 @@ from Agent.causal_agent.graph import (
     _legacy_web_evidence_result,
 )
 from Agent.deep_agent_tools.identity import build_invocation_id, build_result_ref
+from Agent.deep_agent_tools.functional_form import build_effect_request
 from Agent.deep_agent_tools.models import (
     ActionAttempt,
     AlgorithmResult,
@@ -160,6 +161,7 @@ def _evidence_ledger(
     final_status="succeeded",
     attempt_status="succeeded",
     subject_ref=None,
+    effect_query=None,
 ):
     response_identity = f"{tool_name}-response-1"
     provider_call_id = f"{tool_name}-call-1"
@@ -177,6 +179,7 @@ def _evidence_ledger(
         tool_name=tool_name,
         final_status=final_status,
         subject_ref=subject_ref,
+        effect_query=effect_query,
         job_id=str(identity.job_id),
         attempt_count=identity.attempt_count,
         lease_epoch=identity.lease_epoch,
@@ -209,6 +212,9 @@ def _diagnose_record(
         final_status=status,
         attempt_status=status,
         subject_ref=subject_ref,
+        effect_query=build_effect_request(
+            graph_result_ref=subject_ref, treatment="x", outcome="y",
+        ),
     )
 
 
@@ -259,6 +265,9 @@ def _ate_attempt(identity, registry, *, status="not_ready"):
         provider_call_id=provider_call_id,
         tool_name="causal_backdoor_ols",
         final_status=status,
+        effect_query=build_effect_request(
+            graph_result_ref="source-result:0", treatment="x", outcome="y",
+        ),
         job_id=str(identity.job_id),
         attempt_count=identity.attempt_count,
         lease_epoch=identity.lease_epoch,
@@ -541,6 +550,9 @@ def _valid_ate_result(identity, registry, *, source_graph_ref="source-result:0")
         provider_call_id=provider_call_id,
         tool_name="causal_backdoor_ols",
         final_status="succeeded",
+        effect_query=build_effect_request(
+            graph_result_ref=source_graph_ref, treatment="x", outcome="y",
+        ),
         job_id=str(identity.job_id),
         attempt_count=identity.attempt_count,
         lease_epoch=identity.lease_epoch,
@@ -1101,7 +1113,9 @@ def test_gate_rejects_non_estimation_primary_when_estimation_exists() -> None:
     assert failure.value.rule == "primary_not_estimation_result"
 
 
-def test_gate_requires_estimation_source_graph_diagnosed() -> None:
+def test_gate_requires_estimation_on_the_diagnosed_graph() -> None:
+    """诊断源图与估计源图不同，不能证明当前查询已经完成估计。"""
+
     identity, registry, _pc_result, _pc_ledger = _algorithm_execution()
     estimation_result, estimation_record = _valid_ate_result(identity, registry)
     diagnose = _diagnose_record(identity, subject_ref="other-result:0")
@@ -1121,7 +1135,7 @@ def test_gate_requires_estimation_source_graph_diagnosed() -> None:
             analysis_question=_EFFECT_QUESTION,
         )
 
-    assert failure.value.rule == "estimation_graph_not_diagnosed"
+    assert failure.value.rule == "effect_question_without_estimation"
 
 
 def test_gate_rejects_estimation_result_without_effect() -> None:

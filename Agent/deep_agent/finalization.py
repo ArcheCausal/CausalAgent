@@ -358,32 +358,95 @@ class FinalizationGate:
             records.append(record)
         return records
 
-    def _has_current_terminal_estimation(
+    def _has_current_estimation_for_pair(
         self,
         ledger: Mapping[str, InvocationRecord],
         *,
-        job_id: str,
+        pair: tuple[str, str] | None,
+        diagnosed_graphs: Set[str],
         attempt_count: int,
         lease_epoch: int,
         worker_id: str,
         input_identity: str,
     ) -> bool:
-        return any(
-            self._has_current_terminal_tool_invocation(
-                ledger,
-                tool_name=name,
-                job_id=job_id,
-                attempt_count=attempt_count,
-                lease_epoch=lease_epoch,
-                worker_id=worker_id,
-                input_identity=input_identity,
-                terminal_statuses={
-                    "succeeded", "not_ready", "not_applicable",
-                    "failed", "timed_out",
-                },
-            )
-            for name in sorted(self._estimation_tool_names)
-        )
+        """只有当前查询、且源图已被诊断的估计调用才算一次真实尝试。"""
+
+        if pair is None:
+            return False
+        treatment, outcome = pair
+        for record in ledger.values():
+            query = record.effect_query
+            if (
+                record.tool_name not in self._estimation_tool_names
+                or query is None
+                or (query.treatment, query.outcome) != (treatment, outcome)
+                or query.graph_result_ref not in diagnosed_graphs
+            ):
+                continue
+            if (
+                record.attempt_count != attempt_count
+                or record.lease_epoch != lease_epoch
+                or record.worker_id != worker_id
+                or record.input_identity != input_identity
+            ):
+                continue
+            if record.final_status in {
+                "succeeded", "not_ready", "not_applicable", "failed", "timed_out",
+            }:
+                return True
+        return False
+
+    def _current_flex_check(
+        self,
+        ledger: Mapping[str, InvocationRecord],
+        *,
+        treatment: str,
+        outcome: str,
+        attempt_count: int,
+        lease_epoch: int,
+        worker_id: str,
+        input_identity: str,
+    ) -> InvocationRecord | None:
+        """返回当前查询按 (0, 1) 与 hgb 发起的灵活检查；其他尺度和模型不算。"""
+
+        for record in ledger.values():
+            query = record.effect_query
+            if (
+                record.tool_name != FLEX_TOOL_NAME
+                or query is None
+                or (query.treatment, query.outcome) != (treatment, outcome)
+                or query.contrast != (0.0, 1.0)
+                or query.outcome_model != "hgb"
+            ):
+                continue
+            if (
+                record.attempt_count != attempt_count
+                or record.lease_epoch != lease_epoch
+                or record.worker_id != worker_id
+                or record.input_identity != input_identity
+            ):
+                continue
+            return record
+        return None
+
+    def _results_for_pair(
+        self,
+        results: Any,
+        *,
+        current_ledger: Mapping[str, InvocationRecord],
+        treatment: str,
+        outcome: str,
+    ) -> list[AlgorithmResult]:
+        """只保留当前查询且带账本记录的估计结果；其他变量对不能代替。"""
+
+        selected: list[AlgorithmResult] = []
+        for result in results:
+            record = current_ledger.get(result.invocation_id)
+            query = record.effect_query if record is not None else None
+            if query is None or (query.treatment, query.outcome) != (treatment, outcome):
+                continue
+            selected.append(result)
+        return selected
 
     def _validate_result_ledger_pair(
         self,
@@ -652,9 +715,16 @@ class FinalizationGate:
             source_input_identity=current_source,
             analysis_dataset_id=current_dataset_id,
         )
+        pair = estimation_pair(analysis_parameters)
+        # 诊断只比较源图与变量对；`verdict=proceed/reject/error` 与账本状态
+        # `succeeded/not_applicable/failed` 是两层事实，这里按状态读取判定。
+        current_pair_diagnoses = [
+            record for record in current_diagnoses
+            if _diagnosis_matches(record, pair)
+        ]
         diagnose_statuses = {
             normalize_tool_status(record.final_status)
-            for record in current_diagnoses
+            for record in current_pair_diagnoses
         }
         effect_question = (
             route_decision == ANALYSIS_ROUTE
@@ -667,9 +737,14 @@ class FinalizationGate:
                 rule="effect_question_without_diagnose",
             )
         if effect_question and "succeeded" in diagnose_statuses and not (
-            self._has_current_terminal_estimation(
+            self._has_current_estimation_for_pair(
                 current_ledger,
-                job_id=job_id,
+                pair=pair,
+                diagnosed_graphs={
+                    record.subject_ref
+                    for record in current_pair_diagnoses
+                    if normalize_tool_status(record.final_status) == "succeeded"
+                },
                 attempt_count=current_attempt,
                 lease_epoch=current_lease,
                 worker_id=current_worker,
@@ -700,10 +775,12 @@ class FinalizationGate:
                     "valid estimation result is missing causal_effect",
                     rule="estimation_result_missing_effect",
                 )
+            # 估计请求已带源图与变量对；这里只补充检查该源图确有成功诊断记录。
             if effect.graph_result_ref not in {
-                record.subject_ref
+                record.effect_query.graph_result_ref
                 for record in current_diagnoses
-                if normalize_tool_status(record.final_status) == "succeeded"
+                if record.effect_query is not None
+                and normalize_tool_status(record.final_status) == "succeeded"
             }:
                 raise StructuredResponseError(
                     "estimation source graph has no successful diagnosis",
@@ -712,20 +789,32 @@ class FinalizationGate:
 
         # 函数形式判定：信号触发就必须真的跑过一次灵活路；非线性结论要求
         # 灵活估计成为主结果。两条规则都从程序事实重算，不信任模型自述。
-        pair = estimation_pair(analysis_parameters)
-        if effect_question and pair is not None:
+        proceed_graphs = {
+            record.subject_ref
+            for record in current_pair_diagnoses
+            if normalize_tool_status(record.final_status) == "succeeded"
+        }
+        # 诊断判定为 reject（not_applicable）时不再强制灵活检查；只有当前查询
+        # 的诊断结论为 proceed 才进入函数形式比较。
+        if effect_question and pair is not None and proceed_graphs:
             treatment, outcome = pair
             nonlinearity = (
                 analysis_parameters.get("nonlinearity")
                 if isinstance(analysis_parameters, Mapping) else None
             )
             ols = select_result(
-                eligible.values(), capability=OLS_CAPABILITY,
-                treatment=treatment, outcome=outcome,
+                self._results_for_pair(
+                    eligible.values(), current_ledger=current_ledger,
+                    treatment=treatment, outcome=outcome,
+                ),
+                capability=OLS_CAPABILITY, treatment=treatment, outcome=outcome,
             )
             flex = select_result(
-                eligible.values(), capability=FLEX_CAPABILITY,
-                treatment=treatment, outcome=outcome,
+                self._results_for_pair(
+                    eligible.values(), current_ledger=current_ledger,
+                    treatment=treatment, outcome=outcome,
+                ),
+                capability=FLEX_CAPABILITY, treatment=treatment, outcome=outcome,
             )
             assessment = assess_functional_form(
                 nonlinearity=nonlinearity if isinstance(nonlinearity, Mapping) else None,
@@ -734,21 +823,27 @@ class FinalizationGate:
                 flex_status=(
                     "valid" if flex is not None
                     else flex_status_from_results(
-                        eligible.values(), treatment=treatment, outcome=outcome,
+                        self._results_for_pair(
+                            eligible.values(), current_ledger=current_ledger,
+                            treatment=treatment, outcome=outcome,
+                        ),
+                        treatment=treatment, outcome=outcome,
                     )
                 ),
             )
-            flex_attempted = self._has_current_terminal_tool_invocation(
+            flex_check = self._current_flex_check(
                 current_ledger,
-                tool_name=FLEX_TOOL_NAME,
-                job_id=job_id,
+                treatment=treatment,
+                outcome=outcome,
                 attempt_count=current_attempt,
                 lease_epoch=current_lease,
                 worker_id=current_worker,
                 input_identity=current_input,
-                terminal_statuses={"succeeded", "not_applicable", "failed", "timed_out"},
             )
-            if signal_triggered(assessment["signals"]) and not flex_attempted:
+            if (
+                signal_triggered(assessment["signals"])
+                and flex_check is None
+            ):
                 raise StructuredResponseError(
                     "nonlinearity signal requires a flexible check",
                     rule="form_check_not_attempted",
@@ -756,6 +851,7 @@ class FinalizationGate:
             if (
                 assessment["verdict"] == "nonlinear"
                 and flex is not None
+                and flex.status == "valid"
                 and normalized_decision.outcome == "algorithm_supported"
                 and normalized_decision.primary_result_ref != flex.result_ref
             ):
@@ -807,6 +903,19 @@ class FinalizationRetryController:
             raise StructuredResponseError("finalization retry budget exhausted")
         self.retries_used += 1
         return self.retries_used
+
+
+def _diagnosis_matches(
+    record: InvocationRecord, pair: tuple[str, str] | None,
+) -> bool:
+    """诊断只比较源图与变量对；缺少查询证明的旧记录不能满足新门禁。"""
+
+    query = record.effect_query
+    if pair is None or query is None:
+        return False
+    if record.subject_ref is not None and record.subject_ref != query.graph_result_ref:
+        return False
+    return (query.treatment, query.outcome) == pair
 
 
 def _requires_effect_estimation(parameters: Mapping[str, Any] | None) -> bool:
@@ -890,9 +999,10 @@ FINALIZATION_RETRY_HINTS: dict[str, str] = {
         "若最终不采用任何图，请改用 evidence_only 并把所有有效结果标记为 discarded。"
     ),
     "effect_question_without_estimation": (
-        "effect_diagnose 已判定该图可用于估计。请用同一张图的 graph_result_ref、相同的 "
-        "treatment/outcome 调用 recommended_estimator（causal_backdoor_ols 或 "
-        "causal_g_formula），并保留真实终态；不能只用文字结论代替估计调用。"
+        "effect_diagnose 返回 verdict=proceed。请用同一张图的 graph_result_ref、相同的 "
+        "treatment/outcome 调用 recommended_tool_name（causal_backdoor_ols 或 "
+        "causal_g_formula，能力 ID 见 recommended_capability_id），并保留真实终态；"
+        "不能只用文字结论代替估计调用。"
     ),
     "primary_not_estimation_result": (
         "本次已产生有效的因果效应估计结果。主结果必须是该估计结果；"
@@ -904,7 +1014,8 @@ FINALIZATION_RETRY_HINTS: dict[str, str] = {
     ),
     "form_check_not_attempted": (
         "当前数据或残差显示可能存在非线性。请用同一张图、相同 treatment/outcome "
-        "调用 causal_g_formula，contrast 使用 (0, 1) 与线性估计同尺度，保留真实终态后再提交最终决策。"
+        "调用 causal_g_formula，contrast 使用 (0, 1) 与线性估计同尺度，"
+        "outcome_model 明确指定 hgb，保留真实终态后再提交最终决策。"
     ),
     "linear_primary_despite_nonlinear_verdict": (
         "线性与灵活估计已出现实质差异。主结果必须采用 causal_g_formula 的灵活估计结果，"

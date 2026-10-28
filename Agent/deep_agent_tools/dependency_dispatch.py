@@ -16,6 +16,7 @@ import json
 from typing import Any, Awaitable, Callable
 
 from .algorithm_specs import DEFAULT_ALGORITHM_SPECS, get_algorithm_spec
+from .functional_form import build_effect_query
 from .dependency_planner import (
     DependencyPlanningError,
     ToolCallRequest,
@@ -424,6 +425,10 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
             return await algorithm_terminal_command(
                 tool_runtime, identity=identity, tool_name=call["name"],
                 result=result, started_at=started_at,
+                effect_query=build_effect_query(
+                    capability_id=spec.capability_id,
+                    parameters=call.get("args") if isinstance(call.get("args"), Mapping) else None,
+                ),
             )
 
         async def execute_one(planned: ToolCallRequest) -> Any:

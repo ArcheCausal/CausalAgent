@@ -132,7 +132,8 @@ def test_diagnose_proceeds_and_writes_subject_ref() -> None:
     assert payload["reasons"] == []
     assert payload["treatment_type"] == "continuous"
     assert payload["n_rows"] == 100
-    assert payload["recommended_estimator"] == "causal.backdoor_ols"
+    assert payload["recommended_capability_id"] == "causal.backdoor_ols"
+    assert payload["recommended_tool_name"] == "causal_backdoor_ols"
     assert payload["graph_result_ref"] == "graph-invocation:0"
 
 

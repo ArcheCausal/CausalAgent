@@ -28,6 +28,7 @@ from Agent.deep_agent.state import to_deep_agent_input
 from Agent.deep_agent_tools.adapters import build_default_adapters
 from Agent.deep_agent_tools.algorithm_specs import DEFAULT_ALGORITHM_SPECS
 from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
+from Agent.deep_agent_tools.effect_diagnose_tool import build_default_effect_diagnose_tool
 from Agent.deep_agent_tools.registry import build_default_registry
 from tests.support.bound_analysis_input import bind_analysis_input
 from tests.support.local_algorithm_execution import LocalAlgorithmExecutor
@@ -119,6 +120,7 @@ def test_resolved_roles_reach_real_algorithm_tools_and_parent_finalization_gate(
         child = to_deep_agent_input(parent)
         child["message_execution_id"] = "role-mapping-response"
         tools = {tool.name: tool.to_langchain_tool() for tool in build_algorithm_tools(registry, runtime_context=context)}
+        diagnose_tool = build_default_effect_diagnose_tool()
 
         async def call(name, call_id, **kwargs):
             runtime = ToolRuntime(tool_call_id=call_id, state=child, context=context,
@@ -130,8 +132,21 @@ def test_resolved_roles_reach_real_algorithm_tools_and_parent_finalization_gate(
 
         discovery = await call("causal_direct_lingam", "discovery-call")
         assert discovery.status == "valid"
-        effect = await call("causal_ate", "ate-call", graph_result_ref=discovery.result_ref,
-            treatment=child["analysis_parameters"]["treatment"], outcome=child["analysis_parameters"]["target"])
+        treatment = child["analysis_parameters"]["treatment"]
+        outcome = child["analysis_parameters"]["target"]
+        diagnose_runtime = ToolRuntime(tool_call_id="diagnose-call", state=child, context=context,
+                                       config={}, stream_writer=[].append, store=None)
+        diagnose_command = await diagnose_tool.to_langchain_tool().coroutine(
+            runtime=diagnose_runtime, graph_result_ref=discovery.result_ref,
+            treatment=treatment, outcome=outcome,
+        )
+        child["action_ledger"] = {**child["action_ledger"], **diagnose_command.update["action_ledger"]}
+        diagnose_payload = json.loads(diagnose_command.update["messages"][0].content)
+        assert diagnose_payload["verdict"] in {"proceed", "reject"}
+        assert diagnose_payload["recommended_tool_name"] == "causal_backdoor_ols"
+
+        effect = await call("causal_backdoor_ols", "ate-call", graph_result_ref=discovery.result_ref,
+            treatment=treatment, outcome=outcome)
         assert effect.status in {"valid", "not_applicable"}
         assert effect.ate_check.treatment == COLUMNS["treatment"]
         assert effect.ate_check.outcome == COLUMNS["target"]
@@ -147,12 +162,12 @@ def test_resolved_roles_reach_real_algorithm_tools_and_parent_finalization_gate(
         retry = await _finalization_gate_node(missing_ate, runtime=Runtime(context=context), config={},
                                               gate=FinalizationGate(registry=registry))
         assert retry["finalization_retry_count"] == 1
-        assert "causal_ate" in retry["deep_agent_retry_instruction"]
+        assert "effect_diagnose" in retry["deep_agent_retry_instruction"]
         parent.update(deep_agent_algorithm_results=child["algorithm_results"], deep_agent_action_ledger=child["action_ledger"],
             deep_agent_structured_response={
-                "outcome": "algorithm_supported", "primary_result_ref": discovery.result_ref,
+                "outcome": "algorithm_supported", "primary_result_ref": effect.result_ref,
                 "result_assessments": [{"result_ref": result.result_ref,
-                    "disposition": "primary" if result is discovery else "supporting", "rationale": "依据真实工具结果"}
+                    "disposition": "primary" if result is effect else "supporting", "rationale": "依据真实工具结果"}
                     for result in (discovery, effect) if result.status == "valid"],
                 "conflict_status": "none", "conflicts": [], "revision_proposals": [],
                 "selection_rationale": "保留实际算法结果及方法限制", "confidence": "low", "confidence_basis": ["实际工具结果"],
@@ -161,5 +176,6 @@ def test_resolved_roles_reach_real_algorithm_tools_and_parent_finalization_gate(
                                                gate=FinalizationGate(registry=registry))
         assert not result.get("deep_agent_retry_instruction")
         assert result.get("finalization_status") == "valid"
+        assert result["deep_agent_decision"].primary_result_ref == effect.result_ref
         assert parent["analysis_parameters"] == original
     asyncio.run(scenario())

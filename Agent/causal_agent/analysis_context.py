@@ -17,8 +17,15 @@ from collections.abc import Mapping, Sequence
 from itertools import combinations
 from typing import Any
 
-from Agent.deep_agent_tools.models import AlgorithmResult, EvidenceResult, FinalAnalysisDecision, StandardizedGraph
+from Agent.deep_agent_tools.models import (
+    AlgorithmResult,
+    EvidenceResult,
+    FinalAnalysisDecision,
+    InvocationRecord,
+    StandardizedGraph,
+)
 from Agent.deep_agent_tools.algorithm_specs import get_algorithm_spec
+from Agent.data_processing.parameters import execution_parameters
 from Agent.deep_agent_tools.functional_form import (
     FLEX_CAPABILITY,
     OLS_CAPABILITY,
@@ -76,6 +83,7 @@ def normalize_algorithm_summary(
     result: AlgorithmResult,
     *,
     parameters: Mapping[str, Any] | None = None,
+    research_roles: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """把一次算法结果压成报告与追问所需的结构化事实。
 
@@ -112,6 +120,11 @@ def normalize_algorithm_summary(
         "parameters": {
             "target": _optional_text(params.get("target")),
             "treatment": _optional_text(params.get("treatment")),
+        },
+        # 执行参数使用实际列名；原始研究角色只用于展示，不能替换执行列。
+        "research_roles": {
+            "target": _optional_text((research_roles or {}).get("target")),
+            "treatment": _optional_text((research_roles or {}).get("treatment")),
         },
         "summary": _clip(result.summary, MAX_ALGORITHM_SUMMARY_CHARS),
         "graph_semantics": _optional_text(
@@ -454,7 +467,12 @@ _REPORT_PROFILE_FIELDS = (
 _REPORT_METRICS = frozenset({
     "n_samples", "n_features", "missing_values", "runtime_sec", "threshold",
     "standardize", "missing_handling", "independence_test", "alpha",
+    "residual_spearman_max", "residual_abs_spearman_max",
+    "linear_estimate", "effect_difference", "difference_se",
 })
+
+# 计算规则版本：v2 起按效应请求、执行列与结局模型重新计算，旧事实不能直接复用。
+ANALYSIS_FACTS_VERSION = "analysis-facts-v2"
 
 
 def report_data_metadata(parameters: Any) -> dict[str, Any]:
@@ -493,7 +511,16 @@ def report_data_metadata(parameters: Any) -> dict[str, Any]:
 
 
 def _report_result(result: AlgorithmResult, parameters: Any) -> dict[str, Any]:
-    summary = normalize_algorithm_summary(result, parameters=parameters)
+    summary = normalize_algorithm_summary(
+        result,
+        parameters=parameters,
+        research_roles=(
+            parameters.get("research_roles")
+            if isinstance(parameters, Mapping)
+            and isinstance(parameters.get("research_roles"), Mapping)
+            else None
+        ),
+    )
     graph = summary.get("graph")
     if graph is not None:
         edges = graph["edges"]
@@ -585,17 +612,16 @@ def _primary_graph_semantics(result: Mapping[str, Any]) -> Any:
 def _functional_form_facts(
     parameters: Mapping[str, Any],
     results: list[AlgorithmResult],
+    *,
+    current_queries: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     pair = estimation_pair(parameters)
     if pair is None:
         return None
     treatment, outcome = pair
-    ols = select_result(
-        results, capability=OLS_CAPABILITY, treatment=treatment, outcome=outcome,
-    )
-    flex = select_result(
-        results, capability=FLEX_CAPABILITY, treatment=treatment, outcome=outcome,
-    )
+    scoped = _queries_for_pair(results, current_queries or {}, pair)
+    ols = select_result(scoped, capability=OLS_CAPABILITY, treatment=treatment, outcome=outcome)
+    flex = select_result(scoped, capability=FLEX_CAPABILITY, treatment=treatment, outcome=outcome)
     nonlinearity = parameters.get("nonlinearity")
     return assess_functional_form(
         nonlinearity=nonlinearity if isinstance(nonlinearity, Mapping) else None,
@@ -603,9 +629,52 @@ def _functional_form_facts(
         flex_metrics=flex.diagnostics.metrics if flex is not None else None,
         flex_status=(
             "valid" if flex is not None
-            else flex_status_from_results(results, treatment=treatment, outcome=outcome)
+            else flex_status_from_results(scoped, treatment=treatment, outcome=outcome)
         ),
     )
+
+
+def _queries_for_pair(
+    results: list[AlgorithmResult],
+    queries: Mapping[str, Any],
+    pair: tuple[str, str],
+) -> list[AlgorithmResult]:
+    """只保留当前查询、带效应请求证明的估计结果。"""
+
+    selected: list[AlgorithmResult] = []
+    for result in results:
+        query = queries.get(result.result_ref)
+        if not isinstance(query, Mapping):
+            continue
+        if (query.get("treatment"), query.get("outcome")) != pair:
+            continue
+        selected.append(result)
+    return selected
+
+
+def _result_queries(ledger: Any) -> dict[str, dict[str, Any]]:
+    """从账本读取每个估计结果对应的效应请求；缺少证明的记录不产生条目。"""
+
+    queries: dict[str, dict[str, Any]] = {}
+    if not isinstance(ledger, Mapping):
+        return queries
+    for raw in ledger.values():
+        try:
+            record = InvocationRecord.model_validate(raw)
+        except (TypeError, ValueError):
+            continue
+        query = record.effect_query
+        if query is None:
+            continue
+        queries[record.result_ref or record.invocation_id] = {
+            "tool_name": record.tool_name,
+            "graph_result_ref": query.graph_result_ref,
+            "treatment": query.treatment,
+            "outcome": query.outcome,
+            "contrast": list(query.contrast) if query.contrast is not None else None,
+            "outcome_model": query.outcome_model,
+        }
+    return queries
 
 
 def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -613,13 +682,26 @@ def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
     if state.get("report_revision_mode") == "full_regeneration_from_context":
         stored = context_algorithm_summary(state.get("analysis_context")) or {}
         facts = stored.get("analysis_facts")
-        if isinstance(facts, Mapping) and facts.get("schema_version") == "analysis-facts-v1":
+        if isinstance(facts, Mapping) and facts.get("schema_version") == ANALYSIS_FACTS_VERSION:
             return copy.deepcopy(dict(facts))
-        return {"schema_version": "analysis-facts-v1", "finalization_status": "not_recorded",
+        return {"schema_version": ANALYSIS_FACTS_VERSION, "finalization_status": "not_recorded",
                 "primary_result_ref": None, "results": [], "decision": None,
-                "no_primary_reason": "本分析未保存完整选择依据，无法据此重建主图。", "data_metadata": {}}
+                "no_primary_reason": "本分析保存的是旧版计算规则或缺少完整映射与结果证据，必须重新分析。",
+                "data_metadata": {}, "functional_form": None, "result_queries": {}}
 
-    params = state.get("analysis_parameters") or {}
+    raw_params = state.get("analysis_parameters") or {}
+    raw_params = raw_params if isinstance(raw_params, Mapping) else {}
+    research_roles = {
+        "target": raw_params.get("target"),
+        "treatment": raw_params.get("treatment"),
+    }
+    # 报告与门禁使用同一份执行参数：角色映射后的实际列名用于结果匹配，
+    # 原始研究角色只用于展示。
+    params = execution_parameters(
+        raw_params, state.get("prepared_dataset_metadata") or {},
+    )
+    params["research_roles"] = research_roles
+    result_queries = _result_queries(state.get("deep_agent_action_ledger"))
     raw_results = state.get("deep_agent_algorithm_results") or {}
     raw_results = raw_results if isinstance(raw_results, Mapping) else {}
     results: list[dict[str, Any]] = []
@@ -658,7 +740,7 @@ def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
             if not validated.valid:
                 primary = None
     return {
-        "schema_version": "analysis-facts-v1", "finalization_status": state.get("finalization_status") or "not_recorded",
+        "schema_version": ANALYSIS_FACTS_VERSION, "finalization_status": state.get("finalization_status") or "not_recorded",
         "primary_result_ref": primary_ref if primary is not None else None,
         "no_primary_reason": None if primary is not None else (
             "所选结果缺少本次方法定义或未满足图约束，不能用于主图。" if primary_ref else
@@ -667,7 +749,10 @@ def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
         "graph_comparisons": _graph_comparisons(results),
         "data_view_comparison": _data_view_comparison(results),
         "data_metadata": report_data_metadata(params),
-        "functional_form": _functional_form_facts(params, parsed_results),
+        "result_queries": result_queries,
+        "functional_form": _functional_form_facts(
+            params, parsed_results, current_queries=result_queries,
+        ),
     }
 
 
