@@ -19,6 +19,14 @@ from typing import Any
 
 from Agent.deep_agent_tools.models import AlgorithmResult, EvidenceResult, FinalAnalysisDecision, StandardizedGraph
 from Agent.deep_agent_tools.algorithm_specs import get_algorithm_spec
+from Agent.deep_agent_tools.functional_form import (
+    FLEX_CAPABILITY,
+    OLS_CAPABILITY,
+    assess_functional_form,
+    estimation_pair,
+    flex_status_from_results,
+    select_result,
+)
 from Agent.deep_agent_tools.graph_validation import validate_graph_structure
 
 
@@ -573,6 +581,32 @@ def _primary_graph_semantics(result: Mapping[str, Any]) -> Any:
     return semantics
 
 
+def _functional_form_facts(
+    parameters: Mapping[str, Any],
+    results: list[AlgorithmResult],
+) -> dict[str, Any] | None:
+    pair = estimation_pair(parameters)
+    if pair is None:
+        return None
+    treatment, outcome = pair
+    ols = select_result(
+        results, capability=OLS_CAPABILITY, treatment=treatment, outcome=outcome,
+    )
+    flex = select_result(
+        results, capability=FLEX_CAPABILITY, treatment=treatment, outcome=outcome,
+    )
+    nonlinearity = parameters.get("nonlinearity")
+    return assess_functional_form(
+        nonlinearity=nonlinearity if isinstance(nonlinearity, Mapping) else None,
+        ols_metrics=ols.diagnostics.metrics if ols is not None else None,
+        flex_metrics=flex.diagnostics.metrics if flex is not None else None,
+        flex_status=(
+            "valid" if flex is not None
+            else flex_status_from_results(results, treatment=treatment, outcome=outcome)
+        ),
+    )
+
+
 def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
     """完整 State 到报告事实的唯一安全投影；重新生成只读取对应保存快照。"""
     if state.get("report_revision_mode") == "full_regeneration_from_context":
@@ -588,12 +622,14 @@ def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
     raw_results = state.get("deep_agent_algorithm_results") or {}
     raw_results = raw_results if isinstance(raw_results, Mapping) else {}
     results: list[dict[str, Any]] = []
+    parsed_results: list[AlgorithmResult] = []
     for ref, raw in raw_results.items():
         try:
             result = AlgorithmResult.model_validate(raw)
         except (TypeError, ValueError):
             continue
         if ref == result.result_ref:
+            parsed_results.append(result)
             results.append(_report_result(result, params))
     decision = None
     raw_decision = state.get("deep_agent_decision")
@@ -630,6 +666,7 @@ def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
         "graph_comparisons": _graph_comparisons(results),
         "data_view_comparison": _data_view_comparison(results),
         "data_metadata": report_data_metadata(params),
+        "functional_form": _functional_form_facts(params, parsed_results),
     }
 
 

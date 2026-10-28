@@ -6,7 +6,7 @@ import pytest
 
 from Agent.causal_agent.analysis_context import build_context_commit, build_report_analysis_context, report_primary_result
 from Agent.causal_agent.nodes import _report_graph_asset, _report_execution_summary
-from Agent.deep_agent_tools.algorithm_specs import PC_SPEC, CDFM_SPEC, CAUSAL_ATE_SPEC, DIRECT_LINGAM_SPEC
+from Agent.deep_agent_tools.algorithm_specs import PC_SPEC, CDFM_SPEC, CAUSAL_BACKDOOR_OLS_SPEC, DIRECT_LINGAM_SPEC
 from Agent.deep_agent_tools.models import (
     AlgorithmResult, AlgorithmResultProvenance, CausalEffect, DataViewSummary, Diagnostics,
     FinalAnalysisDecision, GraphEdge, StandardizedGraph,
@@ -131,7 +131,7 @@ def test_graph_comparison_distinguishes_absent_reversed_and_mixed_edges(edges, e
 
 def test_estimation_primary_uses_source_graph_semantics_for_report():
     source = result(DIRECT_LINGAM_SPEC, "lingam")
-    spec = CAUSAL_ATE_SPEC
+    spec = CAUSAL_BACKDOOR_OLS_SPEC
     estimate = AlgorithmResult(
         result_ref="ate:0", invocation_id="ate", provider_call_id="ate",
         capability_id=spec.capability_id, capability_version=spec.version, status="valid",
@@ -164,6 +164,7 @@ def test_estimation_primary_uses_source_graph_semantics_for_report():
         "treatment": "A", "outcome": "B", "adjustment_set": [],
         "estimate": 1.0, "standard_error": None, "ci95": None,
         "estimator": "backdoor_ols", "n_rows": 100,
+        "contrast": None, "outcome_model": None, "bootstrap_n": None,
     }
     asset = _report_graph_asset(state)
     assert asset is not None

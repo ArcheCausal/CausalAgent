@@ -139,7 +139,7 @@ def validate_executor_result(
             "executor result contract mismatch: result_ref",
             safe_error_code=SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID,
         )
-    if command.capability_id == "causal.ate":
+    if command.capability_id == "causal.backdoor_ols":
         try:
             # model_copy(update=...) 不触发 Pydantic 校验，入站边界重新验证。
             result = AlgorithmResult.model_validate(result.model_dump())

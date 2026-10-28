@@ -94,6 +94,23 @@ def estimate_ate(
     ci95 = (estimate - critical * standard_error, estimate + critical * standard_error)
     if not np.isfinite(ci95).all():
         raise ValueError("估计区间不是有限值")
+
+    rank_correlations: list[float] = []
+    absolute_rank_correlations: list[float] = []
+    for index in range(1, design.shape[1]):  # 跳过截距；其余为 treatment + 调整变量
+        column = design[:, index]
+        signed = stats.spearmanr(residuals, column).statistic
+        absolute = stats.spearmanr(np.abs(residuals), column).statistic
+        if np.isfinite(signed):
+            rank_correlations.append(abs(float(signed)))
+        if np.isfinite(absolute):
+            absolute_rank_correlations.append(abs(float(absolute)))
+    diagnostics_metrics: dict[str, float] = {}
+    if rank_correlations:
+        diagnostics_metrics["residual_spearman_max"] = max(rank_correlations)
+    if absolute_rank_correlations:
+        diagnostics_metrics["residual_abs_spearman_max"] = max(absolute_rank_correlations)
+
     return {
         "estimand": "ATE",
         "treatment": treatment,
@@ -104,4 +121,5 @@ def estimate_ate(
         "ci95": ci95,
         "estimator": "backdoor_ols",
         "n_rows": int(n_rows),
+        "diagnostics_metrics": diagnostics_metrics,
     }

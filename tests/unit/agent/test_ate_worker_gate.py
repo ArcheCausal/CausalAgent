@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from Agent.deep_agent import TrustedJobIdentity
-from Agent.deep_agent_tools.algorithm_specs import CAUSAL_ATE_SPEC, PC_SPEC
+from Agent.deep_agent_tools.algorithm_specs import CAUSAL_BACKDOOR_OLS_SPEC, PC_SPEC
 from Agent.deep_agent_tools.algorithm_tools import _resolve_graph_artifacts
 from Agent.deep_agent_tools.dependency_dispatch import _initial_artifacts
 from Agent.deep_agent_tools.error_codes import SafeErrorCode
@@ -82,7 +82,7 @@ def _discovery_result(
 def test_resolves_graph_artifact_for_estimation() -> None:
     state = {"algorithm_results": {"inv-1:0": _discovery_result()}}
     rejection, artifacts = _resolve_graph_artifacts(
-        spec=CAUSAL_ATE_SPEC,
+        spec=CAUSAL_BACKDOOR_OLS_SPEC,
         state=state,
         arguments={"graph_result_ref": "inv-1:0"},
         trusted_identity=IDENTITY,
@@ -94,7 +94,7 @@ def test_resolves_graph_artifact_for_estimation() -> None:
 def test_rejects_unknown_ref_and_lists_available() -> None:
     state = {"algorithm_results": {"inv-1:0": _discovery_result()}}
     rejection, artifacts = _resolve_graph_artifacts(
-        spec=CAUSAL_ATE_SPEC,
+        spec=CAUSAL_BACKDOOR_OLS_SPEC,
         state=state,
         arguments={"graph_result_ref": "missing:0"},
         trusted_identity=IDENTITY,
@@ -113,7 +113,7 @@ def test_rejects_non_valid_result() -> None:
         }
     }
     rejection, _ = _resolve_graph_artifacts(
-        spec=CAUSAL_ATE_SPEC,
+        spec=CAUSAL_BACKDOOR_OLS_SPEC,
         state=state,
         arguments={"graph_result_ref": "inv-1:0"},
         trusted_identity=IDENTITY,
@@ -125,7 +125,7 @@ def test_rejects_non_valid_result() -> None:
 def test_rejects_stale_attempt() -> None:
     state = {"algorithm_results": {"inv-1:0": _discovery_result(attempt_count=3)}}
     rejection, _ = _resolve_graph_artifacts(
-        spec=CAUSAL_ATE_SPEC,
+        spec=CAUSAL_BACKDOOR_OLS_SPEC,
         state=state,
         arguments={"graph_result_ref": "inv-1:0"},
         trusted_identity=IDENTITY,
@@ -138,7 +138,7 @@ def test_rejects_other_input_identity() -> None:
         "algorithm_results": {"inv-1:0": _discovery_result(input_identity="other")}
     }
     rejection, _ = _resolve_graph_artifacts(
-        spec=CAUSAL_ATE_SPEC,
+        spec=CAUSAL_BACKDOOR_OLS_SPEC,
         state=state,
         arguments={"graph_result_ref": "inv-1:0"},
         trusted_identity=IDENTITY,
@@ -153,7 +153,7 @@ def test_rejects_other_source_input() -> None:
         }
     }
     rejection, _ = _resolve_graph_artifacts(
-        spec=CAUSAL_ATE_SPEC,
+        spec=CAUSAL_BACKDOOR_OLS_SPEC,
         state=state,
         arguments={"graph_result_ref": "inv-1:0"},
         trusted_identity=IDENTITY,
@@ -166,7 +166,7 @@ def test_rejects_other_analysis_dataset() -> None:
         "algorithm_results": {"inv-1:0": _discovery_result(analysis_dataset_id=42)}
     }
     rejection, _ = _resolve_graph_artifacts(
-        spec=CAUSAL_ATE_SPEC,
+        spec=CAUSAL_BACKDOOR_OLS_SPEC,
         state=state,
         arguments={"graph_result_ref": "inv-1:0"},
         trusted_identity=IDENTITY,
@@ -190,7 +190,7 @@ def test_rejects_source_version_and_digest_before_estimation() -> None:
         _discovery_result().provenance.model_copy(update={"spec_digest": "0" * 64})}):
         source = _discovery_result().model_copy(update=change)
         rejection, artifacts = _resolve_graph_artifacts(
-            spec=CAUSAL_ATE_SPEC, state={"algorithm_results": {source.result_ref: source}},
+            spec=CAUSAL_BACKDOOR_OLS_SPEC, state={"algorithm_results": {source.result_ref: source}},
             arguments={"graph_result_ref": source.result_ref}, trusted_identity=IDENTITY,
         )
         assert rejection["status"] == "invalid_input"

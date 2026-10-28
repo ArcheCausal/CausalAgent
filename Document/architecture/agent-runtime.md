@@ -63,6 +63,12 @@ cleanup outbox 在同一次清理中删除父图 Job thread 和独立的 Deep Ag
 
 执行前，数据处理 Agent 必须通过公开交互展示方案并等待用户确认。服务端用 SHA-256 方案版本绑定 Job、冻结文件 hash、研究语义和转换说明；确认版本保存在 Job 的当前交互和恢复输入账本中，候选元数据也保存该身份。用户以自由文本修改或拒绝时不会形成确认；新的语义答复或方案说明变化会使 Deep Agent State 中的确认失效。已确认语义范围内的脚本修正可以复用该确认；脚本与候选文件仍单独记录内容 hash。脚本执行入口和 MySQL 候选写入事务都核对当前租约及最新确认版本，独立校验和最终绑定继续核对同一版本。
 
+数据处理子图把方案草稿保存在 `data_processing_metadata`，只允许 `set_data_processing_plan` 修改；用户确认且服务端核对 MySQL 当前确认凭据后，复制到 `data_processing_confirmed_plan`，与 `data_processing_confirmed_plan_version` 一同写入 PostgreSQL checkpoint。执行后的解释经 `save_data_processing_execution_report` 写入独立的 `data_processing_execution_report`；候选 ID、修订号、方案版本、来源和文件 hash、行数及列名由程序读取实际产物生成，解释不能代替独立校验。这份说明通过父子 State 白名单传给后续因果 Agent，不写回候选 metadata。
+
+重复保存相同方案保留确认及候选；方案正文或研究语义变化清空有效确认快照、版本、当前候选引用及执行说明。脚本变化保留方案确认，但清空候选引用和说明，必须重新执行；执行失败同样清空当前候选，成功保存后只为本次候选建立新说明。历史候选不删除。工具按轮顺序执行，同一模型响应中的多个工具调用会收到未执行反馈，避免它们同时读取旧 State。
+
+子图结束 middleware 重新核对当前方案、确认快照与版本、MySQL 确认凭据、候选归属及研究参数、语义身份、脚本 hash 和说明绑定。缺少确认时调用原有确认工具并使用原生 `interrupt`；脚本未执行时要求模型先执行，再申请结束；未解决歧义继续调用原有澄清工具。纠正最多三次，计数随 checkpoint 保存，不重置模型、工具预算或父图独立校验重试。来源、hash、租约和持久化记录冲突直接失败；父节点的一致性检查继续保留。不新增数据库列、迁移、人工中断层、Job thread 或数据处理 checkpoint namespace，旧 checkpoint 不回填新确认快照。
+
 独立校验失败时，父图从已有报告读取错误代码及说明、校验使用的 `target` 和 `treatment`、候选 CSV 实际 `columns` 及算法兼容性结果，交回数据处理 Agent，最多进行三轮修正。这些内容只进入内部模型上下文，不进入公开 SSE 或普通日志；正常交互仍返回用户答复，不追加完整参数快照。脚本遗漏已确认方案要求的字段时，在原确认范围内修复；用户信息有多个合理含义时提出具体澄清问题；已有明确答复与保存角色矛盾时识别为参数提取问题，不解释成校验器强制要求角色，也不要求用户重复作同一个研究选择。现有工具不能直接修订已提交参数，识别错误不等于完成修复；不得忽略校验或默认清空角色继续分析，仍失败时按现有上限如实结束。超出已确认语义范围的处理需要再次提问和确认；校验通过后直接绑定，不增加例行的第二次确认。`plan_version` 继续绑定确认范围，`prepared_dataset_id` 继续指定实际分析 CSV；仅修改角色也没有确认例外，不增加仅更新参数并复用旧候选的快捷路径。因果分析 Agent 不会反向启动数据重处理。公开事件按字段和大小限制保留方案版本及摘要，不公开脚本或内部身份。沙盒预览只读取有限前缀，在 UTF-8 字符边界截断并标注；完整输出超过限制时仍拒绝保存。
 
 ## 分析上下文与追问路由
@@ -210,6 +216,8 @@ Deep Agent 使用 `ToolStrategy(FinalAnalysisDecision)` 生成 `structured_respo
 worker 使用 LangGraph v2 的 `updates`、`messages`、`custom` 和 `tasks` 流。父图以 `deep_agent.astream(..., stream_mode=["messages", "values", "custom"], subgraphs=True, version="v2", durability="sync")` 消费内层模型增量并保留完整 State，再通过父图 custom 流交给公共适配器；适配器只提取工具参数中已确认的 `public_decision.summary`，转换为 `decision_delta`，不外带原始参数或隐藏内容。子图 custom 只转发白名单内的工具开始和结果字段。算法、RAG、Web 工具在外部调用前后通过 `OrderedEventWriter` sink 写入 `tool_call_start`/`tool_call_result`；直接 sink、custom 转发和聚合兜底共用由 invocation、执行 attempt、retry ordinal 和事件类型生成的稳定内部事件键。聚合兜底必须从结果与终态账本恢复一致身份，不能按工具名合成终态或去重。算法结果中的 `valid` 在公共事件边界转换为 `succeeded/调用完成`，超时、取消、不适用与跳过保持各自状态。内层 ToolMessage 和内部事件身份不进入普通用户事件。
 
 公共 payload 由 `event_adapter.py` 与 `public_events.py` 的白名单共同约束。`tool_call_result.status` 只允许受控状态；`safe_error_code` 必须符合固定格式。`finalization_status` 只出现在最终报告数据。事件写入由 Job、attempt、lease、worker 和稳定 `event_key` 保护；失去 lease 或收到取消的 worker 不能提交迟到结果。
+
+独立数据集校验的进度事件键包含 Job attempt、候选数据集 ID 和 LangGraph task ID。同一候选在修正循环中再次进入校验节点时，各任务使用独立事件键及阶段 ID；同一 attempt 内的同一任务重放保持原键和载荷。数据库继续拒绝同键不同载荷，内部事件键和 task ID 不进入公开 SSE。
 
 graph 终态失败的内部诊断由 `classify_graph_failure()` 生成：从外向内检查异常类名及基类、白名单 `safe_cause_code`，再沿包装对象的 `error`、显式 `__cause__` 或未被抑制的 `__context__` 查找原因；只遍历真实异常原因，按对象身份去重，最多检查 32 个对象。外层已有明确分类时保留该分类；结构化输出的供应商失败归入 `provider_error`，工具调用、schema、JSON、输出解析和截断失败归入 `protocol_error`；未识别时保留 `internal_error/node_error`。分类不读取异常正文，`exc_info` 始终保留传入异常及其原始 traceback；诊断只用于 worker 日志，不进入公共事件或数据库事件 payload。
 

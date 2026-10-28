@@ -9,10 +9,12 @@ from pydantic import ValidationError
 
 from Agent.deep_agent_tools.algorithm_specs import (
     AlgorithmSpec,
-    CausalAteInput,
+    CausalBackdoorOlsInput,
     CausalCdfmInput,
+    CausalGFormulaInput,
     CausalPcInput,
-    CAUSAL_ATE_SPEC,
+    CAUSAL_BACKDOOR_OLS_SPEC,
+    CAUSAL_G_FORMULA_SPEC,
     CDFM_SPEC,
     DEFAULT_ALGORITHM_SPECS,
     OLC_SPEC,
@@ -28,7 +30,8 @@ def test_default_specs_only_enable_reviewed_runtime_capabilities() -> None:
         "causal.pc",
         "causal.direct_lingam",
         "causal.cdfm",
-        "causal.ate",
+        "causal.backdoor_ols",
+        "causal.g_formula",
     ]
     assert OLC_SPEC.capability_id == "causal.olc"
     assert OLC_SPEC not in DEFAULT_ALGORITHM_SPECS
@@ -42,6 +45,10 @@ def test_default_specs_only_enable_reviewed_runtime_capabilities() -> None:
     assert CDFM_SPEC.requires == frozenset({"continuous_tabular_dataset"})
     assert CDFM_SPEC.default_timeout_seconds == 600
     assert CDFM_SPEC.default_concurrency == 1
+    assert CAUSAL_G_FORMULA_SPEC.capability_id == "causal.g_formula"
+    assert CAUSAL_G_FORMULA_SPEC.tool_name == "causal_g_formula"
+    assert CAUSAL_G_FORMULA_SPEC.kind == "causal_estimation"
+    assert CAUSAL_G_FORMULA_SPEC.default_timeout_seconds == 600
 
 
 def test_spec_digest_and_tool_schema_are_stable() -> None:
@@ -63,9 +70,10 @@ def test_spec_digest_and_tool_schema_are_stable() -> None:
 def test_tool_snapshot_contains_capability_and_spec_identity() -> None:
     snapshot = build_tool_schema_snapshot()
     assert [item["capability_id"] for item in snapshot] == [
-        "causal.ate",
+        "causal.backdoor_ols",
         "causal.cdfm",
         "causal.direct_lingam",
+        "causal.g_formula",
         "causal.pc",
     ]
     assert all(len(item["spec_digest"]) == 64 for item in snapshot)
@@ -88,17 +96,17 @@ def test_cdfm_threshold_accepts_none_and_boundary_values() -> None:
     assert CausalCdfmInput(threshold=0.5).threshold == 0.5
 
 
-def test_causal_ate_spec_is_activated() -> None:
-    assert CAUSAL_ATE_SPEC.capability_id == "causal.ate"
-    assert CAUSAL_ATE_SPEC.tool_name == "causal_ate"
-    assert CAUSAL_ATE_SPEC.kind == "causal_estimation"
-    assert CAUSAL_ATE_SPEC.requires == frozenset({"standardized_graph"})
-    assert CAUSAL_ATE_SPEC.produces == frozenset()
-    assert CAUSAL_ATE_SPEC.default_timeout_seconds == 120
-    assert CAUSAL_ATE_SPEC.default_concurrency == 1
-    assert get_algorithm_spec("causal.ate") is CAUSAL_ATE_SPEC
-    assert CAUSAL_ATE_SPEC in DEFAULT_ALGORITHM_SPECS
-    schema = CAUSAL_ATE_SPEC.build_tool_schema()
+def test_causal_backdoor_ols_spec_is_activated() -> None:
+    assert CAUSAL_BACKDOOR_OLS_SPEC.capability_id == "causal.backdoor_ols"
+    assert CAUSAL_BACKDOOR_OLS_SPEC.tool_name == "causal_backdoor_ols"
+    assert CAUSAL_BACKDOOR_OLS_SPEC.kind == "causal_estimation"
+    assert CAUSAL_BACKDOOR_OLS_SPEC.requires == frozenset({"standardized_graph"})
+    assert CAUSAL_BACKDOOR_OLS_SPEC.produces == frozenset()
+    assert CAUSAL_BACKDOOR_OLS_SPEC.default_timeout_seconds == 120
+    assert CAUSAL_BACKDOOR_OLS_SPEC.default_concurrency == 1
+    assert get_algorithm_spec("causal.backdoor_ols") is CAUSAL_BACKDOOR_OLS_SPEC
+    assert CAUSAL_BACKDOOR_OLS_SPEC in DEFAULT_ALGORITHM_SPECS
+    schema = CAUSAL_BACKDOOR_OLS_SPEC.build_tool_schema()
     assert set(schema["parameters"]["properties"]) >= {
         "graph_result_ref",
         "treatment",
@@ -108,9 +116,9 @@ def test_causal_ate_spec_is_activated() -> None:
     assert "standardized_graph" not in schema["parameters"]["properties"]
 
 
-def test_causal_ate_input_requires_three_fields() -> None:
+def test_causal_backdoor_ols_input_requires_three_fields() -> None:
     with pytest.raises(ValidationError):
-        CausalAteInput(graph_result_ref="inv-1:0", treatment="x")
+        CausalBackdoorOlsInput(graph_result_ref="inv-1:0", treatment="x")
 
 
 def test_spec_requires_an_assumption_and_stable_result_schema() -> None:
@@ -130,3 +138,8 @@ def test_spec_requires_an_assumption_and_stable_result_schema() -> None:
             concurrency_key="test",
         )
 
+
+def test_old_capability_name_is_gone() -> None:
+    assert get_algorithm_spec("causal.backdoor_ols") is CAUSAL_BACKDOOR_OLS_SPEC
+    with pytest.raises(ValueError, match="unknown algorithm capability"):
+        get_algorithm_spec("causal.ate")

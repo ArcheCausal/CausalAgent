@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 import json
 from typing import Annotated, Any, TypedDict
 
@@ -49,9 +50,16 @@ class DeepAgentState(_OfficialDeepAgentState, total=False):
     model_call_count: int
     tool_call_count: int
     data_processing_draft_script: str
+    # 成功保存候选后建立；脚本或方案变化时清空，不删除 MySQL 历史记录。
     data_processing_candidate_id: int
     data_processing_candidate_revision: int
+    # 方案草稿仅由方案工具修改，执行后的解释不写入这里。
     data_processing_metadata: dict[str, Any]
+    # 服务端确认后复制的独立快照，与 confirmed_plan_version 同时有效或清空。
+    data_processing_confirmed_plan: dict[str, Any] | None
+    # 绑定当前候选、修订号和方案版本的文件事实及可选解释。
+    data_processing_execution_report: dict[str, Any] | None
+    data_processing_completion_retry_count: int
     data_processing_semantic_identity: str
     data_processing_confirmed_plan_version: str | None
     deep_agent_run_id: str
@@ -131,6 +139,7 @@ def initial_deep_agent_state(
     web_evidence: Mapping[str, Any] | None = None,
     finalization_retry_count: int = 0,
     deep_agent_run_id: str | None = None,
+    data_processing_execution_report: Mapping[str, Any] | None = None,
 ) -> ProjectDeepAgentState:
     """创建可直接 checkpoint 的最小内层 State。"""
 
@@ -155,6 +164,8 @@ def initial_deep_agent_state(
         ),
         model_call_count=0,
         tool_call_count=0,
+        data_processing_execution_report=(deepcopy(dict(data_processing_execution_report))
+                                          if data_processing_execution_report is not None else None),
     )
 
 
@@ -223,6 +234,7 @@ def to_deep_agent_input(
                     "data_profile": data_profile.model_dump(mode="json"),
                     "analysis_parameters": dict(analysis_parameters),
                     "preprocess_summary": preprocess_summary,
+                    "data_processing_execution_report": parent_state.get("data_processing_execution_report"),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -251,6 +263,7 @@ def to_deep_agent_input(
         ]
     return initial_deep_agent_state(
         data_profile=data_profile,
+        data_processing_execution_report=parent_state.get("data_processing_execution_report"),
         analysis_question=str(
             parent_state.get("analysis_question")
             or parent_state.get("user_question")

@@ -325,6 +325,9 @@ class CausalEffect(ContractModel):
     ci95: tuple[float, float] | None = None
     estimator: str
     n_rows: int = Field(ge=1)
+    contrast: tuple[float, float] | None = None
+    outcome_model: str | None = None
+    bootstrap_n: int | None = Field(default=None, ge=0)
 
     @field_validator("graph_result_ref", "treatment", "outcome", "estimator")
     @classmethod
@@ -345,6 +348,12 @@ class CausalEffect(ContractModel):
                 raise ValueError("ci95 bounds must be finite")
             if low > high:
                 raise ValueError("ci95 lower bound must not exceed upper bound")
+        if self.contrast is not None:
+            low, high = self.contrast
+            if not (math.isfinite(low) and math.isfinite(high)):
+                raise ValueError("contrast bounds must be finite")
+            if low == high:
+                raise ValueError("contrast bounds must differ")
         return self
 
 
@@ -420,8 +429,8 @@ class AlgorithmResult(ContractModel):
     def validate_result_contract(self) -> "AlgorithmResult":
         validate_result_ref_for_invocation(self.result_ref, self.invocation_id)
         if self.ate_check is not None:
-            if self.capability_id != "causal.ate":
-                raise ValueError("ate_check is only valid for causal.ate")
+            if self.capability_id != "causal.backdoor_ols":
+                raise ValueError("ate_check is only valid for causal.backdoor_ols")
             check = self.ate_check
             if check.applicability == "not_applicable":
                 if (
@@ -550,6 +559,7 @@ class InvocationRecord(ContractModel):
     tool_name: str
     final_status: InvocationStatus
     result_ref: str | None = None
+    subject_ref: str | None = None
     # 这些字段允许旧 checkpoint 被读取，但 FinalizationGate 对缺失值
     # fail-closed。新产生的 Ledger 记录必须完整填写它们。
     job_id: str | None = None
@@ -576,6 +586,7 @@ class InvocationRecord(ContractModel):
         "provider_response_id",
         "provider_item_id",
         "result_ref",
+        "subject_ref",
         "job_id",
         "worker_id",
         "input_identity",

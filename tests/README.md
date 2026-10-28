@@ -62,6 +62,8 @@ docker compose -f docker-compose.prod.yml config --quiet
 
 ## Docker 单元测试环境（推荐）
 
+数据处理方案的确定性规则位于 `unit/agent/test_data_processing_lifecycle.py`；方案工具、脚本工具、父子状态投影和 checkpoint 状态传递位于 `integration/agent/test_data_processing_plan_state.py`，使用真实 ToolNode、StateGraph 与 InMemorySaver。真实数据库入口 `acceptance/data_processing_recovery.py` 覆盖保存候选后补写执行说明；完整模型与 OpenSandbox 入口为 `acceptance/sandbox_upgrade_job.py --scenario execution-report`。后两者必须在专用隔离服务上显式执行，离线测试不代替这些证据。
+
 `docker-compose.test.yml` 提供独立的 `unit-test` 服务。Dockerfile 的 `test` 目标先从 `tests/smoke/requirements-deep-agent-py311-linux.lock` 安装 Python 3.11 Linux hash-pinned 项目依赖，再安装 `requirements-test.txt`，不会把 `pytest` 临时安装到正在运行的应用容器。
 
 该服务有以下边界：

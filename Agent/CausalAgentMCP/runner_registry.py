@@ -70,10 +70,10 @@ def _cdfm(
     return run_cdfm_analysis(csv_data, threshold=parameters.get("threshold"))
 
 
-ATE_RUNNER_VERSION = "ate-runner-v2"
+BACKDOOR_OLS_RUNNER_VERSION = "backdoor-ols-runner-v3"
 
 
-def _ate(
+def _backdoor_ols(
     csv_data: str,
     parameters: Mapping[str, Any],
     artifacts: Mapping[str, Any],
@@ -100,7 +100,7 @@ def _ate(
             "schema_version": "causal_estimation_v1",
             "success": False,
             "algorithm": "backdoor_ols",
-            "runner_version": ATE_RUNNER_VERSION,
+            "runner_version": BACKDOOR_OLS_RUNNER_VERSION,
             "error_type": "NotApplicable",
             "reason_code": (
                 exc.reason_code if exc.reason_code in ATE_REASON_SUMMARIES else None
@@ -110,7 +110,55 @@ def _ate(
         "schema_version": "causal_estimation_v1",
         "success": True,
         "algorithm": "backdoor_ols",
-        "runner_version": ATE_RUNNER_VERSION,
+        "runner_version": BACKDOOR_OLS_RUNNER_VERSION,
+        "causal_effect": effect,
+    }
+
+
+G_FORMULA_RUNNER_VERSION = "g-formula-runner-v2"
+
+
+def _g_formula(
+    csv_data: str,
+    parameters: Mapping[str, Any],
+    artifacts: Mapping[str, Any],
+) -> dict[str, Any]:
+    import io
+
+    import pandas as pd
+
+    from Agent.CausalAgentMCP.inference.g_formula import (
+        GFormulaNotApplicable,
+        estimate_g_formula,
+    )
+    from Agent.deep_agent_tools.models import StandardizedGraph
+
+    graph = StandardizedGraph.model_validate(artifacts["standardized_graph"])
+    frame = pd.read_csv(io.StringIO(csv_data))
+    try:
+        effect = estimate_g_formula(
+            graph=graph,
+            data=frame,
+            treatment=str(parameters["treatment"]),
+            outcome=str(parameters["outcome"]),
+            contrast=tuple(parameters["contrast"]),
+            outcome_model=str(parameters.get("outcome_model") or "linear"),
+            bootstrap=int(parameters.get("bootstrap", 200)),
+        )
+    except GFormulaNotApplicable as exc:
+        return {
+            "schema_version": "causal_estimation_v1",
+            "success": False,
+            "algorithm": "g_formula",
+            "runner_version": G_FORMULA_RUNNER_VERSION,
+            "error_type": "NotApplicable",
+            "message": str(exc),
+        }
+    return {
+        "schema_version": "causal_estimation_v1",
+        "success": True,
+        "algorithm": "g_formula",
+        "runner_version": G_FORMULA_RUNNER_VERSION,
         "causal_effect": effect,
     }
 
@@ -149,7 +197,8 @@ def build_default_registry() -> RunnerRegistry:
         "causal.olc": _olc,
         "causal.direct_lingam": _direct_lingam,
         "causal.cdfm": _cdfm,
-        "causal.ate": _ate,
+        "causal.backdoor_ols": _backdoor_ols,
+        "causal.g_formula": _g_formula,
     }
     entries = [
         (spec, runners[spec.capability_id]) for spec in DEFAULT_ALGORITHM_SPECS

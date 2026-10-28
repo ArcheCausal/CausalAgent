@@ -76,7 +76,7 @@
         "status",
         "provenance"
       ],
-      "sha256": "1a63a875419708e74a680eb7b633b0d1659265ded6b6b4f46fe838f661d78f7c",
+      "sha256": "1e3814023382251b3b16b2d1070a0d6f9b2f563b6a44d79893056004d76a8bc8",
       "title": "AlgorithmResult"
     },
     "AlgorithmResultProvenance": {
@@ -127,13 +127,16 @@
     "CausalEffect": {
       "properties": [
         "adjustment_set",
+        "bootstrap_n",
         "ci95",
+        "contrast",
         "estimand",
         "estimate",
         "estimator",
         "graph_result_ref",
         "n_rows",
         "outcome",
+        "outcome_model",
         "standard_error",
         "treatment"
       ],
@@ -146,7 +149,7 @@
         "estimator",
         "n_rows"
       ],
-      "sha256": "7f9ecef33b4f54567592d955a6aaa1192b47b9cffb7da8dd05dc7670ee2ecdd2",
+      "sha256": "432729eecb659b0768aa2c8d9cc7088fdd6d20e3d37255197f4c7ddccc3f4fad",
       "title": "CausalEffect"
     },
     "DataIssue": {
@@ -305,6 +308,7 @@
         "response_identity_source",
         "result_ref",
         "source_input_identity",
+        "subject_ref",
         "tool_name",
         "worker_id"
       ],
@@ -316,7 +320,7 @@
         "tool_name",
         "final_status"
       ],
-      "sha256": "66a726781cacdc15d173da9d3517b58b1e0d0673e561694cc951477ef066fe9a",
+      "sha256": "01f5dbaab35e47568b36f6cb2cb0d1fdff58bc46039cc0ddfa840a999c96e624",
       "title": "InvocationRecord"
     },
     "McpInvocationContext": {
@@ -512,10 +516,10 @@
   "schema_version": "p2-v1",
   "tools": [
     {
-      "capability_id": "causal.ate",
-      "schema_sha256": "c4a28f8200bb34f1598d1e23dbc8495b2a9d29f4e811576073d95d31b2a9240c",
-      "spec_digest": "dc06cab6ee0707afa1520dd4143c8c490758becc628531a8b81867799d8af5bc",
-      "tool_name": "causal_ate"
+      "capability_id": "causal.backdoor_ols",
+      "schema_sha256": "604300092cbe08c114a7f3be5334300f0107486eacc212fd00facec0e914b9be",
+      "spec_digest": "0028098acaf85a189cdf822c54017d22b86b08e4e3942338be5c3ec9d6c01516",
+      "tool_name": "causal_backdoor_ols"
     },
     {
       "capability_id": "causal.cdfm",
@@ -528,6 +532,12 @@
       "schema_sha256": "97654a33c42ade597f332000a44f260e2db45bc7ea5581c85df01e5f2332d4a7",
       "spec_digest": "6fe17dc33c7f78d005bd14b2b14aaf01dfaf925c406547e34399b122a0f92b58",
       "tool_name": "causal_direct_lingam"
+    },
+    {
+      "capability_id": "causal.g_formula",
+      "schema_sha256": "5b34b8fa806849a83b61646c537a52909752bda51024b3524bab682c6506ea56",
+      "spec_digest": "2d502a921a9ab90df4b729cdadbf5b5ec7664ea61d24f2c61a11ed276c0e2dca",
+      "tool_name": "causal_g_formula"
     },
     {
       "capability_id": "causal.pc",

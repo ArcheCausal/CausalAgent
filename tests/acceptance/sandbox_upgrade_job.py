@@ -113,7 +113,7 @@ async def verify(report, timeout, *, scenario="research-revisions"):
     session_id = client.post("/api/new_chat").json["new_session_id"]
     rng = random.Random(20261025)
     rows = []
-    all_nodes = scenario == "all-nodes"
+    all_nodes = scenario in {"all-nodes", "execution-report"}
     for _ in range(240):
         x = rng.expovariate(1)
         row = f"{x},{1.8*x+rng.gauss(0,0.3)},{rng.gauss(0,1)}"
@@ -132,6 +132,9 @@ async def verify(report, timeout, *, scenario="research-revisions"):
                   "列0、1、2、3、4都是连续测量值，每行是一台不同设备的一次独立测量。"
                   "请先向我确认参与因果发现的字段范围，再记录处理方案并请求确认。"
                   "不聚合、不标准化、不筛选行、不增加字段；依据真实算法结果保守说明识别限制。")
+    if scenario == "execution-report":
+        prompt += ("执行并保存候选成功后，必须调用 save_data_processing_execution_report 补充执行解释。"
+                   "请保留原处理方案，说明工具完成后再结束数据处理。")
     job, replay = job_service.create_job(user_id, session_id, prompt, str(uuid4()),
         input_user_file_id=upload.json["user_file_id"], request_id=str(uuid4()), web_search_enabled=False)
     require(not replay, "unexpected_job_replay")
@@ -205,6 +208,30 @@ async def verify(report, timeout, *, scenario="research-revisions"):
             require(job.get("prepared_dataset_id"), "actual_dataset_not_bound")
             snapshot = await runtime.graph.aget_state({"configurable": {"thread_id": job_id}})
             values = snapshot.values
+            if scenario == "execution-report":
+                from langchain_core.messages import ToolMessage
+                from langgraph._internal._constants import CONFIG_KEY_CHECKPOINTER
+                from Agent.deep_agent_tools.identity import build_data_processing_run_id
+                from Agent.data_processing.graph import DATA_PROCESSING_CHECKPOINT_NAMESPACE
+                run_id = build_data_processing_run_id(job_id=job_id, source_input_identity=hashlib.sha256(source).hexdigest())
+                child = runtime.data_processing_agent
+                child_snapshot = await child.aget_state({"configurable": {
+                    "thread_id": job_id, CONFIG_KEY_CHECKPOINTER: child.checkpointer,
+                    "checkpoint_ns": f"{DATA_PROCESSING_CHECKPOINT_NAMESPACE}:{run_id.partition(':')[2]}",
+                }})
+                outputs = [message for message in child_snapshot.values["messages"] if isinstance(message, ToolMessage)]
+                saves = [index for index, message in enumerate(outputs)
+                         if message.name == "execute_processing_script" and '"candidate_saved"' in message.content]
+                explanations = [index for index, message in enumerate(outputs)
+                                if message.name == "save_data_processing_execution_report"
+                                and "执行说明已保存" in message.content]
+                require(saves and explanations and max(explanations) > max(saves), "save_then_explain_order_not_exercised")
+                require(sum(item["type"] == "data_processing_plan_confirmation" for item in report["interactions"]) == 1,
+                        "execution_explanation_required_reconfirmation")
+                require(values["data_processing_execution_report"]["explanation"], "execution_explanation_missing")
+                require(values["data_processing_execution_report"]["candidate_id"] == job["prepared_dataset_id"],
+                        "execution_explanation_bound_to_old_candidate")
+                report["save_then_explain_with_one_confirmation"] = True
             report["parameter_revision_count"] = len(values.get("analysis_parameter_changes") or [])
             if all_nodes:
                 parameters = values.get("analysis_parameters") or {}
@@ -263,7 +290,7 @@ def main():
     parser.add_argument("--role", choices=("run", "mcp"), default="run")
     parser.add_argument("--model-config", type=Path, default=Path("/tmp/full-job-models.json"))
     parser.add_argument("--timeout-seconds", type=int, default=900)
-    parser.add_argument("--scenario", choices=("research-revisions", "all-nodes"), default="research-revisions")
+    parser.add_argument("--scenario", choices=("research-revisions", "all-nodes", "execution-report"), default="research-revisions")
     args = parser.parse_args()
     require(os.environ.get("FULL_JOB_SANDBOX_ACCEPTANCE") == "1", "explicit_isolated_acceptance_required")
     logging.disable(logging.CRITICAL)

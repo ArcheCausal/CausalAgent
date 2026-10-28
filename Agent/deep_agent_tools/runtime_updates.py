@@ -373,6 +373,7 @@ def build_terminal_invocation(
     started_at: datetime,
     retry_ordinal: int = 0,
     result_ref: str | None = None,
+    subject_ref: str | None = None,
     safe_error_code: str | None = None,
 ) -> InvocationRecord:
     """生成只写 terminal revision 的单调 Ledger 更新。"""
@@ -401,6 +402,7 @@ def build_terminal_invocation(
         tool_name=tool_name,
         final_status=final_status,
         result_ref=result_ref,
+        subject_ref=subject_ref,
         job_id=str(identity.runtime_context.trusted_identity.job_id),
         attempt_count=int(identity.runtime_context.trusted_identity.attempt_count),
         lease_epoch=int(identity.runtime_context.trusted_identity.lease_epoch),
@@ -419,7 +421,9 @@ def build_terminal_invocation(
                 revision=2,
                 status=attempt_status,
                 started_at=started_at,
-                finished_at=datetime.now(timezone.utc),
+                # 容器与宿主时钟可能在校验前后小幅回拨；终态时间不得早于开始
+                # 时间，否则账本契约会拒绝一条本该成功的调用。
+                finished_at=max(datetime.now(timezone.utc), started_at),
                 safe_error_code=safe_error_code,
             )
         },
