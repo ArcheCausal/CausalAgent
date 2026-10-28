@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import io
 import inspect
 import logging
+import math
 import re
 import time
 from typing import Any, Callable, Mapping
@@ -287,6 +288,21 @@ def _error_result(
     )
 
 
+def _finite_metrics(payload: Any) -> dict[str, float | int]:
+    """只保留有限数值的 diagnostics metrics；其余值静默丢弃。"""
+
+    if not isinstance(payload, Mapping):
+        return {}
+    return {
+        key: value
+        for key, value in payload.items()
+        if isinstance(key, str)
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    }
+
+
 def _estimation_result(
     raw_result: Mapping[str, Any],
     *,
@@ -302,10 +318,15 @@ def _estimation_result(
     effect_payload = raw_result.get("causal_effect")
     if not isinstance(effect_payload, Mapping):
         raise ValueError("estimation runner did not return causal_effect")
+    diagnostics_metrics = _finite_metrics(effect_payload.get("diagnostics_metrics"))
     effect = CausalEffect.model_validate(
         {
             "graph_result_ref": command.parameters.get("graph_result_ref"),
-            **dict(effect_payload),
+            **{
+                key: value
+                for key, value in effect_payload.items()
+                if key != "diagnostics_metrics"
+            },
         }
     )
     if (
@@ -348,6 +369,7 @@ def _estimation_result(
         diagnostics=Diagnostics(
             summary="效应估计完成。",
             sample_count=effect.n_rows,
+            metrics=diagnostics_metrics,
             assumptions_checked=[
                 "all_edges_directed",
                 "acyclic",

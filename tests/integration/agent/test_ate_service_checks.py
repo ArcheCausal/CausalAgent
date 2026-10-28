@@ -133,7 +133,7 @@ def test_continuous_confounder_runs_real_service_and_process_runner():
     assert result.causal_effect.outcome == result.ate_check.outcome
     assert abs(result.causal_effect.estimate - 2.0) < 0.2
     assert result.causal_effect.n_rows == len(_frame())
-    assert result.implementation.runner_version == BACKDOOR_OLS_RUNNER_VERSION == "backdoor-ols-runner-v2"
+    assert result.implementation.runner_version == BACKDOOR_OLS_RUNNER_VERSION == "backdoor-ols-runner-v3"
     assert result.provenance.analysis_dataset_id == 17
     assert result.provenance.source_input_identity == "frozen-source-hash"
     assert response["trace"]["executor_slot_id"].startswith("process-")
@@ -240,7 +240,7 @@ def test_kernel_collinearity_updates_completed_record_and_controlled_diagnostic(
     assert result.ate_check.adjustment_set == ("z",)
     assert response["raw_payload"]["reason_code"] == result.ate_check.reason_code
     assert "message" not in response["raw_payload"]
-    assert result.implementation.runner_version == "backdoor-ols-runner-v2"
+    assert result.implementation.runner_version == "backdoor-ols-runner-v3"
 
 
 def test_insufficient_dof_is_not_applicable_without_changing_rows_or_adjustments():

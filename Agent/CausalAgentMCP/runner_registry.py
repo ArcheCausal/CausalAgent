@@ -70,7 +70,7 @@ def _cdfm(
     return run_cdfm_analysis(csv_data, threshold=parameters.get("threshold"))
 
 
-BACKDOOR_OLS_RUNNER_VERSION = "backdoor-ols-runner-v2"
+BACKDOOR_OLS_RUNNER_VERSION = "backdoor-ols-runner-v3"
 
 
 def _backdoor_ols(

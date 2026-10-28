@@ -79,9 +79,12 @@ def test_run_runner_passes_artifacts() -> None:
         _backdoor_ols, _frame().to_csv(index=False), PARAMETERS, {"standardized_graph": GRAPH_PAYLOAD}
     )
     assert envelope.value["success"] is True
-    assert envelope.value["runner_version"] == BACKDOOR_OLS_RUNNER_VERSION == "backdoor-ols-runner-v2"
+    assert envelope.value["runner_version"] == BACKDOOR_OLS_RUNNER_VERSION == "backdoor-ols-runner-v3"
     assert envelope.value["causal_effect"]["adjustment_set"] == ("z",)
     assert abs(envelope.value["causal_effect"]["estimate"] - 2.0) < 0.1
+    assert set(envelope.value["causal_effect"]["diagnostics_metrics"]) == {
+        "residual_spearman_max", "residual_abs_spearman_max",
+    }
 
 
 def test_ate_runner_estimates_from_artifact_graph() -> None:
@@ -141,8 +144,8 @@ def test_estimation_result_reuses_input_graph_and_effect() -> None:
     assert result.causal_effect.estimate == payload["causal_effect"]["estimate"]
     assert result.causal_effect.n_rows == len(_frame())
     assert result.ate_check == check
-    assert result.implementation.runner_version == "backdoor-ols-runner-v2"
-    assert result.provenance.algorithm_runner_version == "backdoor-ols-runner-v2"
+    assert result.implementation.runner_version == "backdoor-ols-runner-v3"
+    assert result.provenance.algorithm_runner_version == "backdoor-ols-runner-v3"
 
 
 def test_estimation_result_rejects_mismatched_pair() -> None:
