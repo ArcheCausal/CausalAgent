@@ -144,6 +144,9 @@ def test_estimation_result_reuses_input_graph_and_effect() -> None:
     assert result.causal_effect.estimate == payload["causal_effect"]["estimate"]
     assert result.causal_effect.n_rows == len(_frame())
     assert result.ate_check == check
+    assert set(result.diagnostics.metrics) == {
+        "residual_spearman_max", "residual_abs_spearman_max",
+    }
     assert result.implementation.runner_version == "backdoor-ols-runner-v3"
     assert result.provenance.algorithm_runner_version == "backdoor-ols-runner-v3"
 

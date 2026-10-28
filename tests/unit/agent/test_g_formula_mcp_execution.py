@@ -124,6 +124,11 @@ def test_estimation_result_injects_source_graph_ref_and_controls() -> None:
             "contrast": [0.0, 1.0],
             "outcome_model": "linear",
             "bootstrap_n": 200,
+            "diagnostics_metrics": {
+                "linear_estimate": 2.0,
+                "effect_difference": 0.25,
+                "difference_se": 0.5,
+            },
         },
     }
     result = _estimation_result(
@@ -140,3 +145,28 @@ def test_estimation_result_injects_source_graph_ref_and_controls() -> None:
     assert result.causal_effect.contrast == (0.0, 1.0)
     assert result.causal_effect.outcome_model == "linear"
     assert result.causal_effect.bootstrap_n == 200
+    assert result.diagnostics.metrics == {
+        "linear_estimate": 2.0, "effect_difference": 0.25, "difference_se": 0.5,
+    }
+
+
+def test_estimation_result_drops_non_finite_and_non_numeric_metrics() -> None:
+    command = _command()
+    graph = StandardizedGraph.model_validate(GRAPH_PAYLOAD)
+    payload = {
+        "success": True,
+        "algorithm": "g_formula",
+        "runner_version": "g-formula-runner-v2",
+        "causal_effect": {
+            "estimand": "ATE", "treatment": "x", "outcome": "y",
+            "estimate": 2.0, "estimator": "g_formula", "n_rows": 1000,
+            "diagnostics_metrics": {
+                "ok": 0.25, "nan": float("nan"), "text": "x", "flag": True,
+            },
+        },
+    }
+    result = _estimation_result(
+        payload, command=command, context=_context(command),
+        capability_version="1.0", graph=graph, data_view=None,
+    )
+    assert result.diagnostics.metrics == {"ok": 0.25}
