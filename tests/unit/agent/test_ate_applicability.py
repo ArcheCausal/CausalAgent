@@ -92,10 +92,9 @@ def _execution():
 def _result(*, status="valid", check=None, effect=None, code=None, include_check=True):
     command, context = _execution()
     if status == "valid" and effect is None:
-        effect = CausalEffect(
-            graph_result_ref=GRAPH_REF,
-            **estimate_ate(graph=_graph(), data=_frame(), treatment="T", outcome="Y"),
-        )
+        payload = estimate_ate(graph=_graph(), data=_frame(), treatment="T", outcome="Y")
+        payload.pop("diagnostics_metrics", None)
+        effect = CausalEffect(graph_result_ref=GRAPH_REF, **payload)
     return AlgorithmResult(
         result_ref=f"{context.invocation_id}:0", invocation_id=context.invocation_id,
         provider_call_id=command.provider_call_id, capability_id=command.capability_id,
