@@ -114,13 +114,16 @@ async def verify(report, timeout, *, scenario="research-revisions"):
     rng = random.Random(20261025)
     rows = []
     all_nodes = scenario in {"all-nodes", "execution-report"}
+    role_mapping = scenario == "role-columns"
     for _ in range(240):
         x = rng.expovariate(1)
         row = f"{x},{1.8*x+rng.gauss(0,0.3)},{rng.gauss(0,1)}"
         if all_nodes:
             row += f",{rng.gauss(0,1)},{rng.gauss(0,1)}"
         rows.append(row)
-    source = (("0,1,2,3,4\n" if all_nodes else "x,y,z\n") + "\n".join(rows) + "\n").encode()
+    header = ("0,1,2,3,4\n" if all_nodes else
+              "coolant_flow_l_min,surface_roughness_ra_um,vibration_rms_mm_s\n" if role_mapping else "x,y,z\n")
+    source = (header + "\n".join(rows) + "\n").encode()
     upload = client.post("/api/upload_file", data={"file": (BytesIO(source), "device-measurements.csv", "text/csv")})
     require(upload.status_code == 200 and upload.json["success"], "actual_upload_failed")
     prompt = ("请对上传数据做真实因果分析并生成完整报告，先使用 PC（fisherz）算法。"
@@ -135,6 +138,13 @@ async def verify(report, timeout, *, scenario="research-revisions"):
     if scenario == "execution-report":
         prompt += ("执行并保存候选成功后，必须调用 save_data_processing_execution_report 补充执行解释。"
                    "请保留原处理方案，说明工具完成后再结束数据处理。")
+    if role_mapping:
+        prompt = ("请对上传数据做真实因果分析并生成完整报告，先使用 PC（fisherz）算法。"
+                  "目标变量是表面粗糙度，处理变量是冷却液流量；对应列分别为 surface_roughness_ra_um 和 coolant_flow_l_min，"
+                  "vibration_rms_mm_s 是振动测量。所有列均为连续测量值，每行是一台不同设备的一次独立测量。"
+                  "保留全部行和英文原始列名，不聚合、不标准化、不筛选、不增加字段。"
+                  "研究角色名称保留表面粗糙度和冷却液流量，列名关联单独记录在处理方案中。"
+                  "请记录角色到输出列的映射和处理方案并请求确认；取得因果图后检查冷却液流量对表面粗糙度的效应可估计性，保守说明限制。")
     job, replay = job_service.create_job(user_id, session_id, prompt, str(uuid4()),
         input_user_file_id=upload.json["user_file_id"], request_id=str(uuid4()), web_search_enabled=False)
     require(not replay, "unexpected_job_replay")
@@ -165,21 +175,24 @@ async def verify(report, timeout, *, scenario="research-revisions"):
                     interaction = job["current_interaction"]
                     kind = interaction["interaction_type"]
                     if kind == "data_processing_question":
-                        if all_nodes:
+                        if role_mapping:
+                            answer = ("每行是一台不同设备的一次独立连续测量。目标表面粗糙度对应 surface_roughness_ra_um，"
+                                      "处理变量冷却液流量对应 coolant_flow_l_min；保留全部原始英文列名和数值，不改变研究参数。")
+                        elif all_nodes:
                             require(not any(item["type"] == kind for item in report["interactions"]),
                                 "repeated_research_choice_question")
                             answer = "全部作为节点参与因果发现"
                         else:
                             answer = "每一行是一台不同设备的一次独立测量。保留所有设备和原始连续测量值，不聚合。"
                     elif kind == "data_processing_plan_confirmation":
-                        if not all_nodes and not modified_plan:
+                        if not all_nodes and not role_mapping and not modified_plan:
                             answer = "补充研究参数：时间窗口为2026年10月1日至7日，文件已包含完整范围，不筛选任何行；请保留原处理范围并重新确认。"
                             modified_plan = True
                         else:
                             answer = json.dumps({"action": "confirm", "plan_version": interaction["plan_version"]})
                     else:
                         raise AssertionError("unexpected_interaction_type")
-                    if not all_nodes and len(report["interactions"]) == 2:
+                    if not all_nodes and not role_mapping and len(report["interactions"]) == 2:
                         stop.set()
                         await asyncio.wait_for(slot, timeout=30)
                         slot = None
@@ -244,8 +257,22 @@ async def verify(report, timeout, *, scenario="research-revisions"):
                 require(values["dataset_validation_report"]["columns"] == ["0", "1", "2", "3", "4"],
                     "prepared_columns_changed")
                 report["validation_retry_count"] = int(values.get("data_processing_retry_count") or 0)
-            else:
+            elif not role_mapping:
                 require(report["parameter_revision_count"] >= 2, "research_revisions_not_retained")
+            if role_mapping:
+                parameters = values["analysis_parameters"]
+                mapping = {"target": "surface_roughness_ra_um", "treatment": "coolant_flow_l_min"}
+                require(parameters["target"] == "表面粗糙度" and parameters["treatment"] == "冷却液流量",
+                        "research_roles_were_rewritten")
+                require(values["prepared_dataset_metadata"]["role_columns"] == mapping, "candidate_role_mapping_missing")
+                require(all(values["dataset_validation_report"][role] == column for role, column in mapping.items()),
+                        "validator_did_not_use_mapped_columns")
+                require(any(item.ate_check and item.ate_check.treatment == mapping["treatment"]
+                    and item.ate_check.outcome == mapping["target"]
+                    for item in values["deep_agent_algorithm_results"].values()), "mapped_ate_check_missing")
+                require(values["finalization_status"] == "valid", "mapped_finalization_failed")
+                report["role_columns_validated_through_finalization"] = True
+                report["validation_retry_count"] = int(values.get("data_processing_retry_count") or 0)
             report["dataset_validated"] = values.get("dataset_validation_status") == "accepted"
             report["report_present"] = bool(values.get("report_document"))
             results = list((values.get("deep_agent_algorithm_results") or {}).values())
@@ -290,7 +317,7 @@ def main():
     parser.add_argument("--role", choices=("run", "mcp"), default="run")
     parser.add_argument("--model-config", type=Path, default=Path("/tmp/full-job-models.json"))
     parser.add_argument("--timeout-seconds", type=int, default=900)
-    parser.add_argument("--scenario", choices=("research-revisions", "all-nodes", "execution-report"), default="research-revisions")
+    parser.add_argument("--scenario", choices=("research-revisions", "all-nodes", "execution-report", "role-columns"), default="research-revisions")
     args = parser.parse_args()
     require(os.environ.get("FULL_JOB_SANDBOX_ACCEPTANCE") == "1", "explicit_isolated_acceptance_required")
     logging.disable(logging.CRITICAL)
@@ -310,6 +337,7 @@ def main():
                         "real production Worker, models, controller and MCP HTTP", "RAG unavailable and Web disabled"]}
     sources = ("Agent/causal_agent/nodes.py", "Agent/data_processing/graph.py",
                "Agent/data_processing/parameters.py", "Agent/data_processing/agent.py",
+               "Agent/data_processing/validation.py", "Agent/deep_agent/state.py", "Agent/causal_agent/graph.py",
                "app/agent/worker/runtime.py", "tests/acceptance/sandbox_upgrade_job.py")
     report["source_sha256"] = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in sources}
     process = None

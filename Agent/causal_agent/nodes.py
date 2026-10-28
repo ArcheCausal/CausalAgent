@@ -21,6 +21,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 from Agent.llm_structured_output import StructuredOutputError, ainvoke_structured
 from Agent.measurement_semantics import normalize_measurement_semantics
+from Agent.data_processing.parameters import execution_parameters
 from .fault_tolerance import (
     RAG_DEGRADATION_SUMMARY,
     build_rag_degradation_result,
@@ -773,7 +774,7 @@ async def context_switch_node(
     return _clarification_update(question=None, status="no_match")
 
 class MeasurementDeclaration(BaseModel):
-    column: str
+    column: str = Field(description="用户明确说明测量含义的单个变量名称；观察单位和整句研究要求不是变量名。")
     kind: Literal["count", "ordinal", "category", "continuous", "binary", "unknown"]
     evidence: str = Field(description="包含列名和测量含义的用户原话，必须逐字摘录；没有明确声明则不输出该条。")
 
@@ -788,7 +789,12 @@ class foldQuery(BaseModel):
         None,
         description="用户指定的处理变量(treatment)或干预变量(intervention)名称；分析范围、算法和指令不是变量名。未指定时为 null，名称不必与 CSV 列名一致。"
     )
-    measurement_semantics: list[MeasurementDeclaration] = Field(default_factory=list)
+    observation_unit: Optional[str] = Field(
+        None, description="用户明确说明的每行代表什么观测对象或一次什么记录；未说明时为 null。"
+    )
+    measurement_semantics: list[MeasurementDeclaration] = Field(
+        default_factory=list, description="仅保存用户明确声明的变量测量类型；每行代表什么属于 observation_unit，没有列级声明时返回空列表。"
+    )
 
     @model_validator(mode="after")
     def validate_measurement_declarations(self):
@@ -841,13 +847,16 @@ def _initial_parameter_extraction_prompt() -> ChatPromptTemplate:
         [
             (
                 "system",
-                """从用户的最新消息中提取目标变量、处理变量和明确声明的字段测量含义。
+                """从用户的最新消息中提取目标变量、处理变量、观察单位和明确声明的字段测量含义。
 文件已由当前 Job 的冻结输入确定，不要从自然语言中选择文件。
 target 表示用户指定的目标或结果变量；treatment 表示用户指定的处理或干预变量。
 分析范围、算法名称、处理要求和完整指令不能作为这两个字段的值。用户使用的变量名称不必与 CSV 列名相同，提取阶段不进行列名成员检查，也不自行映射名称。
 结合对话理解用户的研究意图；没有明确指定某个角色，或明确取消该角色时，该字段返回 null。
 例如，“目标是收入，干预变量是培训”提取 target="收入"、treatment="培训"；“全部作为节点参与因果发现”只说明分析范围，不能作为角色值；“取消之前的目标，只做无目标的结构发现”表示 target=null。
 字段含义只能摘录用户明确说明的内容，不能从列名或数值推断。
+observation_unit 保存用户明确说明的每行所代表的观测对象或记录，没有说明时返回 null。
+measurement_semantics 只保存单个变量的测量类型声明；观察单位、分析范围和研究要求都不能作为 column。
+例如，“每行代表一件工件的一次独立加工”写入 observation_unit，measurement_semantics=[]；“每行是一台设备的一次测量，温度是连续测量值”只把温度写入 measurement_semantics，观察单位单独保存。不能因为用户说明了观察单位就添加 kind=unknown 的列声明。
 严格按 foldQuery schema 返回 JSON。""",
             ),
             MessagesPlaceholder(variable_name="messages"),
@@ -886,6 +895,7 @@ async def fold_node(
         )
         target = _normalize_optional_llm_text(structured_response.target)
         treatment = _normalize_optional_llm_text(structured_response.treatment)
+        observation_unit = _normalize_optional_llm_text(structured_response.observation_unit)
         semantic_declarations = [
             item.model_dump() for item in structured_response.measurement_semantics
         ]
@@ -893,6 +903,7 @@ async def fold_node(
         _log_node_degradation("structured_output_error", "empty_parameters")
         target = None
         treatment = None
+        observation_unit = None
         semantic_declarations = []
 
     user_text = "\n".join(
@@ -912,6 +923,7 @@ async def fold_node(
         "target": target,
         "treatment": treatment,
         "analysis_question": user_text[-6000:],
+        "observation_unit": observation_unit,
         "measurement_semantics": semantic_declarations,
     }
     update = {
@@ -993,6 +1005,7 @@ async def preprocess_node(
 
     source_parameters = dict(bound_identity["analysis_parameters"])
     prepared_metadata = bound_data["metadata"]
+    resolved_parameters = execution_parameters(source_parameters, prepared_metadata)
     summary = get_data_summary(df)
     declarations = source_parameters.get("measurement_semantics") or []
     apply_measurement_semantics(
@@ -1000,14 +1013,15 @@ async def preprocess_node(
     )
     validation_code, validation_issues, recommendations = validate_analysis(
         summary,
-        target=source_parameters.get("target"),
-        treatment=source_parameters.get("treatment"),
+        target=resolved_parameters.get("target"),
+        treatment=resolved_parameters.get("treatment"),
     )
     if validation_code == 2:
         raise RuntimeError("目标变量或处理变量未映射到经过校验的数据集。")
     summary.update(
         {
             **source_parameters,
+            "role_columns": prepared_metadata.get("role_columns", {}),
             "transformations": prepared_metadata.get("transformations", []),
             "variable_semantics": prepared_metadata.get("variable_semantics", {}),
             "processing_summary": prepared_metadata.get("summary", ""),
@@ -1027,6 +1041,7 @@ async def preprocess_node(
                 "row_count": int(profile.row_count),
                 "column_count": int(profile.column_count),
                 "observation_unit": prepared_metadata.get("observation_unit"),
+                "role_columns": prepared_metadata.get("role_columns", {}),
                 "processing_summary": prepared_metadata.get("summary", ""),
                 "transformations": list(prepared_metadata.get("transformations") or []),
                 "limitations": list(prepared_metadata.get("limitations") or []),

@@ -62,7 +62,7 @@ Last-Event-ID: 42
 
 数据处理语义澄清使用同一 `interrupt`、SSE 和 `resume` 契约，`interaction_type` 为 `data_processing_question`；交互载荷包含 `question_id`、公开问题文本、`expires_at` 和 `allow_other=true`，不包含算法选项。用户通过 `resume` 提交文本答复后，同一个 Job 从数据处理 Agent 的原中断位置继续；现有等待时限与幂等规则不变。
 
-方案确认使用 `interaction_type=data_processing_plan_confirmation`，并公开 `plan_version` 与 `plan`。版本为 64 位小写 SHA-256；方案只包含 `summary`、`observation_unit`、`transformations`、`variable_semantics` 和 `limitations`。事件输出逐字段限制类型、数量与长度，不透传脚本或内部运行时字段。SSE 重连及聊天历史恢复使用相同的公开投影，前端据此显示方案和确认按钮。
+方案确认使用 `interaction_type=data_processing_plan_confirmation`，并公开 `plan_version` 与 `plan`。版本为 64 位小写 SHA-256；方案只包含 `summary`、`observation_unit`、`transformations`、`variable_semantics`、`role_columns` 和 `limitations`。`role_columns` 是可省略的角色列映射，只允许 `target`、`treatment`，值为实际输出列名或 `null`；列名最多 255 字符，未指定角色保持为空。事件输出逐字段限制类型、数量与长度，不透传脚本或内部运行时字段。SSE 重连及聊天历史恢复使用相同的公开投影，前端据此显示方案、角色对应列和确认按钮。
 
 `decision` 事件除既有路由说明外，还可包含 `decision_kind=algorithm|evidence|final`。`algorithm` 表示模型在同一次算法 Tool Call 中显式提交的公开选择依据，`evidence` 表示同一位置的 `rag_evidence_search`/`web_evidence_search` 检索依据，两者都可同时带公开工具名；`final` 只在 FinalizationGate 验证成功后产生，可带 `low|medium|high` 置信度。模型工具参数流中的公开摘要会先以 `decision_delta` 增量事件发送，工具开始/结果仍分别由可信工具边界发布；完整 `decision` 仍作为历史回放和无增量回退。公开说明是展示文本而非隐藏思维链，不包含内部结果引用；缺失或格式无效的工具说明不会阻止工具执行。相关事件都持久化到 `analysis_job_events`，SSE 重连按原 Event ID 续传，历史回放直接展示完整 `decision` 文本。
 

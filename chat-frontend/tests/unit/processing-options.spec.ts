@@ -93,6 +93,7 @@ describe('processing option projection', () => {
           observation_unit: '设备-日期',
           transformations: ['按设备和日期分组并计数'],
           variable_semantics: { alarm_count: '该设备当天的告警次数' },
+          role_columns: { target: 'alarm_count', treatment: null },
           limitations: ['不包含未触发告警的设备日期'],
         },
         allow_other: true,
@@ -109,6 +110,7 @@ describe('processing option projection', () => {
         observationUnit: '设备-日期',
         transformations: ['按设备和日期分组并计数'],
         variableSemantics: { alarm_count: '该设备当天的告警次数' },
+        roleColumns: { target: 'alarm_count', treatment: null },
         limitations: ['不包含未触发告警的设备日期'],
       },
     })

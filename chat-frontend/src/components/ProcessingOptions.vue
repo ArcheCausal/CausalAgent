@@ -136,6 +136,14 @@ function other(): void {
       <dl>
         <dt>观察单位</dt>
         <dd>{{ waiting.plan.observationUnit }}</dd>
+        <template v-if="waiting.plan.roleColumns?.target">
+          <dt>结果变量对应列</dt>
+          <dd>{{ waiting.plan.roleColumns.target }}</dd>
+        </template>
+        <template v-if="waiting.plan.roleColumns?.treatment">
+          <dt>处理变量对应列</dt>
+          <dd>{{ waiting.plan.roleColumns.treatment }}</dd>
+        </template>
         <dt>处理步骤</dt>
         <dd>
           <ul>

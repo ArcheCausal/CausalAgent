@@ -56,6 +56,10 @@ class DataProcessingPlanSummary(ContractModel):
     observation_unit: str = Field(min_length=1, max_length=500)
     transformations: tuple[str, ...] = Field(min_length=1, max_length=12)
     variable_semantics: dict[str, str] = Field(min_length=1, max_length=128)
+    role_columns: dict[Literal["target", "treatment"], str | None] = Field(
+        default_factory=dict, max_length=2,
+        description="用户已指定的 target、treatment 对应的处理后 CSV 列名；未指定的角色留空，不创造角色。",
+    )
     limitations: tuple[str, ...] = Field(default_factory=tuple, max_length=12)
 
 

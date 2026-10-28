@@ -101,6 +101,10 @@ export const processingPlanSummarySchema = z.object({
   observation_unit: z.string().min(1),
   transformations: z.array(z.string()),
   variable_semantics: z.record(z.string(), z.string()),
+  role_columns: z.object({
+    target: z.string().min(1).max(255).nullable().optional(),
+    treatment: z.string().min(1).max(255).nullable().optional(),
+  }).optional(),
   limitations: z.array(z.string()).optional(),
 }).passthrough()
 

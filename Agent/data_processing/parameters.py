@@ -86,6 +86,26 @@ def parameter_identity(parameters: Mapping[str, Any]) -> str:
     return _digest(research_parameters(parameters))
 
 
+def execution_parameters(
+    parameters: Mapping[str, Any], metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """将已声明的研究角色投影为输出列，保留原参数及其修订身份。"""
+    role_columns = metadata.get("role_columns", {})
+    if not isinstance(role_columns, Mapping) or set(role_columns) - {"target", "treatment"}:
+        raise ParameterContractError("role_columns must map target and treatment to output columns")
+    result = dict(parameters)
+    for role, column in role_columns.items():
+        if column is None:
+            continue
+        if not isinstance(column, str) or not column.strip() or len(column) > 255:
+            raise ParameterContractError("role column must be a non-blank bounded string")
+        declared = parameters.get(role)
+        if not isinstance(declared, str) or not declared.strip():
+            raise ParameterContractError("role column requires a declared research role")
+        result[role] = column.strip()
+    return result
+
+
 def parameter_update_id(*, job_id: str, source_input_id: int) -> str:
     if type(source_input_id) is not int or source_input_id <= 0:
         raise ParameterContractError("source_input_id must identify a trusted input record")

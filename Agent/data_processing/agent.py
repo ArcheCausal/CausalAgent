@@ -66,14 +66,8 @@ class ScriptInput(ContractModel):
     script: str = Field(min_length=1, max_length=16000)
 
 
-class ProcessingPlanInput(ContractModel):
+class ProcessingPlanInput(DataProcessingPlanSummary):
     """供用户确认的处理方案；不接收执行后说明。"""
-
-    summary: str = Field(min_length=1, max_length=1200)
-    observation_unit: str = Field(min_length=1, max_length=500)
-    transformations: tuple[str, ...] = Field(min_length=1, max_length=12)
-    variable_semantics: dict[str, str] = Field(min_length=1, max_length=128)
-    limitations: tuple[str, ...] = Field(default_factory=tuple, max_length=12)
 
 
 class ExecutionReportInput(ContractModel):
@@ -195,7 +189,8 @@ def _plan_tool() -> Any:
         coroutine=call,
         name="set_data_processing_plan",
         description=(
-            "设置待确认处理方案的观察单位、字段含义、计划转换和限制。正文变化会清空确认与当前候选。"
+            "设置待确认处理方案的观察单位、字段含义、角色列映射、计划转换和限制。方案变化会清空确认与当前候选。"
+            "role_columns 将已指定的 target、treatment 映射到处理后 CSV 的实际列名；研究角色名称保持原意，未指定时留空。"
             "执行后补充说明必须使用 save_data_processing_execution_report，不得改写方案。"
             "只写你能从用户说明或实际脚本确认的内容；不要推测字段含义。"
         ),
@@ -712,11 +707,12 @@ def build_data_processing_agent(
             "脚本必须只读取 /workspace/raw/original.csv，并写入 /workspace/output/prepared.csv。不得访问其他路径、调用网络、安装依赖或尝试访问数据库；原始文件只读。",
             "调用 set_data_processing_plan 设置处理方案并保存完整脚本后，必须先调用 request_data_processing_plan_confirmation。只有用户确认当前方案版本后，execute_processing_script 才会运行。",
             "方案草稿、已确认快照和执行说明分别保存。执行成功后用 save_data_processing_execution_report 补充解释，不得为补写说明而改写方案。行数、列名和 hash 由程序生成，解释不能代替独立校验。",
+            "在处理方案的 role_columns 中明确填写用户已指定的 target、treatment 对应的输出列名。研究角色可以是中文名称或业务名称，不能直接当作 CSV 列名；根据字段含义和脚本确定映射，未指定的角色留空。已有明确对应关系时直接记录，存在真实歧义时才向用户提问。",
             "同一轮只调用一个数据处理工具，等待其状态保存后再调用下一工具。修改脚本会清空当前候选，必须重新执行才可结束；方案正文或研究语义变化必须重新展示并等待确认。",
             "确认授权绑定当前 Job、冻结文件、研究语义和方案说明，不绑定脚本正文。用户拒绝或提出新研究语义、改变变量含义或扩大转换范围时，旧方案不得执行；先澄清、更新方案并重新请求确认。",
             "脚本运行失败或独立校验发现可修正的问题时，根据实际错误在已确认的语义和转换范围内修改脚本，并可复用当前确认后再次运行；不要声称未执行的转换已经成功。修复若需要新的语义选择或超出已确认范围，必须先向用户提问并重新确认。",
-            "独立校验节点会检查实际输出文件。报告中的 target、treatment 是本次校验使用的参数，columns 是候选 CSV 的实际列名；角色为空本身不构成缺失错误。算法输入兼容不代表科学假设已经成立。",
-            "收到校验失败反馈后，先区分脚本遗漏已确认方案要求的字段、用户信息不足和参数提取错误。脚本遗漏可在原确认范围内修复；只有用户信息确实存在多个合理含义时，才提出具体澄清问题。",
+            "独立校验节点会检查实际输出文件。报告中的 research_roles 保留研究角色，role_columns 是方案中的角色列映射，target、treatment 是解析后的执行列名，columns 是候选 CSV 的实际列名；角色为空本身不构成缺失错误。算法输入兼容不代表科学假设已经成立。",
+            "收到校验失败反馈后，先区分角色列映射缺失或错误、脚本遗漏、用户信息不足和参数提取错误。角色名称与实际列名不同，应通过 set_data_processing_plan 修正 role_columns，按现有流程确认并重新执行；不需要改写研究角色或让用户重复选择。脚本遗漏可在原确认范围内修复；只有用户信息确实存在多个合理含义时，才提出具体澄清问题。",
             "若用户已有明确答复与保存的角色参数矛盾，应识别为参数提取问题，不得解释成校验器强制要求角色，也不得要求用户再次作同一个研究选择。现有工具不能直接修订已提交参数，不得声称已经修复参数、忽略校验或默认清空角色继续执行；遵守现有重试上限，仍失败时如实说明。",
             "候选数据集提交后，简短说明提交事实，不要输出文件正文或具体记录值。",
         ]

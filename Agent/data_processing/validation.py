@@ -12,7 +12,9 @@ import pandas as pd
 from Agent.deep_agent_tools.algorithm_specs import AlgorithmSpec
 from Agent.deep_agent_tools.preprocessing import build_data_profile
 from Agent.measurement_semantics import normalize_measurement_semantics
-from Agent.data_processing.parameters import PARAMETER_BINDING_KEY, parameter_identity
+from Agent.data_processing.parameters import (
+    PARAMETER_BINDING_KEY, ParameterContractError, execution_parameters, parameter_identity,
+)
 
 
 class DatasetValidationError(ValueError):
@@ -128,8 +130,15 @@ def validate_candidate(
     except ValueError:
         semantic_kinds = {}
         errors.append(_issue("measurement_semantics_invalid", "测量语义包含非法类型、字段或冲突声明"))
-    target = _optional_column_name(parameters.get("target"))
-    treatment = _optional_column_name(parameters.get("treatment"))
+    role_columns = {}
+    try:
+        resolved = execution_parameters(parameters, metadata)
+        role_columns = dict(metadata.get("role_columns", {}))
+    except ParameterContractError:
+        resolved = parameters
+        errors.append(_issue("role_columns_invalid", "角色列映射必须为已指定研究角色对应的非空列名"))
+    target = _optional_column_name(resolved.get("target"))
+    treatment = _optional_column_name(resolved.get("treatment"))
     if target and treatment and target == treatment:
         errors.append(_issue("target_treatment_conflict", "目标变量和处理变量不能是同一字段"))
     for role, column in (("target", target), ("treatment", treatment)):
@@ -190,6 +199,8 @@ def validate_candidate(
         "transformations": list(transformations) if isinstance(transformations, (list, tuple)) else [],
         "target": target,
         "treatment": treatment,
+        "research_roles": {role: parameters.get(role) for role in ("target", "treatment")},
+        "role_columns": role_columns,
         "algorithm_compatibility": algorithm_compatibility,
         "compatible_algorithm_count": compatible_count,
         "scope_note": "输入兼容检查不证明算法科学假设成立，也不证明因果结论正确。",

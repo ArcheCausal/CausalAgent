@@ -8,6 +8,7 @@ import json
 from typing import Annotated, Any, TypedDict
 
 from deepagents.graph import DeepAgentState as _OfficialDeepAgentState
+from Agent.data_processing.parameters import execution_parameters
 
 from Agent.deep_agent_tools.models import (
     DataProfile,
@@ -220,6 +221,9 @@ def to_deep_agent_input(
             **analysis_parameters,
             "data_profile": data_profile.model_dump(mode="json"),
         }
+    analysis_parameters = execution_parameters(
+        analysis_parameters, parent_state.get("prepared_dataset_metadata") or {},
+    )
     messages = [
         *messages,
         {

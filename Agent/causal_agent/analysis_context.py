@@ -482,6 +482,7 @@ def report_data_metadata(parameters: Any) -> dict[str, Any]:
                 "row_count",
                 "column_count",
                 "observation_unit",
+                "role_columns",
                 "processing_summary",
                 "transformations",
                 "limitations",
