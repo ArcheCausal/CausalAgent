@@ -2375,6 +2375,65 @@
           "title": "ActionAttempt",
           "type": "object"
         },
+        "EffectQuery": {
+          "additionalProperties": false,
+          "description": "一次效应调用实际请求的变量对、对比区间与结局模型。\n\n值只来自工具参数的程序解析，不接受模型事后补写；诊断只需源图与变量对，\n估计比较完整请求。缺少该字段的旧 checkpoint 仍可读取，但不能满足新门禁。",
+          "properties": {
+            "graph_result_ref": {
+              "title": "Graph Result Ref",
+              "type": "string"
+            },
+            "treatment": {
+              "title": "Treatment",
+              "type": "string"
+            },
+            "outcome": {
+              "title": "Outcome",
+              "type": "string"
+            },
+            "contrast": {
+              "anyOf": [
+                {
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "prefixItems": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "number"
+                    }
+                  ],
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Contrast"
+            },
+            "outcome_model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Outcome Model"
+            }
+          },
+          "required": [
+            "graph_result_ref",
+            "treatment",
+            "outcome"
+          ],
+          "title": "EffectQuery",
+          "type": "object"
+        },
         "SafeErrorCode": {
           "description": "首版允许跨边界传输的、无敏感细节的错误码。",
           "enum": [
@@ -2491,6 +2550,17 @@
           ],
           "default": null,
           "title": "Subject Ref"
+        },
+        "effect_query": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectQuery"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "job_id": {
           "anyOf": [
@@ -3466,10 +3536,10 @@
     },
     {
       "capability_id": "causal.g_formula",
-      "spec_digest": "2d502a921a9ab90df4b729cdadbf5b5ec7664ea61d24f2c61a11ed276c0e2dca",
+      "spec_digest": "c7c03be8853488aa2137890786a1783a0876912a98884d30c2e9a4a99c1625bf",
       "tool": {
         "name": "causal_g_formula",
-        "description": "在给定因果图上用 g-computation 估计处理变量对比的因果效应。按拓扑序逐节点拟合条件方程并做 do 模拟，结局方程可选线性或梯度提升；不支持未定向边、双箭头边、有向环或处理变量不是结果变量祖先的图。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；至少 3 行、2 列。\n方法假设：图包含查询的处理与结果变量，且无未定向边、双箭头边或有向环；处理变量是结果变量的祖先；相关列均为有限数值，缺失值已在执行前处理；中间方程按线性建模；结局方程由 outcome_model 决定。\n目标图：causal_estimation_input；矩阵约定：g_formula。\n边语义：directed：g-computation 传播所用的因果方向。\n适用边界：中间方程固定线性；真实中介关系非线性时总效应有偏；不处理二值/计数/有序结局的尺度转换；bootstrap 为 percentile 区间，不做 BCa；不处理未观测混杂、选择偏倚或测量误差。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
+        "description": "在给定因果图上用调整后直接标准化估计处理变量对比的因果效应。调整集取处理变量的全部父节点，结局方程可选线性或梯度提升；不支持未定向边、双箭头边、有向环或处理变量不是结果变量祖先的图。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；至少 3 行、2 列。\n方法假设：图包含查询的处理与结果变量，且无未定向边、双箭头边或有向环；处理变量是结果变量的祖先；相关列均为有限数值，缺失值已在执行前处理；调整集取处理变量的全部父节点，不搜索其他有效调整集；调整集有效且无未观测混杂时，条件均值差等于总效应；结局方程由 outcome_model 决定，只拟合 E[Y|T,Z]。\n目标图：causal_estimation_input；矩阵约定：g_formula。\n边语义：directed：确定调整集与可识别性的因果方向。\n适用边界：结局模型只估计条件均值差；存在未建模交互时线性模型仍可能有偏；不处理二值/计数/有序结局的尺度转换；bootstrap 为 percentile 区间，不做 BCa；不处理未观测混杂、选择偏倚或测量误差。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
         "parameters": {
           "additionalProperties": false,
           "properties": {

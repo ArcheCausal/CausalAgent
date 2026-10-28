@@ -295,6 +295,7 @@
         "analysis_dataset_id",
         "attempt_count",
         "attempts",
+        "effect_query",
         "event_step_id",
         "final_status",
         "input_identity",
@@ -320,7 +321,7 @@
         "tool_name",
         "final_status"
       ],
-      "sha256": "01f5dbaab35e47568b36f6cb2cb0d1fdff58bc46039cc0ddfa840a999c96e624",
+      "sha256": "7abef9b44ce3191312c5b4f5c735412ab324ca253b7e84addc53635a55b08891",
       "title": "InvocationRecord"
     },
     "McpInvocationContext": {
@@ -535,8 +536,8 @@
     },
     {
       "capability_id": "causal.g_formula",
-      "schema_sha256": "5b34b8fa806849a83b61646c537a52909752bda51024b3524bab682c6506ea56",
-      "spec_digest": "2d502a921a9ab90df4b729cdadbf5b5ec7664ea61d24f2c61a11ed276c0e2dca",
+      "schema_sha256": "1525b92f79239cf9b938b8d5c391d4aa5539d59cc5a95b3428126f9bda22c32a",
+      "spec_digest": "c7c03be8853488aa2137890786a1783a0876912a98884d30c2e9a4a99c1625bf",
       "tool_name": "causal_g_formula"
     },
     {

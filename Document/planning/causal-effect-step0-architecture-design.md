@@ -12,7 +12,7 @@
 | 范围 | 只做 step 0：`effect_diagnose` + 收尾门禁判据 + `causal.g_formula` + `causal.ate` 改名 |
 | 决策记录来源 | 新增 Agent 侧非算法工具 `effect_diagnose`，终态 ledger 记录即决策记录 |
 | U1 | `causal.ate` 改名为 `causal.backdoor_ols`（内核不变） |
-| U2/U3 | `g_formula` 只收单值 `outcome_model`；中间方程一律线性，偏差写入 limitations |
+| U2/U3 | `g_formula` 只收单值 `outcome_model`；采用调整后直接标准化，拟合 `E[Y|T,Z]` 后对样本取条件均值差 |
 | U4 | 需要独立工具 `effect_diagnose` |
 | U5 | 首版只支持 `contrast=[x0, x1]` |
 | 门禁语义 | 严格：诊断为可估计时必须有真实估计调用 |
@@ -40,12 +40,12 @@ Agent 侧（host process）
 
 MCP 侧（算法池）
   causal.backdoor_ols   ← causal.ate 改名，内核 estimate_ate 不变
-  causal.g_formula      ← 新增 g-computation + bootstrap
+  causal.g_formula      ← 新增调整后直接标准化 + bootstrap
 
 finalization
   ├─ 效应问题 + 有效图 → 必须有终态 effect_diagnose
-  ├─ 诊断 succeeded → 必须有终态估计调用
-  └─ 有有效估计 → 主结果必须是估计，且其源图有 succeeded 诊断
+  ├─ 诊断 verdict=proceed → 必须有当前查询的终态估计调用
+  └─ 有有效估计 → 主结果必须是估计，且其源图有通过诊断
 ```
 
 原则沿用 §0：**MCP 只存算法，判定规则留在 Agent 侧**。`effect_diagnose` 的判定全部是确定性代码，LLM 只决定「调用哪个 ref、何时调用、拿到 verdict 后调哪个估计器」。
@@ -85,7 +85,8 @@ step 0 检查范围与现有 MCP 内核一致（全图）；Y 祖先子图收窄
     "treatment_is_ancestor": true
   },
   "reasons": [],
-  "recommended_estimator": "causal.backdoor_ols",
+  "recommended_capability_id": "causal.backdoor_ols",
+  "recommended_tool_name": "causal_backdoor_ols",
   "graph_result_ref": "...",
   "treatment": "X",
   "outcome": "Y"
@@ -94,7 +95,7 @@ step 0 检查范围与现有 MCP 内核一致（全图）；Y 祖先子图收窄
 
 - `treatment_type` 取自可信 `analysis_input.semantic_kinds`；缺失为 `"unknown"`，不参与判定
 - `n_rows` 取自 `analysis_parameters.data_profile.row_count`，缺失为 `null`
-- `recommended_estimator` 在 step 0 恒为 `causal.backdoor_ols`；step 1 加入线性/灵活判定后才会返回 `causal.g_formula`
+- `recommended_capability_id` 给出能力 ID，`recommended_tool_name` 给出可直接调用的工具名；两者在 step 0 分别为 `causal.backdoor_ols` 与 `causal_backdoor_ols`，模型按工具名调用，避免把能力 ID 当工具名
 - `reasons` 为 `[{"code": ..., "message": ...}]`，code 稳定、message 面向模型
 
 ### 3.4 终态映射
@@ -198,9 +199,9 @@ class CausalGFormulaInput(ContractModel):
 模块 `Agent/CausalAgentMCP/inference/g_formula.py`，函数 `estimate_g_formula(...)`：
 
 1. 结构前置：全边 `directed`、无环、变量在图中、`treatment != outcome`、treatment 是 outcome 祖先；相关列存在且为有限数值。不满足抛 `GFormulaNotApplicable`
-2. 相关节点 = `ancestors(outcome) ∪ {outcome}`；按拓扑序对每个非 treatment 节点拟合 `node ~ 相关父节点`；结局方程用 `outcome_model`（`LinearRegression` 或 `HistGradientBoostingRegressor(max_depth=3, learning_rate=0.05, random_state=0)`），中间方程一律 `LinearRegression`
-3. do 模拟：固定 `treatment = x0` 与 `x1` 各传播一次，按拓扑序预测；父节点取实测值或已预测值；结局取其预测均值
-4. `effect = mean(Y|do(T=x1)) - mean(Y|do(T=x0))`
+2. 调整集 = 处理变量的全部父节点，与后门 OLS 共用同一份适用性规则
+3. 结局方程用 `outcome_model`（`LinearRegression` 或 `HistGradientBoostingRegressor(max_depth=3, learning_rate=0.05, random_state=0)`）拟合 `E[Y|T,Z]`，特征为 `treatment` 与调整集
+4. 直接标准化：同一份实测调整集下分别取 `treatment = x0` 与 `x1` 预测结局，效应为 `mean(m(x1,Zi)) - mean(m(x0,Zi))`
 5. bootstrap：行重采样 → 重拟合 → 重算效应；`standard_error` 取 bootstrap 标准差，`ci95` 取 2.5/97.5 分位；`bootstrap=0` 时两者为 `None`
 6. 返回 `CausalEffect`：`estimand="ATE"`、`estimator="g_formula"`、`n_rows`、`contrast`、`outcome_model`、`bootstrap_n`；`graph_result_ref` 由 `service._estimation_result` 注入
 
@@ -213,7 +214,7 @@ class CausalGFormulaInput(ContractModel):
 
 ### 6.4 Limitations（写入 spec）
 
-- 中间方程固定线性；真实中介关系非线性时总效应有偏
+- 结局模型只估计条件均值差；存在未建模交互时线性模型仍可能有偏
 - 不处理二值/计数/有序结局的尺度转换（风险差/率差/累积概率差属于 step 3/5）
 - bootstrap 为 percentile 区间，不做 BCa
 - 不处理未观测混杂、选择偏倚、测量误差
@@ -223,8 +224,8 @@ class CausalGFormulaInput(ContractModel):
 `Agent/deep_agent/prompts.py` 的强制指令改为两步：
 
 1. `analysis_parameters` 同时有 target 与 treatment，且已获得有效标准图 → 必须调用一次 `effect_diagnose`，携带该图的 `graph_result_ref` 与 target/treatment
-2. 诊断返回 `succeeded` → 用同一张图调用 `recommended_estimator`，保留真实终态（成功、未就绪、不适用、失败都算一次尝试）
-3. 诊断返回 `not_applicable` → 保留拒绝理由，不再强制估计；最终主结果不得指向估计
+2. 诊断返回 `verdict=proceed` → 用同一张图调用 `recommended_tool_name`，保留真实终态（成功、未就绪、不适用、失败都算一次尝试）
+3. 诊断返回 `verdict=reject` → 保留拒绝理由，不再强制估计；最终主结果不得指向该查询的估计
 
 ## 8. 测试与验收
 

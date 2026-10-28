@@ -627,8 +627,8 @@ CAUSAL_G_FORMULA_SPEC = AlgorithmSpec(
     tool_name="causal_g_formula",
     public_name="因果效应估计（g-formula）",
     description=(
-        "在给定因果图上用 g-computation 估计处理变量对比的因果效应。"
-        "按拓扑序逐节点拟合条件方程并做 do 模拟，结局方程可选线性或梯度提升；"
+        "在给定因果图上用调整后直接标准化估计处理变量对比的因果效应。"
+        "调整集取处理变量的全部父节点，结局方程可选线性或梯度提升；"
         "不支持未定向边、双箭头边、有向环或处理变量不是结果变量祖先的图。"
     ),
     model_input_schema=CausalGFormulaInput,
@@ -638,14 +638,16 @@ CAUSAL_G_FORMULA_SPEC = AlgorithmSpec(
         "图包含查询的处理与结果变量，且无未定向边、双箭头边或有向环",
         "处理变量是结果变量的祖先",
         "相关列均为有限数值，缺失值已在执行前处理",
-        "中间方程按线性建模；结局方程由 outcome_model 决定",
+        "调整集取处理变量的全部父节点，不搜索其他有效调整集",
+        "调整集有效且无未观测混杂时，条件均值差等于总效应",
+        "结局方程由 outcome_model 决定，只拟合 E[Y|T,Z]",
     ),
     result_contract=CausalEffect,
     default_timeout_seconds=600,
     concurrency_key="causal_g_formula",
     default_concurrency=1,
     kind="causal_estimation",
-    analysis_goal="在给定因果图上用 g-computation 估计处理变量对比的因果效应",
+    analysis_goal="在给定因果图上用调整后直接标准化估计处理变量对比的因果效应",
     description_source=("用途", "图引用要求", "模型选择", "不适用边界"),
     data_requirements=(
         "standardized_graph",
@@ -659,9 +661,9 @@ CAUSAL_G_FORMULA_SPEC = AlgorithmSpec(
     min_columns=2,
     graph_semantics="causal_estimation_input",
     matrix_convention="g_formula",
-    edge_meanings={"directed": "g-computation 传播所用的因果方向"},
+    edge_meanings={"directed": "确定调整集与可识别性的因果方向"},
     limitations=(
-        "中间方程固定线性；真实中介关系非线性时总效应有偏",
+        "结局模型只估计条件均值差；存在未建模交互时线性模型仍可能有偏",
         "不处理二值/计数/有序结局的尺度转换",
         "bootstrap 为 percentile 区间，不做 BCa",
         "不处理未观测混杂、选择偏倚或测量误差",

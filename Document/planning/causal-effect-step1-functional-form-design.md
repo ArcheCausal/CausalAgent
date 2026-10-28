@@ -20,7 +20,7 @@
 
 - 数据集级信号已存在：`Agent/Processing/nonlinearity.py::measure_nonlinearity` 在 fold 阶段写入 `analysis_parameters["nonlinearity"]`（`Agent/causal_agent/nodes.py:1036`），payload 含 `ratio` / `verdict` / `n_vars` / `n_rows` / `sampled` / `reason`，并已进入报告分析上下文（`Agent/causal_agent/analysis_context.py:465`）。`ratio ≥ 1` 在 d5 25 集上 0 误报、0 漏报；`ratio < 1` 不等于线性。
 - 后门 OLS 内核 `Agent/CausalAgentMCP/inference/ate.py::estimate_ate` 已算出残差（用于 SE），但只返回 `estimand/treatment/outcome/adjustment_set/estimate/standard_error/ci95/estimator/n_rows`。
-- g-formula 内核 `Agent/CausalAgentMCP/inference/g_formula.py::estimate_g_formula` 已做 bootstrap（重采样行 → 重跑 g-computation），但每次重采样只算灵活路。
+- g-formula 内核 `Agent/CausalAgentMCP/inference/g_formula.py::estimate_g_formula` 已做 bootstrap（重采样行 → 重跑调整后直接标准化），但每次重采样只算灵活路。
 - `Diagnostics.metrics: dict[str, float | int | str | bool | None]`（`Agent/deep_agent_tools/models.py:180`）是通用实测值容器；工具消息用 `result.model_dump()` 全量下发（`Agent/deep_agent_tools/runtime_updates.py:482`），metrics 天然对模型可见。
 - 收尾门禁 `Agent/deep_agent/finalization.py` 已有 step 0 的诊断/估计规则（`effect_question_without_diagnose`、`effect_question_without_estimation`、`primary_not_estimation_result`、`estimation_graph_not_diagnosed`），没有任何函数形式判据。
 - 系统提示 `Agent/deep_agent/prompts.py::MANDATORY_ALGORITHM_INSTRUCTION` 只要求“诊断 → 估计”，不要求对比线性与灵活两路。
@@ -66,7 +66,7 @@ Deep Agent 流程
 每次重采样同时拟合并计算两路效应：
 
 - 线性路：以 `treatment + parents(treatment)` 为设计矩阵的 OLS，取 treatment 系数（与 `backdoor_ols` 同式同列）。
-- 灵活路：现有 g-computation（结局方程按 `outcome_model`）。
+- 灵活路：调整后直接标准化，结局方程按 `outcome_model`，调整集为处理变量的全部父节点。
 - 每折差值 `d_b = effect_lin_b − effect_flex_b`。
 
 输出到 `diagnostics_metrics`：
