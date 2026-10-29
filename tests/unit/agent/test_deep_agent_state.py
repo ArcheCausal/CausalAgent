@@ -29,7 +29,7 @@ ANALYSIS_PARENT = {
 def test_analysis_route_requires_algorithm_but_leaves_rag_optional() -> None:
     """分析运行强制算法调用，但知识库检索仍由 Agent 自主判断。"""
 
-    projected = to_deep_agent_input({**ANALYSIS_PARENT, "route_decision": "fold"})
+    projected = to_deep_agent_input({**ANALYSIS_PARENT, "route_decision": "data_processing"})
 
     assert MANDATORY_ALGORITHM_INSTRUCTION in [
         message["content"] for message in projected["messages"]
@@ -57,7 +57,7 @@ def test_web_switch_does_not_change_projected_messages() -> None:
 
     projections = [
         to_deep_agent_input(
-            {**ANALYSIS_PARENT, "route_decision": "fold", "web_search_enabled": enabled}
+            {**ANALYSIS_PARENT, "route_decision": "data_processing", "web_search_enabled": enabled}
         )
         for enabled in (True, False, None)
     ]
@@ -128,7 +128,7 @@ def test_linearity_signal_and_preprocess_report_reach_the_algorithm_prompt() -> 
     projected = to_deep_agent_input(
         {
             **ANALYSIS_PARENT,
-            "route_decision": "fold",
+            "route_decision": "data_processing",
             "preprocess_summary": "非线性度 ratio 3.19，以非线性机制为主。",
             "analysis_parameters": {"target": "y", "nonlinearity": nonlinearity},
         }

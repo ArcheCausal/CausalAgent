@@ -58,7 +58,8 @@ async def continuous_revisions(job, base, report):
     from langgraph.types import interrupt
     from Agent.causal_agent.postgres_checkpointer import open_checkpoint_pool, build_checkpointer
     from Agent.data_processing.graph import run_data_processing_child
-    from Agent.data_processing.parameters import PROCESSING_STATE_VERSION, apply_parameter_patch, sandbox_request_id
+    from Agent.data_processing.parameters import PROCESSING_STATE_VERSION, sandbox_request_id
+    from tests.support.research_specs import commit
     from Agent.data_processing.persistence import read_parameter_answer
     from Agent.deep_agent.context import AgentRunContext
     from Agent.deep_agent.state import ProjectDeepAgentState
@@ -93,7 +94,7 @@ async def continuous_revisions(job, base, report):
                 trusted = await asyncio.to_thread(read_parameter_answer, runtime.context,
                     question_id=question_id, answer=answer)
                 require(trusted['answer'] == text, 'trusted_answer_mismatch')
-                parameters, history = apply_parameter_patch(
+                parameters, history = commit(
                     state['analysis_parameters'], state['analysis_parameter_changes'], patch=patch,
                     job_id=job_id, source_input_id=trusted['source_input_id'],
                 )
@@ -202,19 +203,32 @@ def confirm_and_save(job, parameters, changes, data):
 
 
 async def validate_and_bind(job, candidate, parameters, changes, kwargs):
+    from langgraph.graph import StateGraph, START, END
     from langgraph.runtime import Runtime
     from Agent.data_processing.graph import validate_dataset_node, bind_dataset_node
+    from Agent.deep_agent.context import AgentRunContext
     from Agent.deep_agent_tools.adapters import build_default_adapters
     from Agent.deep_agent_tools.registry import build_default_registry
     state = {'analysis_parameters': parameters, 'analysis_parameter_changes': changes,
         'data_processing_candidate_id': candidate['dataset_id'],
         'data_processing_semantic_identity': kwargs['semantic_identity'],
         'data_processing_confirmed_plan_version': kwargs['plan_version']}
-    runtime = Runtime(context=context_for(identity_for(job)))
-    state.update(await validate_dataset_node(state, runtime=runtime,
-        registry=build_default_registry(build_default_adapters(executor=None))))
+    registry = build_default_registry(build_default_adapters(executor=None))
+    async def validate(state, runtime):
+        return {**state, **await validate_dataset_node(state, runtime=runtime, registry=registry)}
+    async def bind(state, runtime):
+        require(state['dataset_validation_status'] == 'accepted', 'candidate_validation_failed')
+        return {**state, **await bind_dataset_node(state, runtime=runtime)}
+    validate.__annotations__['runtime'] = Runtime[AgentRunContext]
+    bind.__annotations__['runtime'] = Runtime[AgentRunContext]
+    builder = StateGraph(dict, context_schema=AgentRunContext)
+    builder.add_node('validate', validate)
+    builder.add_node('bind', bind)
+    builder.add_edge(START, 'validate')
+    builder.add_edge('validate', 'bind')
+    builder.add_edge('bind', END)
+    state = await builder.compile().ainvoke(state, context=context_for(identity_for(job)))
     require(state['dataset_validation_status'] == 'accepted', 'candidate_validation_failed')
-    state.update(await bind_dataset_node(state, runtime=runtime))
     return state
 
 
@@ -333,6 +347,8 @@ async def replay_stale_parent(job, candidate, old_context, report, *, bound):
         require(restored['analysis_context']['analysis_context_id'] == current_context_id, 'parent_restored_old_context')
         require(restored['context_resolution']['analysis_context_id'] == current_context_id, 'resolution_not_restored')
         require(restored['analysis_parameters'] == parameters['analysis_parameters'], 'parent_final_parameters_not_restored')
+        require(restored['analysis_question'] == (parameters['analysis_parameters'].get('analysis_question') or ''),
+            'parent_final_question_not_restored')
         require([row['analysis_context_id'] for row in restored['analysis_context_index']] ==
             [old_context['analysis_context_id']], 'parent_history_index_not_restored')
         require(context_count(job['user_id'], job['session_id']) == count_before, 'parent_replay_duplicated_context')
@@ -361,8 +377,8 @@ async def verify(report):
     upload = client.post('/api/upload_file', data={'file': (BytesIO(data), 'parameters.csv', 'text/csv')})
     require(upload.status_code == 200 and upload.json['success'], 'upload_failed')
 
-    def new_job():
-        created, replay = job_service.create_job(user_id, session_id, 'Explicit synthetic parameter acceptance.',
+    def new_job(message='Explicit synthetic parameter acceptance.'):
+        created, replay = job_service.create_job(user_id, session_id, message,
             str(uuid4()), input_user_file_id=upload.json['user_file_id'], request_id=str(uuid4()))
         require(not replay, 'unexpected_job_replay')
         job = job_service.claim_next_job('parameter-worker')
@@ -419,7 +435,7 @@ async def verify(report):
     second, other, other_kwargs = confirm_and_save(new_job(), changed, [], data)
     forged = deepcopy(changes)
     for record in forged:
-        record['update_id'] = parameter_update_id(job_id=second['job_id'], source_input_id=record['source_input_id'])
+        record['update_id'] = parameter_update_id(job_id=second['job_id'], source_input_id=record['source_input_id'], changes=record['changes'], reason=record['reason'])
     try:
         save_candidate(identity_for(second), **{**other_kwargs, 'analysis_parameters': parameters, 'analysis_parameter_changes': forged})
     except DatasetPersistenceError as exc:
@@ -452,7 +468,8 @@ async def verify(report):
     report['active_test'] = 'legacy_postgres_checkpoints'
     await verify_legacy_checkpoints(report)
     report['active_test'] = 'original_tool_answer_sources'
-    from tests.acceptance.research_parameter_tool_sources import verify_tool_sources
+    from tests.acceptance.research_parameter_tool_sources import verify_spec_commits, verify_tool_sources
+    await verify_spec_commits(report, new_job)
     await verify_tool_sources(report, new_job)
     report['status'] = 'PASS'
 

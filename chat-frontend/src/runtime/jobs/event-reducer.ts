@@ -158,7 +158,10 @@ function parseProcessingPlan(value: unknown): ProcessingPlanSummary | null {
     target: typeof columns.target === 'string' ? columns.target : null,
     treatment: typeof columns.treatment === 'string' ? columns.treatment : null,
   }
-  return { summary: item.summary, observationUnit: item.observation_unit, transformations, variableSemantics, roleColumns, limitations }
+  const measurementColumns = typeof item.measurement_columns === 'object' && item.measurement_columns !== null
+    ? Object.fromEntries(Object.entries(item.measurement_columns).filter((entry): entry is [string, string | null] => entry[1] === null || typeof entry[1] === 'string'))
+    : {}
+  return { summary: item.summary, observationUnit: item.observation_unit, transformations, variableSemantics, roleColumns, measurementColumns, limitations }
 }
 
 export function waitingInputFromInteraction(

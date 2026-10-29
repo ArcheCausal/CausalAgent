@@ -34,7 +34,6 @@ from .fault_tolerance import (
     recover_report,
     recover_terminal_message,
     recover_tools_to_agent,
-    recover_fold_to_agent,
     recover_preprocess_to_agent,
     degrade_rag_adapter_result,
     degrade_web_search_adapter_result,
@@ -77,7 +76,7 @@ from Agent.data_processing.graph import (
     validate_dataset_node,
     validation_router,
 )
-from Agent.data_processing.parameters import execution_parameters
+from Agent.data_processing.parameters import execution_parameters, PROCESSING_GRAPH_NAME
 from Agent.deep_agent_tools.models import (
     AlgorithmResult,
     EvidenceResult,
@@ -92,12 +91,66 @@ DEEP_AGENT_CHECKPOINT_NAMESPACE = ""
 
 
 
+def _add_data_processing_stage(workflow: StateGraph, *, agent: Any, registry: Any) -> None:
+    """注册统一的数据处理、独立校验和绑定阶段。"""
+    workflow.add_node(
+        "data_processing",
+        bind_subgraph_node(
+            data_processing_parent_node,
+            event_node_name="data_processing",
+            agent=agent,
+            registry=registry,
+        ),
+        timeout=timeout(run_timeout=1800, idle_timeout=300),
+    )
+    workflow.add_node(
+        "validate_dataset",
+        bind_node(
+            validate_dataset_node,
+            event_node_name="validate_dataset",
+            registry=registry,
+        ),
+        timeout=timeout(run_timeout=180, idle_timeout=80),
+    )
+    workflow.add_node(
+        "bind_dataset",
+        bind_node(
+            bind_dataset_node,
+            event_node_name="bind_dataset",
+        ),
+        timeout=timeout(run_timeout=120, idle_timeout=60),
+    )
+    workflow.add_node(
+        "data_processing_failed",
+        dataset_failure_node,
+    )
+    workflow.add_conditional_edges(
+        "data_processing",
+        guarded_router(_data_processing_router),
+        {"validate": "validate_dataset", "failed": "data_processing_failed"},
+    )
+    workflow.add_conditional_edges(
+        "validate_dataset",
+        guarded_router(validation_router),
+        {
+            "bind": "bind_dataset",
+            "retry": "data_processing",
+            "failed": "data_processing_failed",
+        },
+    )
+    workflow.add_edge("bind_dataset", "preprocess")
+    workflow.add_edge("data_processing_failed", END)
+
+
 def build_graph(
     llm: "ChatOpenAI",
     mcp_tools: list,
     rag_tools: list,
     checkpointer,
     rag_available: bool = True,
+    *,
+    data_processing_agent: Any,
+    registry: Any,
 ):
     """
     构建父图。
@@ -108,7 +161,6 @@ def build_graph(
 
     streaming_llm = llm.model_copy(update={"streaming": True})
     agent_node_with_llm = bind_node(nodes.agent_node, event_node_name="agent", llm=llm)#将普通节点函数绑定llm，这些普通节点函数内部要调用大模型，但 LangGraph 执行节点时主要只传一个参数：state
-    fold_node_with_llm = bind_node(nodes.fold_node, event_node_name="fold", llm=llm)
     preprocess_node_with_llm = bind_node(nodes.preprocess_node, event_node_name="preprocess", llm=llm)
     mcp_subgraph = build_mcp_subgraph(llm=llm, mcp_tools=mcp_tools)#创建mcp子图
     rag_subgraph = build_rag_subgraph(
@@ -153,17 +205,6 @@ def build_graph(
             event_node_name="agent",
             timeout_ms=45_000,
         ),#最后失败怎么兜底
-    )
-    workflow.add_node(
-        "fold",
-        fold_node_with_llm,
-        retry_policy=short_retry(),
-        timeout=timeout(run_timeout=120, idle_timeout=45),
-        error_handler=guarded_error_handler(
-            recover_fold_to_agent,
-            event_node_name="fold",
-            timeout_ms=120_000,
-        ),
     )
     workflow.add_node(
         "preprocess",
@@ -253,12 +294,16 @@ def build_graph(
         ),
     )
 
+    _add_data_processing_stage(
+        workflow, agent=data_processing_agent, registry=registry,
+    )
+
     workflow.set_entry_point("agent")#节点入口
     workflow.add_conditional_edges(#节点的边
         "agent",#从agent节点出发
         guarded_router(edges.decision_router),#由decision_router函数决定路由？
         {
-            "fold": "fold",#"路由函数返回值": "要跳转到的节点名"
+            "data_processing": "data_processing",#"路由函数返回值": "要跳转到的节点名"
             "normal_chat": "normal_chat",
             "postprocess": "postprocess",
             "report": "report",
@@ -270,25 +315,17 @@ def build_graph(
         "context_switch",
         guarded_router(edges.decision_router),
         {
-            "fold": "fold",
+            "data_processing": "data_processing",
             "normal_chat": "normal_chat",
             "report": "report",
             "inquiry_answer": "inquiry_answer",
-            # context_switch 正常只写入 fold/report/inquiry_answer/normal_chat；
+            # context_switch 正常只写入 data_processing/report/inquiry_answer/normal_chat；
             # 这里为异常状态保留一个确定性的终点，避免自环。
             "context_switch": "normal_chat",
             "postprocess": "report",
         },
     )
-    workflow.add_conditional_edges(
-        "fold",
-        guarded_router(edges.fold_router),#由fold_router函数决定路由
-        {
-            "preprocess": "preprocess",
-            "agent": "agent",
-            "normal_chat": "normal_chat",
-        }
-    )
+
 
     workflow.add_edge("preprocess", "mcp")#从preprocess节点到mcp子图节点的边
 
@@ -326,7 +363,7 @@ def build_graph(
     if checkpointer is None or checkpointer is False:
         raise RuntimeError("必须提供 PostgreSQL Checkpointer，禁止无持久化降级")
 
-    return workflow.compile(checkpointer=checkpointer)
+    return workflow.compile(checkpointer=checkpointer, name=PROCESSING_GRAPH_NAME)
 
 
 
@@ -335,6 +372,9 @@ def create_graph_from_tools(
     mcp_tools: list,
     checkpointer,
     rag_available: bool = True,
+    *,
+    data_processing_agent: Any,
+    registry: Any,
 ):
     """使用已加载的 MCP tools 构建父图，返回可直接执行的 compiled graph。"""
     from Agent.tool_node.rag_tool_registry import build_rag_tools
@@ -346,6 +386,8 @@ def create_graph_from_tools(
         rag_tools=rag_tools,
         checkpointer=checkpointer,
         rag_available=rag_available,
+        data_processing_agent=data_processing_agent,
+        registry=registry,
     )
 
 
@@ -1121,8 +1163,7 @@ def build_deep_agent_parent_graph(
 ) -> Any:
     """构建新 Job 路径：原始输入 → 数据处理校验/绑定 → Deep Agent → Gate → report。
 
-    旧 ``build_graph`` 保留给兼容链路；worker 新运行时显式使用本构造器，
-    因而不会再加载 slot stdio MCP 或固定 mcp→rag→web 流水线。
+    worker 使用本构造器；研究参数由数据处理 Agent 管理，入口不预先提取参数。
     """
 
     if checkpointer is None or checkpointer is False:
@@ -1142,17 +1183,6 @@ def build_deep_agent_parent_graph(
         ),
     )
     workflow.add_node(
-        "fold",
-        bind_node(nodes.fold_node, event_node_name="fold", llm=llm),
-        retry_policy=short_retry(),
-        timeout=timeout(run_timeout=120, idle_timeout=45),
-        error_handler=guarded_error_handler(
-            recover_fold_to_agent,
-            event_node_name="fold",
-            timeout_ms=120_000,
-        ),
-    )
-    workflow.add_node(
         "preprocess",
         bind_node(nodes.preprocess_node, event_node_name="preprocess", llm=llm),
         retry_policy=short_retry(),
@@ -1163,36 +1193,8 @@ def build_deep_agent_parent_graph(
             timeout_ms=180_000,
         ),
     )
-    workflow.add_node(
-        "data_processing",
-        bind_subgraph_node(
-            data_processing_parent_node,
-            event_node_name="data_processing",
-            agent=data_processing_agent,
-            registry=registry,
-        ),
-        timeout=timeout(run_timeout=1800, idle_timeout=300),
-    )
-    workflow.add_node(
-        "validate_dataset",
-        bind_node(
-            validate_dataset_node,
-            event_node_name="validate_dataset",
-            registry=registry,
-        ),
-        timeout=timeout(run_timeout=180, idle_timeout=80),
-    )
-    workflow.add_node(
-        "bind_dataset",
-        bind_node(
-            bind_dataset_node,
-            event_node_name="bind_dataset",
-        ),
-        timeout=timeout(run_timeout=120, idle_timeout=60),
-    )
-    workflow.add_node(
-        "data_processing_failed",
-        dataset_failure_node,
+    _add_data_processing_stage(
+        workflow, agent=data_processing_agent, registry=registry,
     )
     workflow.add_node(
         "deep_agent",
@@ -1272,7 +1274,7 @@ def build_deep_agent_parent_graph(
         "agent",
         guarded_router(edges.decision_router),
         {
-            "fold": "fold",
+            "data_processing": "data_processing",
             "normal_chat": "normal_chat",
             "postprocess": "report",
             "report": "report",
@@ -1284,7 +1286,7 @@ def build_deep_agent_parent_graph(
         "context_switch",
         guarded_router(edges.decision_router),
         {
-            "fold": "fold",
+            "data_processing": "data_processing",
             "normal_chat": "normal_chat",
             "report": "report",
             "inquiry_answer": "inquiry_answer",
@@ -1292,30 +1294,7 @@ def build_deep_agent_parent_graph(
             "postprocess": "report",
         },
     )
-    workflow.add_conditional_edges(
-        "fold",
-        guarded_router(edges.fold_router),
-        {
-            "preprocess": "data_processing",
-            "agent": "agent",
-            "normal_chat": "normal_chat",
-        },
-    )
-    workflow.add_conditional_edges(
-        "data_processing",
-        guarded_router(_data_processing_router),
-        {"validate": "validate_dataset", "failed": "data_processing_failed"},
-    )
-    workflow.add_conditional_edges(
-        "validate_dataset",
-        guarded_router(validation_router),
-        {
-            "bind": "bind_dataset",
-            "retry": "data_processing",
-            "failed": "data_processing_failed",
-        },
-    )
-    workflow.add_edge("bind_dataset", "preprocess")
+
     workflow.add_edge("preprocess", "deep_agent")
     workflow.add_edge("deep_agent", "finalization_gate")
     workflow.add_conditional_edges(
@@ -1324,10 +1303,9 @@ def build_deep_agent_parent_graph(
         {"deep_agent": "deep_agent", "report": "report"},
     )
     workflow.add_edge("report", END)
-    workflow.add_edge("data_processing_failed", END)
     workflow.add_edge("normal_chat", END)
     workflow.add_edge("inquiry_answer", END)
-    return workflow.compile(checkpointer=checkpointer, store=store)
+    return workflow.compile(checkpointer=checkpointer, store=store, name=PROCESSING_GRAPH_NAME)
 
 
 agent_graph = None

@@ -144,6 +144,16 @@ function other(): void {
           <dt>处理变量对应列</dt>
           <dd>{{ waiting.plan.roleColumns.treatment }}</dd>
         </template>
+        <template v-if="Object.keys(waiting.plan.measurementColumns ?? {}).length">
+          <dt>原始测量列处理</dt>
+          <dd>
+            <ul>
+              <li v-for="(output, source) in waiting.plan.measurementColumns" :key="source">
+                {{ source }}：{{ output === null ? '不传递原始测量类型' : output === source ? '保留' : `重命名为 ${output}` }}
+              </li>
+            </ul>
+          </dd>
+        </template>
         <dt>处理步骤</dt>
         <dd>
           <ul>

@@ -6,6 +6,10 @@
 
 ## Worker 启动与运行时边界
 
+模型按职责分为两套配置。外层图使用 `MODEL`、`BASE_URL` 和密钥文件中的 `API_KEY`，明确关闭思考，统一结构化输出入口继续关闭思考。数据处理 Agent 与因果分析 Deep Agent 共用 `DEEP_AGENT_MODEL`、`DEEP_AGENT_BASE_URL` 和独立的 `DEEP_AGENT_API_KEY`，使用 Responses API；`DEEP_AGENT_REASONING_EFFORT` 默认 `high`，允许 `none`、`low`、`high`、`max`，非法值在 worker 初始化时直接失败。这两套模型分别执行各自节点，不增加研究参数审查模型。开启思考后的工具调用历史仍由 Agent 消息与 checkpoint 保存，公共事件不得输出推理内容。
+
+DeepSeek 思考模式不接受强制指定工具或 `required`。模型适配器将思考模式下的强制工具选择改为 `auto`，包括 LangChain ToolStrategy 产生的 `any`；关闭思考时保留原选择。工具 schema、结构化结果校验、参数待处理门禁和最终决策门禁继续生效，自然语言回复不能代替有效提交。接口约束见 [DeepSeek 工具选择说明](https://api-docs.deepseek.com/api/create-chat-completion/)。
+
 `python -m app.agent.worker` 进入 worker bootstrap。生产路径在领取 Job 前按以下顺序初始化：
 
 ```text
@@ -32,24 +36,26 @@ MySQL readiness
 数据分析主路径为：
 
 ```text
-agent → fold → data_processing → validate_dataset → bind_dataset → preprocess → deep_agent → finalization_gate → report
+agent → data_processing → validate_dataset → bind_dataset → preprocess → deep_agent → finalization_gate → report
 ```
 
-父图直接表达的其余路径为 `agent → report`（按当前分析上下文重新生成报告）、`agent → context_switch` 与 `context_switch → fold / report / inquiry_answer / normal_chat`（解析并切换分析上下文后再继续）；普通聊天和报告追问仍由 `normal_chat`、`inquiry_answer` 路径结束。新分析先把冻结的原始 CSV 和研究目标交给数据处理子图。数据处理 Agent 可通过现有 interrupt/resume 契约澄清观察单位和转换语义；它只能调用受控领域工具，不能使用内置 Shell、文件写入工具或通用子 Agent。脚本由独立控制服务经 OpenSandbox API 在 Python 3.11 处理镜像中运行，原始输入只读，沙盒创建请求默认拒绝所有外连。候选 CSV、脚本和说明先写入 MySQL；独立校验节点读取实际文件，通过后才绑定 prepared_dataset_id 并重建分析画像。因果分析阶段的所有算法调用使用同一份已校验数据，不在 MCP 或算法适配器中改写输入。
+父图直接表达的其余路径为 `agent → report`（按当前分析上下文重新生成报告）、`agent → context_switch` 与 `context_switch → data_processing / report / inquiry_answer / normal_chat`（解析并切换分析上下文后再继续）；普通聊天和报告追问仍由 `normal_chat`、`inquiry_answer` 路径结束。新分析先把冻结的原始 CSV 和研究目标交给数据处理子图。数据处理 Agent 可通过现有 interrupt/resume 契约澄清观察单位和转换语义；它只能调用受控领域工具，不能使用内置 Shell、文件写入工具或通用子 Agent。脚本由独立控制服务经 OpenSandbox API 在 Python 3.11 处理镜像中运行，原始输入只读，沙盒创建请求默认拒绝所有外连。候选 CSV、脚本和说明先写入 MySQL；独立校验节点读取实际文件，通过后才绑定 prepared_dataset_id 并重建分析画像。因果分析阶段的所有算法调用使用同一份已校验数据，不在 MCP 或算法适配器中改写输入。
 
 候选数据集和提交后的脚本正文保存在 MySQL file_objects，analysis_job_datasets 记录候选 revision、来源 hash、对象引用和验证报告，Job 保存最终选中产物 ID。独立校验器先流式检查 CSV 行列结构，并限制最多 1,000,000 个数据单元格，再将文件载入 DataFrame 计算画像。PostgreSQL checkpoint 保存当前阶段、运行标识、产物引用、方案说明及尚待执行的脚本草稿，不保存 CSV 正文或 DataFrame。每次脚本执行都创建短期沙盒；用户等待答复时不会保留正在运行的命令。恢复时按原始文件与已保存脚本重新建立工作区；候选幂等身份包含文件、脚本及附带确认版本的规范化元数据，重复提交返回原 revision。数据处理子图使用以 Job 为 thread、以处理运行标识分隔的 namespace，因此现有 Job 清理 outbox 可一次清理该 Job 的全部处理 checkpoint。
 
-父 State 和处理子 State 均保存 analysis_parameters 与 analysis_parameter_changes。fold 仅提取初始研究参数，其输出 schema 拒绝冲突测量类型和空证据，结构不合法时使用统一入口的有界重试；数据澄清和方案确认中的自由文本均经统一结构化入口提取修订，来源 ID 由 MySQL 输入账本提供；读取时通过已持久化的 interrupt 事件关联外层中断 ID 与内层工具调用 ID，不能直接把两者视为同一个问题 ID。缺席字段保持原值，显式 null 清空，实际变化才追加 revision；相同来源重放去重，冲突拒绝。参数版本不包含派生画像。含义或范围变化使旧确认失效，歧义未解决时不能确认或执行。
+研究参数由数据处理 Agent 通过唯一的 `set_research_spec` 工具提交。父图入口只判断会话意图，不提取研究参数；子图从当前 Job 的真实初始输入及必要的已有研究上下文开始，先用 `inspect_frozen_dataset` 获取完整原始列结构和受限预览，再提交完整参数草稿。`ResearchSpec` 同时表达角色、研究问题、观察单位、时间范围、聚合范围和测量声明；程序检查结构与列引用，解析成功后保存有效参数。确定性错误直接返回同一 Agent 纠正，只有真实歧义才通过现有提问工具暂停。解析失败不能以空参数继续分析。
 
-初始提取单独提供 `observation_unit` 保存用户明确说明的行级观察单位，并直接传入研究参数。`measurement_semantics` 只保存单个变量的测量类型声明；“每行代表一件工件的一次独立加工”属于观察单位，没有其他明确列声明时测量语义列表为空。此边界由 schema 说明和提取提示表达，不通过丢弃非法声明或放宽独立校验修复。
+测量声明区分 `columns` 与 `all_input_columns`。后者的列列表必须为空，由程序依据冻结 CSV 的完整列集合展开；“全部11列”不能保存为列名。完整草稿整体替换有效测量声明，纠正错误条目时不会保留旧条目。`target`、`treatment` 保存研究角色名称，可以与原始或输出列名不同；参与范围、算法和观察单位不属于角色。用户未修改的字段应保留在完整草稿中，明确取消使用 null；程序不使用自然语言关键词代替模型理解。
 
-初始提取与两种交互入口采用相同角色定义：`target` 是用户指定的目标或结果变量，`treatment` 是用户指定的处理或干预变量。分析范围、算法名称、处理要求及完整指令不是角色值；用户变量名称无需与 CSV 列名相同，提取阶段不做列名成员检查或自动映射。初始未指定角色返回 null；交互修订未提及角色保持原值，明确取消时只清空取消范围内的角色。“全部作为节点参与因果发现”表达参与范围，可以与已有角色并存，不能直接保存为角色名或据此清空已有角色。以上通过提取提示说明，不增加自然语言关键词拦截或第二次语义审核调用。
+明确的新研究意图可以同时更新 `analysis_question` 和 `aggregation_scope`；未改变的角色、观察单位及时间范围保持当前值。草稿方案中的提议只有在用户实际接受后才能成为参数；只接受 A 时不能同时写入未接受的 B。处理完成及已绑定产物恢复时，父图的研究问题同步为最终参数中的问题，后续分析读取同一份含义。
 
-参数修订中的每个修改项必须包含 `field`、`value` 和外层 `evidence`；`value` 保存用户本次指定、修正或接受的参数值，可以结合当前问题和已有参数理解。外层 `evidence` 说明答复为何支持这项修改，可以引用原文或概括确认关系；`measurement_semantics.value` 中的每条列声明还必须包含 `column`、`kind` 和内层 `evidence`，内层说明对应列的测量类型依据。两层证据均需为非空文本，可以复用说明，不要求逐字出现在答复中。用户确认当前问题或当前展示方案中的提议后，可以提取该提议中的具体参数；未接受的提议不能作为修改依据；存在实际歧义时返回具体澄清问题。方案确认自由文本的提取上下文同时包含确认提示和当前展示的方案摘要，普通澄清入口继续传入当前问题。
+工具接收期望修订号、真实输入引用和变更原因（首次提交、用户修改、解释纠正），不接受输入正文或其他 State 写入。输入引用必须已经由程序交给 Agent，并由 MySQL 账本再次核验 Job 归属；澄清答复仍通过持久化 interrupt 关联外层中断与工具调用。程序计算实际差异，只有变化才追加修订，允许同一真实输入支持后续纠正。当前版本的相同提交不增加记录；紧邻提交的相同快照可重放，过期或冲突草稿拒绝。修订链与候选绑定均包含当前流程版本，画像不参与研究参数身份。
 
-提取提示提供完整确认、部分确认和修改部分提议的示例。结构校验通过后，数据处理交互入口把确定性参数校验传给异步结构化输出入口；重复字段、非法字段值、非法测量类型、冲突声明和缺少具体澄清问题使用专用提取异常。结构错误与这些可纠正的参数错误共享最多两次提取调用，纠错反馈只包含安全的字段路径和规则；证据改写、标点变化和概括说明不会触发重试。来源身份、修订历史和重放一致性错误不进入这条重试路径。最终提取失败记为 `parameter_extraction_failed`，父图停止处理；worker 将所有数据处理失败转换为现有 `error` 终态，由失败事务保存 `failed`、错误消息和可重放事件。前端据此展示失败；参数提取失败明确显示“参数解析失败”及“本次未启动因果分析”，不再生成成功终态。
+存在待处理输入时，参数提交必须引用该输入；引用较早来源会被拒绝且不修改参数、修订链或待处理状态。处理完最新输入后，才可引用已交付的原始输入进行解释纠正，避免把新答复的变更错误记在旧来源上。
 
-处理运行身份只依赖 Job 和冻结输入；研究参数变化不切换 checkpoint namespace。初始参数只写入首次子图启动，恢复及校验重试优先使用已有子 State。父包装节点显式接收最终参数、修订链和候选身份，再幂等完成上下文绑定；已有历史结果的研究不能被改写含义，必要时新建上下文。候选 metadata 保存最终参数与方案身份，独立校验和绑定逐次核对；已绑定产物恢复时同时恢复对应参数。无法识别的旧格式处理 checkpoint 明确拒绝继续。沙盒 API 与容量事实见 [沙盒控制服务](sandbox-controller.md)。
+提问和方案确认工具只接收真实答复，不再调用独立的参数提取模型。自由文本进入 checkpoint 后立即成为待处理输入，使旧确认和候选失效；同一 Agent 通过参数工具处理该输入后，方案工具才能保存绑定当前参数身份的方案。无参数变化也必须记录输入已处理。参数变化、方案变化或未处理输入均不能复用旧执行资格；按钮对有效版本的确认不重新解释研究参数。来源、修订链、文件身份和租约冲突直接失败；解释纠正与工具循环继续受现有调用预算及完成纠正上限限制。
+
+处理运行身份只依赖 Job 和冻结输入；研究参数变化不切换 checkpoint namespace。初始子图仅保存空参数与可信待处理输入，恢复及校验重试优先使用已有子 State。父包装节点显式接收最终参数、修订链和候选身份，再幂等完成上下文绑定；已有历史结果的研究不能被改写含义，必要时新建上下文。候选 metadata 保存最终参数与方案身份，独立校验和绑定逐次核对；已绑定产物恢复时同时恢复对应参数。无法识别的旧格式处理 checkpoint 明确拒绝继续。沙盒 API 与容量事实见 [沙盒控制服务](sandbox-controller.md)。
 
 处理阶段的开始进度事件另行包含当前 attempt 和父任务 ID。恢复或校验重试产生新的阶段实例时使用不同事件键，同次任务重放仍可去重；公开阶段事件的身份不改变子图 checkpoint 或沙盒申请身份。
 
@@ -69,17 +75,19 @@ cleanup outbox 在同一次清理中删除父图 Job thread 和独立的 Deep Ag
 
 重复保存相同方案保留确认及候选；方案正文或研究语义变化清空有效确认快照、版本、当前候选引用及执行说明。脚本变化保留方案确认，但清空候选引用和说明，必须重新执行；执行失败同样清空当前候选，成功保存后只为本次候选建立新说明。历史候选不删除。工具按轮顺序执行，同一模型响应中的多个工具调用会收到未执行反馈，避免它们同时读取旧 State。
 
-子图结束 middleware 重新核对当前方案、确认快照与版本、MySQL 确认凭据、候选归属及研究参数、语义身份、脚本 hash 和说明绑定。缺少确认时调用原有确认工具并使用原生 `interrupt`；脚本未执行时要求模型先执行，再申请结束；未解决歧义继续调用原有澄清工具。纠正最多三次，计数随 checkpoint 保存，不重置模型、工具预算或父图独立校验重试。来源、hash、租约和持久化记录冲突直接失败；父节点的一致性检查继续保留。不新增数据库列、迁移、人工中断层、Job thread 或数据处理 checkpoint namespace，旧 checkpoint 不回填新确认快照。
+子图结束 middleware 重新核对当前方案、确认快照与版本、MySQL 确认凭据、候选归属及研究参数、语义身份、脚本 hash 和说明绑定。缺少确认时调用原有确认工具并使用原生 `interrupt`；脚本未执行时要求模型先执行，再申请结束；未解决歧义继续调用原有澄清工具。纠正最多三次，计数随 checkpoint 保存，不重置模型、工具预算或父图独立校验重试。来源、hash、租约和持久化记录冲突直接失败；父节点的一致性检查继续保留。不新增数据库列、迁移、人工中断层、Job thread 或数据处理 checkpoint namespace，旧 checkpoint 不迁移；新父图恢复前检查版本，不支持时提示重新发起任务，历史记录和产物保留。
 
 研究参数的 `target`、`treatment` 保存用户表达的角色名称，可以与 CSV 列名不同。数据处理 Agent 在方案的 `role_columns` 中明确记录这些角色对应的输出列；映射随方案展示、确认并保存到候选 metadata，纳入已有 `plan_version`。未指定的角色保持为空；角色已经是实际列名时可以直接使用。独立校验先解析映射，再检查实际列的存在性、角色冲突和字段语义。`preprocess`、Deep Agent 输入和最终决策校验共用 `execution_parameters()` 生成执行参数副本，算法与 ATE 使用同一组列名；原始研究参数及修订身份保持不变，报告的数据处理事实保留映射。该流程不增加模型调用、数据库字段或确认阶段。
 
-独立校验失败时，父图从已有报告读取错误代码及说明、`research_roles`、`role_columns`、解析后的 `target` 和 `treatment`、候选 CSV 实际 `columns` 及算法兼容性结果，交回数据处理 Agent，最多进行三轮修正。这些内容只进入内部模型上下文，不进入公开 SSE 或普通日志；正常交互仍返回用户答复，不追加完整参数快照。角色名称与实际列名不同或映射错误时，通过现有方案工具修正 `role_columns`，按原流程确认并重新执行；不改写研究角色，也不要求用户重复选择。脚本遗漏已确认方案要求的字段时，在原确认范围内修复；用户信息有多个合理含义时提出具体澄清问题。已有明确答复与保存角色矛盾仍属于参数提取问题，现有工具不能直接修订已提交研究参数；不得忽略校验或默认清空角色继续分析，仍失败时按现有上限如实结束。超出已确认语义范围的处理需要再次提问和确认；校验通过后直接绑定。`plan_version` 继续绑定确认范围，`prepared_dataset_id` 继续指定实际分析 CSV。因果分析 Agent 不会反向启动数据重处理。公开事件按字段和大小限制保留方案版本及摘要，不公开脚本或内部身份。沙盒预览只读取有限前缀，在 UTF-8 字符边界截断并标注；完整输出超过限制时仍拒绝保存。
+方案的 `measurement_columns` 显式映射原始列到保留或重命名后的输出列；null 表示删除或不再继承，缺席默认同名保留。聚合或计算派生列不自动继承原始测量类型。参数工具先依据真实输入列解析研究声明，方案工具核对映射来源，独立校验对映射后的输出声明检查列存在性和冲突。通过的 `semantic_kinds` 保存为权威输出快照；画像重建读取该快照，不再要求展开后的每个列名逐字出现在证据文本中。映射经公共事件白名单和前端卡片展示，并纳入方案版本。
+
+独立校验失败时，父图从已有报告读取错误代码及说明、`research_roles`、`role_columns`、解析后的 `target` 和 `treatment`、候选 CSV 实际 `columns` 及算法兼容性结果，交回数据处理 Agent，最多进行三轮修正。这些内容只进入内部模型上下文，不进入公开 SSE 或普通日志；正常交互仍返回用户答复，不追加完整参数快照。角色名称与实际列名不同或映射错误时，通过现有方案工具修正 `role_columns`，按原流程确认并重新执行；不改写研究角色，也不要求用户重复选择。脚本遗漏已确认方案要求的字段时，在原确认范围内修复；用户信息有多个合理含义时提出具体澄清问题。已有明确答复与保存参数矛盾时，使用 `set_research_spec` 纠正，再更新方案并重新确认；不要求用户重复回答明确的问题，不得忽略校验或默认清空角色，仍失败时按现有上限如实结束。超出已确认语义范围的处理需要再次提问和确认；校验通过后直接绑定。`plan_version` 继续绑定确认范围，`prepared_dataset_id` 继续指定实际分析 CSV。因果分析 Agent 不会反向启动数据重处理。公开事件按字段和大小限制保留方案版本及摘要，不公开脚本或内部身份。沙盒预览只读取有限前缀，在 UTF-8 字符边界截断并标注；完整输出超过限制时仍拒绝保存。
 
 ## 分析上下文与追问路由
 
 `Session`、`AnalysisContext`、`Job` 和 checkpoint 各管一段事实：Session 是用户可见的会话容器；AnalysisContext 是 MySQL 中的跨 Job 业务事实，保存创建时的文件快照、分析参数、最新结构化算法摘要、RAG/Web 证据摘要和最新报告引用；Job 是一次具体执行并绑定一个上下文；checkpoint 只负责当前 Job 的执行恢复、中间 State 和虚拟文件。一个 Session 可以拥有多个 AnalysisContext，`sessions.active_analysis_context_id` 只表示当前默认上下文。
 
-`fold` 只提取初始参数，数据处理完成后由现有父包装节点按最终参数绑定上下文，再进入独立校验与数据绑定。`preprocess` 只强读已绑定的数据集并重建画像，不切换上下文。切到不同上下文时清除旧数据绑定，同一上下文的幂等重放保留绑定；恢复已绑定产物时同时从数据库回填当前 Job 的上下文和最终参数。历史研究参数快照取自已有分析产物，普通聊天或报告追问不会遮住该快照。报告后的普通追问读取报告与分析事实，不重新读取 CSV；新 Job 不自动继承旧 Job 的处理数据。
+数据处理 Agent 统一维护参数，处理完成后由现有父包装节点按最终参数绑定上下文，再进入独立校验与数据绑定。`preprocess` 只强读已绑定的数据集并重建画像，不切换上下文。切到不同上下文时清除旧数据绑定，同一上下文的幂等重放保留绑定；恢复已绑定产物时同时从数据库回填当前 Job 的上下文和最终参数。历史研究参数快照取自已有分析产物，普通聊天或报告追问不会遮住该快照。报告后的普通追问读取报告与分析事实，不重新读取 CSV；新 Job 不自动继承旧 Job 的处理数据。
 
 `agent_node` 用一次结构化调用判断意图（`normal_chat`、`start_analysis`、`answer_report`、`revise_report`、`rerun_analysis`、`switch_analysis_context`、`clarify`），模型只输出意图、`context_hint` 和澄清问题；`route_decision` 由后端按固定映射生成，模型不能输出分析上下文 ID 或用户文件 ID，也不能直接选择图节点。节点输入是当前消息、最近有限聊天历史、当前 AnalysisContext 摘要和同一 Session 的历史上下文索引；索引只含文件名、目标变量、处理变量、报告标题、更新时间和简短摘要，提示词里不出现内部 ID。没有可引用报告时 `answer_report` 与 `revise_report` 回退到 `normal_chat`，结构化输出失败同样回退到 `normal_chat`。
 
@@ -193,7 +201,7 @@ CDFM 的输入准入检查确认数值存储和可计算性，不将整数列或
 |---|---|---|
 | `storage_type` | 实际 pandas dtype | 是否能作为数值输入 |
 | `statistical_features` | 整数性、非负性、基数、基数占比、低频、非有限值 | 统计提示，不决定测量含义 |
-| `measurement_semantics` | kind、source、status、候选含义及证据 | CSV 推断保持 unknown/uncertain；现有 fold 结构化调用摘录可在用户原话定位的声明，记录 user_description/user_stated，不等同额外确认 |
+| `measurement_semantics` | kind、source、status、候选含义及证据 | CSV 推断保持 unknown/uncertain；研究需求工具提交测量声明，独立校验后记录 validated_research_spec/user_stated，不等同额外确认 |
 
 `profile_thresholds` 明确：低基数为不同值数不超过 10；低频为取值频数不超过 5 或占非缺失值比例不超过 1%；高缺失为缺失比例大于 30%。低基数与低频独立计算，可以同时成立，不合并低频数值，不由整数和高唯一比推断标识符。画像不修改原数据。非线性检测依据实际数值 dtype、有限观测和至少 10 个不同值选择变量，不执行时提供原因；并列数值用平均秩分箱。图表对低基数数值使用按数值顺序排列的频数柱图，对其他数值使用直方图；字符串类别单独展示。
 
@@ -214,10 +222,10 @@ Deep Agent 使用 `ToolStrategy(FinalAnalysisDecision)` 生成 `structured_respo
 - provenance 属于当前 Job、attempt、lease、worker 与冻结输入；
 - 每个有效算法结果都有唯一取舍，主结果满足 outcome 约束。
 - 每个已登记算法调用都已有一致的终态结果；`pending`、`queued/running` 或缺少结果时禁止进入报告。
-- 分析运行（父图 `route_decision=fold`，含 `context_switch` 之后的 fold）在没有任何算法结果时，不得提交 `evidence_only` 或 `no_valid_algorithm`。
+- 分析运行（父图 `route_decision=data_processing`，含 `context_switch` 之后的数据处理路径）在没有任何算法结果时，不得提交 `evidence_only` 或 `no_valid_algorithm`。
 - `web_search_enabled=true` 时，分析运行必须有一次 `web_evidence_search` terminal 调用；允许真实返回无结果/不可用状态，但不能零调用完成。RAG 是否调用由 Agent 自主决策。
 
-进入 Deep Agent 的运行都是分析运行：`agent` 的 `start_analysis`/`rerun_analysis` 直接路由到 `fold`，`context_switch` 也会把 `route_decision` 改写成后续节点名。因此父图投影时按运行追加“必须至少调用一个算法工具”这一条系统约束。Web 调用要求写在固定系统提示中，按本次实际提供的工具是否包含 `web_evidence_search` 生效；可见性由可信运行上下文决定。RAG 不追加强制调用约束。
+进入 Deep Agent 的运行都是分析运行：`agent` 的 `start_analysis`/`rerun_analysis` 直接路由到 `data_processing`，`context_switch` 也会把 `route_decision` 改写成后续节点名。因此父图投影时按运行追加“必须至少调用一个算法工具”这一条系统约束。Web 调用要求写在固定系统提示中，按本次实际提供的工具是否包含 `web_evidence_search` 生效；可见性由可信运行上下文决定。RAG 不追加强制调用约束。
 
 最终决策的两套引用命名空间不混用：`result_assessments`、`primary_result_ref`、`conflicts.result_refs` 与 `revision_proposals.result_ref` 只接受本次运行返回的算法结果引用；RAG/Web 证据引用只能出现在 `revision_proposals.evidence_refs`。引用分工和按可见工具生效的 Web 调用要求写在固定系统提示中，Gate 继续独立按可信开关校验本 attempt 的真实调用记录；RAG 是否检索由 Agent 自主判断，避免模型把“证据不采用”写进算法结果取舍。
 

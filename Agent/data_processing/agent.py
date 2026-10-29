@@ -13,7 +13,6 @@ from deepagents import create_deep_agent
 from deepagents.middleware import FilesystemMiddleware
 from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command, interrupt
 from pydantic import Field
@@ -35,7 +34,7 @@ from Agent.deep_agent_tools.interaction import (
 from Agent.deep_agent_tools.models import ContractModel
 from Agent.data_processing.persistence import (
     read_candidate,
-    read_parameter_answer,
+    read_parameter_answer, read_research_inputs,
     require_current_plan_confirmation,
     save_candidate,
 )
@@ -44,12 +43,11 @@ from Agent.data_processing.lifecycle import (
     update_plan, update_script,
 )
 from Agent.data_processing.parameters import (
-    ParameterExtraction, apply_parameter_patch, extraction_patch,
-    parameter_identity, sandbox_request_id, validate_parameter_extraction,
+    ResearchSpecInput, ParameterContractError, commit_research_spec,
+    parameter_identity, sandbox_request_id,
 )
-from Agent.llm_structured_output import ainvoke_structured
 from Agent.data_processing.plans import (
-    build_processing_plan_version,
+    build_processing_plan_version, _answer_object,
     extend_data_processing_semantic_identity,
     plan_confirmation_matches,
 )
@@ -171,6 +169,11 @@ def _plan_tool() -> Any:
     async def call(runtime: Any, **kwargs: Any) -> Any:
         payload = ProcessingPlanInput.model_validate(kwargs)
         metadata = payload.model_dump(mode="json")
+        if not _research_ready(runtime.state):
+            return _tool_message(runtime, name="set_data_processing_plan", content="先检查冻结数据并通过 set_research_spec 提交参数和处理待处理输入。")
+        input_columns = runtime.state.get("data_processing_input_columns") or []
+        if set(metadata.get("measurement_columns", {})) - set(input_columns):
+            return _tool_message(runtime, name="set_data_processing_plan", content="measurement_columns 只能引用冻结输入的实际列名。")
         return Command(
             update={
                 "messages": [
@@ -181,6 +184,7 @@ def _plan_tool() -> Any:
                     )
                 ],
                 **update_plan(runtime.state, metadata),
+                "data_processing_plan_parameter_identity": parameter_identity(runtime.state["analysis_parameters"]),
             }
         )
 
@@ -241,89 +245,93 @@ def _execution_report_tool() -> Any:
     )
 
 
-def _parameter_extraction_prompt() -> ChatPromptTemplate:
-    """为两种答复入口提供同一份参数职责、确认语义和证据说明要求。"""
-    return ChatPromptTemplate.from_messages([
-        ("system", "你只提取用户此次明确补充或修正的研究参数。未提及字段不要输出；明确清空时 value 为 null。"
-         "target 表示用户指定的目标或结果变量；treatment 表示用户指定的处理或干预变量。"
-         "分析范围、算法名称、处理要求和完整指令不能作为这两个字段的值。用户使用的变量名称不必与 CSV 列名相同，提取阶段不进行列名成员检查，也不自行映射名称。"
-         "结合当前问题、本次答复和已有参数理解角色修订。明确指定时更新，未提及时保留，明确取消时只清空取消范围内的角色；不能因为答复没有角色名就清空已有角色。"
-         "全部变量参与结构发现可以与已指定的目标或干预角色并存。仅扩大参与分析的变量范围不等于撤销角色，不能据此输出角色的 null 修改；必须有本次明确取消该角色的依据。"
-         "例如，‘目标变量是收入’只更新 target 为‘收入’；‘全部作为节点参与因果发现’只说明分析范围，不生成角色值，也不无条件清空已有角色；"
-         "‘不指定目标变量’或‘取消之前的目标，只做无目标的结构发现’明确清空 target，但不自动清空 treatment。"
-         "value 保存用户本次指定、修正或接受的参数值，可以结合当前问题和已有参数理解。用户确认当前问题中的某个提议后，可以提取该提议中的具体参数；未接受的建议不能作为修改依据。"
-         "updates 中每项修改必须包含 field、value、evidence，包含 value 为 null 的修改。"
-         "measurement_semantics 只输出用户明确修订的列声明，代码会保留其他列；每条声明包含 column、kind、evidence，kind 只能为 count/ordinal/category/continuous/binary/unknown。"
-         "外层 evidence 解释本次答复为何支持这项参数修改，可以引用答复原文，也可以概括用户的确认关系；它不要求逐字出现在答复中。测量声明内层 evidence 解释对应列的测量类型依据，允许与外层 evidence 复用说明；两层 evidence 都必须是非空文本。不要根据字段名推测语义。观察单位、时间范围、聚合范围分别写入 observation_unit、time_window、aggregation_scope。"
-         "完整确认、部分确认和修改部分提议都只提取用户接受或修改的内容：如果当前问题提出 A 和 B，用户回复‘A 默认，B 默认’，提取 A、B 的具体提议值；用户回复‘A 默认’，只提取 A；用户回复‘A 默认，但 B 改为每周’，提取接受后的 A 和修改后的 B。未接受的提议不作为修改依据。"
-         "如有实际歧义，设置 needs_clarification 和具体问题，不提交猜测。不增加额外语义审核调用。仅在处理含义或范围改变时设置 processing_scope_changed，脚本实现修正不改变范围。"),
-        ("human", "结构示例：用户答复为‘次数是计数变量’时，返回完整结构：{example}。示例只说明结构，不能当作当前答复的证据。"),
-        ("human", "当前参数：{parameters}\n当前问题：{question}\n用户答复：{answer}"),
-    ]).partial(example=json.dumps({
-        "updates": [{"field": "measurement_semantics",
-                     "value": [{"column": "次数", "kind": "count", "evidence": "次数是计数变量"}],
-                     "evidence": "次数是计数变量"}],
-        "needs_clarification": False, "clarification_question": "",
-        "processing_scope_changed": True,
-    }, ensure_ascii=False))
+def _research_spec_tool() -> Any:
+    async def call(runtime: Any, **kwargs: Any) -> Any:
+        payload = ResearchSpecInput.model_validate(kwargs)
+        context = _context(runtime, sandbox_required=False)
+        await context.ensure_active()
+        state = runtime.state
+        sources = state.get("data_processing_input_sources") or {}
+        source = sources.get(str(payload.source_input_id))
+        if source is None:
+            raise ParameterContractError("research specification source is not a delivered trusted input")
+        trusted = await asyncio.to_thread(read_research_inputs, context)
+        await context.check_after_call()
+        if not any(item["source_input_id"] == payload.source_input_id and _answer_object(item["text"]) == _answer_object(source["text"]) for item in trusted):
+            raise ParameterContractError("research specification source conflicts with the Job input ledger")
+        try:
+            pending_source = state.get("data_processing_pending_input_id")
+            if pending_source and payload.source_input_id != pending_source:
+                raise ParameterContractError(f"process pending_input_id={pending_source} before referring to an earlier input")
+            parameters, history = commit_research_spec(
+                state["analysis_parameters"], state["analysis_parameter_changes"], spec=payload.spec,
+                input_columns=state.get("data_processing_input_columns") or [],
+                job_id=str(context.trusted_identity.job_id), source_input_id=payload.source_input_id,
+                expected_revision=payload.expected_revision, reason=payload.reason,
+            )
+        except (ParameterContractError, ValueError) as exc:
+            return _tool_message(runtime, name="set_research_spec", content=json.dumps({
+                "status": "rejected", "error": str(exc), "revision": len(state["analysis_parameter_changes"]),
+                "instruction": "依据已提供的真实输入纠正草稿；只有真实歧义才向用户提问。",
+            }, ensure_ascii=False))
+        changed = parameter_identity(parameters) != parameter_identity(state["analysis_parameters"])
+        semantic_identity = _semantic_identity(context, state)
+        update = {}
+        if changed:
+            semantic_identity = extend_data_processing_semantic_identity(semantic_identity, {
+                "parameters": parameter_identity(parameters), "revision": len(history)})
+            update = {**invalidate_plan(), "data_processing_plan_parameter_identity": None}
+        receipts = dict(state.get("data_processing_answer_receipts") or {})
+        receipts[str(payload.source_input_id)] = {"parameter_identity": parameter_identity(parameters)}
+        pending = state.get("data_processing_pending_input_id")
+        if pending == payload.source_input_id:
+            pending = None
+        return Command(update={
+            **update, "analysis_parameters": parameters, "analysis_parameter_changes": history,
+            "data_processing_semantic_identity": semantic_identity,
+            "data_processing_answer_receipts": receipts,
+            "data_processing_pending_input_id": pending,
+            "data_processing_research_spec_ready": True,
+            "messages": [_tool_message(runtime, name="set_research_spec", content=json.dumps({
+                "status": "committed", "parameters": parameters, "revision": len(history),
+                "pending_input_id": pending,
+            }, ensure_ascii=False))],
+        })
+    call.__annotations__["runtime"] = ToolRuntime
+    return StructuredTool.from_function(coroutine=call, name="set_research_spec",
+        description="提交下一版完整研究参数。先检查冻结列结构；未修改字段保留当前值，取消用 null，测量声明完整替换。首次、用户修改和明确纠错使用同一入口。source_input_id 只能引用程序已提供的真实输入，expected_revision 使用当前修订号。全部原始列用 all_input_columns 声明，不能把范围写成列名。",
+        args_schema=with_tool_runtime_schema(ResearchSpecInput, tool_name="set_research_spec", tool_runtime_type=ToolRuntime))
 
 
-async def _apply_user_answer(
-    runtime: Any, *, model: Any, question_id: str, question: str, answer: Any,
-) -> dict[str, Any]:
-    """两个答复入口共用同一结构化提取及确定性提交边界。"""
-    context = _context(runtime)
-    state = runtime.state
-    identity = context.trusted_identity
-    trusted = await asyncio.to_thread(
-        read_parameter_answer, context, question_id=question_id, answer=answer,
-    )
+async def _receive_user_answer(runtime: Any, *, question_id: str, question: str, answer: Any) -> dict[str, Any]:
+    """只接收可信答复并停止旧方案执行，语义理解回到同一 Agent。"""
+    context = _context(runtime, sandbox_required=False)
+    trusted = await asyncio.to_thread(read_parameter_answer, context, question_id=question_id, answer=answer)
     await context.check_after_call()
-    source_input_id = trusted["source_input_id"]
+    sources = dict(runtime.state.get("data_processing_input_sources") or {})
+    source_id = trusted["source_input_id"]
     answer_text = trusted["answer"]
     if not isinstance(answer_text, str):
         answer_text = json.dumps(answer_text, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    answer_digest = hashlib.sha256(answer_text.encode("utf-8")).hexdigest()
-    receipts = dict(state.get("data_processing_answer_receipts") or {})
-    receipt_key = str(source_input_id)
-    if receipt_key in receipts:
-        if receipts[receipt_key]["answer_digest"] != answer_digest:
-            raise RuntimeError("replayed parameter answer conflicts with its trusted input")
+    source = {"source_input_id": source_id, "text": answer_text, "question": question}
+    if str(source_id) in sources:
+        if sources[str(source_id)] != source:
+            raise ParameterContractError("replayed input conflicts with its trusted source")
         return {}
-    extracted = await ainvoke_structured(
-        llm=model, schema=ParameterExtraction, prompt=_parameter_extraction_prompt(),
-        inputs={"parameters": json.dumps(state["analysis_parameters"], ensure_ascii=False),
-                "question": question, "answer": answer_text},
-        node_name="data_processing_parameter_extraction",
-        retry_with_validation_feedback=True,
-        result_validator=validate_parameter_extraction,
-    )
-    await context.check_after_call()
-    patch = extraction_patch(extracted, current_parameters=state["analysis_parameters"])
-    parameters, history = apply_parameter_patch(
-        state["analysis_parameters"], state["analysis_parameter_changes"], patch=patch,
-        job_id=str(identity.job_id), source_input_id=source_input_id,
-    )
-    semantic_identity = _semantic_identity(context, state)
-    changed = parameter_identity(parameters) != parameter_identity(state["analysis_parameters"])
-    if changed or extracted.processing_scope_changed:
-        semantic_identity = extend_data_processing_semantic_identity(
-            semantic_identity, {"source_input_id": source_input_id, "parameters": parameter_identity(parameters),
-                                "scope_answer_digest": answer_digest},
-        )
-    receipts[receipt_key] = {"answer_digest": answer_digest}
-    invalidated = changed or extracted.processing_scope_changed or extracted.needs_clarification
-    return {
-        "analysis_parameters": parameters, "analysis_parameter_changes": history,
-        "data_processing_semantic_identity": semantic_identity,
-        **(invalidate_plan() if invalidated else {}),
-        "data_processing_parameter_clarification_required": extracted.needs_clarification,
-        "data_processing_parameter_clarification_question": extracted.clarification_question,
-        "data_processing_answer_receipts": receipts,
+    sources[str(source_id)] = source
+    return {**invalidate_plan(), "data_processing_plan_parameter_identity": None,
+        "data_processing_input_sources": sources, "data_processing_pending_input_id": source_id,
+        "data_processing_semantic_identity": extend_data_processing_semantic_identity(
+            _semantic_identity(context, runtime.state), {"source_input_id": source_id, "answer": answer_text}),
     }
 
 
-def _question_tool(*, model: Any) -> Any:
+def _research_ready(state: Any, *, require_plan: bool = False) -> bool:
+    return bool(state.get("data_processing_research_spec_ready") and not state.get("data_processing_pending_input_id")
+        and (not require_plan or state.get("data_processing_plan_parameter_identity") == parameter_identity(state["analysis_parameters"])))
+
+
+def _question_tool() -> Any:
     async def call(runtime: Any, **kwargs: Any) -> Any:
         payload = QuestionInput.model_validate(kwargs)
         context = _context(runtime)
@@ -346,8 +354,8 @@ def _question_tool(*, model: Any) -> Any:
         state = getattr(runtime, "state", None)
         if not isinstance(state, dict):
             raise RuntimeError("data-processing Agent State is unavailable")
-        parameter_update = await _apply_user_answer(
-            runtime, model=model, question_id=call_id, question=payload.question, answer=answer,
+        parameter_update = await _receive_user_answer(
+            runtime, question_id=call_id, question=payload.question, answer=answer,
         )
         return Command(
             update={
@@ -356,8 +364,9 @@ def _question_tool(*, model: Any) -> Any:
                         runtime,
                         name="ask_data_processing_question",
                         content=json.dumps(
-                            {"status": "answered", "answer": answer_text[:4000],
-                             "clarification_question": parameter_update.get("data_processing_parameter_clarification_question", "")},
+                            {"status": "answered", "answer": answer_text,
+                             "pending_input_id": parameter_update.get("data_processing_pending_input_id"),
+                             "instruction": "根据真实答复调用 set_research_spec，再制定或更新方案。"},
                             ensure_ascii=False,
                         ),
                     )
@@ -382,7 +391,7 @@ def _question_tool(*, model: Any) -> Any:
     )
 
 
-def _plan_confirmation_tool(*, model: Any) -> Any:
+def _plan_confirmation_tool() -> Any:
     async def call(runtime: Any, **_: Any) -> Any:
         context = _context(runtime)
         await context.ensure_active()
@@ -390,10 +399,9 @@ def _plan_confirmation_tool(*, model: Any) -> Any:
         state = getattr(runtime, "state", None)
         if identity is None or not isinstance(state, dict):
             raise RuntimeError("data-processing plan state is unavailable")
-        if state.get("data_processing_parameter_clarification_required"):
+        if not _research_ready(state, require_plan=True):
             return _tool_message(runtime, name="request_data_processing_plan_confirmation",
-                                 content="请先使用 ask_data_processing_question 澄清：" +
-                                 state.get("data_processing_parameter_clarification_question", "研究语义不明确"))
+                                 content="请先用 set_research_spec 处理待处理输入，并用 set_data_processing_plan 保存绑定当前参数的方案。")
         script = state.get("data_processing_draft_script")
         metadata = state.get("data_processing_metadata")
         if not isinstance(script, str) or not script.strip() or not isinstance(metadata, dict):
@@ -417,8 +425,20 @@ def _plan_confirmation_tool(*, model: Any) -> Any:
         call_id = str(getattr(runtime, "tool_call_id", "") or "")
         if not call_id:
             raise RuntimeError("data-processing plan confirmation ID is missing")
+        parameters = state["analysis_parameters"]
+        labels = {"target": "结果变量", "treatment": "处理变量", "analysis_question": "研究问题",
+                  "observation_unit": "观察单位", "time_window": "时间范围", "aggregation_scope": "聚合范围"}
+        research_summary = "；".join(label + "：" + str(parameters.get(key) or "未指定")[:130]
+                                     for key, label in labels.items())
+        kinds = {}
+        for declaration in parameters.get("measurement_semantics") or []:
+            kinds[declaration["kind"]] = kinds.get(declaration["kind"], 0) + 1
+        kind_labels = {"continuous": "连续值", "count": "计数", "ordinal": "有序类别",
+                       "category": "类别", "binary": "二元值", "unknown": "未知"}
+        research_summary += "；测量声明：" + ("、".join(kind_labels[kind] + str(count) + "列"
+            for kind, count in kinds.items()) or "未指定")
         request = DataProcessingPlanConfirmationRequest(
-            prompt="请检查这份处理方案。确认后系统才会执行脚本；如需修改，请在下方说明。",
+            prompt="请确认当前研究参数与处理方案。研究参数：" + research_summary[:1000] + "。确认后执行；如需修改请说明。",
             question_id=call_id,
             expires_at=(
                 datetime.now(timezone.utc) + timedelta(seconds=300)
@@ -451,8 +471,8 @@ def _plan_confirmation_tool(*, model: Any) -> Any:
             plan_question = request.prompt + "\n当前展示的方案摘要：\n" + json.dumps(
                 request.plan.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"),
             )
-            parameter_update = await _apply_user_answer(
-                runtime, model=model, question_id=call_id, question=plan_question, answer=answer,
+            parameter_update = await _receive_user_answer(
+                runtime, question_id=call_id, question=plan_question, answer=answer,
             )
         return Command(
             update={
@@ -461,8 +481,9 @@ def _plan_confirmation_tool(*, model: Any) -> Any:
                         runtime,
                         name="request_data_processing_plan_confirmation",
                         content=json.dumps(
-                            {"status": status, "answer": answer_text[:4000],
-                             "clarification_question": parameter_update.get("data_processing_parameter_clarification_question", "")},
+                            {"status": status, "answer": answer_text,
+                             "pending_input_id": parameter_update.get("data_processing_pending_input_id"),
+                             "instruction": "根据真实答复调用 set_research_spec，再制定或更新方案。"},
                             ensure_ascii=False,
                         ),
                     )
@@ -515,14 +536,11 @@ def _inspect_input_tool() -> Any:
         ) as session:
             preview = await session.read_preview("raw/original.csv")
         await context.check_after_call()
-        return _tool_message(
-            runtime,
-            name="inspect_frozen_dataset",
-            content=json.dumps(
-                {"status": "inspected", "preview": preview},
-                ensure_ascii=False,
-            ),
-        )
+        from Agent.data_processing.validation import _inspect_csv_shape
+        columns, _rows = _inspect_csv_shape(source, max_rows=100_000, max_columns=1_000, max_cells=1_000_000)
+        return Command(update={"data_processing_input_columns": columns, "messages": [
+            _tool_message(runtime, name="inspect_frozen_dataset", content=json.dumps(
+                {"status": "inspected", "columns": columns, "preview": preview}, ensure_ascii=False))]})
 
     call.__annotations__["runtime"] = ToolRuntime
     return StructuredTool.from_function(
@@ -550,6 +568,8 @@ def _execute_script_tool() -> Any:
         state = getattr(runtime, "state", None)
         if not isinstance(state, dict):
             raise RuntimeError("data-processing Agent State is unavailable")
+        if not _research_ready(state, require_plan=True):
+            return _tool_message(runtime, name="execute_processing_script", content="研究参数、待处理输入或方案版本尚未就绪，不能执行。")
         script = state.get("data_processing_draft_script")
         metadata = state.get("data_processing_metadata")
         if not isinstance(script, str) or not script.strip():
@@ -578,7 +598,7 @@ def _execute_script_tool() -> Any:
             semantic_identity=semantic_identity,
             metadata=metadata,
         )
-        if state.get("data_processing_parameter_clarification_required") or confirmed_version(
+        if not _research_ready(state, require_plan=True) or confirmed_version(
             state, job_id=str(identity.job_id), source_hash=source_hash,
         ) != plan_version:
             return _tool_message(
@@ -688,18 +708,9 @@ def _execute_script_tool() -> Any:
     )
 
 
-def build_data_processing_agent(
-    *,
-    model: Any,
-    checkpointer: Any,
-    config: DeepAgentGraphConfig,
-) -> Any:
-    """Build the sandbox-only Data Processing Deep Agent with bounded model/tool calls."""
-    profile: DeepAgentProfile = config.profile()
-    from Agent.data_processing.graph import DataProcessingCompletionMiddleware
-    _register_harness_profile(config.harness_profile_key)
-    filesystem_middleware = FilesystemMiddleware(tools=["read_file"])
-    system_prompt = "\n".join(
+def data_processing_system_prompt() -> str:
+    """运行时与真实模型验收共用的统一研究参数与处理职责。"""
+    return "\n".join(
         [
             "你是数据处理 Agent。你的工作只是在隔离沙盒中生成一份可复现的分析数据集。",
             "先检查受限的数据预览，再结合用户目标和服务端提供的 AlgorithmSpec 输入要求判断数据含义。",
@@ -713,19 +724,44 @@ def build_data_processing_agent(
             "脚本运行失败或独立校验发现可修正的问题时，根据实际错误在已确认的语义和转换范围内修改脚本，并可复用当前确认后再次运行；不要声称未执行的转换已经成功。修复若需要新的语义选择或超出已确认范围，必须先向用户提问并重新确认。",
             "独立校验节点会检查实际输出文件。报告中的 research_roles 保留研究角色，role_columns 是方案中的角色列映射，target、treatment 是解析后的执行列名，columns 是候选 CSV 的实际列名；角色为空本身不构成缺失错误。算法输入兼容不代表科学假设已经成立。",
             "收到校验失败反馈后，先区分角色列映射缺失或错误、脚本遗漏、用户信息不足和参数提取错误。角色名称与实际列名不同，应通过 set_data_processing_plan 修正 role_columns，按现有流程确认并重新执行；不需要改写研究角色或让用户重复选择。脚本遗漏可在原确认范围内修复；只有用户信息确实存在多个合理含义时，才提出具体澄清问题。",
-            "若用户已有明确答复与保存的角色参数矛盾，应识别为参数提取问题，不得解释成校验器强制要求角色，也不得要求用户再次作同一个研究选择。现有工具不能直接修订已提交参数，不得声称已经修复参数、忽略校验或默认清空角色继续执行；遵守现有重试上限，仍失败时如实说明。",
+            "研究参数只能通过 set_research_spec 提交。首次先提交完整草稿，后续用户修改或明确提取错误使用相同工具。工具返回确定性错误时自行纠正；不要要求用户重复回答明确的问题。只有真实歧义才提问。",
+            "参数修订号等于 analysis_parameter_changes 的长度。使用程序提供的 source_input_id，初始 reason=initial，用户新要求=user_change，依据原输入纠错=correction。未修改字段保留；measurement_semantics 是完整替换，全部输入列用 all_input_columns，columns 留空。",
+            "用户明确改变研究意图时，可以同步更新 analysis_question 和 aggregation_scope，使它们表达新的研究问题及参与范围；不能仅为润色改写无关参数。未改变的角色、观察单位和时间范围保持当前值。",
+            "参与范围与研究角色相互独立。‘全部作为节点参与因果发现’只修改参与范围，不表示取消已有目标或干预；只有用户明确取消某个角色，才将对应角色设为 null。",
+            "完整草稿中的 null 表示首次未知或用户明确清除，不表示‘本次未提到’。当前非空字段若未被用户修改，必须逐字保留，包括已有观察单位、时间范围和角色名称；不能翻译、概括或补用默认值。",
+            "当前问题和展示方案中的内容只是提议，必须区分用户实际接受的部分。回答‘A 默认’只接受 A，B 没有答复时保留当前有效的 B；‘A 默认，B 默认’接受两项；‘A 默认，但 B 改为每周’接受 A 并把 B 设为每周。不能因为草稿方案包含某个值就把未接受的部分写入参数。",
+            "‘A 默认’这类引用应取当前问题或方案中 A 的具体提议值；不能把已有有效值当成 A 的提议而忽略用户接受的修改。若用户先描述过去的角色，再明确取消目标和干预，以最后的取消为准，target 和 treatment 均为 null；只取消其中一个时保留另一个。",
+            "已有有效值和用户已接受的具体提议应直接保留其表达，不为了换一种说法重写观察单位、时间范围或角色名。用户接受‘每个设备一行观测’和‘每天一个时间窗口’时，可以分别保存 observation_unit=每个设备一行观测、time_window=每天；只接受前者不能同时修改时间窗口。",
+            "用户自由文本答复只表示待处理输入，不是授权。先 set_research_spec 消费该输入，即使参数无变化也提交完整草稿，再更新方案并确认。",
+            "存在 pending_input_id 时，source_input_id 必须使用该待处理输入的 ID，不能引用较早输入来提交本次答复的变更；工具拒绝错误引用后按返回的待处理 ID 纠正。处理完最新输入后才可引用原输入进行纠错。",
+            "measurement_columns 明确原始列到输出列的保留/重命名映射，删除或不再继承填 null；派生列不得自动继承原始类型。",
             "候选数据集提交后，简短说明提交事实，不要输出文件正文或具体记录值。",
         ]
     )
+
+
+def build_data_processing_agent(
+    *,
+    model: Any,
+    checkpointer: Any,
+    config: DeepAgentGraphConfig,
+) -> Any:
+    """Build the sandbox-only Data Processing Deep Agent with bounded model/tool calls."""
+    profile: DeepAgentProfile = config.profile()
+    from Agent.data_processing.graph import DataProcessingCompletionMiddleware
+    _register_harness_profile(config.harness_profile_key)
+    filesystem_middleware = FilesystemMiddleware(tools=["read_file"])
+    system_prompt = data_processing_system_prompt()
     return create_deep_agent(
         model=model,
         tools=[
             _inspect_input_tool(),
+            _research_spec_tool(),
             _write_script_tool(),
             _plan_tool(),
             _execution_report_tool(),
-            _question_tool(model=model),
-            _plan_confirmation_tool(model=model),
+            _question_tool(),
+            _plan_confirmation_tool(),
             _execute_script_tool(),
         ],
         subagents=[],
@@ -745,7 +781,7 @@ def build_initial_message(*, goal: str, specifications: list[dict[str, Any]]) ->
     return "\n".join(
         [
             "研究目标与用户约束：",
-            goal[:6000],
+            goal,
             "当前实际可用算法的输入要求（仅供兼容性参考；不要求同时满足全部算法）：",
             json.dumps(specifications, ensure_ascii=False, separators=(",", ":"))[:16000],
             "开始前先检查冻结数据的受限预览。",

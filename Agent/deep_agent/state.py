@@ -36,8 +36,11 @@ class DeepAgentState(_OfficialDeepAgentState, total=False):
     data_processing_state_version: int
     data_processing_run_id: str
     data_processing_answer_receipts: dict[str, dict[str, Any]]
-    data_processing_parameter_clarification_required: bool
-    data_processing_parameter_clarification_question: str
+    data_processing_input_sources: dict[str, dict[str, Any]]
+    data_processing_pending_input_id: int | None
+    data_processing_research_spec_ready: bool
+    data_processing_input_columns: list[str]
+    data_processing_plan_parameter_identity: str | None
     file_summary: dict[str, Any]
     missing_values_present: bool
     message_execution_id: str

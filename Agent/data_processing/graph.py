@@ -37,12 +37,12 @@ from Agent.data_processing.persistence import (
     require_candidate_parameters,
     bind_candidate,
     read_bound_dataset_identity,
-    read_candidate,
+    read_candidate, read_research_inputs,
     record_validation,
 )
 from Agent.data_processing.lifecycle import confirmed_version, require_candidate_binding
 from Agent.data_processing.parameters import (
-    PROCESSING_STATE_VERSION, ParameterContractError, parameter_identity,
+    PROCESSING_STATE_VERSION, ParameterContractError, UnsupportedProcessingCheckpointError, parameter_identity,
     research_parameters, validate_parameter_history,
 )
 from Database.analysis_contexts import apply_final_parameters_context
@@ -91,9 +91,11 @@ class DataProcessingCompletionMiddleware(AgentMiddleware):
         version = confirmed_version(state, job_id=str(identity.job_id), source_hash=source_hash)
         tool_name = None
         args: dict[str, Any] = {}
-        if state.get("data_processing_parameter_clarification_required"):
-            tool_name = "ask_data_processing_question"
-            args = {"question": state["data_processing_parameter_clarification_question"]}
+        from Agent.data_processing.agent import _research_ready
+        if not _research_ready(state):
+            instruction = "请先检查冻结输入的完整列结构，再用 set_research_spec 提交研究参数并处理最新输入。"
+        elif state.get("data_processing_plan_parameter_identity") != parameter_identity(state["analysis_parameters"]):
+            instruction = "请用 set_data_processing_plan 保存绑定当前研究参数的方案，再继续确认和执行。"
         elif not state.get("data_processing_metadata") or not state.get("data_processing_draft_script"):
             instruction = "请先使用 set_data_processing_plan 保存完整处理方案，并保存脚本，再展示方案请求确认。"
         elif version is None:
@@ -150,7 +152,7 @@ def _validation_retry_message(candidate_id: Any, report: Mapping[str, Any]) -> H
             "请判断是角色列映射缺失或错误、脚本遗漏已确认字段、用户信息不足，还是参数提取与已有明确答复矛盾。"
             "脚本遗漏可在原确认范围内修复；有新的语义歧义才向用户澄清。"
             "参数提取错误不代表校验器强制要求角色，不要要求用户重复作同一个选择，"
-            "也不要声称现有工具已修订参数。不得忽略校验或默认清空角色继续分析；"
+            "请通过 set_research_spec 提交实际参数纠正，再更新并确认方案。不得忽略校验或默认清空角色继续分析；"
             "遵守重试上限，未解决时如实说明。不要声称未实际执行的修正已完成。\n"
             + json.dumps(details, ensure_ascii=False, separators=(",", ":"))
         ),
@@ -225,15 +227,6 @@ def _specification_briefs(registry: Any) -> list[dict[str, Any]]:
         }
         for spec in specs
     ]
-
-
-def _analysis_goal(state: Mapping[str, Any]) -> str:
-    return json.dumps(
-        research_parameters(state.get("analysis_parameters") or {}),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
 
 
 def _emit_progress(runtime: Any, *, key: str, summary: str) -> None:
@@ -316,7 +309,7 @@ async def run_data_processing_child(
         if isinstance(values, Mapping) and values:
             if (values.get("data_processing_state_version") != PROCESSING_STATE_VERSION
                     or values.get("data_processing_run_id") != run_id):
-                raise ParameterContractError("legacy or mismatched active processing checkpoint")
+                raise UnsupportedProcessingCheckpointError("legacy or mismatched active processing checkpoint")
             validate_parameter_history(
                 values.get("analysis_parameters"), values.get("analysis_parameter_changes"), job_id=job_id,
             )
@@ -328,7 +321,7 @@ async def run_data_processing_child(
                     saved.checkpoint.get("channel_values", {}).get("data_processing_state_version")
                     != PROCESSING_STATE_VERSION
                 ):
-                    raise ParameterContractError("legacy active processing checkpoint requires explicit restart")
+                    raise UnsupportedProcessingCheckpointError("legacy active processing checkpoint requires explicit restart")
     if _interrupts(snapshot):
         # The parent Command(resume=...) reaches the child through its inherited
         # scratchpad/resume map. A second manual interrupt would consume it twice.
@@ -341,7 +334,9 @@ async def run_data_processing_child(
                      "data_processing_candidate_revision", "data_processing_execution_report",
                      "data_processing_completion_retry_count",
                      "data_processing_state_version", "data_processing_run_id",
-                     "data_processing_answer_receipts"}
+                     "data_processing_answer_receipts", "data_processing_input_sources",
+                     "data_processing_pending_input_id", "data_processing_research_spec_ready",
+                     "data_processing_input_columns", "data_processing_plan_parameter_identity"}
         if retry_input and protected.intersection(retry_input):
             raise ParameterContractError("retry input cannot overwrite persisted child parameters")
         if getattr(snapshot, "next", ()):
@@ -381,6 +376,8 @@ async def data_processing_parent_node(
         raise RuntimeError("data-processing Agent requires trusted Job runtime context")
     await context.ensure_active()
     identity = context.trusted_identity
+    if identity.frozen_input is None or identity.frozen_input.user_file_id is None or identity.frozen_input.object_id is None:
+        return {"data_processing_failure_code": "missing_frozen_input"}
     source_hash = identity.source_input_identity()
     run_id = build_data_processing_run_id(job_id=identity.job_id, source_input_identity=source_hash)
 
@@ -397,7 +394,9 @@ async def data_processing_parent_node(
         ):
             raise ParameterContractError("restored execution report conflicts with bound dataset")
         return {
+            "data_processing_state_version": PROCESSING_STATE_VERSION,
             "analysis_parameters": bound["analysis_parameters"],
+            "analysis_question": bound["analysis_parameters"].get("analysis_question") or "",
             "analysis_parameter_changes": bound["analysis_parameter_changes"],
             "analysis_context": bound["analysis_context"],
             "analysis_context_index": rebuild_context_index(
@@ -416,8 +415,14 @@ async def data_processing_parent_node(
             "data_processing_run_id": run_id,
         }
 
-    goal = _analysis_goal(state)
+    inputs = await asyncio.to_thread(read_research_inputs, context)
+    await context.check_after_call()
+    initial_source = inputs[0]
+    goal = initial_source["text"]
     specs = _specification_briefs(registry)
+    context_brief = {key: (state.get("analysis_context") or {}).get(key)
+                     for key in ("target", "treatment", "analysis_question", "summary")}
+    goal += "\n可参考的已有研究上下文（本次要求优先）：" + json.dumps(context_brief, ensure_ascii=False)
     semantic_payload = canonical_json_bytes(
         {"goal": goal, "specifications": specs}
     )
@@ -429,15 +434,18 @@ async def data_processing_parent_node(
     from Agent.data_processing.agent import build_initial_message
 
     initial_input = {
-        "analysis_parameters": research_parameters(state.get("analysis_parameters") or {}),
-        "analysis_parameter_changes": list(state.get("analysis_parameter_changes") or []),
+        "analysis_parameters": research_parameters({}),
+        "analysis_parameter_changes": [],
         "data_processing_state_version": PROCESSING_STATE_VERSION,
         "data_processing_run_id": run_id,
         "data_processing_answer_receipts": {},
-        "data_processing_parameter_clarification_required": False,
-        "data_processing_parameter_clarification_question": "",
+        "data_processing_input_sources": {str(initial_source["source_input_id"]): initial_source},
+        "data_processing_pending_input_id": initial_source["source_input_id"],
+        "data_processing_research_spec_ready": False,
+        "data_processing_input_columns": [],
+        "data_processing_plan_parameter_identity": None,
         "messages": [
-            HumanMessage(content=build_initial_message(goal=goal, specifications=specs))
+            HumanMessage(content=build_initial_message(goal=goal, specifications=specs) + "\n可信初始输入来源：" + str(initial_source["source_input_id"]) + "；当前参数修订号：0")
         ],
         "data_processing_draft_script": "",
         "data_processing_candidate_id": 0,
@@ -507,7 +515,8 @@ async def data_processing_parent_node(
     changes = validate_parameter_history(
         parameters, child_state.get("analysis_parameter_changes"), job_id=str(identity.job_id),
     )
-    if child_state.get("data_processing_parameter_clarification_required"):
+    from Agent.data_processing.agent import _research_ready
+    if not _research_ready(child_state, require_plan=True):
         raise ParameterContractError("processing completed with unresolved parameter ambiguity")
     candidate = await asyncio.to_thread(
         read_candidate, identity, dataset_id=candidate_id, source_hash=source_hash,
@@ -530,7 +539,9 @@ async def data_processing_parent_node(
     if result is None:
         raise ParameterContractError("final parameters require a frozen input context")
     return {
+        "data_processing_state_version": PROCESSING_STATE_VERSION,
         "analysis_parameters": dict(parameters),
+        "analysis_question": parameters.get("analysis_question") or "",
         "analysis_parameter_changes": changes,
         "analysis_context": result["context"],
         "analysis_context_index": rebuild_context_index(
@@ -699,6 +710,7 @@ def dataset_failure_node(state: Mapping[str, Any]) -> dict[str, Any]:
     """以明确原因结束，不把未通过校验的数据交给因果分析。"""
 
     failure_labels = {
+        "missing_frozen_input": "请先上传并选择一个 CSV 文件，再开始因果分析",
         "sandbox_unavailable": "数据处理沙盒服务当前不可用",
         "processing_failed": "数据处理阶段未能完成",
         "parameter_extraction_failed": "参数解析失败，未能从用户答复中提取有效的研究参数",

@@ -46,11 +46,16 @@ def require(condition: Any, reason: str) -> None:
 def candidate_checkpoint_state(saved):
     """为验收构造已实际保存候选的 checkpoint，不用于旧生产 checkpoint 回填。"""
     from Agent.data_processing.lifecycle import execution_report
+    from Agent.data_processing.parameters import parameter_identity
     from Agent.deep_agent_tools.interaction import DataProcessingPlanSummary
 
     binding = saved['metadata']['processing_plan_identity']
     plan = {key: saved['metadata'][key] for key in DataProcessingPlanSummary.model_fields if key in saved['metadata']}
+    parameters = saved['metadata']['analysis_parameter_identity']['parameters']
     return {
+        'analysis_parameters': parameters, 'data_processing_research_spec_ready': True,
+        'data_processing_pending_input_id': None,
+        'data_processing_plan_parameter_identity': parameter_identity(parameters),
         'data_processing_metadata': plan, 'data_processing_confirmed_plan': json.loads(json.dumps(plan)),
         'data_processing_confirmed_plan_version': binding['plan_version'],
         'data_processing_semantic_identity': binding['semantic_identity'],
@@ -110,11 +115,13 @@ def application():
 
 
 def identity_for(job):
-    from Agent.deep_agent.context import TrustedJobIdentity, AnalysisInputRef
+    from Agent.deep_agent.context import TrustedJobIdentity, AnalysisInputRef, FrozenInputRef
     return TrustedJobIdentity(
         job_id=job['job_id'], session_id=job['session_id'], user_id=int(job['user_id']),
         worker_id=job['worker_id'], attempt_count=int(job['attempt_count']),
         lease_epoch=int(job['lease_epoch']), input_identity=job['input_file_hash'],
+        frozen_input=FrozenInputRef(user_file_id=job["input_user_file_id"], object_id=job["input_object_id"],
+            content_hash=job["input_file_hash"], filename=job["input_filename"]),
         analysis_input=AnalysisInputRef(),
     )
 

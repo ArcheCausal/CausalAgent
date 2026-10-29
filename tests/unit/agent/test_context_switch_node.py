@@ -160,7 +160,7 @@ def test_unique_match_switches_context_and_drops_previous_facts(monkeypatch):
     assert result["context_resolution"]["file_changed"] is True
 
 
-def test_switch_to_context_without_facts_routes_to_fold(monkeypatch):
+def test_switch_to_context_without_facts_routes_to_data_processing(monkeypatch):
     """目标上下文还没有结论时，切换后直接进入分析流程。"""
     monkeypatch.setattr(
         nodes,
@@ -175,8 +175,8 @@ def test_switch_to_context_without_facts_routes_to_fold(monkeypatch):
         nodes.context_switch_node(_state(), runtime=_runtime(identity))
     )
 
-    assert result["route_decision"] == "fold"
-    assert result["context_resolution"]["followup_route"] == "fold"
+    assert result["route_decision"] == "data_processing"
+    assert result["context_resolution"]["followup_route"] == "data_processing"
 
 
 def test_rerun_analysis_re_runs_after_switching(monkeypatch):
@@ -188,7 +188,7 @@ def test_rerun_analysis_re_runs_after_switching(monkeypatch):
     )
     result = asyncio.run(nodes.context_switch_node(state, runtime=_runtime(identity)))
 
-    assert result["route_decision"] == "fold"
+    assert result["route_decision"] == "data_processing"
 
 
 def test_rerun_analysis_without_hint_targets_current_context(monkeypatch):
@@ -205,7 +205,7 @@ def test_rerun_analysis_without_hint_targets_current_context(monkeypatch):
     result = asyncio.run(nodes.context_switch_node(state, runtime=_runtime(identity)))
 
     assert calls["context_id"] == "ctx-current"
-    assert result["route_decision"] == "fold"
+    assert result["route_decision"] == "data_processing"
 
 
 def test_ambiguous_candidates_return_clarification_without_switching(monkeypatch):
@@ -320,7 +320,7 @@ def test_unmatched_filename_creates_context_for_authorized_file(monkeypatch):
     result = asyncio.run(nodes.context_switch_node(state, runtime=_runtime(identity)))
 
     assert captured["user_file_id"] == 41
-    assert result["route_decision"] == "fold"
+    assert result["route_decision"] == "data_processing"
     assert result["analysis_context"]["analysis_context_id"] == "ctx-new"
     assert result["context_resolution"]["status"] == "created"
     assert frozen.content_hash == "hash-new"

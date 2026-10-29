@@ -115,6 +115,7 @@ describe('ProcessingOptions', () => {
             transformations: ['按设备和日期分组并计数'],
             variableSemantics: { alarm_count: '该设备当天的告警次数' },
             roleColumns: { target: 'alarm_count', treatment: 'coolant_flow_l_min' },
+            measurementColumns: { device: 'device_id', raw_alarm: null, date: 'date' },
             limitations: ['不包含未触发告警的设备日期'],
           },
         }),
@@ -127,6 +128,10 @@ describe('ProcessingOptions', () => {
     expect(wrapper.text()).toContain('alarm_count')
     expect(wrapper.text()).toContain('处理变量对应列')
     expect(wrapper.text()).toContain('coolant_flow_l_min')
+    expect(wrapper.text()).toContain('原始测量列处理')
+    expect(wrapper.text()).toContain('device：重命名为 device_id')
+    expect(wrapper.text()).toContain('raw_alarm：不传递原始测量类型')
+    expect(wrapper.text()).toContain('date：保留')
     expect(wrapper.text()).toContain('修改或拒绝方案')
     expect(wrapper.text()).toContain('确认方案并继续')
     await wrapper.get('.processing-plan-confirm').trigger('click')

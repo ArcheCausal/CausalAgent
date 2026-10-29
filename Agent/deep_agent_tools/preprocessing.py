@@ -129,7 +129,7 @@ def build_data_profile_from_csv(csv_data: str) -> DataProfile:
 def profile_from_analysis_parameters(
     analysis_parameters: Mapping[str, Any] | None,
 ) -> DataProfile | None:
-    """从 fold 阶段已持久化的 analysis_parameters 重建画像。
+    """从分析准备阶段已持久化的 analysis_parameters 重建画像。
 
     旧 checkpoint 没有新字段时返回 None，由调用方决定是否要求在恢复时
     重新读取冻结文件，而不是用不完整信息猜测。

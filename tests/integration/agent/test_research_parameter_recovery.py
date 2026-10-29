@@ -12,7 +12,8 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command, interrupt
 
 from Agent.data_processing.graph import DATA_PROCESSING_CHECKPOINT_NAMESPACE, run_data_processing_child
-from Agent.data_processing.parameters import PROCESSING_STATE_VERSION, ParameterContractError, apply_parameter_patch
+from Agent.data_processing.parameters import PROCESSING_STATE_VERSION, ParameterContractError
+from tests.support.research_specs import commit
 from Agent.deep_agent.context import AgentRunContext
 from Agent.deep_agent.state import ProjectDeepAgentState
 from Agent.deep_agent_tools.identity import build_data_processing_run_id
@@ -46,7 +47,7 @@ def graphs(saver, *, retry=False, retry_update=None):
             )
             answer = interrupt(request.public_payload())
             assert answer == f"answer-{index}"
-            parameters, history = apply_parameter_patch(
+            parameters, history = commit(
                 state["analysis_parameters"], state["analysis_parameter_changes"], patch=patch,
                 job_id=JOB, source_input_id=100 + index,
             )

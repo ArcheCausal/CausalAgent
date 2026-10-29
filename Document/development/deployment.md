@@ -6,6 +6,8 @@
 
 ## 镜像构建
 
+Worker 使用两套模型配置：`MODEL`、`BASE_URL` 与密钥文件中的 `API_KEY` 服务外层图，外层图明确关闭思考；`DEEP_AGENT_MODEL`、`DEEP_AGENT_BASE_URL` 与 `DEEP_AGENT_API_KEY` 服务数据处理和因果分析两个 Agent。开发、预发和生产 Compose 均传入 `DEEP_AGENT_REASONING_EFFORT`，默认 `high`，可设为 `none`、`low`、`high`、`max`。更改后需重建 worker 容器以读取配置；该设置不会改写已完成任务的研究参数或产物。完整调用边界见 [Agent 运行时](../architecture/agent-runtime.md)。
+
 `Agent/CausalAgentMCP/Dockerfile` 使用 MCP 自己的依赖环境，在复制源码后执行 `python -c "import Agent.CausalAgentMCP.app"`，并检查导入完成后的 `sys.modules` 中没有 `langgraph*`、`langchain*` 或 `Agent.deep_agent` 及其子模块。`publish-staging-images.yml` 的 MCP 构建直接使用该 Dockerfile，导入失败或越过依赖边界都会阻止镜像推送。此检查不需要数据库或部署密钥；发布前仍须用真实数据库和配置启动镜像并确认 `/ready` 返回成功，并执行算法 `Command` 终态解析与依赖调度回归。
 
 `Dockerfile` 当前有六个重要阶段：

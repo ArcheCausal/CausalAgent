@@ -48,10 +48,10 @@ selection_rationale 和逐结果 rationale 会直接向当前用户展示，应�
 """
 
 # 父图只有真正执行分析的路径会进入 Deep Agent：agent 的 start_analysis/rerun_analysis
-# 直接路由到 fold，context_switch 也会把 route_decision 改写成后续节点名，因此进入
-# Deep Agent 时该字段一定是 fold。算法要求按运行注入；Web 要求由固定系统提示
+# 直接路由到 data_processing，context_switch 也会把 route_decision 改写成后续节点名，因此进入
+# Deep Agent 时该字段一定是 data_processing。算法要求按运行注入；Web 要求由固定系统提示
 # 根据本次实际提供的工具生效，工具可见性只读取可信运行上下文。
-ANALYSIS_ROUTE = "fold"
+ANALYSIS_ROUTE = "data_processing"
 
 MANDATORY_ALGORITHM_INSTRUCTION = (
     "本次运行要求执行因果分析：必须至少调用一个算法工具，并在最终结构化决策中引用"

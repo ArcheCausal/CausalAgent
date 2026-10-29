@@ -182,7 +182,7 @@ def _validate(
     return FinalizationGate(registry=registry).validate(
         decision=decision, algorithm_results={item.result_ref: item for item in (source, result)},
         action_ledger=ledger,
-        trusted_identity=context.trusted_identity, route_decision="fold", analysis_parameters=PARAMETERS,
+        trusted_identity=context.trusted_identity, route_decision="data_processing", analysis_parameters=PARAMETERS,
     )
 
 
@@ -305,7 +305,7 @@ def test_another_variable_pair_does_not_satisfy_current_query(evidence_only):
                 other.invocation_id: other,
             },
             trusted_identity=context.trusted_identity,
-            route_decision="fold", analysis_parameters=PARAMETERS,
+            route_decision="data_processing", analysis_parameters=PARAMETERS,
         )
     assert failure.value.rule == "effect_question_without_diagnose"
 
@@ -344,7 +344,7 @@ def test_another_variable_pair_does_not_satisfy_current_query(evidence_only):
             flex_record.invocation_id: flex_record,
         },
         trusted_identity=context.trusted_identity,
-        route_decision="fold", analysis_parameters=PARAMETERS,
+        route_decision="data_processing", analysis_parameters=PARAMETERS,
     )
     assert accepted.primary_result_ref == flex.result_ref
 
@@ -438,7 +438,7 @@ def test_dispatch_deadline_retains_completed_local_check_for_current_call():
     FinalizationGate(registry=registry).validate(decision=decision,
         algorithm_results=state["algorithm_results"],
         action_ledger=state["action_ledger"] | {diagnose.invocation_id: diagnose},
-        trusted_identity=context.trusted_identity, route_decision="fold", analysis_parameters=PARAMETERS)
+        trusted_identity=context.trusted_identity, route_decision="data_processing", analysis_parameters=PARAMETERS)
 
 
 TRIGGERED = {**PARAMETERS, "nonlinearity": {"ratio": 1.5, "verdict": "nonlinear"}}
@@ -497,7 +497,7 @@ def _validate_with_estimations(context, registry, source, source_record, entries
     }
     return FinalizationGate(registry=registry).validate(
         decision=decision, algorithm_results=results, action_ledger=ledger,
-        trusted_identity=context.trusted_identity, route_decision="fold",
+        trusted_identity=context.trusted_identity, route_decision="data_processing",
         analysis_parameters=parameters,
     )
 
@@ -580,7 +580,7 @@ def test_gate_allows_undetermined_flex_failure_with_graph_primary():
             rejected.invocation_id: rejected,
         },
         trusted_identity=context.trusted_identity,
-        route_decision="fold", analysis_parameters=TRIGGERED,
+        route_decision="data_processing", analysis_parameters=TRIGGERED,
     )
     assert accepted.primary_result_ref == source.result_ref
 

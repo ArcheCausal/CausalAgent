@@ -32,7 +32,7 @@
 
 `input_user_file_id` 和 `web_search_enabled` 都可省略；`web_search_enabled` 缺省为 `false`。消息必须是非空文本，长度受服务端限制。请求必须带标准 UUID v4 `Idempotency-Key`。`web_search_enabled` 只接受 JSON 布尔值；字符串 `"true"`、`"false"`、数字、`null` 等非布尔值在接口层返回 `400`，服务层在创建 Job 前再次严格校验。该开关参与请求指纹，因此同一个幂等键不能把搜索开关从开启改为关闭或反之。
 
-服务端在一个 MySQL 事务中检查会话归属、活动 Job、文件归属，冻结文件快照，按该文件复用当前 Session 的默认分析上下文或新建一个，然后写入 Job（含 `analysis_context_id`）、initial input（含 `analysis_context_id`）、用户聊天消息和包含 `web_search_enabled` 的请求指纹。fold 提取初始参数，数据处理完成后由现有父节点使用最终研究参数幂等绑定上下文；响应不返回上下文 ID，前端不需要传入。
+服务端在一个 MySQL 事务中检查会话归属、活动 Job、文件归属，冻结文件快照，按该文件复用当前 Session 的默认分析上下文或新建一个，然后写入 Job（含 `analysis_context_id`）、initial input（含 `analysis_context_id`）、用户聊天消息和包含 `web_search_enabled` 的请求指纹。数据处理 Agent 通过统一参数工具提交研究参数，数据处理完成后由现有父节点使用最终研究参数幂等绑定上下文；响应不返回上下文 ID，前端不需要传入。
 
 请求上下文中的 `X-Request-ID` 会在入口校验或生成，并作为创建 Job 的原始关联 ID 保存到 `analysis_jobs.request_id`；历史 Job 该字段可以为 `NULL`。同一 `Idempotency-Key` 重放时只返回首次创建的 Job，不会用后续请求的 `X-Request-ID` 覆盖首次值；该内部关联字段不进入普通用户响应。
 
@@ -62,7 +62,9 @@ Last-Event-ID: 42
 
 数据处理语义澄清使用同一 `interrupt`、SSE 和 `resume` 契约，`interaction_type` 为 `data_processing_question`；交互载荷包含 `question_id`、公开问题文本、`expires_at` 和 `allow_other=true`，不包含算法选项。用户通过 `resume` 提交文本答复后，同一个 Job 从数据处理 Agent 的原中断位置继续；现有等待时限与幂等规则不变。
 
-方案确认使用 `interaction_type=data_processing_plan_confirmation`，并公开 `plan_version` 与 `plan`。版本为 64 位小写 SHA-256；方案只包含 `summary`、`observation_unit`、`transformations`、`variable_semantics`、`role_columns` 和 `limitations`。`role_columns` 是可省略的角色列映射，只允许 `target`、`treatment`，值为实际输出列名或 `null`；列名最多 255 字符，未指定角色保持为空。事件输出逐字段限制类型、数量与长度，不透传脚本或内部运行时字段。SSE 重连及聊天历史恢复使用相同的公开投影，前端据此显示方案、角色对应列和确认按钮。
+方案确认使用 `interaction_type=data_processing_plan_confirmation`，并公开 `plan_version` 与 `plan`。版本为 64 位小写 SHA-256；方案只包含 `summary`、`observation_unit`、`transformations`、`variable_semantics`、`role_columns`、`measurement_columns` 和 `limitations`。`role_columns` 是可省略的角色列映射，只允许 `target`、`treatment`，值为实际输出列名或 `null`；列名最多 255 字符，未指定角色保持为空。事件输出逐字段限制类型、数量与长度，不透传脚本或内部运行时字段。SSE 重连及聊天历史恢复使用相同的公开投影，前端据此显示方案、角色对应列和确认按钮。
+
+方案确认中的 `measurement_columns` 是原始测量列到输出列的公开映射；null 表示不传递原始测量类型，缺席表示同名保留。确认提示同时显示当前研究参数摘要。自由文本答复不触发隐藏模型提取，也不形成执行授权；它先成为待处理输入，参数工具处理后重新制定或提交方案。旧流程 checkpoint 不迁移，恢复失败提示重新发起，历史数据保留。
 
 `decision` 事件除既有路由说明外，还可包含 `decision_kind=algorithm|evidence|final`。`algorithm` 表示模型在同一次算法 Tool Call 中显式提交的公开选择依据，`evidence` 表示同一位置的 `rag_evidence_search`/`web_evidence_search` 检索依据，两者都可同时带公开工具名；`final` 只在 FinalizationGate 验证成功后产生，可带 `low|medium|high` 置信度。模型工具参数流中的公开摘要会先以 `decision_delta` 增量事件发送，工具开始/结果仍分别由可信工具边界发布；完整 `decision` 仍作为历史回放和无增量回退。公开说明是展示文本而非隐藏思维链，不包含内部结果引用；缺失或格式无效的工具说明不会阻止工具执行。相关事件都持久化到 `analysis_job_events`，SSE 重连按原 Event ID 续传，历史回放直接展示完整 `decision` 文本。
 
@@ -76,7 +78,7 @@ FinalizationGate 对模型可修正的决策拒绝额外发布 `progress` 阶段
 
 `degraded` 结果不展示未经 Gate 验证的主图，也不把内部校验错误、provider ID、raw result 或工具参数返回给用户。该字段是结果质量元数据，不是模型的 `outcome`，旧 Job 没有该字段时按兼容语义处理。算法超时若已完整记录，可以采用其他有效结果完成报告；报告正文固定保留超时算法未完成、未提供可用因果图的分析限制说明。
 
-数据处理失败在因果分析开始前终止任务，使用既有 `error` 事件和 Job `failed` 状态，不生成 `final_result`。参数提取达到有界重试次数后，公开 `message` 明确说明“参数解析失败”以及“本次未启动因果分析”；不公开模型原始响应、参数值或校验异常正文。实时 SSE 与历史事件回放使用同一错误终态。
+数据处理失败在因果分析开始前终止任务，使用既有 `error` 事件和 Job `failed` 状态，不生成 `final_result`。参数草稿不合法时，同一 Agent 在现有调用预算内纠正，未解决时任务失败；不公开模型原始响应、参数值或校验异常正文。实时 SSE 与历史事件回放使用同一错误终态。
 
 新报告终态是结构化报告文档，`final_result.data` 的形状如下：
 

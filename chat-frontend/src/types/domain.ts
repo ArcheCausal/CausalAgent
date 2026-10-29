@@ -170,6 +170,7 @@ export interface ProcessingPlanSummary {
   transformations: string[]
   variableSemantics: Record<string, string>
   roleColumns?: { target?: string | null; treatment?: string | null }
+  measurementColumns?: Record<string, string | null>
   limitations: string[]
 }
 

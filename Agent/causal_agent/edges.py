@@ -4,14 +4,13 @@ from observability.logging_runtime import log_context, log_event
 
 
 ROUTE_DECISIONS = {
-    "fold",
+    "data_processing",
     "postprocess",
     "report",
     "normal_chat",
     "inquiry_answer",
     "context_switch",
 }
-FOLD_DECISIONS = {"preprocess", "agent", "normal_chat"}
 LOGGER = logging.getLogger(__name__)
 
 
@@ -35,16 +34,6 @@ def decision_router(state: CausalAgentState) -> str:
     if decision not in ROUTE_DECISIONS:
         _log_route_degradation("decision_router", "normal_chat")
         return "normal_chat"
-    return decision
-
-def fold_router(state: CausalAgentState) -> str:
-    """
-    只读取 fold 写入的显式 fold_decision，不从展示消息推断控制流。
-    """
-    decision = state.get("fold_decision")
-    if decision not in FOLD_DECISIONS:
-        _log_route_degradation("fold_router", "agent")
-        return "agent"
     return decision
 
 def preprocess_router(state: CausalAgentState) -> str:

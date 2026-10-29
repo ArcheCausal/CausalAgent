@@ -139,4 +139,10 @@ def _public_processing_plan(value: Any) -> dict[str, Any] | None:
             if role in {"target", "treatment"}
             and (column is None or isinstance(column, str) and 0 < len(column) <= 255)
         }
+    if isinstance(value.get("measurement_columns"), dict):
+        public["measurement_columns"] = {
+            source: output for source, output in islice(value["measurement_columns"].items(), 128)
+            if isinstance(source, str) and 0 < len(source) <= 255
+            and (output is None or isinstance(output, str) and 0 < len(output) <= 255)
+        }
     return public

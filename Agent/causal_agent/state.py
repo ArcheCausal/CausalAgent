@@ -83,7 +83,7 @@ class CausalAgentState(TypedDict):
 
     route_decision: NotRequired[
         Literal[
-            "fold",
+            "data_processing",
             "postprocess",
             "report",
             "normal_chat",
@@ -91,12 +91,13 @@ class CausalAgentState(TypedDict):
             "context_switch",
         ]
     ]
-    fold_decision: NotRequired[Literal["preprocess", "agent", "normal_chat"]]
 
     tool_call_request: Optional[bool]
 
     analysis_parameters: Optional[dict]
+    analysis_question: NotRequired[str]
     analysis_parameter_changes: NotRequired[list[dict[str, Any]]]
+    data_processing_state_version: NotRequired[int]
     data_processing_semantic_identity: NotRequired[str]
     data_processing_confirmed_plan_version: NotRequired[str | None]
     data_processing_execution_report: NotRequired[dict[str, Any] | None]

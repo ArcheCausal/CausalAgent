@@ -117,3 +117,20 @@ def test_official_agent_compiles_completion_routes_and_retains_call_limits():
     tools = graph.nodes["tools"].bound.tools_by_name
     assert {"set_data_processing_plan", "save_data_processing_execution_report"}.issubset(tools)
     assert "describe_prepared_dataset" not in tools
+
+
+@pytest.mark.parametrize("pending,ready", [(1, True), (None, False)])
+def test_real_plan_tool_refuses_unprocessed_research_input(pending, ready):
+    async def scenario():
+        builder = StateGraph(ProjectDeepAgentState)
+        builder.add_node("tools", ToolNode([_plan_tool()], handle_tool_errors=False))
+        builder.add_edge(START, "tools")
+        builder.add_edge("tools", END)
+        state = current_state()
+        state.update(data_processing_pending_input_id=pending, data_processing_research_spec_ready=ready)
+        state["messages"] = [AIMessage(content="", tool_calls=[{
+            "id": "denied-plan", "name": "set_data_processing_plan", "args": {**PLAN, "summary": "不可提交"}}])]
+        result = await builder.compile().ainvoke(state)
+        assert result["data_processing_metadata"] == PLAN
+        assert "set_research_spec" in result["messages"][-1].content
+    asyncio.run(scenario())

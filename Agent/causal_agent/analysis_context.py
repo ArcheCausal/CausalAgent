@@ -17,6 +17,8 @@ from collections.abc import Mapping, Sequence
 from itertools import combinations
 from typing import Any
 
+from langchain_core.messages import HumanMessage
+
 from Agent.deep_agent_tools.models import (
     AlgorithmResult,
     EvidenceResult,
@@ -43,6 +45,15 @@ MAX_CONTEXT_EVIDENCE_ITEMS = 8
 MAX_CONTEXT_QUESTION_CHARS = 1000
 MAX_INDEX_SUMMARY_CHARS = 160
 MAX_INDEX_ENTRY_QUESTION_CHARS = 200
+
+
+def latest_user_message_text(state: Mapping[str, Any]) -> str:
+    """读取当前用户原文，不混入历史提问、路由消息或模型生成的参数。"""
+    for message in reversed(state.get("messages") or []):
+        if isinstance(message, HumanMessage):
+            content = message.content
+            return content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    return ""
 
 _ORDINAL_PATTERN = re.compile(r"(?:第\s*)?(\d{1,2})\s*(?:个|条|项|次)?")
 _ORDINAL_WORD_PATTERN = re.compile(r"第\s*([一二三四五六七八九十]{1,3})\s*(?:个|条|项|次)")
