@@ -55,6 +55,9 @@ async def verify(report, model_config):
             'reasoning_effort': (payload.get('reasoning') or {}).get('effort'),
             'reasoning_history_items': sum(item.get('type') == 'reasoning'
                 for item in payload.get('input', []) if isinstance(item, dict)),
+            'reasoning_history_text_chars': sum(len(part.get('text') or '')
+                for item in payload.get('input', []) if isinstance(item, dict) and item.get('type') == 'reasoning'
+                for part in (item.get('content') or []) if part.get('type') == 'reasoning_text'),
             'tool_output_items': sum(item.get('type') == 'function_call_output'
                 for item in payload.get('input', []) if isinstance(item, dict)),
         })
@@ -172,7 +175,7 @@ async def verify(report, model_config):
                     'causal_reconnected_decision_mismatch')
             report['causal_agent_tools_and_reconnected_followup'] = 'PASS'
             require(all(item['reasoning_effort'] == 'high' for item in report['requests']), 'thinking_not_enabled')
-            require(any(item['reasoning_history_items'] and item['tool_output_items'] for item in report['requests']),
+            require(any(item['reasoning_history_text_chars'] and item['tool_output_items'] for item in report['requests']),
                 'reasoning_history_not_sent_with_tool_results')
             report['reasoning_history_with_tool_results'] = 'PASS'
         report['status'] = 'PASS'

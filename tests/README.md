@@ -66,6 +66,8 @@ docker compose -f docker-compose.prod.yml config --quiet
 
 研究参数的真实模型及数据库恢复入口、思考模式工具续接和连接池重建说明见 [数据处理验收](../Document/development/testing.md)。独立脚本 `acceptance/real_model_parameter_extraction.py` 比较完整参数语义，`acceptance/real_model_reasoning_recovery.py` 检查真实思考历史、参数工具、因果 Agent 文件工具及 PostgreSQL 重连；二者均不属于默认 pytest 范围。
 
+`acceptance/deepseek_responses_roundtrip.py` 使用真实 DeepSeek 和专用 PostgreSQL，检查父图状态消息隔离、非空明文推理回传、同步与异步调用、文件工具续接及重连后的历史一致性。它不运行业务 Job 或领域算法，专用容器及报告要求见同一[数据处理验收说明](../Document/development/testing.md)。
+
 数据处理方案的确定性规则位于 `unit/agent/test_data_processing_lifecycle.py`；方案工具、脚本工具、父子状态投影和 checkpoint 状态传递位于 `integration/agent/test_data_processing_plan_state.py`，使用真实 ToolNode、StateGraph 与 InMemorySaver。真实数据库入口 `acceptance/data_processing_recovery.py` 覆盖保存候选后补写执行说明；完整模型与 OpenSandbox 入口为 `acceptance/sandbox_upgrade_job.py --scenario execution-report`。后两者必须在专用隔离服务上显式执行，离线测试不代替这些证据。
 
 `docker-compose.test.yml` 提供独立的 `unit-test` 服务。Dockerfile 的 `test` 目标先从 `tests/smoke/requirements-deep-agent-py311-linux.lock` 安装 Python 3.11 Linux hash-pinned 项目依赖，再安装 `requirements-test.txt`，不会把 `pytest` 临时安装到正在运行的应用容器。

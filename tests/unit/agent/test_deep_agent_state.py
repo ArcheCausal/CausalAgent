@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from Agent.deep_agent.state import (
     assert_checkpoint_state_safe,
     from_deep_agent_output,
     initial_deep_agent_state,
+    retry_deep_agent_from_checkpoint,
     to_deep_agent_input,
 )
 from Agent.deep_agent_tools.models import DataProfile
@@ -102,6 +104,41 @@ def test_parent_projection_does_not_copy_job_or_runtime_fields() -> None:
         "deep_agent_structured_response",
         "deep_agent_status",
     }
+
+
+def test_parent_projection_keeps_user_inputs_and_domain_context_without_parent_transcript() -> None:
+    question = HumanMessage(content="分析 x 对 y 的影响。")
+    answer = {"role": "user", "content": "使用已确认的数据处理方案。"}
+    messages = [
+        question,
+        AIMessage(content="决策：进入因果分析流程。", name="agent"),
+        AIMessage(content="决策：数据预处理完成，进入工具处理路由", name="preprocess"),
+        SystemMessage(content="父图内部状态"),
+        ToolMessage(content="父图工具返回", tool_call_id="parent-tool"),
+        {"role": "assistant", "content": "父图流程说明"},
+        answer,
+    ]
+    parent = {**ANALYSIS_PARENT, "messages": messages, "preprocess_summary": "已完成数据准备。"}
+    projected = to_deep_agent_input(parent)
+    assert projected["messages"][:2] == [question, answer]
+    assert len(projected["messages"]) == 3
+    assert json.loads(projected["messages"][-1]["content"])["preprocess_summary"] == "已完成数据准备。"
+    assert parent["messages"] is messages and len(messages) == 7
+
+
+def test_child_retry_preserves_its_own_model_and_tool_history() -> None:
+    model_message = AIMessage(content="", tool_calls=[{
+        "id": "read-context", "name": "read_file", "args": {"file_path": "/context.txt"},
+    }])
+    tool_message = ToolMessage(content="上下文文件已读取。", tool_call_id="read-context")
+    child = initial_deep_agent_state(
+        data_profile=DataProfile(row_count=0, column_count=0),
+        messages=[HumanMessage(content="读取上下文。"), model_message, tool_message],
+    )
+    retried = retry_deep_agent_from_checkpoint(child, retry_instruction="继续完成分析。")
+    assert retried["messages"][:-1] == child["messages"]
+    assert retried["messages"][-1] == {"role": "user", "content": "继续完成分析。"}
+    assert len(child["messages"]) == 3
 
 
 def test_runtime_only_state_keys_are_rejected() -> None:

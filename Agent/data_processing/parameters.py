@@ -13,7 +13,7 @@ ParameterField = Literal["target", "treatment", "analysis_question", "measuremen
 RESEARCH_FIELDS = frozenset(ParameterField.__args__)
 PARAMETER_BINDING_KEY = "analysis_parameter_identity"
 PROCESSING_STATE_VERSION = 3
-PROCESSING_GRAPH_NAME = "causalagent-research-v3"
+PROCESSING_GRAPH_NAME = "causalagent"
 RevisionReason = Literal["initial", "user_change", "correction"]
 
 class ParameterContractError(ValueError):

@@ -61,6 +61,10 @@ agent → data_processing → validate_dataset → bind_dataset → preprocess �
 
 父图 checkpoint 使用 `thread_id=analysis_jobs.job_id` 和空 namespace。Deep Agent 子图使用同一个 PostgreSQL saver 和稳定的 `thread_id=deep-agent:<uuid5(job_id)>`，独立调用的读写均使用该 thread 的根 namespace（空字符串），不携带父图的 checkpoint ID 或位置映射。父节点读取同一位置的已有状态后继续未完成子图，或在 Gate 修正时追加受控指令。子图 State 保存的分析身份由 Job、当前冻结输入和算法 Spec 摘要构成；worker、attempt 和 lease 只代表本次执行权限。输入身份读取的是 invocation 级可刷新引用，服务端重新冻结输入或切换分析上下文后，旧执行产物不会被复用。
 
+首次进入因果子图时，父图只传递用户消息，再显式加入分析问题、画像、研究参数、预处理摘要和执行说明等结构化上下文。程序生成的路由、进度和其他父图消息不作为子图的模型历史。子图已经保存的模型响应、工具调用和返回仍由其自身 checkpoint 完整恢复，Gate 修正只追加新的受控指令。
+
+两个 Agent 共用的 DeepSeek Responses 适配器在流式 `response.output_item.done` 事件中读取真实 `reasoning.content`，与响应其他内容一同写入消息和 checkpoint；不重复拼接推理 delta，也不生成替代推理。同步和异步流式调用均保留这些文本，非流式继续使用框架的完整响应解析。DeepSeek 使用无状态 Responses 协议，每次回传完整历史；即使设置 `store=False`，明文推理也保留，不使用 `previous_response_id` 省略历史。推理内容不进入公共文字事件。
+
 提交数据处理语义问题时，子图在内层 `interrupt` 暂停；父图保留原生中断 ID 和公开载荷，让 LangGraph 直接向外传播暂停，不把它当作执行失败，也不再增加一层人工中断。用户答复通过父图的 `Command(resume=...)` 回到子图原中断位置，连续提问分别消费自己的答复。子图配置保留父任务的恢复索引，移除父 checkpoint ID、位置映射和重放状态，并显式指定共享 saver；读取处理 namespace 时不会误用父图位置。等待期间结束本轮执行并释放 OpenSandbox、MCP 请求、算法子进程和 worker 执行槽位。
 
 从可信 checkpoint 恢复时，系统校验同一 Job、冻结输入、Spec 摘要和数据处理运行身份；已完成结果以原始 provenance 进入 Gate 认可的恢复结果集合，不因新 attempt/lease 被重复执行。旧 worker 的迟到写入继续被 fencing 拒绝；checkpoint 不可可靠读取时阻止恢复。人工恢复只增加 `resume_count`，不消耗故障恢复次数。

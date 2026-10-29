@@ -8,6 +8,7 @@ import json
 from typing import Annotated, Any, TypedDict
 
 from deepagents.graph import DeepAgentState as _OfficialDeepAgentState
+from langchain_core.messages import HumanMessage
 from Agent.data_processing.parameters import execution_parameters
 
 from Agent.deep_agent_tools.models import (
@@ -199,13 +200,13 @@ def to_deep_agent_input(
 ) -> ProjectDeepAgentState:
     """只把 Deep Agent 所需字段投影到内层 State，不复制父状态。"""
 
-    # 子图的完整 messages/官方内部字段由子图 checkpoint 持有；父图只在
-    # 首次进入边界时提供自己的输入消息，不回投影子图消息。
-    messages = parent_state.get("messages")
-    if messages is None:
-        messages = []
-    if not isinstance(messages, list):
-        messages = list(messages)
+    # 首次进入只传用户输入。父图程序生成的 AIMessage 是流程状态，不能
+    # 充当带推理历史的模型答复；子图自己的模型/工具历史由其 checkpoint 持有。
+    messages = [
+        message for message in (parent_state.get("messages") or [])
+        if isinstance(message, HumanMessage)
+        or (isinstance(message, Mapping) and message.get("role") in {"user", "human"})
+    ]
     analysis_parameters = parent_state.get("analysis_parameters")
     if not isinstance(analysis_parameters, Mapping):
         analysis_parameters = {}
