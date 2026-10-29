@@ -139,6 +139,8 @@ class CausalAgentState(TypedDict):
     finalization_retry_count: NotRequired[int]
     finalization_status: NotRequired[Literal["valid", "degraded"]]
     finalization_error: NotRequired[str]
+    deep_agent_budget_exhausted: NotRequired[bool]
+    analysis_limitations: NotRequired[list[dict[str, str]]]
 
 
 class RagSubgraphState(TypedDict, total=False):

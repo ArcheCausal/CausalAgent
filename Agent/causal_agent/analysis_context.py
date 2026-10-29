@@ -764,6 +764,8 @@ def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
         "functional_form": _functional_form_facts(
             params, parsed_results, current_queries=result_queries,
         ),
+        "analysis_limitations": copy.deepcopy(state.get("analysis_limitations") or []),
+        "budget_exhausted": bool(state.get("deep_agent_budget_exhausted")),
     }
 
 

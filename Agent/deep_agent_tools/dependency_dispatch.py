@@ -188,6 +188,7 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
         """收尾本轮被预算或跳转跳过、永远不会有终态的工具调用。"""
 
         identity = runtime.context.trusted_identity
+        budget_exhausted = bool(state.get("analysis_budget_exhausted"))
         closing: dict[str, InvocationRecord] = {}
         results: dict[str, AlgorithmResult] = {}
         for invocation_id, raw in (state.get("action_ledger") or {}).items():
@@ -214,12 +215,14 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                 invocation_id=invocation_id, result_index=0
             )
             closing[str(invocation_id)] = record.model_copy(update={
-                "final_status": "failed",
+                "final_status": "skipped" if budget_exhausted else "failed",
                 "result_ref": result_ref,
                 "attempts": {retry_ordinal: ActionAttempt(
-                    retry_ordinal=retry_ordinal, revision=2, status="failed",
+                    retry_ordinal=retry_ordinal, revision=2,
+                    status="skipped" if budget_exhausted else "failed",
                     started_at=started_at, finished_at=finished_at,
-                    safe_error_code=SafeErrorCode.ALGORITHM_CANCELED,
+                    safe_error_code=(SafeErrorCode.ALGORITHM_BUDGET_EXHAUSTED if budget_exhausted
+                                     else SafeErrorCode.ALGORITHM_CANCELED),
                 )},
             })
             results[result_ref] = AlgorithmResult(
@@ -228,11 +231,13 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                 provider_call_id=record.provider_call_id,
                 capability_id=spec.capability_id,
                 capability_version=spec.version,
-                status="execution_failed",
+                status="skipped" if budget_exhausted else "execution_failed",
                 method=spec.method_definition(),
                 diagnostics=Diagnostics(
-                    summary="工具调用批次因预算上限被跳过，未执行。",
-                    safe_error_code=SafeErrorCode.ALGORITHM_CANCELED,
+                    summary=("工具调用批次因预算上限被跳过，未执行。" if budget_exhausted
+                             else "工具调用在执行前被终止，未产生算法结果。"),
+                    safe_error_code=(SafeErrorCode.ALGORITHM_BUDGET_EXHAUSTED if budget_exhausted
+                                     else SafeErrorCode.ALGORITHM_CANCELED),
                 ),
                 provenance=AlgorithmResultProvenance(
                     job_id=str(identity.job_id),

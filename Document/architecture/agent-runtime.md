@@ -117,7 +117,9 @@ Adapter 负责模型参数和数据集输入契约检查、标准结果、raw re
 
 `ToolCallProtocolMiddleware` 在完整模型响应之后检查最新 `AIMessage.invalid_tool_calls`。参数 JSON 解析失败时，它使用原调用 ID 追加 `status=error` 的 `ToolMessage`，说明工具未执行，并且不修改原参数、不把原始参数或底层异常写入返回内容；仅在本地 JSON 解析器能够确认时附带行列位置。当前响应任一调用缺少有效 ID，或调用 ID 重复时，运行以受控协议错误终止，不生成替代 ID。若仍有合法工具调用待执行，继续原工具路由；否则通过 `jump_to=model` 返回现有 `before_model` 链，继续接受模型预算检查。存在无效调用时，本轮 `structured_response` 会清空，父图继续使用既有 FinalizationGate 拒绝、一次修正和降级规则。该钩子只检查当前响应，不修复旧 checkpoint。
 
-`PendingToolCallLimitMiddleware` 在 `after_model` 阶段只向官方次数限制器传递尚未收到回执的调用。ToolStrategy 已在这一阶段前解析结构化输出并写入成功或校验失败的 ToolMessage，因此这些调用不再占用工具执行预算，也不会被追加同一调用 ID 的超限回执。混合批次仍对未完成调用执行原有计数、次数上限和停止规则；实际消息及已有回执保持原样。达到工具预算后仍可提交最终结构化决策，Gate 修正继续使用子图 checkpoint 的完整历史。
+因果分析使用 `AnalysisBudgetMiddleware` 管理执行和收尾两个阶段。执行阶段沿用 `PendingToolCallLimitMiddleware` 的计数规则，只统计当前响应中尚无回执的调用；ToolStrategy 已完成的结构化提交不占工具预算，也不追加重复回执。整个未执行批次超过剩余工具预算、工具次数达到上限或执行模型次数达到上限时，进入收尾阶段：隐藏全部算法、检索和文件工具，最多再调用模型三次，仅允许提交或修正 `FinalAnalysisDecision`。即使模型请求已隐藏的工具，执行边界也只返回未执行回执。取消、租约撤销与不可恢复的外部错误继续传播，不转换为预算收尾。
+
+`analysis_model_call_count`、`closeout_model_call_count`、`analysis_budget_exhausted` 和 `analysis_budget_reason` 随子图 checkpoint 保存；工具上限按同一子图的 `thread_tool_call_count` 检查。Gate 修正和重连不会重置预算；收尾仅返回普通文字时，在剩余额度内追加明确的结构化提交指令后续接，不直接发送以普通 assistant 消息结尾的下一次请求。收尾次数用尽仍无有效决策时，沿用既有受控降级。被预算拦截的算法记录为 `skipped` 和 `ALGORITHM_BUDGET_EXHAUSTED`，不生成图、效应查询或适用性检查，也不解释为算法执行失败。数据处理子图继续使用原来的模型及工具限制器，不采用因果分析的收尾契约。
 
 每次模型响应后，identity middleware 先把算法调用以 `pending/queued`、revision 0 登记到 Action Ledger；dispatch 的独立 `after_model` 节点再推进到 `pending/running`、revision 1。父图使用同步 checkpoint durability 消费子图，工具外部调用必须等这些 State 更新提交后才开始。调度器达到 deadline 时取消内部协程并等待 MCP control lane 完成清理，随后以 `timed_out`、`ALGORITHM_TIMED_OUT` 生成无因果图、无 raw artifact 的结果。工具清理路径不提前发布 `canceled`。普通成功、失败、超时及依赖未就绪均通过 `Command` 一并写回 ToolMessage、算法结果和 revision 2 终态账本；用户取消和 lease 撤销传播控制流并取消整批任务，不转成普通算法失败。
 
@@ -169,13 +171,13 @@ Agent 侧的 `effect_diagnose` 只做结构诊断，不执行估计。它校验�
 
 每个算法调用和诊断调用在终态账本中保存程序生成的 `effect_query`：源图引用、处理变量、结果变量，以及 g-formula 的对比区间与结局模型。值只来自已校验的工具参数，模型不能事后补写。诊断比较源图和变量对，估计比较完整请求，因此另一变量对或其他源图的记录不能代替当前查询。成功、失败、超时和不适用路径都保留这份信息。旧 checkpoint 仍可读取，但缺少查询证明的记录不能满足新门禁，也不会由程序猜测补齐。
 
-分析路由中，已绑定不同的 `treatment` 和 `target`，且当前认可结果中有结构合法的有效发现图时，最终门禁要求当前查询有一份诊断记录；`proceed` 与 `reject` 都算有结论，只有 `proceed` 才要求当前查询完成一次真实估计，未就绪、不适用、失败和超时都保留真实终态。存在有效估计结果时，主结果必须是估计结果，且该估计的源图必须有成功的诊断记录。门禁先校验结果与账本身份、终态和引用，再核对诊断和估计是否属于当前查询。
+分析路由中，已绑定不同的 `treatment` 和 `target`，且当前认可结果中有结构合法的有效发现图时，科学检查要求当前查询有一份诊断记录；`proceed` 与 `reject` 都算有结论，只有 `proceed` 才要求当前查询真实发起估计。报告入口把缺少诊断或尚未执行估计保存为 `analysis_limitations`，允许展示已有候选结构。未就绪、不适用、失败和超时保留真实终态。存在有效估计结果时，主结果必须是估计结果，且该估计的源图必须有成功的诊断记录；其他变量对或源图的诊断不能替代。身份、账本、终态、来源和引用仍严格校验。
 
-函数形式检查只针对当前查询。估计结果出现 `residual_spearman_max` 或 `residual_abs_spearman_max` 达到阈值，或数据集非线性强度达到阈值时，必须有一次当前查询的 `causal_g_formula` 调用，并且 `contrast` 明确为 `(0, 1)`、`outcome_model` 明确为 `hgb`；仅调用 g-formula、只使用线性结局模型或其他对比区间都不满足这项检查。线性估计按每单位变化解释，因此本轮统一使用 `(0, 1)`。线性与灵活估计的差值明显时，灵活估计必须成为主结果。诊断判定为 `reject` 时不要求补跑灵活估计。
+函数形式检查只针对当前查询。估计结果出现 `residual_spearman_max` 或 `residual_abs_spearman_max` 达到阈值，或数据集非线性强度达到阈值时，需要当前查询的 `causal_g_formula` 检查，且 `contrast=(0, 1)`、`outcome_model=hgb`；仅调用 g-formula、线性结局模型、其他对比区间或预算跳过都不能算完成该检查。未发起检查或检查后仍无可用结论时，报告入口保存缺口，保留 OLS 数字并注明“线性假设下的初步估计”，区间只反映该模型假设下的不确定性。实际有效灵活估计已经证明线性近似偏离时，仍必须选择灵活估计作为主结果。诊断为 `reject` 时不要求补跑灵活估计。
 
 g-formula 采用调整后的直接标准化：在调整集 `Z` 为处理变量全部父节点、且无未观测混杂的假设下，用结局模型估计条件均值 `m(t,z)=E[Y|T=t,Z=z]`，再以 `(1/n)Σ[m(x1,Zi)−m(x0,Zi)]` 得到对比效应。这种方式直接估计总效应所需的条件均值，不对随机中介做逐节点替换，也不需要额外的中介分布模拟器。结局模型可选 `linear` 或 `hgb`；`bootstrap` 给出 percentile 区间，并同时记录线性效应、效应差和差值标准误供函数形式判定使用。真实中介存在非线性时，直接标准化仍依赖调整集与结局模型设定，结论不超出该假设范围。
 
-门禁仍只给模型一次修正机会，随后沿用降级流程；不自动补调、换图或增加循环。Adapter 在实际执行前通过当前任务内的程序通道发布已完成检查，调度器按 invocation 收集；即使外层 deadline 取消工具，也可在超时结果中保留真实的 `ready` 记录。该临时通道不进入模型参数、State 或 checkpoint，独立调用之间不复用记录。执行器不可用属于执行失败，输出解析或 raw 校验损坏仍属于输出契约错误。预算收尾从原调用账本补齐 `source_input_identity` 与 `analysis_dataset_id`，记录真实未执行，不生成检查记录。
+决策和引用等可修正错误仍只给模型一次 Gate 修正机会，随后沿用降级流程；修正也受剩余执行或收尾预算限制。科学检查缺失保存为限制，不占用这次修正机会。Adapter 在实际执行前通过当前任务内的程序通道发布已完成检查，调度器按 invocation 收集；即使外层 deadline 取消工具，也可在超时结果中保留真实的 `ready` 记录。该临时通道不进入模型参数、State 或 checkpoint，独立调用之间不复用记录。执行器不可用属于执行失败，输出解析或 raw 校验损坏仍属于输出契约错误。预算收尾从原调用账本补齐 `source_input_identity` 与 `analysis_dataset_id`，记录真实未执行，不生成检查记录。
 
 算法在独立进程中执行。进程池默认使用 `forkserver` 启动方式，避免父进程已经启动的 OpenMP 线程被 `fork` 继承；父进程先使用过 scikit-learn 或 BLAS 时，直接 `fork` 的子进程运行梯度提升树会崩溃。Windows 沿用平台默认的 `spawn`。
 
@@ -229,15 +231,17 @@ Deep Agent 使用 `ToolStrategy(FinalAnalysisDecision)` 生成 `structured_respo
 - 每个有效算法结果都有唯一取舍，主结果满足 outcome 约束。
 - 每个已登记算法调用都已有一致的终态结果；`pending`、`queued/running` 或缺少结果时禁止进入报告。
 - 分析运行（父图 `route_decision=data_processing`，含 `context_switch` 之后的数据处理路径）在没有任何算法结果时，不得提交 `evidence_only` 或 `no_valid_algorithm`。
-- `web_search_enabled=true` 时，分析运行必须有一次 `web_evidence_search` terminal 调用；允许真实返回无结果/不可用状态，但不能零调用完成。RAG 是否调用由 Agent 自主决策。
+- `web_search_enabled=true` 时检查当前分析是否有 `web_evidence_search` terminal 调用；零调用在报告入口记录为缺少外部证据核对，不因此隐藏已有可信图。真实返回无结果/不可用时保留实际终态。RAG 是否调用由 Agent 自主决策。
 
 进入 Deep Agent 的运行都是分析运行：`agent` 的 `start_analysis`/`rerun_analysis` 直接路由到 `data_processing`，`context_switch` 也会把 `route_decision` 改写成后续节点名。因此父图投影时按运行追加“必须至少调用一个算法工具”这一条系统约束。Web 调用要求写在固定系统提示中，按本次实际提供的工具是否包含 `web_evidence_search` 生效；可见性由可信运行上下文决定。RAG 不追加强制调用约束。
 
-最终决策的两套引用命名空间不混用：`result_assessments`、`primary_result_ref`、`conflicts.result_refs` 与 `revision_proposals.result_ref` 只接受本次运行返回的算法结果引用；RAG/Web 证据引用只能出现在 `revision_proposals.evidence_refs`。引用分工和按可见工具生效的 Web 调用要求写在固定系统提示中，Gate 继续独立按可信开关校验本 attempt 的真实调用记录；RAG 是否检索由 Agent 自主判断，避免模型把“证据不采用”写进算法结果取舍。
+最终决策的两套引用命名空间不混用：`result_assessments`、`primary_result_ref`、`conflicts.result_refs` 与 `revision_proposals.result_ref` 只接受本次运行返回的算法结果引用；RAG/Web 证据引用只能出现在 `revision_proposals.evidence_refs`。引用分工和按可见工具生效的 Web 调用要求写在固定系统提示中，Gate 继续独立按可信开关检查本 attempt 的真实记录。父图显式传入科学限制收集器，将缺少诊断、估计、函数形式检查或联网核对转换为报告限制；未传收集器的独立校验调用保持严格拒绝缺失检查。RAG 是否检索由 Agent 自主判断，避免模型把“证据不采用”写进算法结果取舍。
 
 模型可修正的决策校验第一次失败时，父图把失败映射为稳定的规则码，再生成一条脱敏修正指令（包含被违反的具体引用规则）交回同一个 Deep Agent 子图；第二次仍失败则设置 `finalization_status=degraded` 并生成安全报告。身份、账本或状态一致性问题不带规则码，直接终止分析，不进入模型修正或报告降级。可修正的 Gate 拒绝会发布 `progress` 阶段说明：首次挂在 `finalization_gate` 阶段并给出同一份修正要求，降级时说明本次仅基于已验证输入生成报告；第二次 Deep Agent 启动修正时，新阶段同样收到一条 `progress` 说明，指出该阶段复用已有结果，并补齐校验要求的步骤。`degraded` 不公开未经验证的主图或最终选择，但报告成功时 Job 仍以 `succeeded` 收敛。校验通过时设置 `finalization_status=valid`，并把内部结果引用转换为公开算法名称后发布最终决策说明。已完整记录的算法超时不阻止使用其他有效结果；报告装配根据执行摘要固定追加超时算法的分析限制说明。
 
 报告节点让模型只产出 `ReportDraft`：报告标题、块结构、Markdown 文本和资源/证据引用。图表资源、因果图模型、来源和证据全部由后端注入并校验，块 ID 重复、块类型未知、`asset_key` 不存在或类型不匹配、`evidence_id` 不存在都会进入节点受控错误路径并生成降级报告文档，不保存部分报告。来源类别按证据通道（输入文件、知识库、联网检索）显式给出，不根据是否存在 URL 推断。报告装配还会把正文中出现且属于本次证据清单的 `ev_...` ID 回填到对应 `markdown.evidence_refs`，兼容模型漏填结构化字段；前端来源页脚据此提供“定位正文”。父 State 用 `chart_assets` 保存已绑定分析数据集的分析准备阶段生成的结构化图表资源，用 `report_document` 保存后端装配完成的结构化报告文档；报告追问只使用文档摘要、资源说明、来源说明和证据说明，不把图表数据、因果图模型或完整文档塞进提示词。新报告不再依赖 `visualization_mapping`、Base64 图片、HTML 图片标签和 `[[CHART:...]]` 占位符。
+
+报告入口的 `finalization_status=valid` 表示决策及来源完整性通过，不表示科学假设均已验证。存在 `analysis_limitations` 或预算耗尽时，后端固定在正文开头写入“分析范围与限制”，图标题使用“候选因果结构”；适用时固定写入 OLS 初步估计及区间的条件说明。已有 `graph_main` 但草稿遗漏图块时，后端补入唯一主图块，不依赖模型另行提交图片。限制、预算状态、原始数值与图资源进入报告文档和 `analysis-facts-v2` 快照，历史读取、追问与重新生成保留同一事实；旧快照没有这些字段时不推测补写旧运行结论。
 
 算法 Tool 的模型可见参数允许附带 `public_decision.summary`。middleware 在科学参数校验和执行前剥离该字段；有效说明写入 `decision_kind=algorithm` 的公共事件，缺失或格式无效不会阻止算法执行。`rag_evidence_search` 与 `web_evidence_search` 使用同一 envelope，并在外部检索前剥离该字段，写入 `decision_kind=evidence` 的公共事件。两类工具说明都不进入 Adapter、MCP、检索器入参。普通 assistant content、ToolMessage、工具参数、完整工具结果、provider ID、result reference 和隐藏推理都不会因此公开。
 

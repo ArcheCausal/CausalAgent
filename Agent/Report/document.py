@@ -405,6 +405,39 @@ def build_report_document(
                     "报告块引用了不存在的证据: " + ", ".join(unknown_evidence)
                 )
 
+    # 已有可信主图不能因模型遗漏资源块而在报告中消失。
+    if not graph_block_count and isinstance(available_assets.get("graph_main"), CausalGraphModel):
+        block_id = "primary_causal_graph"
+        while block_id in seen_block_ids:
+            block_id += "_"
+        seen_block_ids.add(block_id)
+        normalized_blocks = [*normalized_blocks, CausalGraphBlock(
+            id=block_id, title="候选因果结构", asset_key="graph_main",
+        )]
+        graph_block_count = 1
+
+    # 检查缺口和预算状态是程序事实，固定注入正文，供实时、历史和导出共同使用。
+    summary = execution_summary or {}
+    limitations = summary.get("analysis_limitations") or []
+    if limitations or summary.get("budget_exhausted"):
+        normalized_blocks = [block.model_copy(deep=True) for block in normalized_blocks]
+        lines = ["### 分析范围与限制"]
+        if graph_block_count:
+            lines.append("本报告展示的是候选因果结构；图的来源和结构通过校验，不表示因果方向或科学假设已经得到确认。")
+            for block in iter_report_blocks(normalized_blocks):
+                if isinstance(block, CausalGraphBlock):
+                    block.title = "候选因果结构"
+        if summary.get("budget_exhausted"):
+            lines.append("分析执行预算已耗尽，后续工具未执行；报告仅整理已有结果。预算跳过不代表检查通过或算法执行失败。")
+        if summary.get("preliminary_ols"):
+            lines.append("OLS 数值为线性假设下的初步估计；置信区间仅反映该模型假设下的不确定性，不能证明对非线性机制稳健。")
+        lines.extend(item["message"] for item in limitations)
+        block_id = "analysis_scope_limits"
+        while block_id in seen_block_ids:
+            block_id += "_"
+        seen_block_ids.add(block_id)
+        normalized_blocks = [MarkdownBlock(id=block_id, content="\n\n".join(lines)), *normalized_blocks]
+
     # 超时是程序事实；即使模型正文省略限制，报告也必须保留这项说明。
     timed_out_names = [
         item.get("public_name") or item.get("capability_id") or "算法"

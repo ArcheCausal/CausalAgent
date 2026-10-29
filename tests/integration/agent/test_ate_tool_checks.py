@@ -186,6 +186,64 @@ def _validate(
     )
 
 
+def test_incomplete_nonlinearity_review_keeps_real_ols_and_candidate_in_saved_report():
+    from langgraph.runtime import Runtime
+    from Agent.causal_agent.graph import _finalization_gate_node
+    from Agent.causal_agent.analysis_context import build_context_commit, build_report_analysis_context
+    from Agent.causal_agent.nodes import _report_graph_asset, _report_execution_summary
+    from Agent.Report.document import ReportDraft, ReportDocument, build_report_document
+
+    context, registry, source, source_record = _setup(kinds={"z": "continuous"})
+    estimate, estimate_record = _call(context, registry, source, source_record)
+    assert estimate.status == "valid"
+    diagnosis = _diagnose_record(context.trusted_identity, subject_ref=source.result_ref)
+    state = {
+        "deep_agent_structured_response": {
+            "outcome": "algorithm_supported", "primary_result_ref": estimate.result_ref,
+            "result_assessments": [
+                {"result_ref": estimate.result_ref, "disposition": "primary", "rationale": "实际 OLS 估计"},
+                {"result_ref": source.result_ref, "disposition": "supporting", "rationale": "估计所用源图"},
+            ],
+            "conflict_status": "none", "selection_rationale": "仅保留初步估计。",
+            "confidence": "low", "confidence_basis": ["灵活检查未完成"],
+        },
+        "deep_agent_algorithm_results": {r.result_ref: r for r in (source, estimate)},
+        "deep_agent_action_ledger": {r.invocation_id: r for r in (source_record, estimate_record, diagnosis)},
+        "route_decision": "data_processing", "deep_agent_budget_exhausted": True,
+        "analysis_parameters": {**PARAMETERS, "nonlinearity": {"ratio": 1.05}},
+        "messages": [],
+    }
+    update = asyncio.run(_finalization_gate_node(
+        state, runtime=Runtime(context=context, stream_writer=[].append), config={},
+        gate=FinalizationGate(registry=registry),
+    ))
+    assert update["finalization_status"] == "valid"
+    assert update["analysis_limitations"][0]["code"] == "form_check_not_attempted"
+    state.update(update)
+    facts = build_report_analysis_context(state)
+    assert facts["primary_result_ref"] == estimate.result_ref
+    graph = _report_graph_asset(state)
+    assert graph is not None
+    draft = ReportDraft(title="初步分析", blocks=[
+        {"id": "scope", "type": "markdown", "content": "基于已有结果。"},
+        {"id": "graph", "type": "causal_graph", "asset_key": "graph_main"},
+    ])
+    document = build_report_document(draft, assets={"graph_main": graph},
+        finalization_status="valid", execution_summary=_report_execution_summary(state))
+    restored = ReportDocument.model_validate_json(document.model_dump_json())
+    assert restored.finalization_status == "valid"
+    assert restored.blocks[0].id == "analysis_scope_limits"
+    assert "线性假设下的初步估计" in restored.blocks[0].content
+    assert "非线性" in restored.blocks[0].content
+    assert restored.blocks[2].title == "候选因果结构"
+    assert restored.assets["graph_main"] == graph
+    committed = json.loads(json.dumps(build_context_commit(state)))
+    regenerated = build_report_analysis_context({"report_revision_mode": "full_regeneration_from_context",
+        "analysis_context": {"latest_algorithm_summary": committed["algorithm_summary"]}})
+    assert regenerated["analysis_limitations"] == facts["analysis_limitations"]
+    assert regenerated["budget_exhausted"] is True
+
+
 def test_continuous_confounder_runs_real_ols_and_passes_gate():
     context, registry, source, source_record = _setup(kinds={"z": "continuous"})
     result, record = _call(context, registry, source, source_record)

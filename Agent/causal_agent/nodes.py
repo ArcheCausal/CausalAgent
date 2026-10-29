@@ -577,6 +577,8 @@ def _switched_context_state(
         "finalization_retry_count": 0,
         "finalization_status": None,
         "finalization_error": None,
+        "deep_agent_budget_exhausted": False,
+        "analysis_limitations": [],
     }
     if file_snapshot:
         update["file_summary"] = {
@@ -1879,6 +1881,12 @@ def _report_execution_summary(state: CausalAgentState) -> dict[str, Any]:
         "finalization_status": facts.get("finalization_status"),
         "algorithms": algorithms,
         "data_views_differ": (facts.get("data_view_comparison") or {}).get("data_views_differ"),
+        "analysis_limitations": facts.get("analysis_limitations", []),
+        "budget_exhausted": facts.get("budget_exhausted", False),
+        "preliminary_ols": bool(
+            (facts.get("analysis_limitations") or facts.get("budget_exhausted"))
+            and (report_primary_result(facts) or {}).get("algorithm") == "causal.backdoor_ols"
+        ),
     }
 
 
@@ -1987,6 +1995,8 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
           nonlinear 写“线性近似偏离”并说明主结果采用灵活估计；
           flexible_primary 写“采用灵活估计，未做线性对比”；
           undetermined 写“非线性检查未完成”并写明 reason 对应的真实终态或缺失原因。不得自行写死或改写判定阈值。
+        - analysis_limitations 是程序确认的检查缺口，必须如实说明；预算跳过不是算法执行失败，也不表示检查通过。
+          存在检查缺口时，图称为“候选因果结构”，OLS 称为“线性假设下的初步估计”；区间仅反映该模型下的不确定性。
 
         ## 报告文档结构
         你必须返回一个 JSON 对象，只包含 title 和 blocks 两个字段：

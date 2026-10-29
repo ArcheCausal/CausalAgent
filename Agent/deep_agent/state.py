@@ -54,6 +54,10 @@ class DeepAgentState(_OfficialDeepAgentState, total=False):
     finalization_retry_count: int
     model_call_count: int
     tool_call_count: int
+    analysis_model_call_count: int
+    closeout_model_call_count: int
+    analysis_budget_exhausted: bool
+    analysis_budget_reason: str
     data_processing_draft_script: str
     # 成功保存候选后建立；脚本或方案变化时清空，不删除 MySQL 历史记录。
     data_processing_candidate_id: int
@@ -90,6 +94,7 @@ class ParentStateUpdate(TypedDict, total=False):
     deep_agent_structured_response: FinalAnalysisDecision | None
     deep_agent_run_id: str
     deep_agent_status: str
+    deep_agent_budget_exhausted: bool
 
 
 def _as_data_profile(value: object, parent_state: Mapping[str, Any]) -> DataProfile:
@@ -169,6 +174,10 @@ def initial_deep_agent_state(
         ),
         model_call_count=0,
         tool_call_count=0,
+        analysis_model_call_count=0,
+        closeout_model_call_count=0,
+        analysis_budget_exhausted=False,
+        analysis_budget_reason="",
         data_processing_execution_report=(deepcopy(dict(data_processing_execution_report))
                                           if data_processing_execution_report is not None else None),
     )
@@ -332,6 +341,7 @@ def from_deep_agent_output(state: Mapping[str, Any]) -> ParentStateUpdate:
         "deep_agent_decision": state.get("structured_response"),
         "deep_agent_structured_response": state.get("structured_response"),
         "deep_agent_status": "completed",
+        "deep_agent_budget_exhausted": bool(state.get("analysis_budget_exhausted")),
     }
     if state.get("deep_agent_run_id"):
         result["deep_agent_run_id"] = str(state["deep_agent_run_id"])

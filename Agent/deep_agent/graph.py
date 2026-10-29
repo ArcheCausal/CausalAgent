@@ -27,6 +27,7 @@ from .profile import DeepAgentBudget, DeepAgentProfile, build_filesystem_permiss
 from .prompts import build_deep_agent_system_prompt
 from .state import ProjectDeepAgentState
 from .tool_call_limit import PendingToolCallLimitMiddleware
+from .analysis_budget import AnalysisBudgetMiddleware
 from .tool_call_protocol import ToolCallProtocolMiddleware
 from .tool_visibility import ToolVisibilityMiddleware
 
@@ -67,9 +68,13 @@ def build_tool_strategy() -> Any:
     return ToolStrategy(FinalAnalysisDecision)
 
 
-def build_budget_middlewares(profile: DeepAgentProfile) -> list[Any]:
-    """构造官方模型/Tool limit middleware；缺失时 fail closed。"""
+def build_budget_middlewares(profile: DeepAgentProfile, *, analysis_closeout: bool = False) -> list[Any]:
+    """构造预算限制；因果分析额外提供独立的结构化收尾阶段。"""
 
+    if analysis_closeout:
+        return [AnalysisBudgetMiddleware(
+            tool_limit=profile.budget.tool_call_limit, model_limit=profile.budget.model_call_limit,
+        )]
     try:
         module = importlib.import_module("langchain.agents.middleware")
     except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover - 真实版本门禁
@@ -339,7 +344,7 @@ def build_deep_agent(
         ToolCallProtocolMiddleware(),
         filesystem_middleware,
         _build_summarization_middleware(configured_model, profile),
-        *build_budget_middlewares(profile),
+        *build_budget_middlewares(profile, analysis_closeout=True),
     ]
     if registry is not None:
         middleware.append(

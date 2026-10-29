@@ -1004,6 +1004,7 @@ async def _finalization_gate_node(
     identity = getattr(context, "trusted_identity", None)
     if identity is None:
         raise RuntimeError("trusted runtime identity is required for finalization")
+    limitations = []
     try:
         decision = gate.validate(
             decision=state.get("deep_agent_structured_response")
@@ -1019,6 +1020,7 @@ async def _finalization_gate_node(
                 state.get("analysis_parameters") or {}, state.get("prepared_dataset_metadata") or {},
             ),
             analysis_question=nodes._latest_human_text(state),
+            scientific_limitations=limitations,
         )
     except StructuredResponseError as exc:
         if exc.rule is None:
@@ -1049,6 +1051,7 @@ async def _finalization_gate_node(
         return {
             "finalization_status": "degraded",
             "finalization_error": safe_error,
+            "analysis_limitations": [],
             "deep_agent_retry_instruction": "",
             "causal_analysis_result": _legacy_analysis_result(
                 decision=None,
@@ -1071,6 +1074,7 @@ async def _finalization_gate_node(
         "deep_agent_structured_response": decision,
         "deep_agent_retry_instruction": "",
         "finalization_status": "valid",
+        "analysis_limitations": limitations,
         "causal_analysis_result": _legacy_analysis_result(
             decision=decision,
             algorithm_results=state.get("deep_agent_algorithm_results") or {},

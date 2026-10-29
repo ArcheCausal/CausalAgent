@@ -29,6 +29,15 @@ from Agent.deep_agent_tools.models import (
 from Agent.deep_agent.prompts import ANALYSIS_ROUTE
 
 
+SCIENTIFIC_LIMITATIONS = {
+    "effect_question_without_diagnose": "效应可估计性诊断未完成；候选结构不能替代效应识别。",
+    "effect_question_without_estimation": "效应诊断已完成，但估计未实际执行；当前仅展示候选结构。",
+    "form_check_not_attempted": "已发现非线性信号，但灵活估计检查未完成；OLS 仅为线性假设下的初步估计，尚未验证函数形式稳健性。",
+    "form_check_incomplete": "已发起灵活估计检查，但尚无可用的函数形式结论；数值仅在所选模型假设下解释。",
+    "analysis_route_without_web_invocation": "本次已开启联网检索，但未实际执行；分析缺少该通道的外部证据核对。",
+}
+
+
 class StructuredResponseError(ValueError):
     """模型没有提交可验证的 ``structured_response``。
 
@@ -413,6 +422,7 @@ class FinalizationGate:
             query = record.effect_query
             if (
                 record.tool_name != FLEX_TOOL_NAME
+                or record.final_status == "skipped"
                 or query is None
                 or (query.treatment, query.outcome) != (treatment, outcome)
                 or query.contrast != (0.0, 1.0)
@@ -536,10 +546,18 @@ class FinalizationGate:
         web_search_enabled: bool | None = None,
         analysis_parameters: Mapping[str, Any] | None = None,
         analysis_question: str | None = None,
+        scientific_limitations: list[dict[str, str]] | None = None,
     ) -> FinalAnalysisDecision:
         """校验并返回可安全交给 report 的 decision 副本。"""
 
         normalized_decision = validate_structured_response(decision)
+
+        def incomplete_check(message: str, *, rule: str) -> None:
+            # 未传收集器的独立严格校验入口保留原有合同；报告入口显式收集缺口。
+            if scientific_limitations is None:
+                raise StructuredResponseError(message, rule=rule)
+            scientific_limitations.append({"code": rule, "message": SCIENTIFIC_LIMITATIONS[rule]})
+
         results = self._coerce_results(algorithm_results)
         ledger = self._coerce_ledger(action_ledger)
         job_id = str(self._identity_value(trusted_identity, "job_id"))
@@ -732,7 +750,7 @@ class FinalizationGate:
             and _requires_effect_estimation(analysis_parameters)
         )
         if effect_question and not diagnose_statuses & {"succeeded", "not_applicable"}:
-            raise StructuredResponseError(
+            incomplete_check(
                 "effect question requires an effect_diagnose decision",
                 rule="effect_question_without_diagnose",
             )
@@ -751,7 +769,7 @@ class FinalizationGate:
                 input_identity=current_input,
             )
         ):
-            raise StructuredResponseError(
+            incomplete_check(
                 "successful diagnosis requires a real estimation attempt",
                 rule="effect_question_without_estimation",
             )
@@ -787,8 +805,8 @@ class FinalizationGate:
                     rule="estimation_graph_not_diagnosed",
                 )
 
-        # 函数形式判定：信号触发就必须真的跑过一次灵活路；非线性结论要求
-        # 灵活估计成为主结果。两条规则都从程序事实重算，不信任模型自述。
+        # 函数形式判定：缺少灵活检查时记录限制；已有非线性结论时要求
+        # 灵活估计成为主结果。两者都从程序事实重算，不信任模型自述。
         proceed_graphs = {
             record.subject_ref
             for record in current_pair_diagnoses
@@ -844,10 +862,15 @@ class FinalizationGate:
                 signal_triggered(assessment["signals"])
                 and flex_check is None
             ):
-                raise StructuredResponseError(
+                incomplete_check(
                     "nonlinearity signal requires a flexible check",
                     rule="form_check_not_attempted",
                 )
+            elif assessment["verdict"] == "undetermined" and scientific_limitations is not None:
+                scientific_limitations.append({
+                    "code": "form_check_incomplete",
+                    "message": SCIENTIFIC_LIMITATIONS["form_check_incomplete"],
+                })
             if (
                 assessment["verdict"] == "nonlinear"
                 and flex is not None
@@ -873,7 +896,7 @@ class FinalizationGate:
                 input_identity=current_input,
             )
         ):
-            raise StructuredResponseError(
+            incomplete_check(
                 "analysis route requires at least one web evidence invocation",
                 rule="analysis_route_without_web_invocation",
             )
