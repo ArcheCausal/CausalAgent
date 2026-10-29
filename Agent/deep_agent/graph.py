@@ -26,6 +26,7 @@ from .memory import MEMORY_PATHS
 from .profile import DeepAgentBudget, DeepAgentProfile, build_filesystem_permissions
 from .prompts import build_deep_agent_system_prompt
 from .state import ProjectDeepAgentState
+from .tool_call_limit import PendingToolCallLimitMiddleware
 from .tool_call_protocol import ToolCallProtocolMiddleware
 from .tool_visibility import ToolVisibilityMiddleware
 
@@ -95,7 +96,7 @@ def build_budget_middlewares(profile: DeepAgentProfile) -> list[Any]:
 
     return [
         construct(classes["ModelCallLimitMiddleware"], profile.budget.model_call_limit),
-        construct(classes["ToolCallLimitMiddleware"], profile.budget.tool_call_limit),
+        construct(PendingToolCallLimitMiddleware, profile.budget.tool_call_limit),
     ]
 
 

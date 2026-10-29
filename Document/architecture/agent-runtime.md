@@ -117,6 +117,8 @@ Adapter 负责模型参数和数据集输入契约检查、标准结果、raw re
 
 `ToolCallProtocolMiddleware` 在完整模型响应之后检查最新 `AIMessage.invalid_tool_calls`。参数 JSON 解析失败时，它使用原调用 ID 追加 `status=error` 的 `ToolMessage`，说明工具未执行，并且不修改原参数、不把原始参数或底层异常写入返回内容；仅在本地 JSON 解析器能够确认时附带行列位置。当前响应任一调用缺少有效 ID，或调用 ID 重复时，运行以受控协议错误终止，不生成替代 ID。若仍有合法工具调用待执行，继续原工具路由；否则通过 `jump_to=model` 返回现有 `before_model` 链，继续接受模型预算检查。存在无效调用时，本轮 `structured_response` 会清空，父图继续使用既有 FinalizationGate 拒绝、一次修正和降级规则。该钩子只检查当前响应，不修复旧 checkpoint。
 
+`PendingToolCallLimitMiddleware` 在 `after_model` 阶段只向官方次数限制器传递尚未收到回执的调用。ToolStrategy 已在这一阶段前解析结构化输出并写入成功或校验失败的 ToolMessage，因此这些调用不再占用工具执行预算，也不会被追加同一调用 ID 的超限回执。混合批次仍对未完成调用执行原有计数、次数上限和停止规则；实际消息及已有回执保持原样。达到工具预算后仍可提交最终结构化决策，Gate 修正继续使用子图 checkpoint 的完整历史。
+
 每次模型响应后，identity middleware 先把算法调用以 `pending/queued`、revision 0 登记到 Action Ledger；dispatch 的独立 `after_model` 节点再推进到 `pending/running`、revision 1。父图使用同步 checkpoint durability 消费子图，工具外部调用必须等这些 State 更新提交后才开始。调度器达到 deadline 时取消内部协程并等待 MCP control lane 完成清理，随后以 `timed_out`、`ALGORITHM_TIMED_OUT` 生成无因果图、无 raw artifact 的结果。工具清理路径不提前发布 `canceled`。普通成功、失败、超时及依赖未就绪均通过 `Command` 一并写回 ToolMessage、算法结果和 revision 2 终态账本；用户取消和 lease 撤销传播控制流并取消整批任务，不转成普通算法失败。
 
 调度器读取 `Command.update.algorithm_results` 中与当前 call/capability 匹配的受控结果，保留失败 Command 的 State 更新。只有明确的有效成功结果才发布依赖 artifact；失败、超时、不适用、跳过或无法识别的返回均不放行下游依赖。

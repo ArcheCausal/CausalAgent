@@ -41,7 +41,7 @@ def test_real_deep_agent_graph_builds_without_default_subagent() -> None:
     assert "SubAgentMiddleware.before_agent" not in node_names
     assert "SummarizationMiddleware.before_model" in node_names
     assert "ModelCallLimitMiddleware.before_model" in node_names
-    assert "ToolCallLimitMiddleware.after_model" in node_names
+    assert "PendingToolCallLimitMiddleware.after_model" in node_names
     assert ProjectDeepAgentState.__annotations__["algorithm_results"]
     assert AgentRunContext.__dataclass_fields__["trusted_identity"]
 

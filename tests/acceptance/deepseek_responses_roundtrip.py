@@ -49,7 +49,8 @@ async def verify(report):
     from Agent.deep_agent.context import AgentRunContext, TrustedJobIdentity
     from Agent.deep_agent.graph import DeepAgentGraphConfig, build_deep_agent
     from Agent.deep_agent.model import DeepSeekResponsesChatOpenAI
-    from Agent.deep_agent.state import to_deep_agent_input
+    from Agent.deep_agent.profile import DeepAgentBudget
+    from Agent.deep_agent.state import retry_deep_agent_from_checkpoint, to_deep_agent_input
     from Agent.deep_agent_tools.models import DataProfile, FinalAnalysisDecision
     from config.secret_file import require_secret
 
@@ -66,6 +67,9 @@ async def verify(report):
         require(len(report['requests']) < 16, 'request_budget_exhausted')
         payload = json.loads(request.content)
         texts = reasoning_texts(payload.get('input') or [])
+        output_ids = [item['call_id'] for item in payload.get('input', [])
+            if item.get('type') == 'function_call_output']
+        require(len(output_ids) == len(set(output_ids)), 'duplicate_tool_output_sent')
         report['requests'].append({
             'reasoning_text_chars': sum(map(len, texts)),
             'tool_outputs': sum(item.get('type') == 'function_call_output' for item in payload.get('input', [])),
@@ -110,7 +114,8 @@ async def verify(report):
         def graph(saver):
             return build_deep_agent(model=model, domain_tools=[], backend=StateBackend(), store=store,
                 checkpointer=saver, config=DeepAgentGraphConfig(
-                    model_name=model_options['model'], context_window_tokens=1000000))
+                    model_name=model_options['model'], context_window_tokens=1000000,
+                    budget=DeepAgentBudget(tool_call_limit=1)))
 
         initial = to_deep_agent_input({
             'messages': [
@@ -125,7 +130,10 @@ async def verify(report):
         initial['files'] = {'/acceptance/context.txt': create_file_data(
             'This acceptance has no analysis dataset and no search tools. Do not report algorithm results.')}
         async with checkpoint() as saver:
-            completed = await asyncio.wait_for(graph(saver).ainvoke(initial, config, context=context), timeout=240)
+            running = graph(saver)
+            completed = await asyncio.wait_for(running.ainvoke(initial, config, context=context), timeout=240)
+            saved = await running.aget_state(config)
+            require(saved.values['thread_tool_call_count']['__all__'] == 1, 'tool_budget_boundary_not_reached')
         require(FinalAnalysisDecision.model_validate(completed['structured_response']).outcome == 'evidence_only',
             'decision_invalid')
         call_ids = {call['id'] for message in completed['messages'] for call in getattr(message, 'tool_calls', [])
@@ -134,21 +142,32 @@ async def verify(report):
             and 'no analysis dataset' in str(message.content) for message in completed['messages']), 'real_file_read_missing')
         original = signatures(completed['messages'])
         require(bool(original), 'async_reasoning_missing')
-        require(any(item['reasoning_text_chars'] and item['tool_outputs'] for item in report['requests']),
-            'reasoning_not_replayed_with_tool_output')
+        receipts = [message.tool_call_id for message in completed['messages'] if isinstance(message, ToolMessage)]
+        require(len(receipts) == len(set(receipts)), 'duplicate_tool_output_saved')
         report['parent_boundary_and_real_file_tool_roundtrip'] = 'PASS'
 
         async with checkpoint() as saver:
             rebuilt = graph(saver)
             restored = await rebuilt.aget_state(config)
             require(signatures(restored.values['messages']) == original, 'checkpoint_reasoning_changed')
-            repeated = await asyncio.wait_for(rebuilt.ainvoke({'messages': [HumanMessage(content=
-                '仍然没有分析数据。请再次读取 /acceptance/context.txt，继续用 evidence_only 的 FinalAnalysisDecision 收尾。')]
-            }, config, context=context), timeout=240)
+            retry_input = retry_deep_agent_from_checkpoint(restored.values, retry_instruction=
+                '仍然没有分析数据。请再次读取 /acceptance/context.txt，继续用 evidence_only 的 FinalAnalysisDecision 收尾。')
+            repeated = await asyncio.wait_for(rebuilt.ainvoke(retry_input, config, context=context), timeout=240)
+            retried_state = await rebuilt.aget_state(config)
+            require(retried_state.values['thread_tool_call_count']['__all__'] == 2,
+                'retry_tool_budget_boundary_not_reached')
         require(FinalAnalysisDecision.model_validate(repeated['structured_response']).outcome == 'evidence_only',
             'reconnected_decision_invalid')
         require(signatures(repeated['messages'])[:len(original)] == original, 'followup_changed_old_reasoning')
+        receipts = [message.tool_call_id for message in repeated['messages'] if isinstance(message, ToolMessage)]
+        require(len(receipts) == len(set(receipts)), 'retry_duplicate_tool_output_saved')
+        require(any(item['reasoning_text_chars'] and item['tool_outputs'] for item in report['requests']),
+            'reasoning_not_replayed_with_tool_output')
         report['postgres_reconnect_and_model_followup'] = 'PASS'
+        report['tool_budget_boundary_and_gate_retry_input'] = 'PASS'
+        report['tool_call_limit'] = 1
+        report['thread_tool_call_counts'] = [saved.values['thread_tool_call_count']['__all__'],
+            retried_state.values['thread_tool_call_count']['__all__']]
 
         disabled = DeepSeekResponsesChatOpenAI(**{**model_options, 'reasoning': {'effort': 'none'}},
             http_async_client=transport)
