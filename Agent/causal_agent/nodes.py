@@ -1021,6 +1021,11 @@ async def preprocess_node(
     summary.update(
         {
             **source_parameters,
+            # 原始研究角色与解析后的执行列同时保留；报告只展示研究角色。
+            "research_roles": {
+                "target": source_parameters.get("target"),
+                "treatment": source_parameters.get("treatment"),
+            },
             "role_columns": prepared_metadata.get("role_columns", {}),
             "transformations": prepared_metadata.get("transformations", []),
             "variable_semantics": prepared_metadata.get("variable_semantics", {}),
@@ -2129,6 +2134,11 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         - 统计检验限制须依据实际检验方法说明，不把离散列联表的格子频数要求套用于 Fisher-Z；没有执行的适用性诊断只列为未检验事项。
         - PC 算法的一般性质与本次 independence_test 的条件分别解释；若使用 Fisher-Z，不能声称本次检验不受线性或分布条件限制。
         - 没有可引用的知识库或联网证据时只说明缺少证据；除非存在明确失败状态，不得将未执行、未启用或不可用猜测为检索失败。
+        - 函数形式只读取 functional_form：verdict=not_detected 写“未检出非线性”，不得写成“已确认线性”；
+          linear 写“线性与灵活估计一致”并给出 effect_difference 与 difference_se；
+          nonlinear 写“线性近似偏离”并说明主结果采用灵活估计；
+          flexible_primary 写“采用灵活估计，未做线性对比”；
+          undetermined 写“非线性检查未完成”并写明 reason 对应的真实终态或缺失原因。不得自行写死或改写判定阈值。
 
         ## 报告文档结构
         你必须返回一个 JSON 对象，只包含 title 和 blocks 两个字段：

@@ -40,7 +40,7 @@ def _result(**overrides) -> AlgorithmResult:
         result_ref="inv-1:0",
         invocation_id="inv-1",
         provider_call_id="call-1",
-        capability_id="causal.ate",
+        capability_id="causal.backdoor_ols",
         capability_version="1.0",
         status="valid",
         standardized_graph=StandardizedGraph(graph_semantics="pdag", nodes=["x", "y"]),
@@ -74,6 +74,31 @@ def test_causal_effect_rejects_inverted_ci() -> None:
         _effect(ci95=(2.2, 1.8))
 
 
+def test_causal_effect_carries_estimation_controls() -> None:
+    effect = _effect(contrast=(0.0, 1.0), outcome_model="hgb", bootstrap_n=200)
+    assert effect.contrast == (0.0, 1.0)
+    assert effect.outcome_model == "hgb"
+    assert effect.bootstrap_n == 200
+
+
+def test_causal_effect_controls_default_to_none() -> None:
+    effect = _effect()
+    assert effect.contrast is None
+    assert effect.outcome_model is None
+    assert effect.bootstrap_n is None
+
+
+@pytest.mark.parametrize("value", [(math.nan, 1.0), (0.0, math.inf)])
+def test_causal_effect_rejects_non_finite_contrast(value) -> None:
+    with pytest.raises(ValidationError):
+        _effect(contrast=value)
+
+
+def test_causal_effect_rejects_negative_bootstrap() -> None:
+    with pytest.raises(ValidationError):
+        _effect(bootstrap_n=-1)
+
+
 def test_result_rejects_effect_without_graph() -> None:
     # 用非 valid 状态，确保拒绝来自新增的交叉校验而不是 valid 必须带图的旧规则。
     with pytest.raises(ValidationError, match="causal_effect"):
@@ -94,7 +119,7 @@ def test_result_accepts_effect_with_graph() -> None:
 def test_command_artifacts_default_to_empty_and_are_dumped() -> None:
     command = AlgorithmExecutionCommand(
         invocation_id="00000000-0000-0000-0000-000000000001",
-        capability_id="causal.ate",
+        capability_id="causal.backdoor_ols",
         capability_version="1.0",
         spec_digest="a" * 64,
         provider_call_id="call-1",

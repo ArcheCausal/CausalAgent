@@ -347,17 +347,21 @@ passed/skipped/failed；历史通过数量不能代替当前工作树证据。`t
 检查缺少 Docker CLI 时跳过并保留未执行结论。日志序列化兜底事件本身也不能作为生产观测
 链路已验收的证据。
 
-## 后门 OLS 适用性检查
+## 因果效应估计与函数形式检查
 
-`tests/unit/agent/test_ate_applicability.py` 使用真实纯检查和内核验证完整调整集、参与列准入、数值编码分类语义拒绝、结构原因码与检查记录契约。`tests/integration/agent/test_ate_tool_checks.py` 使用固定输入图、正式 ToolRuntime/Adapter/MCP 服务与真实进程 runner，验证连续调整变量估计、非参与分类列、工具消息与账本一致、错误引用拒绝、变量对门禁、报告快照重新生成和预算身份收尾。`tests/integration/agent/test_ate_service_checks.py` 直接验证 MCP 使用实际 CSV 及保存语义复核，并保留内核共线等具体不适用理由。固定图是被测入口的已知输入，不代表因果发现准确性。
+`tests/unit/agent/test_ate_applicability.py` 使用真实纯检查和内核验证完整调整集、参与列准入、数值编码分类语义拒绝、结构原因码与检查记录契约；`test_g_formula_kernel.py` 验证调整后直接标准化的线性一致性、非线性差异、bootstrap 可复现性与拒绝路径。`tests/integration/agent/test_ate_tool_checks.py` 使用固定输入图、正式 ToolRuntime/Adapter/MCP 服务与真实进程 runner，验证连续调整变量估计、非参与分类列、工具消息与账本一致、错误引用拒绝、当前查询的诊断与估计匹配、函数形式检查的对比区间与结局模型要求、报告快照重新生成和预算身份收尾。`tests/integration/agent/test_ate_service_checks.py` 直接验证 MCP 使用实际 CSV 及保存语义复核，并保留内核共线等具体不适用理由。固定图是被测入口的已知输入，不代表因果发现准确性。
+
+`tests/unit/agent/test_effect_diagnose_tool.py` 校验诊断工具对图引用、身份、变量与结构条件的判定，以及 `verdict`、`recommended_capability_id` 和 `recommended_tool_name` 的输出契约；`tests/unit/agent/test_functional_form.py` 与 `test_functional_form_prompt.py` 校验判定纯函数和提示词中的工具名。`tests/integration/agent/test_role_column_mapping.py` 从研究角色出发，经过方案映射得到执行列，再实际调用发现工具、诊断工具和后门 OLS，确认成功估计成为主结果。
 
 调度 deadline 用例通过真实进程池初始化阶段的信号量屏障阻止 runner 开始，确定触发截止时间，并检查已完成的本地适用性记录只归属于对应调用。该用例不依赖 OLS 运行速度，不替换算法或 MCP 服务；它验证进程启动阶段超时，不表示回归已经开始执行。既有 FakeAlgorithmExecutor 用例仅检查传输无关的身份契约，默认结果和模板重绑定都必须从可信上下文复制来源身份及分析数据集 ID，不能作为真实算法链路证据。
 
-```powershell
-docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_ate_applicability.py tests/unit/agent/test_ate_kernel.py tests/unit/agent/test_ate_worker_gate.py tests/integration/agent/test_ate_tool_checks.py tests/integration/agent/test_ate_service_checks.py
-```
+~~~powershell
+docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_ate_applicability.py tests/unit/agent/test_ate_kernel.py tests/unit/agent/test_ate_worker_gate.py tests/unit/agent/test_g_formula_kernel.py tests/unit/agent/test_g_formula_mcp_execution.py tests/unit/agent/test_effect_diagnose_tool.py tests/unit/agent/test_functional_form.py tests/integration/agent/test_ate_tool_checks.py tests/integration/agent/test_ate_service_checks.py tests/integration/agent/test_role_column_mapping.py
+~~~
 
-上述进程内组件测试不访问 MySQL，不运行 HTTP MCP、PostgreSQL checkpoint 或完整模型 Job，不能替代真实环境验收。真实环境需另验证权威数据集绑定、HTTP 鉴权和传输、checkpoint 恢复后的记录、真实预算跳过及最终报告。缺少检查记录的旧结果应可读但不能满足新门禁；检查后超时可保留 `ready`，仍禁止成功图和 raw artifact；检查前失败及预算收尾不可生成记录。
+上述进程内组件测试不访问 MySQL，不运行 HTTP MCP、PostgreSQL checkpoint 或完整模型 Job，不能替代真实环境验收。真实环境需另验证权威数据集绑定、HTTP 鉴权和传输、checkpoint 恢复后的记录、真实预算跳过及最终报告。缺少效应请求或检查记录的旧结果应可读但不能满足新门禁；检查后超时可保留 `ready`，仍禁止成功图和 raw artifact；检查前失败及预算收尾不可生成记录。
+
+算法在独立进程中执行，进程池默认使用 `forkserver`。父进程先使用过线程化的数值库时，直接 `fork` 的子进程运行梯度提升树会崩溃，因此函数形式检查的 `outcome_model=hgb` 用例必须在真实进程池中执行；单独运行这些用例通过不代表已在父进程预热后的顺序下验证，合并执行 `tests/unit/agent` 与 `tests/integration/agent` 才能覆盖该交互。
 
 ## causal-mcp 纵向验证
 

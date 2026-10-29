@@ -17,12 +17,17 @@ from tests.support.bound_analysis_input import bind_analysis_input
 from tests.support.local_algorithm_execution import LocalAlgorithmExecutor, PC_CSV, PC_INSUFFICIENT_SAMPLE_CSV
 
 from Agent.deep_agent.finalization import (
+    FINALIZATION_RETRY_HINTS,
     FinalizationRetryController,
     StructuredResponseError,
     _requires_effect_estimation,
     build_finalization_retry_instruction,
     validate_decision_references,
     validate_structured_response,
+)
+
+from Agent.deep_agent_tools.effect_diagnose_tool import (
+    build_default_effect_diagnose_tool,
 )
 from Agent.causal_agent.graph import (
     _emit_public_final_decision,
@@ -31,6 +36,7 @@ from Agent.causal_agent.graph import (
     _legacy_web_evidence_result,
 )
 from Agent.deep_agent_tools.identity import build_invocation_id, build_result_ref
+from Agent.deep_agent_tools.functional_form import build_effect_request
 from Agent.deep_agent_tools.models import (
     ActionAttempt,
     AlgorithmResult,
@@ -154,6 +160,8 @@ def _evidence_ledger(
     tool_name,
     final_status="succeeded",
     attempt_status="succeeded",
+    subject_ref=None,
+    effect_query=None,
 ):
     response_identity = f"{tool_name}-response-1"
     provider_call_id = f"{tool_name}-call-1"
@@ -170,6 +178,8 @@ def _evidence_ledger(
         provider_call_id=provider_call_id,
         tool_name=tool_name,
         final_status=final_status,
+        subject_ref=subject_ref,
+        effect_query=effect_query,
         job_id=str(identity.job_id),
         attempt_count=identity.attempt_count,
         lease_epoch=identity.lease_epoch,
@@ -190,6 +200,24 @@ def _evidence_ledger(
     return record
 
 
+def _diagnose_record(
+    identity,
+    *,
+    status="succeeded",
+    subject_ref="source-result:0",
+):
+    return _evidence_ledger(
+        identity,
+        tool_name="effect_diagnose",
+        final_status=status,
+        attempt_status=status,
+        subject_ref=subject_ref,
+        effect_query=build_effect_request(
+            graph_result_ref=subject_ref, treatment="x", outcome="y",
+        ),
+    )
+
+
 _EFFECT_PARAMETERS = {"target": "y", "treatment": "x", "columns": ["x", "y"]}
 _EFFECT_QUESTION = "请分析 x 对 y 的因果效应。"
 
@@ -197,9 +225,9 @@ _EFFECT_QUESTION = "请分析 x 对 y 的因果效应。"
 def _ate_attempt(identity, registry, *, status="not_ready"):
     """构造没有检查记录的旧终态契约，验证其不能满足新门禁。"""
 
-    spec = registry.get("causal.ate").spec
-    response_identity = "causal_ate-response-1"
-    provider_call_id = "causal_ate-call-1"
+    spec = registry.get("causal.backdoor_ols").spec
+    response_identity = "causal_backdoor_ols-response-1"
+    provider_call_id = "causal_backdoor_ols-call-1"
     invocation_id = build_invocation_id(
         job_id=identity.job_id,
         response_identity=response_identity,
@@ -235,8 +263,11 @@ def _ate_attempt(identity, registry, *, status="not_ready"):
         response_identity=response_identity,
         response_identity_source="message_execution_id",
         provider_call_id=provider_call_id,
-        tool_name="causal_ate",
+        tool_name="causal_backdoor_ols",
         final_status=status,
+        effect_query=build_effect_request(
+            graph_result_ref="source-result:0", treatment="x", outcome="y",
+        ),
         job_id=str(identity.job_id),
         attempt_count=identity.attempt_count,
         lease_epoch=identity.lease_epoch,
@@ -463,12 +494,12 @@ def test_finalization_gate_accepts_only_ledger_backed_primary_result() -> None:
     assert accepted.primary_result_ref == result.result_ref
 
 
-def _valid_ate_result(identity, registry):
+def _valid_ate_result(identity, registry, *, source_graph_ref="source-result:0"):
     """构造一次有效的后门估计结果；图沿用源 DAG 语义。"""
 
-    spec = registry.get("causal.ate").spec
-    response_identity = "causal_ate-response-1"
-    provider_call_id = "causal_ate-call-1"
+    spec = registry.get("causal.backdoor_ols").spec
+    response_identity = "causal_backdoor_ols-response-1"
+    provider_call_id = "causal_backdoor_ols-call-1"
     invocation_id = build_invocation_id(
         job_id=identity.job_id,
         response_identity=response_identity,
@@ -489,7 +520,7 @@ def _valid_ate_result(identity, registry):
         ),
         causal_effect=CausalEffect(
             estimand="ATE",
-            graph_result_ref="source-result:0",
+            graph_result_ref=source_graph_ref,
             treatment="x",
             outcome="y",
             estimate=1.0,
@@ -517,8 +548,11 @@ def _valid_ate_result(identity, registry):
         response_identity=response_identity,
         response_identity_source="message_execution_id",
         provider_call_id=provider_call_id,
-        tool_name="causal_ate",
+        tool_name="causal_backdoor_ols",
         final_status="succeeded",
+        effect_query=build_effect_request(
+            graph_result_ref=source_graph_ref, treatment="x", outcome="y",
+        ),
         job_id=str(identity.job_id),
         attempt_count=identity.attempt_count,
         lease_epoch=identity.lease_epoch,
@@ -556,10 +590,15 @@ def test_finalization_gate_accepts_estimation_result_as_primary() -> None:
         }
     )
 
+    diagnose = _diagnose_record(identity, subject_ref="source-result:0")
+
     accepted = FinalizationGate(registry=registry).validate(
         decision=decision,
         algorithm_results={result.result_ref: result},
-        action_ledger={record.invocation_id: record},
+        action_ledger={
+            record.invocation_id: record,
+            diagnose.invocation_id: diagnose,
+        },
         trusted_identity=identity,
     )
 
@@ -749,7 +788,7 @@ def test_effect_rule_uses_one_retry_then_degrades() -> None:
         _finalization_gate_node(state, runtime=runtime, config={}, gate=gate)
     )
     assert retried["finalization_retry_count"] == 1
-    assert "causal_ate" in retried["deep_agent_retry_instruction"]
+    assert "effect_diagnose" in retried["deep_agent_retry_instruction"]
 
     degraded = asyncio.run(
         _finalization_gate_node(
@@ -793,7 +832,7 @@ def test_no_valid_algorithm_hint_still_demands_ate_for_effect_question() -> None
 
     assert failure.value.rule == "no_valid_algorithm_with_valid_result"
     instruction = build_finalization_retry_instruction(failure.value)
-    assert "causal_ate" in instruction
+    assert "effect_diagnose" in instruction
 
 
 def test_gate_rejects_evidence_reference_mixed_into_result_assessments() -> None:
@@ -959,7 +998,7 @@ def test_effect_predicate_requires_distinct_bound_variables() -> None:
     "question",
     [_EFFECT_QUESTION, "Estimate the causal effect of x on y.", None],
 )
-def test_gate_requires_ate_attempt_whenever_variables_are_bound(question) -> None:
+def test_gate_requires_diagnose_whenever_variables_are_bound(question) -> None:
     identity, registry, result, ledger = _algorithm_execution()
 
     with pytest.raises(StructuredResponseError) as failure:
@@ -973,26 +1012,157 @@ def test_gate_requires_ate_attempt_whenever_variables_are_bound(question) -> Non
             analysis_question=question,
         )
 
-    assert failure.value.rule == "effect_question_without_ate_attempt"
+    assert failure.value.rule == "effect_question_without_diagnose"
     instruction = build_finalization_retry_instruction(failure.value)
-    assert "causal_ate" in instruction
+    assert "effect_diagnose" in instruction
     assert "evidence_only" in instruction
 
 
-@pytest.mark.parametrize("ate_status", ["not_ready", "not_applicable"])
-def test_gate_rejects_ate_terminal_without_applicability_check(ate_status) -> None:
+@pytest.mark.parametrize("diagnose_status", ["succeeded", "not_applicable"])
+def test_gate_accepts_effect_question_after_diagnose(diagnose_status) -> None:
     identity, registry, result, ledger = _algorithm_execution()
-    ate_result, ate_record = _ate_attempt(identity, registry, status=ate_status)
+    diagnose = _diagnose_record(identity, status=diagnose_status)
+
+    algorithm_results = {result.result_ref: result}
+    action_ledger = {ledger.invocation_id: ledger, diagnose.invocation_id: diagnose}
+    if diagnose_status == "succeeded":
+        estimation_result, estimation_record = _ate_attempt(
+            identity, registry, status="not_ready"
+        )
+        algorithm_results[estimation_result.result_ref] = estimation_result
+        action_ledger[estimation_record.invocation_id] = estimation_record
+
+    accepted = FinalizationGate(registry=registry).validate(
+        decision=_primary_decision(result),
+        algorithm_results=algorithm_results,
+        action_ledger=action_ledger,
+        trusted_identity=identity,
+        route_decision="fold",
+        analysis_parameters=_EFFECT_PARAMETERS,
+        analysis_question=_EFFECT_QUESTION,
+    )
+
+    assert accepted.primary_result_ref == result.result_ref
+
+
+def test_gate_requires_estimation_after_successful_diagnose() -> None:
+    identity, registry, result, ledger = _algorithm_execution()
+    diagnose = _diagnose_record(identity)
 
     with pytest.raises(StructuredResponseError) as failure:
         FinalizationGate(registry=registry).validate(
             decision=_primary_decision(result),
-            algorithm_results={result.result_ref: result, ate_result.result_ref: ate_result},
-            action_ledger={ledger.invocation_id: ledger, ate_record.invocation_id: ate_record},
-            trusted_identity=identity, route_decision="fold",
-            analysis_parameters=_EFFECT_PARAMETERS, analysis_question=_EFFECT_QUESTION,
+            algorithm_results={result.result_ref: result},
+            action_ledger={
+                ledger.invocation_id: ledger,
+                diagnose.invocation_id: diagnose,
+            },
+            trusted_identity=identity,
+            route_decision="fold",
+            analysis_parameters=_EFFECT_PARAMETERS,
+            analysis_question=_EFFECT_QUESTION,
         )
-    assert failure.value.rule == "effect_question_without_ate_attempt"
+
+    assert failure.value.rule == "effect_question_without_estimation"
+    assert "causal_backdoor_ols" in build_finalization_retry_instruction(
+        failure.value
+    )
+
+
+def test_gate_rejects_non_estimation_primary_when_estimation_exists() -> None:
+    identity, registry, pc_result, pc_ledger = _algorithm_execution()
+    estimation_result, estimation_record = _valid_ate_result(identity, registry)
+    diagnose = _diagnose_record(identity, subject_ref="source-result:0")
+    decision = validate_structured_response(
+        {
+            **_decision(),
+            "primary_result_ref": pc_result.result_ref,
+            "result_assessments": [
+                {
+                    "result_ref": pc_result.result_ref,
+                    "disposition": "primary",
+                    "rationale": "选择发现图。",
+                },
+                {
+                    "result_ref": estimation_result.result_ref,
+                    "disposition": "supporting",
+                    "rationale": "效应估计作为补充。",
+                },
+            ],
+        }
+    )
+
+    with pytest.raises(StructuredResponseError) as failure:
+        FinalizationGate(registry=registry).validate(
+            decision=decision,
+            algorithm_results={
+                pc_result.result_ref: pc_result,
+                estimation_result.result_ref: estimation_result,
+            },
+            action_ledger={
+                pc_ledger.invocation_id: pc_ledger,
+                estimation_record.invocation_id: estimation_record,
+                diagnose.invocation_id: diagnose,
+            },
+            trusted_identity=identity,
+            route_decision="fold",
+            analysis_parameters=_EFFECT_PARAMETERS,
+            analysis_question=_EFFECT_QUESTION,
+        )
+
+    assert failure.value.rule == "primary_not_estimation_result"
+
+
+def test_gate_requires_estimation_on_the_diagnosed_graph() -> None:
+    """诊断源图与估计源图不同，不能证明当前查询已经完成估计。"""
+
+    identity, registry, _pc_result, _pc_ledger = _algorithm_execution()
+    estimation_result, estimation_record = _valid_ate_result(identity, registry)
+    diagnose = _diagnose_record(identity, subject_ref="other-result:0")
+    decision = _primary_decision(estimation_result)
+
+    with pytest.raises(StructuredResponseError) as failure:
+        FinalizationGate(registry=registry).validate(
+            decision=decision,
+            algorithm_results={estimation_result.result_ref: estimation_result},
+            action_ledger={
+                estimation_record.invocation_id: estimation_record,
+                diagnose.invocation_id: diagnose,
+            },
+            trusted_identity=identity,
+            route_decision="fold",
+            analysis_parameters=_EFFECT_PARAMETERS,
+            analysis_question=_EFFECT_QUESTION,
+        )
+
+    assert failure.value.rule == "effect_question_without_estimation"
+
+
+def test_gate_rejects_estimation_result_without_effect() -> None:
+    identity, registry, _pc_result, _pc_ledger = _algorithm_execution()
+    estimation_result, estimation_record = _valid_ate_result(identity, registry)
+    broken = estimation_result.model_copy(update={"causal_effect": None})
+    diagnose = _diagnose_record(identity, subject_ref="source-result:0")
+
+    with pytest.raises(StructuredResponseError) as failure:
+        FinalizationGate(registry=registry).validate(
+            decision=_primary_decision(broken),
+            algorithm_results={broken.result_ref: broken},
+            action_ledger={
+                estimation_record.invocation_id: estimation_record,
+                diagnose.invocation_id: diagnose,
+            },
+            trusted_identity=identity,
+            route_decision="fold",
+            analysis_parameters=_EFFECT_PARAMETERS,
+            analysis_question=_EFFECT_QUESTION,
+        )
+
+    assert failure.value.rule == "estimation_result_missing_effect"
+
+
+def test_legacy_ate_attempt_rule_is_gone() -> None:
+    assert "effect_question_without_ate_attempt" not in FINALIZATION_RETRY_HINTS
 
 
 @pytest.mark.parametrize(
@@ -1053,3 +1223,75 @@ def test_gate_skips_ate_requirement_without_valid_graph() -> None:
 
     assert accepted.outcome == "no_valid_algorithm"
 
+
+
+def _source_graph_result(identity, registry, *, graph_result_ref="graph-invocation:0"):
+    spec = registry.get("causal.pc").spec
+    return AlgorithmResult(
+        result_ref=graph_result_ref,
+        invocation_id="graph-invocation",
+        provider_call_id="graph-call-1",
+        capability_id=spec.capability_id,
+        capability_version=spec.version,
+        status="valid",
+        standardized_graph=StandardizedGraph(
+            graph_semantics="dag_target_to_source",
+            nodes=["x", "y"],
+            edges=[GraphEdge(source="x", target="y")],
+        ),
+        diagnostics=Diagnostics(),
+        provenance=AlgorithmResultProvenance(
+            job_id=str(identity.job_id),
+            attempt_count=identity.attempt_count,
+            lease_epoch=identity.lease_epoch,
+            input_identity=identity.current_input_identity(),
+            source_input_identity=identity.source_input_identity(),
+            analysis_dataset_id=identity.analysis_input.dataset_id,
+            spec_digest=spec.spec_digest,
+        ),
+    )
+
+
+def test_diagnose_then_estimate_record_passes_finalization() -> None:
+    identity, registry, _pc_result, _pc_ledger = _algorithm_execution()
+    graph_result = _source_graph_result(identity, registry)
+    command = asyncio.run(
+        build_default_effect_diagnose_tool().to_langchain_tool().coroutine(
+            runtime=ToolRuntime(
+                tool_call_id="diagnose-call-1",
+                state={
+                    "message_execution_id": "diagnose-response-1",
+                    "algorithm_results": {graph_result.result_ref: graph_result},
+                },
+                context=AgentRunContext(
+                    execution_guard=None, trusted_identity=identity
+                ),
+                config={},
+                stream_writer=[].append,
+                store=None,
+            ),
+            graph_result_ref=graph_result.result_ref,
+            treatment="x",
+            outcome="y",
+        )
+    )
+    diagnose = next(iter(command.update["action_ledger"].values()))
+    assert diagnose.final_status == "succeeded"
+    assert diagnose.subject_ref == graph_result.result_ref
+
+    estimation_result, estimation_record = _valid_ate_result(
+        identity, registry, source_graph_ref=graph_result.result_ref
+    )
+    accepted = FinalizationGate(registry=registry).validate(
+        decision=_primary_decision(estimation_result),
+        algorithm_results={estimation_result.result_ref: estimation_result},
+        action_ledger={
+            diagnose.invocation_id: diagnose,
+            estimation_record.invocation_id: estimation_record,
+        },
+        trusted_identity=identity,
+        route_decision="fold",
+        analysis_parameters=_EFFECT_PARAMETERS,
+    )
+
+    assert accepted.primary_result_ref == estimation_result.result_ref

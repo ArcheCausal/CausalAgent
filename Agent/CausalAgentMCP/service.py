@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import io
 import inspect
 import logging
+import math
 import re
 import time
 from typing import Any, Callable, Mapping
@@ -287,6 +288,21 @@ def _error_result(
     )
 
 
+def _finite_metrics(payload: Any) -> dict[str, float | int]:
+    """只保留有限数值的 diagnostics metrics；其余值静默丢弃。"""
+
+    if not isinstance(payload, Mapping):
+        return {}
+    return {
+        key: value
+        for key, value in payload.items()
+        if isinstance(key, str)
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    }
+
+
 def _estimation_result(
     raw_result: Mapping[str, Any],
     *,
@@ -295,17 +311,22 @@ def _estimation_result(
     capability_version: str,
     graph: StandardizedGraph,
     data_view: DataViewSummary | None,
-    ate_check: AteApplicabilityCheck,
+    ate_check: AteApplicabilityCheck | None = None,
 ) -> AlgorithmResult:
     """估计能力的成功结果：图取入参图，效应取 runner 返回值。"""
 
     effect_payload = raw_result.get("causal_effect")
     if not isinstance(effect_payload, Mapping):
         raise ValueError("estimation runner did not return causal_effect")
+    diagnostics_metrics = _finite_metrics(effect_payload.get("diagnostics_metrics"))
     effect = CausalEffect.model_validate(
         {
             "graph_result_ref": command.parameters.get("graph_result_ref"),
-            **dict(effect_payload),
+            **{
+                key: value
+                for key, value in effect_payload.items()
+                if key != "diagnostics_metrics"
+            },
         }
     )
     if (
@@ -314,9 +335,8 @@ def _estimation_result(
         or effect.graph_result_ref != command.parameters.get("graph_result_ref")
     ):
         raise ValueError("estimation result does not match the requested pair")
-    if (
-        ate_check is None
-        or ate_check.applicability != "ready"
+    if ate_check is not None and (
+        ate_check.applicability != "ready"
         or effect.graph_result_ref != ate_check.graph_result_ref
         or effect.treatment != ate_check.treatment
         or effect.outcome != ate_check.outcome
@@ -347,8 +367,9 @@ def _estimation_result(
         summary="算法调用完成。",
         data_view=data_view,
         diagnostics=Diagnostics(
-            summary="后门调整估计完成。",
+            summary="效应估计完成。",
             sample_count=effect.n_rows,
+            metrics=diagnostics_metrics,
             assumptions_checked=[
                 "all_edges_directed",
                 "acyclic",
@@ -572,7 +593,7 @@ class CausalMcpService:
             semantic_kinds = normalize_semantic_kinds(
                 trusted_input.semantic_kinds, columns=processed_profile.column_names,
             )
-            if command.capability_id == "causal.ate":
+            if command.capability_id == "causal.backdoor_ols":
                 graph_check = check_ate_graph(
                     graph=graph,
                     graph_result_ref=parameters["graph_result_ref"],
@@ -875,7 +896,7 @@ class CausalMcpService:
                 if error_type == "ResultValidationError"
                 else SafeErrorCode.ALGORITHM_EXECUTION_FAILED
             )
-            if command.capability_id == "causal.ate" and error_type == "NotApplicable":
+            if command.capability_id == "causal.backdoor_ols" and error_type == "NotApplicable":
                 reason = raw_result.get("reason_code")
                 if isinstance(reason, str) and reason in ATE_REASON_SUMMARIES and ate_check is not None:
                     try:

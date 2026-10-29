@@ -104,7 +104,7 @@ class CausalCdfmInput(ContractModel):
         return value
 
 
-class CausalAteInput(ContractModel):
+class CausalBackdoorOlsInput(ContractModel):
     """后门调整 ATE 的模型可见参数；图只能通过结果引用提供。"""
 
     graph_result_ref: str = Field(
@@ -118,6 +118,35 @@ class CausalAteInput(ContractModel):
     def validate_reference_strings(cls, value: str, info: Any) -> str:
         if not value or not value.strip() or value != value.strip():
             raise ValueError(f"{info.field_name} must be a non-blank string")
+        return value
+
+
+class CausalGFormulaInput(ContractModel):
+    """g-formula 的模型可见参数；随机种子由服务端固定。"""
+
+    graph_result_ref: str = Field(
+        description="本次运行中已发现且有效的因果图结果引用。",
+    )
+    treatment: str
+    outcome: str
+    contrast: tuple[float, float] = Field(
+        description="要比较的两个处理取值 (x0, x1)，效应为 do(x1) 减 do(x0)。",
+    )
+    outcome_model: Literal["linear", "hgb"] = "linear"
+    bootstrap: int = Field(default=200, ge=0, le=2000)
+
+    @field_validator("graph_result_ref", "treatment", "outcome")
+    @classmethod
+    def validate_reference_strings(cls, value: str, info: Any) -> str:
+        if not value or not value.strip() or value != value.strip():
+            raise ValueError(f"{info.field_name} must be a non-blank string")
+        return value
+
+    @field_validator("bootstrap", mode="before")
+    @classmethod
+    def validate_bootstrap_type(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("bootstrap must be an integer")
         return value
 
 
@@ -541,10 +570,10 @@ CDFM_SPEC = AlgorithmSpec(
 )
 
 
-CAUSAL_ATE_SPEC = AlgorithmSpec(
-    capability_id="causal.ate",
+CAUSAL_BACKDOOR_OLS_SPEC = AlgorithmSpec(
+    capability_id="causal.backdoor_ols",
     version="2.0",
-    tool_name="causal_ate",
+    tool_name="causal_backdoor_ols",
     public_name="因果效应估计（后门调整）",
     description=(
         "在后门调整下估计处理变量对结果变量的线性总效应。"
@@ -552,7 +581,7 @@ CAUSAL_ATE_SPEC = AlgorithmSpec(
         "不支持未定向边、双箭头边、有向环或处理变量不是结果变量祖先的图。"
         "同一张图只能与产生它的数据版本一起使用。"
     ),
-    model_input_schema=CausalAteInput,
+    model_input_schema=CausalBackdoorOlsInput,
     requires=frozenset({"standardized_graph"}),
     produces=frozenset(),
     assumptions=(
@@ -563,7 +592,7 @@ CAUSAL_ATE_SPEC = AlgorithmSpec(
     ),
     result_contract=CausalEffect,
     default_timeout_seconds=120,
-    concurrency_key="causal_ate",
+    concurrency_key="causal_backdoor_ols",
     default_concurrency=1,
     kind="causal_estimation",
     analysis_goal="在被引用的因果图上估计处理变量对结果变量的线性总效应",
@@ -592,16 +621,67 @@ CAUSAL_ATE_SPEC = AlgorithmSpec(
 )
 
 
+CAUSAL_G_FORMULA_SPEC = AlgorithmSpec(
+    capability_id="causal.g_formula",
+    version="1.0",
+    tool_name="causal_g_formula",
+    public_name="因果效应估计（g-formula）",
+    description=(
+        "在给定因果图上用调整后直接标准化估计处理变量对比的因果效应。"
+        "调整集取处理变量的全部父节点，结局方程可选线性或梯度提升；"
+        "不支持未定向边、双箭头边、有向环或处理变量不是结果变量祖先的图。"
+    ),
+    model_input_schema=CausalGFormulaInput,
+    requires=frozenset({"standardized_graph"}),
+    produces=frozenset(),
+    assumptions=(
+        "图包含查询的处理与结果变量，且无未定向边、双箭头边或有向环",
+        "处理变量是结果变量的祖先",
+        "相关列均为有限数值，缺失值已在执行前处理",
+        "调整集取处理变量的全部父节点，不搜索其他有效调整集",
+        "调整集有效且无未观测混杂时，条件均值差等于总效应",
+        "结局方程由 outcome_model 决定，只拟合 E[Y|T,Z]",
+    ),
+    result_contract=CausalEffect,
+    default_timeout_seconds=600,
+    concurrency_key="causal_g_formula",
+    default_concurrency=1,
+    kind="causal_estimation",
+    analysis_goal="在给定因果图上用调整后直接标准化估计处理变量对比的因果效应",
+    description_source=("用途", "图引用要求", "模型选择", "不适用边界"),
+    data_requirements=(
+        "standardized_graph",
+        "处理变量、结果变量及其祖先列为数值列",
+        "无缺失值、空列、常数列或非有限值",
+    ),
+    requires_numeric_columns=True,
+    requires_complete_cases=True,
+    native_missing_handling="reject",
+    min_rows=3,
+    min_columns=2,
+    graph_semantics="causal_estimation_input",
+    matrix_convention="g_formula",
+    edge_meanings={"directed": "确定调整集与可识别性的因果方向"},
+    limitations=(
+        "结局模型只估计条件均值差；存在未建模交互时线性模型仍可能有偏",
+        "不处理二值/计数/有序结局的尺度转换",
+        "bootstrap 为 percentile 区间，不做 BCa",
+        "不处理未观测混杂、选择偏倚或测量误差",
+    ),
+)
+
+
 DEFAULT_ALGORITHM_SPECS: tuple[AlgorithmSpec, ...] = (
     PC_SPEC,
     DIRECT_LINGAM_SPEC,
     CDFM_SPEC,
-    CAUSAL_ATE_SPEC,
+    CAUSAL_BACKDOOR_OLS_SPEC,
+    CAUSAL_G_FORMULA_SPEC,
 )
 
 
 def get_algorithm_spec(capability_id: str) -> AlgorithmSpec:
-    for spec in (*DEFAULT_ALGORITHM_SPECS, OLC_SPEC, CAUSAL_ATE_SPEC):
+    for spec in (*DEFAULT_ALGORITHM_SPECS, OLC_SPEC):
         if spec.capability_id == capability_id:
             return spec
     raise ValueError("unknown algorithm capability")

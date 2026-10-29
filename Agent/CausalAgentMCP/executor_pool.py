@@ -8,8 +8,11 @@ from collections.abc import Awaitable
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from functools import partial
 from io import StringIO
 import itertools
+import multiprocessing
+import os
 import time
 from typing import Any, Callable, Mapping
 
@@ -19,6 +22,21 @@ except ImportError:  # pragma: no cover - Windows worker fallback
     _resource = None
 
 from Agent.deep_agent_tools.error_codes import SafeErrorCode
+
+
+def _default_executor_factory() -> Callable[..., Any]:
+    """POSIX 下用 forkserver 启动子进程，避免 fork 继承父进程的 OpenMP 线程状态。
+
+    父进程一旦用过 scikit-learn、BLAS 等线程化库，再 fork 出的子进程运行
+    梯度提升树会在 OpenMP 内部崩溃；forkserver 从干净的服务进程派生执行进程。
+    """
+
+    if os.name == "nt":
+        return ProcessPoolExecutor
+    return partial(
+        ProcessPoolExecutor,
+        mp_context=multiprocessing.get_context("forkserver"),
+    )
 
 
 @dataclass(frozen=True)
@@ -130,7 +148,7 @@ class BoundedProcessPool:
         self.queue_capacity = queue_capacity
         self.enqueue_timeout_seconds = enqueue_timeout_seconds
         self.timeout_recycle_threshold = timeout_recycle_threshold
-        self._executor_factory = executor_factory or ProcessPoolExecutor
+        self._executor_factory = executor_factory or _default_executor_factory()
         self._admission = asyncio.Semaphore(process_workers + queue_capacity)
         self._running = asyncio.Semaphore(process_workers)
         self._capability_limits: dict[str, asyncio.Semaphore] = {}

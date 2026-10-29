@@ -350,7 +350,7 @@ class BaseAlgorithmAdapter(ABC):
             columns=adapter_input.data_profile.column_names,
         )
         ate_check = None
-        if self.spec.capability_id == "causal.ate":
+        if self.spec.capability_id == "causal.backdoor_ols":
             graph_payload = adapter_input.artifacts.get("standardized_graph")
             if graph_payload is not None:
                 try:

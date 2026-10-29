@@ -635,7 +635,7 @@ async def report_snapshot(job: dict, user_id: int) -> dict:
             "variable_count": (result.get("data_view") or {}).get("column_count"),
             "operations": (result.get("data_view") or {}).get("operations", [])} for result in results]}
     checks = {
-        "facts_recorded": bool(facts.get("schema_version") == "analysis-facts-v1" and results and decision),
+        "facts_recorded": bool(facts.get("schema_version") == "analysis-facts-v2" and results and decision),
         "method_snapshots_recorded": bool(results) and all(result.get("method") for result in results),
         "implementation_snapshots_recorded": all(result.get("implementation") for result in results if result["status"] == "valid"),
         "cdfm_weights_identity_recorded": all(len(((result.get("implementation") or {}).get("weights") or {}).get("sha256") or "") == 64

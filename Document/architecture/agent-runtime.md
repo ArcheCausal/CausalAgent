@@ -139,21 +139,33 @@ CDFM v0.1 在 runner 内保持 `directed_graph` 和输入列顺序，按 `adjace
 
 旧 `build_graph()` 的固定 `mcp → rag → web_search` 子图只作为兼容路径保留，不是 worker 当前生产入口。
 
-## 后门 OLS 适用性检查与最终门禁
+## 因果效应估计与最终门禁
 
-`causal.ate` 方法契约为 `2.0`，runner 为 `ate-runner-v2`。模型只提交 `graph_result_ref`、`treatment` 和 `outcome`。Worker 先确认引用是本 Job、attempt、lease 和同一来源摘要、分析数据集及内容摘要的有效发现结果，并按当前源算法版本、规格摘要和图契约校验。未知、过期、身份不符、规格不兼容或结构不合法的引用返回 `invalid_input`；尚无图的依赖未就绪返回 `not_ready`。拒绝也使用 `algorithm_terminal_command()` 原子写入结果、工具消息和终态账本，顶层错误码保留输入或未就绪含义。
+效应估计能力池包含 `causal.backdoor_ols`（契约 `2.0`，runner `backdoor-ols-runner-v3`）和 `causal.g_formula`（契约 `1.0`，runner `g-formula-runner-v2`）。模型只提交 `graph_result_ref`、`treatment` 和 `outcome`；g-formula 另提交 `contrast`、`outcome_model` 与 `bootstrap`。Worker 先确认引用是本 Job、attempt、lease 和同一来源摘要、分析数据集及内容摘要的有效发现结果，并按当前源算法版本、规格摘要和图契约校验。未知、过期、身份不符、规格不兼容或结构不合法的引用返回 `invalid_input`；尚无图的依赖未就绪返回 `not_ready`。拒绝也使用 `algorithm_terminal_command()` 原子写入结果、工具消息和终态账本，顶层错误码保留输入或未就绪含义。
 
-共享轻量模块 `Agent/deep_agent_tools/ate_applicability.py` 不加载 LangChain、LangGraph 或数据库。Worker、MCP 与内核先判断图是否支持当前方法，再取处理变量的全部父节点作为调整集，实际执行列按 `treatment、outcome、排序后的调整变量` 生成。合法发现图包含未定向边、双箭头边、不支持边型或查询不满足当前结构要求时，返回带稳定理由的 `not_applicable`。源图结构校验与方法适用性是不同检查：有效 PDAG 仍可能不适用于后门 OLS。
+共享轻量模块 `Agent/deep_agent_tools/ate_applicability.py` 不加载 LangChain、LangGraph 或数据库。Worker、MCP 与两个内核共用同一份图适用性与调整集规则：先判断图是否支持当前方法，再取处理变量的全部父节点作为调整集，后门 OLS 的实际执行列按 `treatment、outcome、排序后的调整变量` 生成。合法发现图包含未定向边、双箭头边、不支持边型或查询不满足当前结构要求时，返回带稳定理由的 `not_applicable`。源图结构校验与方法适用性是不同检查：有效 PDAG 仍可能不适用于当前方法。
 
-准入覆盖全部执行列，检查存在性、数值存储、缺失、空列、常数和非有限值。保存的测量语义为 `category`、`ordinal` 或 `binary` 时，参与估计的列返回不适用；未参与列不受此约束。不根据整数 dtype 或唯一值数量推断分类语义。未明确声明语义时沿用数值准入，并保留测量语义未充分确认的边界。MCP 使用当前权威数据集、实际 CSV 画像和保存的语义重新检查。内核继续检查设计矩阵共线、自由度和数值有限性，不自动删行、删变量、填值、编码或改变源图。
+准入覆盖全部执行列，检查存在性、数值存储、缺失、空列、常数和非有限值。保存的测量语义为 `category`、`ordinal` 或 `binary` 时，参与估计的列返回不适用；未参与列不受此约束。不根据整数 dtype 或唯一值数量推断分类语义。未明确声明语义时沿用数值准入，并保留测量语义未充分确认的边界。MCP 使用当前权威数据集、实际 CSV 画像和保存的语义重新检查。后门 OLS 内核继续检查设计矩阵共线、自由度和数值有限性，不自动删行、删变量、填值、编码或改变源图。
 
 `AlgorithmResult.ate_check` 由程序生成，包含源图引用、处理与结果变量、调整集、执行列、`applicability=ready|not_applicable` 和稳定 `reason_code`。图检查未通过且调整集无法确定时，调整集与执行列均为 `null`，不能用空集合表示未知。记录正文只保存在结果，账本继续保存调用身份、终态和结果引用。成功效应必须与记录中的引用、变量对和调整集一致；失败或超时只有完成检查后才保留 `ready` 记录，超时结果仍不得携带成功图或 raw artifact。缺少记录的旧结果可以读取，但不默认满足新门禁。
 
 runner 通过结构化原因码返回 `ATE_GRAPH_HAS_UNDIRECTED_EDGE`、`ATE_GRAPH_HAS_BIDIRECTED_EDGE`、`ATE_ADJUSTMENT_SEMANTICS_UNSUPPORTED`、`ATE_DESIGN_MATRIX_SINGULAR`、`ATE_INSUFFICIENT_DOF` 等具体原因。MCP 从白名单生成 `Diagnostics.summary`，顶层仍使用 `ALGORITHM_NOT_APPLICABLE` 等共享分类；任意异常正文不能进入受控诊断。报告事实投影与 AnalysisContext 快照同时保存检查记录和受控诊断，报告重新生成使用该快照。
 
-分析路由中，已绑定不同的 `treatment` 和 `target`，且当前认可结果中有结构合法的有效发现图时，最终门禁要求至少一份针对该变量对的有效检查记录；若提供非空列集合，两个角色必须属于其中。门禁先校验结果与账本身份、终态和引用，再核对检查引用的源图、数据集、变量对、调整集和状态原因一致性。`not_applicable` 可满足要求；检查后执行失败或超时也可满足。错误引用、另一变量对、未就绪、预算跳过和无记录的普通失败均不能满足，`evidence_only` 也不能免除要求。门禁只核对契约，不重新回归，不证明图方向、线性或混杂假设。
+Agent 侧的 `effect_diagnose` 只做结构诊断，不执行估计。它校验图引用属于当前 Job 与数据集、图结构合法、处理变量与结果变量都存在且处理变量是结果变量的祖先，然后返回 `verdict=proceed|reject|error`、逐项检查结果、拒绝理由、`recommended_capability_id` 和 `recommended_tool_name`。`proceed` 表示可以按推荐能力继续估计，`reject` 表示该图不适用，`error` 表示引用、身份或内部校验失败。账本另存调用状态 `succeeded|not_applicable|failed`，两套取值描述不同事实：`verdict` 是诊断结论，状态表示这次调用是否完成。
+
+每个算法调用和诊断调用在终态账本中保存程序生成的 `effect_query`：源图引用、处理变量、结果变量，以及 g-formula 的对比区间与结局模型。值只来自已校验的工具参数，模型不能事后补写。诊断比较源图和变量对，估计比较完整请求，因此另一变量对或其他源图的记录不能代替当前查询。成功、失败、超时和不适用路径都保留这份信息。旧 checkpoint 仍可读取，但缺少查询证明的记录不能满足新门禁，也不会由程序猜测补齐。
+
+分析路由中，已绑定不同的 `treatment` 和 `target`，且当前认可结果中有结构合法的有效发现图时，最终门禁要求当前查询有一份诊断记录；`proceed` 与 `reject` 都算有结论，只有 `proceed` 才要求当前查询完成一次真实估计，未就绪、不适用、失败和超时都保留真实终态。存在有效估计结果时，主结果必须是估计结果，且该估计的源图必须有成功的诊断记录。门禁先校验结果与账本身份、终态和引用，再核对诊断和估计是否属于当前查询。
+
+函数形式检查只针对当前查询。估计结果出现 `residual_spearman_max` 或 `residual_abs_spearman_max` 达到阈值，或数据集非线性强度达到阈值时，必须有一次当前查询的 `causal_g_formula` 调用，并且 `contrast` 明确为 `(0, 1)`、`outcome_model` 明确为 `hgb`；仅调用 g-formula、只使用线性结局模型或其他对比区间都不满足这项检查。线性估计按每单位变化解释，因此本轮统一使用 `(0, 1)`。线性与灵活估计的差值明显时，灵活估计必须成为主结果。诊断判定为 `reject` 时不要求补跑灵活估计。
+
+g-formula 采用调整后的直接标准化：在调整集 `Z` 为处理变量全部父节点、且无未观测混杂的假设下，用结局模型估计条件均值 `m(t,z)=E[Y|T=t,Z=z]`，再以 `(1/n)Σ[m(x1,Zi)−m(x0,Zi)]` 得到对比效应。这种方式直接估计总效应所需的条件均值，不对随机中介做逐节点替换，也不需要额外的中介分布模拟器。结局模型可选 `linear` 或 `hgb`；`bootstrap` 给出 percentile 区间，并同时记录线性效应、效应差和差值标准误供函数形式判定使用。真实中介存在非线性时，直接标准化仍依赖调整集与结局模型设定，结论不超出该假设范围。
 
 门禁仍只给模型一次修正机会，随后沿用降级流程；不自动补调、换图或增加循环。Adapter 在实际执行前通过当前任务内的程序通道发布已完成检查，调度器按 invocation 收集；即使外层 deadline 取消工具，也可在超时结果中保留真实的 `ready` 记录。该临时通道不进入模型参数、State 或 checkpoint，独立调用之间不复用记录。执行器不可用属于执行失败，输出解析或 raw 校验损坏仍属于输出契约错误。预算收尾从原调用账本补齐 `source_input_identity` 与 `analysis_dataset_id`，记录真实未执行，不生成检查记录。
+
+算法在独立进程中执行。进程池默认使用 `forkserver` 启动方式，避免父进程已经启动的 OpenMP 线程被 `fork` 继承；父进程先使用过 scikit-learn 或 BLAS 时，直接 `fork` 的子进程运行梯度提升树会崩溃。Windows 沿用平台默认的 `spawn`。
+
+报告事实使用 `analysis-facts-v2`。`analysis_parameters` 来自 `execution_parameters()`，保存实际列名；原始研究角色单独保存在 `research_roles`，只用于展示。函数形式事实和逐结果效应请求同时保存。重新生成报告时，只有版本匹配且映射与结果证据完整的快照可以直接复用；旧版事实或缺少证据的快照明确要求重新分析。
 
 ## 方法定义、图约束与数据画像
 

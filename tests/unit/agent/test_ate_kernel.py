@@ -114,6 +114,45 @@ def test_rejects_nan_and_non_numeric() -> None:
         estimate_ate(graph=graph, data=with_text, treatment="x", outcome="y")
 
 
+def test_linear_data_has_low_residual_rank_correlation() -> None:
+    rng = np.random.default_rng(7)
+    n = 2000
+    z = rng.normal(size=n)
+    x = 0.8 * z + rng.normal(size=n)
+    y = 2.0 * x + 1.5 * z + rng.normal(size=n)
+    metrics = estimate_ate(
+        graph=_chain(), data=pd.DataFrame({"z": z, "x": x, "y": y}),
+        treatment="x", outcome="y",
+    )["diagnostics_metrics"]
+    assert metrics["residual_spearman_max"] < 0.1
+    assert metrics["residual_abs_spearman_max"] < 0.1
+
+
+def test_quadratic_outcome_raises_residual_rank_correlation() -> None:
+    # 右偏处理变量：均匀分布下二次残差对 x 对称，秩相关会抵消。
+    rng = np.random.default_rng(13)
+    x = rng.exponential(size=2000)
+    y = x**2 + 0.1 * rng.normal(size=2000)
+    graph = _graph(("x", "y"), [("x", "y", "directed")])
+    metrics = estimate_ate(
+        graph=graph, data=pd.DataFrame({"x": x, "y": y}),
+        treatment="x", outcome="y",
+    )["diagnostics_metrics"]
+    assert metrics["residual_spearman_max"] > 0.5
+
+
+def test_heteroscedastic_residuals_raise_absolute_rank_correlation() -> None:
+    rng = np.random.default_rng(17)
+    x = rng.uniform(0.0, 2.0, size=3000)
+    y = x + (0.1 + 0.9 * x) * rng.normal(size=3000)
+    graph = _graph(("x", "y"), [("x", "y", "directed")])
+    metrics = estimate_ate(
+        graph=graph, data=pd.DataFrame({"x": x, "y": y}),
+        treatment="x", outcome="y",
+    )["diagnostics_metrics"]
+    assert metrics["residual_abs_spearman_max"] > 0.2
+
+
 def test_rejects_collinear_design() -> None:
     graph = _graph(
         ("z", "x", "y"),

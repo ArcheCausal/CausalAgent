@@ -325,6 +325,9 @@ class CausalEffect(ContractModel):
     ci95: tuple[float, float] | None = None
     estimator: str
     n_rows: int = Field(ge=1)
+    contrast: tuple[float, float] | None = None
+    outcome_model: str | None = None
+    bootstrap_n: int | None = Field(default=None, ge=0)
 
     @field_validator("graph_result_ref", "treatment", "outcome", "estimator")
     @classmethod
@@ -345,6 +348,12 @@ class CausalEffect(ContractModel):
                 raise ValueError("ci95 bounds must be finite")
             if low > high:
                 raise ValueError("ci95 lower bound must not exceed upper bound")
+        if self.contrast is not None:
+            low, high = self.contrast
+            if not (math.isfinite(low) and math.isfinite(high)):
+                raise ValueError("contrast bounds must be finite")
+            if low == high:
+                raise ValueError("contrast bounds must differ")
         return self
 
 
@@ -420,8 +429,8 @@ class AlgorithmResult(ContractModel):
     def validate_result_contract(self) -> "AlgorithmResult":
         validate_result_ref_for_invocation(self.result_ref, self.invocation_id)
         if self.ate_check is not None:
-            if self.capability_id != "causal.ate":
-                raise ValueError("ate_check is only valid for causal.ate")
+            if self.capability_id != "causal.backdoor_ols":
+                raise ValueError("ate_check is only valid for causal.backdoor_ols")
             check = self.ate_check
             if check.applicability == "not_applicable":
                 if (
@@ -521,6 +530,49 @@ class AlgorithmResult(ContractModel):
         return self.standardized_graph
 
 
+class EffectQuery(ContractModel):
+    """一次效应调用实际请求的变量对、对比区间与结局模型。
+
+    值只来自工具参数的程序解析，不接受模型事后补写；诊断只需源图与变量对，
+    估计比较完整请求。缺少该字段的旧 checkpoint 仍可读取，但不能满足新门禁。
+    """
+
+    graph_result_ref: str
+    treatment: str
+    outcome: str
+    contrast: tuple[float, float] | None = None
+    outcome_model: str | None = None
+
+    @field_validator("graph_result_ref", "treatment", "outcome")
+    @classmethod
+    def validate_query_strings(cls, value: str, info: Any) -> str:
+        return _non_blank(value, field_name=info.field_name)
+
+    @field_validator("contrast")
+    @classmethod
+    def validate_contrast(
+        cls, value: tuple[float, float] | None,
+    ) -> tuple[float, float] | None:
+        if value is None:
+            return None
+        low, high = value
+        if not (math.isfinite(low) and math.isfinite(high)):
+            raise ValueError("contrast bounds must be finite")
+        if low == high:
+            raise ValueError("contrast bounds must differ")
+        return value
+
+    def matches_diagnosis(self, *, graph_result_ref: str, treatment: str, outcome: str) -> bool:
+        return (self.graph_result_ref, self.treatment, self.outcome) == (
+            graph_result_ref, treatment, outcome,
+        )
+
+    def matches_estimation(self, other: "EffectQuery") -> bool:
+        """估计比较完整请求；对比区间与结局模型也参与匹配。"""
+
+        return self == other
+
+
 class ActionAttempt(ContractModel):
     """一次实际执行 attempt 的单调 revision 快照。"""
 
@@ -550,6 +602,10 @@ class InvocationRecord(ContractModel):
     tool_name: str
     final_status: InvocationStatus
     result_ref: str | None = None
+    subject_ref: str | None = None
+    # 只有可从已校验工具参数解析出效应请求的调用才带该字段；旧 checkpoint
+    # 允许缺失，但缺少它的记录不能替代当前查询的证明。
+    effect_query: EffectQuery | None = None
     # 这些字段允许旧 checkpoint 被读取，但 FinalizationGate 对缺失值
     # fail-closed。新产生的 Ledger 记录必须完整填写它们。
     job_id: str | None = None
@@ -576,6 +632,7 @@ class InvocationRecord(ContractModel):
         "provider_response_id",
         "provider_item_id",
         "result_ref",
+        "subject_ref",
         "job_id",
         "worker_id",
         "input_identity",
@@ -1068,7 +1125,8 @@ def _record_progress(record: InvocationRecord) -> tuple[int, int]:
 
 def _immutable_record_dump(record: InvocationRecord) -> dict[str, Any]:
     return record.model_dump(
-        mode="json", exclude={"attempts", "final_status", "result_ref"}
+        mode="json",
+        exclude={"attempts", "final_status", "result_ref", "effect_query"},
     )
 
 
@@ -1079,6 +1137,19 @@ def _merge_invocation_records(
         raise ReducerConflictError(
             f"invocation {current.invocation_id!r} identity changed during replay"
         )
+
+    # 效应请求由终态工具参数生成：pending 记录没有该字段，终态只能补写一次，
+    # 两次非空且内容不同的记录视为账本冲突。
+    if current.effect_query is None:
+        effect_query = incoming.effect_query
+    elif incoming.effect_query is None:
+        effect_query = current.effect_query
+    elif current.effect_query != incoming.effect_query:
+        raise ReducerConflictError(
+            f"invocation {current.invocation_id!r} effect query changed during replay"
+        )
+    else:
+        effect_query = current.effect_query
 
     merged_attempts: dict[int, ActionAttempt] = {
         ordinal: attempt.model_copy(deep=True)
@@ -1128,6 +1199,7 @@ def _merge_invocation_records(
             },
             "final_status": final_status,
             "result_ref": result_ref,
+            "effect_query": effect_query,
         },
     )
 
