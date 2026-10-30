@@ -14,6 +14,7 @@ from Agent.deep_agent_tools.models import (
     AlgorithmResultProvenance,
     CausalEffect,
     Diagnostics,
+    EffectQuery,
     StandardizedGraph,
 )
 
@@ -75,8 +76,14 @@ def test_causal_effect_rejects_inverted_ci() -> None:
 
 
 def test_causal_effect_carries_estimation_controls() -> None:
-    effect = _effect(contrast=(0.0, 1.0), outcome_model="hgb", bootstrap_n=200)
-    assert effect.contrast == (0.0, 1.0)
+    request = {"effect": "average_total_effect", "intervention": {
+        "type": "fixed_contrast", "from": 9.0, "to": 6.0, "unit": "L/min"}}
+    effect = _effect(contrast=(9.0, 6.0), outcome_model="hgb", bootstrap_n=200,
+        effect_request=request, sample_identity="sample-content-digest",
+        adjustment_rule="parents_of_treatment", support={"status": "supported", "conditional_overlap": "not_assessed"})
+    assert effect.contrast == (9.0, 6.0)
+    assert effect.effect_request == request
+    assert CausalEffect.model_validate(effect.model_dump(mode="json")) == effect
     assert effect.outcome_model == "hgb"
     assert effect.bootstrap_n == 200
 
@@ -86,6 +93,30 @@ def test_causal_effect_controls_default_to_none() -> None:
     assert effect.contrast is None
     assert effect.outcome_model is None
     assert effect.bootstrap_n is None
+    assert effect.effect_request is None
+    assert effect.sample_identity is None
+    assert effect.adjustment_rule is None
+    assert effect.support == {}
+
+
+def test_shift_definition_does_not_invent_fixed_contrast() -> None:
+    request = {"effect": "average_total_effect", "intervention": {
+        "type": "additive_shift", "delta": -2.0, "unit": "L/min"}}
+    effect = _effect(effect_request=request)
+    assert effect.effect_request == request
+    assert effect.contrast is None
+
+
+def test_query_matches_full_execution_identity() -> None:
+    request = {"effect": "average_total_effect", "intervention": {
+        "type": "fixed_contrast", "from": 6.0, "to": 9.0, "unit": "L/min"}}
+    query = EffectQuery(graph_result_ref="graph:0", treatment="x", outcome="y",
+        effect_request=request, estimator_config={"outcome_model": "hgb", "bootstrap": 20})
+    assert query.matches_estimation(EffectQuery.model_validate(query.model_dump(mode="json")))
+    for changes in ({"graph_result_ref": "other:0"}, {"effect_request": {**request, "target_population": "age >= 18"}},
+                    {"estimator_config": {"outcome_model": "hgb", "bootstrap": 12}}):
+        other = EffectQuery.model_validate({**query.model_dump(mode="json"), **changes})
+        assert not query.matches_estimation(other)
 
 
 @pytest.mark.parametrize("value", [(math.nan, 1.0), (0.0, math.inf)])

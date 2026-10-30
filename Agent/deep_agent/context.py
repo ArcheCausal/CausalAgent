@@ -85,6 +85,7 @@ class AnalysisInputRef:
     object_id: int | None = None
     content_hash: str | None = None
     filename: str | None = None
+    research_identity: str | None = None
     _semantic_kinds: tuple[tuple[str, str], ...] | None = field(
         default=None, init=False, repr=False,
     )
@@ -98,6 +99,7 @@ class AnalysisInputRef:
     def bind(
         self, *, dataset_id: int, object_id: int, content_hash: str, filename: str,
         semantic_kinds: Mapping[str, str] | None = None,
+        research_identity: str | None = None,
     ) -> None:
         if dataset_id <= 0 or object_id <= 0:
             raise ValueError("prepared dataset and object IDs must be positive")
@@ -113,6 +115,7 @@ class AnalysisInputRef:
         self.object_id = object_id
         self.content_hash = content_hash
         self.filename = filename
+        self.research_identity = research_identity
         self._semantic_kinds = snapshot
 
 
@@ -200,6 +203,7 @@ class TrustedJobIdentity:
             raise ValueError("now must be timezone-aware")
         digest = self.current_input_identity()
         return McpInvocationContext(
+            research_identity=self.analysis_input.research_identity if self.analysis_input is not None else None,
             invocation_id=invocation_id,
             job_id=self.job_id,
             session_id=self.session_id,

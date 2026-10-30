@@ -1,26 +1,15 @@
-"""初始研究参数直接使用真实 Pydantic schema 校验，不调用替代模型。"""
-
+"""研究声明已统一交由数据处理参数契约处理。"""
 import pytest
-from pydantic import ValidationError
-
-from Agent.causal_agent.nodes import foldQuery
-
-
-def declaration(kind, *, column="x", evidence="x是连续测量变量"):
-    return {"column": column, "kind": kind, "evidence": evidence}
+from Agent.data_processing.parameters import ParameterContractError, resolve_research_spec
+from tests.support.research_specs import spec_from_parameters
 
 
-def test_fold_rejects_conflicting_measurement_kinds_before_parameter_handoff():
-    with pytest.raises(ValidationError, match="conflicting measurement declarations"):
-        foldQuery.model_validate({"measurement_semantics": [declaration("continuous"), declaration("count")]})
+def test_empty_spec_is_explicitly_valid_without_inventing_roles():
+    result = resolve_research_spec(spec_from_parameters({}), input_columns=["x"])
+    assert result["target"] is None and result["treatment"] is None
+    assert result["measurement_semantics"] == []
 
 
-def test_fold_accepts_consistent_repeated_declarations():
-    result = foldQuery.model_validate({"measurement_semantics": [declaration("continuous"), declaration("continuous")]})
-    assert result.measurement_semantics[0].kind == "continuous"
-
-
-@pytest.mark.parametrize("column,evidence", [(" x", "x是连续测量变量"), ("x", " ")])
-def test_fold_rejects_unusable_column_or_evidence(column, evidence):
-    with pytest.raises(ValidationError):
-        foldQuery.model_validate({"measurement_semantics": [declaration("continuous", column=column, evidence=evidence)]})
+def test_empty_frozen_structure_cannot_publish_a_specification():
+    with pytest.raises(ParameterContractError):
+        resolve_research_spec(spec_from_parameters({}), input_columns=[])

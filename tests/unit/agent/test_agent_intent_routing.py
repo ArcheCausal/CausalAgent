@@ -76,10 +76,10 @@ def _decision(intent, **overrides):
     "intent,expected_route",
     [
         ("normal_chat", "normal_chat"),
-        ("start_analysis", "fold"),
+        ("start_analysis", "data_processing"),
         ("answer_report", "inquiry_answer"),
         ("revise_report", "report"),
-        ("rerun_analysis", "fold"),
+        ("rerun_analysis", "data_processing"),
         ("switch_analysis_context", "context_switch"),
         ("clarify", "inquiry_answer"),
     ],
@@ -200,7 +200,7 @@ def test_intent_routes_cover_every_declared_intent():
 
     assert allowed == set(nodes.INTENT_ROUTES)
     assert set(nodes.INTENT_ROUTES.values()) <= {
-        "fold",
+        "data_processing",
         "report",
         "normal_chat",
         "inquiry_answer",

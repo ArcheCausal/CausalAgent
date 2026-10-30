@@ -1,0 +1,74 @@
+{
+  "status": "PASS",
+  "started_at": "2026-10-29T07:59:46.377751+00:00",
+  "limitations": [
+    "Flask routes in process; no HTTP/browser",
+    "no model/OpenSandbox/script execution",
+    "same Job checkpoint recovery; no worker crash or expired-lease takeover",
+    "MCP service in process; no HTTP transport"
+  ],
+  "source_sha256": {
+    "app/agent/job_service.py": "77e50d3192ba65ec487952619b9d17f680ee70f9770a9a43f21f2d11487a9df1",
+    "Agent/data_processing/graph.py": "9858f13dd433c7850752008e77a1b77536cabf6ebc274c86a9d0ebaf2c3b46a7",
+    "Agent/data_processing/persistence.py": "4ec04e9b5aad8c36cacb4dcbcc6eefb71eb8878dff8319b14747c9a57ea36c99",
+    "Agent/measurement_semantics.py": "a55d15664578561068793117b89c06889d3411adbe1d4e5d0a33a7c5eea50587",
+    "tests/acceptance/data_processing_recovery.py": "4017c601a5caf0f33822a8ba46df0409e61e7b82331f15520cfc9a1b8bfd984f"
+  },
+  "first_run_empty_databases": true,
+  "formal_alembic_head_and_postgres_setup": true,
+  "native_child_postgres_recovery": {
+    "status": "PASS",
+    "real_compiled_parent_and_child": true,
+    "fresh_postgres_pools": 3,
+    "native_interrupts": 2,
+    "resumes_after_reconnect": 2,
+    "limitations": "deterministic question nodes; no LLM, OpenSandbox or Job confirmation service"
+  },
+  "registered_login_session_file_job": true,
+  "job_id": "482087a0-d533-4689-ac23-15dba0c07ff8",
+  "unconfirmed_candidate_rejected": true,
+  "active_test": "old_lease_save_validate_bind_rejected",
+  "plan_confirmation_and_input_ledger": true,
+  "candidate_replay_tuple_and_json_lists": true,
+  "unbound_parent_registry_branch": {
+    "status": "PASS",
+    "real_registry_and_postgres_graphs": true,
+    "child_reads_actual_pending_candidate": true,
+    "model_execution": false
+  },
+  "final_parameters_context_bound_after_child": true,
+  "save_then_explain_preserves_confirmation": true,
+  "real_validation_record_and_binding": true,
+  "new_identity_and_postgres_pool_recovery": true,
+  "mcp": {
+    "strong_primary_reader": true,
+    "binary_semantics_restored": true,
+    "direct_lingam_status": "not_applicable",
+    "transport": "in_process_service_with_real_hmac_and_database"
+  },
+  "same_context_preserves_different_context_clears": true,
+  "old_lease_save_validate_bind_rejected": true,
+  "source_unchanged_during_run": true,
+  "test_cases": {
+    "first_run_empty_databases": "PASS",
+    "formal_alembic_head_and_postgres_setup": "PASS",
+    "registered_login_session_file_job": "PASS",
+    "final_parameters_context_bound_after_child": "PASS",
+    "unconfirmed_candidate_rejected": "PASS",
+    "plan_confirmation_and_input_ledger": "PASS",
+    "candidate_replay_tuple_and_json_lists": "PASS",
+    "save_then_explain_preserves_confirmation": "PASS",
+    "real_validation_record_and_binding": "PASS",
+    "new_identity_and_postgres_pool_recovery": "PASS",
+    "mcp": "PASS",
+    "same_context_preserves_different_context_clears": "PASS",
+    "old_lease_save_validate_bind_rejected": "PASS",
+    "native_child_postgres_recovery": "PASS"
+  },
+  "counts": {
+    "PASS": 14,
+    "FAIL": 0,
+    "NOT_RUN": 0
+  },
+  "finished_at": "2026-10-29T07:59:53.353090+00:00"
+}

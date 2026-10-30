@@ -17,6 +17,8 @@ from collections.abc import Mapping, Sequence
 from itertools import combinations
 from typing import Any
 
+from langchain_core.messages import HumanMessage
+
 from Agent.deep_agent_tools.models import (
     AlgorithmResult,
     EvidenceResult,
@@ -27,12 +29,8 @@ from Agent.deep_agent_tools.models import (
 from Agent.deep_agent_tools.algorithm_specs import get_algorithm_spec
 from Agent.data_processing.parameters import execution_parameters
 from Agent.deep_agent_tools.functional_form import (
-    FLEX_CAPABILITY,
-    OLS_CAPABILITY,
-    assess_functional_form,
     estimation_pair,
-    flex_status_from_results,
-    select_result,
+    compare_effect_results,
 )
 from Agent.deep_agent_tools.graph_validation import validate_graph_structure
 
@@ -43,6 +41,15 @@ MAX_CONTEXT_EVIDENCE_ITEMS = 8
 MAX_CONTEXT_QUESTION_CHARS = 1000
 MAX_INDEX_SUMMARY_CHARS = 160
 MAX_INDEX_ENTRY_QUESTION_CHARS = 200
+
+
+def latest_user_message_text(state: Mapping[str, Any]) -> str:
+    """读取当前用户原文，不混入历史提问、路由消息或模型生成的参数。"""
+    for message in reversed(state.get("messages") or []):
+        if isinstance(message, HumanMessage):
+            content = message.content
+            return content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    return ""
 
 _ORDINAL_PATTERN = re.compile(r"(?:第\s*)?(\d{1,2})\s*(?:个|条|项|次)?")
 _ORDINAL_WORD_PATTERN = re.compile(r"第\s*([一二三四五六七八九十]{1,3})\s*(?:个|条|项|次)")
@@ -101,6 +108,7 @@ def normalize_algorithm_summary(
                     "target": edge.target,
                     "edge_type": edge.edge_type,
                     "weight": edge.weight,
+                    "prediction": edge.prediction.model_dump(mode="json") if edge.prediction else None,
                 }
                 for edge in standardized.edges
             ],
@@ -446,10 +454,10 @@ def _primary_algorithm_summary(state: Mapping[str, Any]) -> dict[str, Any] | Non
             results[str(key)] = result
     if not results:
         return None
-    decision = state.get("deep_agent_decision")
-    primary_ref = getattr(decision, "primary_result_ref", None)
+    decision = state.get("deep_agent_accepted_decision")
+    primary_ref = getattr(decision, "primary_graph_result_ref", None)
     if not primary_ref and isinstance(decision, Mapping):
-        primary_ref = decision.get("primary_result_ref")
+        primary_ref = decision.get("primary_graph_result_ref")
     selected = results.get(str(primary_ref)) if primary_ref else None
     if selected is None or selected.status != "valid":
         return None
@@ -469,10 +477,11 @@ _REPORT_METRICS = frozenset({
     "standardize", "missing_handling", "independence_test", "alpha",
     "residual_spearman_max", "residual_abs_spearman_max",
     "linear_estimate", "effect_difference", "difference_se",
+    "difference_ci95_low", "difference_ci95_high",
 })
 
-# 计算规则版本：v2 起按效应请求、执行列与结局模型重新计算，旧事实不能直接复用。
-ANALYSIS_FACTS_VERSION = "analysis-facts-v2"
+# v3 分开保存主图、主效应和 Gate 已接受决策，旧事实不能直接复用。
+ANALYSIS_FACTS_VERSION = "analysis-facts-v3"
 
 
 def report_data_metadata(parameters: Any) -> dict[str, Any]:
@@ -615,23 +624,10 @@ def _functional_form_facts(
     *,
     current_queries: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    pair = estimation_pair(parameters)
-    if pair is None:
+    if estimation_pair(parameters) is None:
         return None
-    treatment, outcome = pair
-    scoped = _queries_for_pair(results, current_queries or {}, pair)
-    ols = select_result(scoped, capability=OLS_CAPABILITY, treatment=treatment, outcome=outcome)
-    flex = select_result(scoped, capability=FLEX_CAPABILITY, treatment=treatment, outcome=outcome)
-    nonlinearity = parameters.get("nonlinearity")
-    return assess_functional_form(
-        nonlinearity=nonlinearity if isinstance(nonlinearity, Mapping) else None,
-        ols_metrics=ols.diagnostics.metrics if ols is not None else None,
-        flex_metrics=flex.diagnostics.metrics if flex is not None else None,
-        flex_status=(
-            "valid" if flex is not None
-            else flex_status_from_results(scoped, treatment=treatment, outcome=outcome)
-        ),
-    )
+    return {"verdict": "agent_assessed", "comparisons": compare_effect_results(results),
+            "reason": "方法差异仅作为诊断事实，不能据此判定非线性或强制选择估计器。"}
 
 
 def _queries_for_pair(
@@ -673,6 +669,8 @@ def _result_queries(ledger: Any) -> dict[str, dict[str, Any]]:
             "outcome": query.outcome,
             "contrast": list(query.contrast) if query.contrast is not None else None,
             "outcome_model": query.outcome_model,
+            "effect_request": copy.deepcopy(query.effect_request),
+            "estimator_config": copy.deepcopy(query.estimator_config),
         }
     return queries
 
@@ -683,14 +681,24 @@ def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
         stored = context_algorithm_summary(state.get("analysis_context")) or {}
         facts = stored.get("analysis_facts")
         if isinstance(facts, Mapping) and facts.get("schema_version") == ANALYSIS_FACTS_VERSION:
-            return copy.deepcopy(dict(facts))
-        return {"schema_version": ANALYSIS_FACTS_VERSION, "finalization_status": "not_recorded",
-                "primary_result_ref": None, "results": [], "decision": None,
-                "no_primary_reason": "本分析保存的是旧版计算规则或缺少完整映射与结果证据，必须重新分析。",
-                "data_metadata": {}, "functional_form": None, "result_queries": {}}
+            restored = copy.deepcopy(dict(facts))
+            # 同版本的早期快照已有成对方向和区间；补充保存过的同方向点值，
+            # 不重新计算结果，也不把 right-minus-left 点值配上反方向区间。
+            for comparison in restored.get("effect_comparisons", []):
+                if (comparison.get("comparable")
+                    and comparison.get("paired_difference_direction") == "linear_minus_flexible"
+                    and "paired_effect_difference" not in comparison):
+                    refs = {comparison.get("left_result_ref"), comparison.get("right_result_ref")}
+                    flexible = next((item for item in restored.get("results", [])
+                        if item.get("result_ref") in refs and item.get("algorithm") == "causal.g_formula"), {})
+                    comparison["paired_effect_difference"] = flexible.get("diagnostics", {}).get("metrics", {}).get("effect_difference")
+            return restored
+        return _unrecorded_analysis_facts()
 
     raw_params = state.get("analysis_parameters") or {}
     raw_params = raw_params if isinstance(raw_params, Mapping) else {}
+    if "effect_request" not in raw_params:
+        return _unrecorded_analysis_facts()
     research_roles = {
         "target": raw_params.get("target"),
         "treatment": raw_params.get("treatment"),
@@ -715,7 +723,7 @@ def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
             parsed_results.append(result)
             results.append(_report_result(result, params))
     decision = None
-    raw_decision = state.get("deep_agent_decision")
+    raw_decision = state.get("deep_agent_accepted_decision")
     if state.get("finalization_status") == "valid" and raw_decision is not None:
         try:
             decision = FinalAnalysisDecision.model_validate(raw_decision).model_dump(mode="json")
@@ -726,7 +734,7 @@ def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
         assessment = assessments.get(result["result_ref"])
         result["disposition"] = assessment["disposition"] if assessment else ("discarded" if result["status"] != "valid" else "unassessed")
         result["assessment_rationale"] = assessment["rationale"] if assessment else "最终决策没有采纳该结果，或尚未提供取舍说明。"
-    primary_ref = decision["primary_result_ref"] if decision else None
+    primary_ref = decision["primary_graph_result_ref"] if decision else None
     primary = next((result for result in results if result["result_ref"] == primary_ref and result["status"] == "valid"), None)
     if primary is not None:
         graph = primary.get("graph")
@@ -741,7 +749,14 @@ def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
                 primary = None
     return {
         "schema_version": ANALYSIS_FACTS_VERSION, "finalization_status": state.get("finalization_status") or "not_recorded",
-        "primary_result_ref": primary_ref if primary is not None else None,
+        "primary_result_ref": decision["primary_result_ref"] if decision and primary is not None else None,
+        "primary_graph_result_ref": decision["primary_graph_result_ref"] if decision else None,
+        "primary_effect_result_ref": decision["primary_effect_result_ref"] if decision else None,
+        "effect_request": copy.deepcopy(raw_params.get("effect_request")),
+        "effect_request_status": "recorded" if "effect_request" in raw_params else "not_recorded",
+        "effect_status": decision["effect_status"] if decision else "not_recorded",
+        "effect_reason": decision["effect_reason"] if decision else "没有通过门禁的效应决策。",
+        "effect_comparisons": compare_effect_results(parsed_results) if decision else [],
         "no_primary_reason": None if primary is not None else (
             "所选结果缺少本次方法定义或未满足图约束，不能用于主图。" if primary_ref else
             decision["selection_rationale"] if decision else "本次没有通过门禁的主结果选择，不能展示任意结果或复用旧图。"),
@@ -753,11 +768,24 @@ def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
         "functional_form": _functional_form_facts(
             params, parsed_results, current_queries=result_queries,
         ),
+        "analysis_limitations": copy.deepcopy(state.get("analysis_limitations") or []),
+        "budget_exhausted": bool(state.get("deep_agent_budget_exhausted")),
     }
 
 
+def _unrecorded_analysis_facts() -> dict[str, Any]:
+    return {"schema_version": ANALYSIS_FACTS_VERSION, "finalization_status": "not_recorded",
+            "primary_result_ref": None, "primary_graph_result_ref": None,
+            "primary_effect_result_ref": None, "effect_request": None,
+            "effect_request_status": "not_recorded", "effect_status": "not_recorded",
+            "effect_reason": "历史记录没有保存完整效应定义，不能推断为未请求。",
+            "effect_comparisons": [], "results": [], "decision": None,
+            "no_primary_reason": "本分析保存的是旧版计算规则或缺少完整映射与结果证据，必须重新分析。",
+            "data_metadata": {}, "functional_form": None, "result_queries": {}}
+
+
 def report_primary_result(facts: Mapping[str, Any]) -> dict[str, Any] | None:
-    primary = facts.get("primary_result_ref")
+    primary = facts.get("primary_graph_result_ref")
     if not primary or facts.get("finalization_status") != "valid":
         return None
     selected = next((result for result in facts.get("results", [])

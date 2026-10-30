@@ -8,6 +8,7 @@ import json
 from typing import Annotated, Any, TypedDict
 
 from deepagents.graph import DeepAgentState as _OfficialDeepAgentState
+from langchain_core.messages import HumanMessage
 from Agent.data_processing.parameters import execution_parameters
 
 from Agent.deep_agent_tools.models import (
@@ -36,8 +37,11 @@ class DeepAgentState(_OfficialDeepAgentState, total=False):
     data_processing_state_version: int
     data_processing_run_id: str
     data_processing_answer_receipts: dict[str, dict[str, Any]]
-    data_processing_parameter_clarification_required: bool
-    data_processing_parameter_clarification_question: str
+    data_processing_input_sources: dict[str, dict[str, Any]]
+    data_processing_pending_input_id: int | None
+    data_processing_research_spec_ready: bool
+    data_processing_input_columns: list[str]
+    data_processing_plan_parameter_identity: str | None
     file_summary: dict[str, Any]
     missing_values_present: bool
     message_execution_id: str
@@ -50,6 +54,10 @@ class DeepAgentState(_OfficialDeepAgentState, total=False):
     finalization_retry_count: int
     model_call_count: int
     tool_call_count: int
+    analysis_model_call_count: int
+    closeout_model_call_count: int
+    analysis_budget_exhausted: bool
+    analysis_budget_reason: str
     data_processing_draft_script: str
     # 成功保存候选后建立；脚本或方案变化时清空，不删除 MySQL 历史记录。
     data_processing_candidate_id: int
@@ -83,9 +91,11 @@ class ParentStateUpdate(TypedDict, total=False):
     deep_agent_rag_evidence: dict[str, EvidenceResult]
     deep_agent_web_evidence: dict[str, WebEvidenceResult]
     deep_agent_decision: FinalAnalysisDecision | None
+    deep_agent_accepted_decision: FinalAnalysisDecision | None
     deep_agent_structured_response: FinalAnalysisDecision | None
     deep_agent_run_id: str
     deep_agent_status: str
+    deep_agent_budget_exhausted: bool
 
 
 def _as_data_profile(value: object, parent_state: Mapping[str, Any]) -> DataProfile:
@@ -165,6 +175,10 @@ def initial_deep_agent_state(
         ),
         model_call_count=0,
         tool_call_count=0,
+        analysis_model_call_count=0,
+        closeout_model_call_count=0,
+        analysis_budget_exhausted=False,
+        analysis_budget_reason="",
         data_processing_execution_report=(deepcopy(dict(data_processing_execution_report))
                                           if data_processing_execution_report is not None else None),
     )
@@ -196,13 +210,13 @@ def to_deep_agent_input(
 ) -> ProjectDeepAgentState:
     """只把 Deep Agent 所需字段投影到内层 State，不复制父状态。"""
 
-    # 子图的完整 messages/官方内部字段由子图 checkpoint 持有；父图只在
-    # 首次进入边界时提供自己的输入消息，不回投影子图消息。
-    messages = parent_state.get("messages")
-    if messages is None:
-        messages = []
-    if not isinstance(messages, list):
-        messages = list(messages)
+    # 首次进入只传用户输入。父图程序生成的 AIMessage 是流程状态，不能
+    # 充当带推理历史的模型答复；子图自己的模型/工具历史由其 checkpoint 持有。
+    messages = [
+        message for message in (parent_state.get("messages") or [])
+        if isinstance(message, HumanMessage)
+        or (isinstance(message, Mapping) and message.get("role") in {"user", "human"})
+    ]
     analysis_parameters = parent_state.get("analysis_parameters")
     if not isinstance(analysis_parameters, Mapping):
         analysis_parameters = {}
@@ -325,9 +339,11 @@ def from_deep_agent_output(state: Mapping[str, Any]) -> ParentStateUpdate:
         "deep_agent_action_ledger": dict(state.get("action_ledger") or {}),
         "deep_agent_rag_evidence": dict(state.get("rag_evidence") or {}),
         "deep_agent_web_evidence": dict(state.get("web_evidence") or {}),
-        "deep_agent_decision": state.get("structured_response"),
+        "deep_agent_decision": None,
+        "deep_agent_accepted_decision": None,
         "deep_agent_structured_response": state.get("structured_response"),
         "deep_agent_status": "completed",
+        "deep_agent_budget_exhausted": bool(state.get("analysis_budget_exhausted")),
     }
     if state.get("deep_agent_run_id"):
         result["deep_agent_run_id"] = str(state["deep_agent_run_id"])

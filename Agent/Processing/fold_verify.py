@@ -84,7 +84,7 @@ def validate_analysis(analysis_params: dict, target: str = None, treatment: str 
     if datetime_columns and len(datetime_columns) > 0:
         recommends.append(f"数据中包含时间变量: {', '.join(datetime_columns[:3])}{'等' if len(datetime_columns) > 3 else ''}，本次分析将作为普通变量处理。如需专门的时间序列因果分析，请告知。")
     
-    # 数据质量事实由 DeepAgent 在算法选择后生成处理选项，fold 只保留为
-    # 非阻断说明；只有参数事实错误返回 2。返回值 1 表示“未指定目标或
+    # 数据处理由独立子图完成，这里只生成非阻断的数据质量说明。
+    # 只有参数事实错误返回 2。返回值 1 表示“未指定目标或
     # 处理变量但可继续分析”。
     return (1 if issues else 0, issues, recommends)

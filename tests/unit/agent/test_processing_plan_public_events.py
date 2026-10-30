@@ -22,6 +22,7 @@ def _plan() -> dict:
         "transformations": ["按设备和日期分组并计数"],
         "variable_semantics": {"alarm_count": "该设备当天的告警次数"},
         "role_columns": {},
+        "measurement_columns": {},
         "limitations": ["不包含未触发告警的设备日期"],
     }
 
@@ -216,6 +217,7 @@ def test_plan_text_and_collection_limits(extra_length: int) -> None:
         },
         "limitations": ["限" * (600 + extra_length)] * (12 + extra_length),
         "role_columns": {},
+        "measurement_columns": {},
     }
 
     public = public_event_payload("interrupt", {"interaction": _interaction(plan=plan)})
@@ -226,6 +228,7 @@ def test_plan_text_and_collection_limits(extra_length: int) -> None:
         "transformations": ["转" * 600] * 12,
         "variable_semantics": {f"column_{index}": "义" * 600 for index in range(128)},
         "role_columns": {},
+        "measurement_columns": {},
         "limitations": ["限" * 600] * 12,
     }
     assert public["interaction"]["plan"] == expected
@@ -344,3 +347,11 @@ def test_existing_events_keep_public_fields_and_remove_internal_fields(
     public = public_event_payload(event_type, payload)
 
     assert public == {**fields, "type": event_type}
+
+
+def test_measurement_mapping_is_public_but_other_fields_remain_private():
+    plan = {**_plan(), "measurement_columns": {"raw": "renamed", "dropped": None}, "script": "private"}
+    public = public_event_payload("interrupt", {"type": "interrupt", "question_id": "q-plan-1",
+        "message": "请确认", "interaction": _interaction(plan=plan)})
+    assert public["interaction"]["plan"]["measurement_columns"] == plan["measurement_columns"]
+    assert "script" not in public["interaction"]["plan"]

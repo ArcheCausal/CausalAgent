@@ -1,3 +1,5 @@
+import type { EffectRequest, EffectExecutionContext } from '../api/effect-request.schemas'
+
 export type Locale = 'zh' | 'en'
 
 export type JsonPrimitive = string | number | boolean | null
@@ -27,6 +29,10 @@ export interface CausalGraphEdge {
   target: string
   edge_type: string
   weight?: number | null
+  prediction?: {
+    forward_probability: number
+    reverse_probability: number
+  } | null
   metadata?: Record<string, unknown>
   evidence_refs?: string[]
 }
@@ -170,7 +176,10 @@ export interface ProcessingPlanSummary {
   transformations: string[]
   variableSemantics: Record<string, string>
   roleColumns?: { target?: string | null; treatment?: string | null }
+  measurementColumns?: Record<string, string | null>
   limitations: string[]
+  effectRequest?: EffectRequest | null
+  effectExecutionContext?: EffectExecutionContext | null
 }
 
 export interface WaitingInput {

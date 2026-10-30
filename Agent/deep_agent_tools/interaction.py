@@ -60,7 +60,26 @@ class DataProcessingPlanSummary(ContractModel):
         default_factory=dict, max_length=2,
         description="用户已指定的 target、treatment 对应的处理后 CSV 列名；未指定的角色留空，不创造角色。",
     )
+    measurement_columns: dict[str, str | None] = Field(
+        default_factory=dict, max_length=128,
+        description=(
+            "原始输入列到保留或重命名后输出列的测量声明映射；null 表示明确删除该原始列，"
+            "缺席表示默认同名保留。仅传递原始列已有的测量声明；聚合或计算派生列不得自动继承，"
+            "应把被替换的原始列映射为 null。一个输出列不能继承相互冲突的输入测量声明。"
+        ),
+    )
     limitations: tuple[str, ...] = Field(default_factory=tuple, max_length=12)
+
+    @field_validator("measurement_columns")
+    @classmethod
+    def validate_measurement_columns(cls, value: dict[str, str | None]) -> dict[str, str | None]:
+        for source, output in value.items():
+            for column in (source, output):
+                if column is not None and (
+                    not column.strip() or column != column.strip() or len(column) > 255
+                ):
+                    raise ValueError("measurement column must be a non-blank bounded trimmed string")
+        return value
 
 
 class DataProcessingPlanConfirmationRequest(ContractModel):

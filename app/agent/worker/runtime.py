@@ -178,6 +178,7 @@ def create_llm() -> ChatOpenAI:
         base_url=settings.BASE_URL,
         api_key=settings.API_KEY,
         streaming=False,
+        extra_body={"thinking": {"type": "disabled"}},
     )
     return llm
 
@@ -289,14 +290,20 @@ def create_deep_agent_model() -> ChatOpenAI:
     api_key = require_secret("DEEP_AGENT_API_KEY").strip()
     if not model_name or not base_url or not api_key:
         raise RuntimeError("Deep Agent 模型配置不完整，无法初始化")
-    return ChatOpenAI(
+    reasoning_effort = os.getenv("DEEP_AGENT_REASONING_EFFORT", "high").strip()
+    if reasoning_effort not in {"none", "low", "high", "max"}:
+        raise RuntimeError("DEEP_AGENT_REASONING_EFFORT must be none, low, high or max")
+    from Agent.deep_agent.model import DeepSeekResponsesChatOpenAI
+
+    model_class = DeepSeekResponsesChatOpenAI if model_name.startswith("deepseek-") else ChatOpenAI
+    return model_class(
         model=model_name,
         base_url=base_url,
         api_key=api_key,
         streaming=True,
         use_responses_api=True,
         output_version="responses/v1",
-        reasoning={"effort": "none"},
+        reasoning={"effort": reasoning_effort},
     )
 
 
@@ -306,7 +313,7 @@ async def initialize_production_runtime(
 ) -> ProcessRuntime:
     """按计划的 fail-fast 顺序创建进程级 Store、MCP pool 和 compiled graphs。"""
 
-    # 外层旧图仍负责 fold/report；新内层使用独立、显式的 Deep Agent model。
+    # 外层模型负责会话路由和报告；数据处理与因果分析使用独立的 Deep Agent model。
     outer_llm = create_llm()
     store = await process_stack.enter_async_context(open_async_postgres_store())
 
@@ -446,6 +453,8 @@ async def create_slot_runtime(
         mcp_resources.tools,
         checkpointer,
         rag_available=process_runtime.rag_available,
+        data_processing_agent=process_runtime.data_processing_agent,
+        registry=process_runtime.algorithm_registry,
     )
     return SlotRuntime(
         llm=process_runtime.llm,

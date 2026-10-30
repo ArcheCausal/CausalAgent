@@ -25,6 +25,19 @@ def _data() -> pd.DataFrame:
     return pd.DataFrame({"x": [0.0, 1.0, 2.0, 3.0], "y": [1.0, 3.0, 5.0, 7.0]})
 
 
+def _estimate(**kwargs):
+    """所有数值用例显式声明同一原始单位干预和已知生成语义。"""
+    return estimate_ate(
+        **kwargs, effect_request={"effect": "average_total_effect", "intervention": {
+            "type": "fixed_contrast", "from": 0.25, "to": 1.25, "unit": "L/min",
+        }},
+        execution_context={"treatment_column": "x", "outcome_column": "y",
+            "treatment_unit": "L/min", "treatment_transform": {"type": "identity"},
+            "outcome_transform": {"type": "identity"}},
+        semantic_kinds={"x": "continuous", "y": "continuous", "z": "continuous"},
+    )
+
+
 def _chain() -> StandardizedGraph:
     return _graph(
         ("z", "x", "y"),
@@ -40,7 +53,7 @@ def test_recovers_known_linear_coefficient() -> None:
     y = 2.0 * x + 1.5 * z + rng.normal(size=n)
     frame = pd.DataFrame({"z": z, "x": x, "y": y})
 
-    result = estimate_ate(graph=_chain(), data=frame, treatment="x", outcome="y")
+    result = _estimate(graph=_chain(), data=frame, treatment="x", outcome="y")
 
     assert result["estimand"] == "ATE"
     assert result["adjustment_set"] == ("z",)
@@ -57,7 +70,7 @@ def test_ci_narrows_with_sample_size() -> None:
         z = rng.normal(size=n)
         x = 0.8 * z + rng.normal(size=n)
         y = 2.0 * x + 1.5 * z + rng.normal(size=n)
-        result = estimate_ate(
+        result = _estimate(
             graph=_chain(),
             data=pd.DataFrame({"z": z, "x": x, "y": y}),
             treatment="x",
@@ -70,48 +83,48 @@ def test_ci_narrows_with_sample_size() -> None:
 def test_rejects_undirected_edge() -> None:
     graph = _graph(("x", "y"), [("x", "y", "undirected")])
     with pytest.raises(AteNotApplicable):
-        estimate_ate(graph=graph, data=_data(), treatment="x", outcome="y")
+        _estimate(graph=graph, data=_data(), treatment="x", outcome="y")
 
 
 def test_rejects_bidirected_edge() -> None:
     graph = _graph(("x", "y"), [("x", "y", "bidirected")])
     with pytest.raises(AteNotApplicable):
-        estimate_ate(graph=graph, data=_data(), treatment="x", outcome="y")
+        _estimate(graph=graph, data=_data(), treatment="x", outcome="y")
 
 
 def test_rejects_directed_cycle() -> None:
     graph = _graph(("x", "y"), [("x", "y", "directed"), ("y", "x", "directed")])
     with pytest.raises(AteNotApplicable):
-        estimate_ate(graph=graph, data=_data(), treatment="x", outcome="y")
+        _estimate(graph=graph, data=_data(), treatment="x", outcome="y")
 
 
 def test_rejects_missing_variable() -> None:
     graph = _graph(("z", "x"), [("x", "z", "directed")])
     with pytest.raises(AteNotApplicable):
-        estimate_ate(graph=graph, data=_data(), treatment="x", outcome="y")
+        _estimate(graph=graph, data=_data(), treatment="x", outcome="y")
 
 
 def test_rejects_treatment_not_ancestor() -> None:
     graph = _graph(("x", "y"), [("y", "x", "directed")])
     with pytest.raises(AteNotApplicable):
-        estimate_ate(graph=graph, data=_data(), treatment="x", outcome="y")
+        _estimate(graph=graph, data=_data(), treatment="x", outcome="y")
 
 
 def test_rejects_missing_column() -> None:
     graph = _graph(("x", "y"), [("x", "y", "directed")])
     frame = pd.DataFrame({"x": [0.0, 1.0, 2.0, 3.0]})
     with pytest.raises(AteNotApplicable):
-        estimate_ate(graph=graph, data=frame, treatment="x", outcome="y")
+        _estimate(graph=graph, data=frame, treatment="x", outcome="y")
 
 
 def test_rejects_nan_and_non_numeric() -> None:
     graph = _graph(("x", "y"), [("x", "y", "directed")])
     with_nan = pd.DataFrame({"x": [0.0, np.nan, 2.0, 3.0], "y": [1.0, 3.0, 5.0, 7.0]})
     with pytest.raises(AteNotApplicable):
-        estimate_ate(graph=graph, data=with_nan, treatment="x", outcome="y")
+        _estimate(graph=graph, data=with_nan, treatment="x", outcome="y")
     with_text = pd.DataFrame({"x": ["a", "b", "c", "d"], "y": [1.0, 3.0, 5.0, 7.0]})
     with pytest.raises(AteNotApplicable):
-        estimate_ate(graph=graph, data=with_text, treatment="x", outcome="y")
+        _estimate(graph=graph, data=with_text, treatment="x", outcome="y")
 
 
 def test_linear_data_has_low_residual_rank_correlation() -> None:
@@ -120,7 +133,7 @@ def test_linear_data_has_low_residual_rank_correlation() -> None:
     z = rng.normal(size=n)
     x = 0.8 * z + rng.normal(size=n)
     y = 2.0 * x + 1.5 * z + rng.normal(size=n)
-    metrics = estimate_ate(
+    metrics = _estimate(
         graph=_chain(), data=pd.DataFrame({"z": z, "x": x, "y": y}),
         treatment="x", outcome="y",
     )["diagnostics_metrics"]
@@ -134,7 +147,7 @@ def test_quadratic_outcome_raises_residual_rank_correlation() -> None:
     x = rng.exponential(size=2000)
     y = x**2 + 0.1 * rng.normal(size=2000)
     graph = _graph(("x", "y"), [("x", "y", "directed")])
-    metrics = estimate_ate(
+    metrics = _estimate(
         graph=graph, data=pd.DataFrame({"x": x, "y": y}),
         treatment="x", outcome="y",
     )["diagnostics_metrics"]
@@ -146,7 +159,7 @@ def test_heteroscedastic_residuals_raise_absolute_rank_correlation() -> None:
     x = rng.uniform(0.0, 2.0, size=3000)
     y = x + (0.1 + 0.9 * x) * rng.normal(size=3000)
     graph = _graph(("x", "y"), [("x", "y", "directed")])
-    metrics = estimate_ate(
+    metrics = _estimate(
         graph=graph, data=pd.DataFrame({"x": x, "y": y}),
         treatment="x", outcome="y",
     )["diagnostics_metrics"]
@@ -162,4 +175,4 @@ def test_rejects_collinear_design() -> None:
         {"z": [1.0, 1.0, 1.0, 1.0], "x": [0.0, 1.0, 2.0, 3.0], "y": [1.0, 3.0, 5.0, 7.0]}
     )
     with pytest.raises(AteNotApplicable):
-        estimate_ate(graph=graph, data=frame, treatment="x", outcome="y")
+        _estimate(graph=graph, data=frame, treatment="x", outcome="y")

@@ -62,6 +62,12 @@ docker compose -f docker-compose.prod.yml config --quiet
 
 ## Docker 单元测试环境（推荐）
 
+统一研究参数的完整提交、集合声明与测量列映射分别由 `unit/agent/test_research_parameter_revisions.py`、`test_parameter_extraction_feedback.py`、`test_measurement_column_mapping.py` 检查；`integration/agent/test_processing_checkpoint_version.py` 使用真实图与 saver 检查旧版本拒绝，缺少冻结输入时不访问数据库或模型。
+
+研究参数的真实模型及数据库恢复入口、思考模式工具续接和连接池重建说明见 [数据处理验收](../Document/development/testing.md)。独立脚本 `acceptance/real_model_parameter_extraction.py` 比较完整参数语义，`acceptance/real_model_reasoning_recovery.py` 检查真实思考历史、参数工具、因果 Agent 文件工具及 PostgreSQL 重连；二者均不属于默认 pytest 范围。
+
+`acceptance/deepseek_responses_roundtrip.py` 使用真实 DeepSeek 和专用 PostgreSQL，检查父图状态消息隔离、非空明文推理回传、同步与异步调用、文件工具续接及重连后的历史一致性。工具或执行模型预算耗尽后，只能使用独立的三次模型收尾额度提交结构化决策；请求不再暴露执行工具，生产 Gate 修正输入和重连不得重开预算，回执保持唯一。额度用尽时也不得再调用模型。`unit/agent/test_analysis_budget.py` 检查阶段转换与真实未执行状态；`unit/agent/test_tool_call_limit.py` 检查已完成调用、混合批次、正常计数和超限停止规则。报告和算法组件检查见 `unit/agent/test_report_document.py`、`integration/agent/test_ate_tool_checks.py`。验收脚本不运行业务 Job 或领域算法，专用容器及报告要求见同一[数据处理验收说明](../Document/development/testing.md)。
+
 数据处理方案的确定性规则位于 `unit/agent/test_data_processing_lifecycle.py`；方案工具、脚本工具、父子状态投影和 checkpoint 状态传递位于 `integration/agent/test_data_processing_plan_state.py`，使用真实 ToolNode、StateGraph 与 InMemorySaver。真实数据库入口 `acceptance/data_processing_recovery.py` 覆盖保存候选后补写执行说明；完整模型与 OpenSandbox 入口为 `acceptance/sandbox_upgrade_job.py --scenario execution-report`。后两者必须在专用隔离服务上显式执行，离线测试不代替这些证据。
 
 `docker-compose.test.yml` 提供独立的 `unit-test` 服务。Dockerfile 的 `test` 目标先从 `tests/smoke/requirements-deep-agent-py311-linux.lock` 安装 Python 3.11 Linux hash-pinned 项目依赖，再安装 `requirements-test.txt`，不会把 `pytest` 临时安装到正在运行的应用容器。

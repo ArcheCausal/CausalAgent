@@ -70,7 +70,7 @@ def _cdfm(
     return run_cdfm_analysis(csv_data, threshold=parameters.get("threshold"))
 
 
-BACKDOOR_OLS_RUNNER_VERSION = "backdoor-ols-runner-v3"
+BACKDOOR_OLS_RUNNER_VERSION = "backdoor-ols-runner-v4"
 
 
 def _backdoor_ols(
@@ -85,6 +85,7 @@ def _backdoor_ols(
     from Agent.CausalAgentMCP.inference.ate import AteNotApplicable, estimate_ate
     from Agent.deep_agent_tools.ate_applicability import ATE_REASON_SUMMARIES
     from Agent.deep_agent_tools.models import StandardizedGraph
+    from Agent.CausalAgentMCP.inference.interventions import InterventionNotApplicable
 
     graph = StandardizedGraph.model_validate(artifacts["standardized_graph"])
     frame = pd.read_csv(io.StringIO(csv_data))
@@ -94,10 +95,20 @@ def _backdoor_ols(
             data=frame,
             treatment=str(parameters["treatment"]),
             outcome=str(parameters["outcome"]),
+            effect_request=parameters["effect_request"],
+            execution_context=artifacts.get("effect_execution_context"),
+            semantic_kinds=artifacts.get("semantic_kinds"),
         )
+    except InterventionNotApplicable as exc:
+        return {
+            "schema_version": "causal_estimation_v2", "success": False,
+            "algorithm": "backdoor_ols", "runner_version": BACKDOOR_OLS_RUNNER_VERSION,
+            "error_type": "NotApplicable", "reason_code": exc.reason_code,
+            "support": exc.support, "effect_request": parameters["effect_request"],
+        }
     except AteNotApplicable as exc:
         return {
-            "schema_version": "causal_estimation_v1",
+            "schema_version": "causal_estimation_v2",
             "success": False,
             "algorithm": "backdoor_ols",
             "runner_version": BACKDOOR_OLS_RUNNER_VERSION,
@@ -107,7 +118,7 @@ def _backdoor_ols(
             ),
         }
     return {
-        "schema_version": "causal_estimation_v1",
+        "schema_version": "causal_estimation_v2",
         "success": True,
         "algorithm": "backdoor_ols",
         "runner_version": BACKDOOR_OLS_RUNNER_VERSION,
@@ -115,7 +126,7 @@ def _backdoor_ols(
     }
 
 
-G_FORMULA_RUNNER_VERSION = "g-formula-runner-v2"
+G_FORMULA_RUNNER_VERSION = "g-formula-runner-v3"
 
 
 def _g_formula(
@@ -132,6 +143,7 @@ def _g_formula(
         estimate_g_formula,
     )
     from Agent.deep_agent_tools.models import StandardizedGraph
+    from Agent.CausalAgentMCP.inference.interventions import InterventionNotApplicable
 
     graph = StandardizedGraph.model_validate(artifacts["standardized_graph"])
     frame = pd.read_csv(io.StringIO(csv_data))
@@ -141,13 +153,22 @@ def _g_formula(
             data=frame,
             treatment=str(parameters["treatment"]),
             outcome=str(parameters["outcome"]),
-            contrast=tuple(parameters["contrast"]),
+            effect_request=parameters["effect_request"],
+            execution_context=artifacts.get("effect_execution_context"),
+            semantic_kinds=artifacts.get("semantic_kinds"),
             outcome_model=str(parameters.get("outcome_model") or "linear"),
             bootstrap=int(parameters.get("bootstrap", 200)),
         )
+    except InterventionNotApplicable as exc:
+        return {
+            "schema_version": "causal_estimation_v2", "success": False,
+            "algorithm": "g_formula", "runner_version": G_FORMULA_RUNNER_VERSION,
+            "error_type": "NotApplicable", "reason_code": exc.reason_code,
+            "support": exc.support, "effect_request": parameters["effect_request"],
+        }
     except GFormulaNotApplicable as exc:
         return {
-            "schema_version": "causal_estimation_v1",
+            "schema_version": "causal_estimation_v2",
             "success": False,
             "algorithm": "g_formula",
             "runner_version": G_FORMULA_RUNNER_VERSION,
@@ -155,7 +176,7 @@ def _g_formula(
             "message": str(exc),
         }
     return {
-        "schema_version": "causal_estimation_v1",
+        "schema_version": "causal_estimation_v2",
         "success": True,
         "algorithm": "g_formula",
         "runner_version": G_FORMULA_RUNNER_VERSION,

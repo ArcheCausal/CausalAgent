@@ -780,7 +780,7 @@ result = await loop.run_in_executor(process_pool, run_algorithm, command)
 | 配置 | 默认值 | 含义 |
 |---|---:|---|
 | `DEEP_AGENT_MODEL_CALL_LIMIT` | 12 | 每 Job 总模型调用上限，含 finalization 修正 |
-| `DEEP_AGENT_TOOL_CALL_LIMIT` | 8 | 每 Job 总 Tool 调用上限，含失败与重跑 |
+| `DEEP_AGENT_TOOL_CALL_LIMIT` | 15 | 每 Job 总 Tool 调用上限，含失败与重跑 |
 | `DEEP_AGENT_RECURSION_LIMIT` | 32 | LangGraph 外层最终保险，不替代上述预算 |
 | `DEEP_AGENT_TOOL_NODE_TIMEOUT_SECONDS` | 720 | 内层工具执行总等待上限，必须大于 MCP read timeout |
 | `DEEP_AGENT_FINALIZATION_RETRY_LIMIT` | 1 | Gate 动态校验失败后只回送 Deep Agent 一次 |

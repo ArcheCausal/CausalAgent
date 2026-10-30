@@ -67,6 +67,10 @@ JobController 为每个 Job 管理订阅 generation，切换 Session、取消、
 
 报告标题右侧提供一键复制按钮，复制内容由 `renderers/report-clipboard.ts` 从同一份已校验文档投影成 Markdown：标题、章节层级、正文段落和来源清单按页面顺序保留，图表和因果图在文本副本里降级成 `[图表：标题]`、`[因果图：标题]` 占位行，来源页脚里默认收起的检索证据不写进副本，未知块直接跳过。复制期间按钮忽略重复点击，成功后就地显示“已复制”，失败显示“复制失败，请重试”，2 秒后恢复初始文案，切换到另一份报告时立即复位。剪贴板写入优先使用 `navigator.clipboard`，HTTP 非安全上下文退回临时 textarea 选中复制，两条路径都不可用时落到失败状态而不是静默丢内容。
 
+CDFM 主图沿用同一个 `CausalGraphBlock` 和选边说明。边的可选 `prediction` 与结构系数 `weight` 分开；Zod 接受缺失或 null 的旧字段，对存在的正反概率检查有限值及 `[0,1]` 范围。有向边显示 `p=…`，双箭头保留两个箭头并显示 `p₁`、`p₂`；选边说明按变量标签明确 `source→target` 和 `target→source` 的矩阵编码位置，两个分数共同编码潜在共同原因候选。图注说明模型预测概率的含义，并读取 `metadata.diagnostics.metrics.threshold` 显示实际阈值。数据保留完整精度，显示使用四位有效数字。CDFM 作为辅助结果时只供现有比较文字引用，不增加图入口；其他算法继续使用既有权重标签。旧报告不回填概率。字段来源及方法边界见[Agent 运行时](../architecture/agent-runtime.md)。
+
+`npm run test:cdfm` 使用独立配置检查真实解析函数、图投影和 Vue SSR 组件，不加载全局替身或模拟图形库；它证明契约与组件文字，不代表 canvas 点击、真实后端或完整模型会话。真实推理与可选 MCP HTTP 的人工入口见[测试与验证](testing.md#cdfm-边概率)。
+
 ## 开发与构建
 
 在仓库根目录执行：

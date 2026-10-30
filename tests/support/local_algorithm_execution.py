@@ -4,6 +4,7 @@
 """
 
 from dataclasses import dataclass
+from copy import deepcopy
 from secrets import token_hex
 from collections.abc import Mapping
 
@@ -14,8 +15,9 @@ from Agent.CausalAgentMCP.auth import sign_invocation
 from Agent.CausalAgentMCP.config import McpServerConfig
 from Agent.CausalAgentMCP.executor_pool import BoundedProcessPool
 from Agent.CausalAgentMCP.runner_registry import build_default_registry
-from Agent.CausalAgentMCP.service import CausalMcpService
+from Agent.CausalAgentMCP.service import CausalMcpService, EffectValidatedInput
 from Agent.data_processing.validation import validate_candidate
+from Agent.data_processing.parameters import execution_parameters, parameter_identity
 from Agent.deep_agent_tools.algorithm_specs import DEFAULT_ALGORITHM_SPECS
 from Agent.measurement_semantics import (
     ValidatedAlgorithmInput, normalize_semantic_kinds,
@@ -53,6 +55,8 @@ class LocalAlgorithmExecutor:
     def __init__(
         self, csv_data: str = PC_CSV, *, semantic_kinds: Mapping[str, str] | None = None,
         executor_pool: BoundedProcessPool | None = None,
+        analysis_parameters: Mapping[str, object] | None = None,
+        effect_execution_context: Mapping[str, object] | None = None,
     ) -> None:
         self.csv_data = csv_data
         self.executor_pool = executor_pool
@@ -61,27 +65,37 @@ class LocalAlgorithmExecutor:
             {} if semantic_kinds is None else semantic_kinds,
             columns=self.data_profile.column_names,
         )
+        self.analysis_parameters = (
+            {"target": None, "treatment": None, "effect_request": None}
+            if analysis_parameters is None else deepcopy(dict(analysis_parameters))
+        )
+        self.analysis_parameters.setdefault("measurement_semantics", [
+                {"column": column, "kind": kind, "evidence": f"{column}: {kind}"}
+                for column, kind in kinds.items()
+            ])
+        self.metadata = {
+            "summary": "本地算法输入，不执行转换",
+            "observation_unit": "CSV 中的一条观测记录",
+            "transformations": ["保留原始行列和值"],
+            "variable_semantics": {},
+        }
+        if effect_execution_context is not None:
+            self.metadata["effect_execution_context"] = deepcopy(dict(effect_execution_context))
         self.validation_report = validate_candidate(
             data_bytes=csv_data.encode("utf-8"),
             script_bytes=b"import pandas as pd\n",
-            metadata={
-                "summary": "本地算法输入，不执行转换",
-                "observation_unit": "CSV 中的一条观测记录",
-                "transformations": ["保留原始行列和值"],
-                "variable_semantics": {},
-            },
-            analysis_parameters={
-                "measurement_semantics": [
-                    {"column": column, "kind": kind, "evidence": f"{column}: {kind}"}
-                    for column, kind in kinds.items()
-                ],
-            },
+            metadata=self.metadata,
+            analysis_parameters=self.analysis_parameters,
             specifications=DEFAULT_ALGORITHM_SPECS,
             max_bytes=max(1, len(csv_data.encode("utf-8"))),
         )
-        self.validated_input = ValidatedAlgorithmInput(
+        validated_kinds = semantic_kinds_from_validation_report(self.validation_report)
+        resolved = execution_parameters(self.analysis_parameters, self.metadata)
+        resolved["research_identity"] = parameter_identity(self.analysis_parameters)
+        self.validated_input = EffectValidatedInput(
             csv_data=csv_data,
-            semantic_kinds=semantic_kinds_from_validation_report(self.validation_report),
+            semantic_kinds=validated_kinds,
+            effect_parameters=resolved,
         )
         self.calls: list[ExecutionCall] = []
 

@@ -173,6 +173,28 @@ def test_report_draft_rejects_unknown_block_types_and_extra_fields() -> None:
         _draft([{"id": "x", "type": "markdown", "content": "正文", "bogus": True}])
 
 
+def test_trusted_primary_graph_is_shown_even_when_draft_omits_graph_block():
+    graph = build_causal_graph_model(ORIGINAL_GRAPH, graph_id="graph_main")
+    draft = _draft([{"id": "primary_causal_graph", "type": "markdown", "content": "分析说明"}])
+    document = build_report_document(draft, assets={"graph_main": graph},
+        execution_summary={"budget_exhausted": True, "preliminary_ols": True})
+    restored = ReportDocument.model_validate_json(document.model_dump_json())
+    assert restored.blocks[-1].type == "causal_graph"
+    assert restored.blocks[-1].id == "primary_causal_graph_"
+    assert restored.blocks[-1].title == "候选因果结构"
+    assert "线性假设下的初步估计" in restored.blocks[0].content
+    assert len(draft.blocks) == 1
+
+
+def test_candidate_title_does_not_mutate_model_draft():
+    graph = build_causal_graph_model(ORIGINAL_GRAPH, graph_id="graph_main")
+    draft = _draft([{"id": "g", "type": "causal_graph", "asset_key": "graph_main", "title": "模型标题"}])
+    document = build_report_document(draft, assets={"graph_main": graph},
+        execution_summary={"budget_exhausted": True})
+    assert document.blocks[-1].title == "候选因果结构"
+    assert draft.blocks[0].title == "模型标题"
+
+
 def test_duplicate_block_ids_are_rejected() -> None:
     with pytest.raises(ReportSchemaError):
         build_report_document(_draft([

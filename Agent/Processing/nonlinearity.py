@@ -186,9 +186,8 @@ def measure_nonlinearity(
 ) -> dict[str, Any]:
     """给出数据集级的线性/非线性判定，写进 ``analysis_parameters["nonlinearity"]``。
 
-    返回的 dict 恰好是 :data:`PAYLOAD_KEYS` 六个键。**绝不抛异常**：调用点在
-    ``fold_node`` 的 ``try`` 块之外，而那块一旦抛异常会走 ``interrupt()`` 挂起等
-    用户输入，指标算错绝不能把 job 引到那条路上。
+    返回的 dict 恰好是 :data:`PAYLOAD_KEYS` 六个键。计算失败时返回原因，
+    不因这个辅助指标中断分析准备流程。
     """
 
     try:

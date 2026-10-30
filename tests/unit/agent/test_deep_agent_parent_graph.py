@@ -75,9 +75,10 @@ def test_parent_graph_compiles_deep_agent_gate_and_report_path() -> None:
     )
     nodes = set(graph.get_graph().nodes)
     assert {
-        "agent", "fold", "data_processing", "validate_dataset", "bind_dataset",
+        "agent", "data_processing", "validate_dataset", "bind_dataset",
         "preprocess", "deep_agent", "finalization_gate", "report",
     }.issubset(nodes)
+    assert "fold" not in nodes
     edges = {(edge.source, edge.target) for edge in graph.get_graph().edges}
     assert ("bind_dataset", "preprocess") in edges
     assert ("preprocess", "deep_agent") in edges
@@ -108,7 +109,7 @@ def test_bound_finalization_gate_executes_with_langgraph_config() -> None:
     assert state["deep_agent_decision"] == decision
 
 
-def test_finalization_gate_receives_analysis_parameters_and_latest_question() -> None:
+def test_finalization_gate_enforces_processing_route_after_projection() -> None:
     decision = FinalAnalysisDecision(
         outcome="evidence_only",
         primary_result_ref=None,
@@ -121,31 +122,15 @@ def test_finalization_gate_receives_analysis_parameters_and_latest_question() ->
         confidence_basis=["no algorithm result"],
     )
 
-    class Gate:
-        def validate(self, **kwargs):
-            assert kwargs["analysis_parameters"] == {
-                "target": "y",
-                "treatment": "x",
-            }
-            assert kwargs["analysis_question"] == "请分析 x 对 y 的因果效应。"
-            return decision
-
-    identity = TrustedJobIdentity(
-        job_id="00000000-0000-0000-0000-000000000441",
-        session_id="00000000-0000-0000-0000-000000000442",
-        user_id=7,
-        attempt_count=0,
-        lease_epoch=1,
-        worker_id="worker-1",
-        input_identity="input-sha",
-    )
+    identity = _identity()
     builder = StateGraph(CausalAgentState, context_schema=AgentRunContext)
     builder.add_node(
         "finalization_gate",
         bind_subgraph_node(
             _finalization_gate_node,
             event_node_name="finalization_gate",
-            gate=Gate(),
+            gate=FinalizationGate(registry=build_default_registry(
+                build_default_adapters(executor=LocalAlgorithmExecutor()))),
         ),
     )
     builder.add_edge(START, "finalization_gate")
@@ -159,6 +144,7 @@ def test_finalization_gate_receives_analysis_parameters_and_latest_question() ->
                     HumanMessage(content="请分析 x 对 y 的因果效应。"),
                 ],
                 "analysis_parameters": {"target": "y", "treatment": "x"},
+                "route_decision": "data_processing",
                 "deep_agent_structured_response": decision,
                 "deep_agent_algorithm_results": {},
                 "deep_agent_action_ledger": {},
@@ -171,7 +157,9 @@ def test_finalization_gate_receives_analysis_parameters_and_latest_question() ->
         )
     )
 
-    assert state["finalization_status"] == "valid"
+    assert state["finalization_retry_count"] == 1
+    assert state.get("deep_agent_decision") is None
+    assert "算法" in state["deep_agent_retry_instruction"]
 
 
 def test_parent_node_consumes_child_message_stream_before_projecting_state() -> None:

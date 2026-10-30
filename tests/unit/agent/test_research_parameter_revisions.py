@@ -1,12 +1,13 @@
 """直接测试研究修订和候选身份纯函数，不替代模型或数据库验收。"""
 
 from copy import deepcopy
+from tests.support.research_specs import commit, spec_from_parameters
 
 import pytest
 
 from Agent.data_processing.parameters import (
-    PARAMETER_BINDING_KEY, ParameterContractError, ParameterExtraction,
-    apply_parameter_patch, extraction_patch, parameter_binding, parameter_identity,
+    PARAMETER_BINDING_KEY, ParameterContractError, ResearchSpec,
+    parameter_binding, parameter_identity,
     restore_parameter_binding, sandbox_request_id, validate_parameter_history,
 )
 from Agent.data_processing.persistence import DatasetPersistenceError, require_candidate_parameters
@@ -19,11 +20,11 @@ from Database.analysis_contexts import context_has_results, final_context_action
 
 JOB = "00000000-0000-0000-0000-000000000951"
 PARAMETERS = {"target": "outcome", "treatment": "exposure",
-              "analysis_question": "研究暴露与结果之间的关系", "measurement_semantics": []}
+              "analysis_question": "研究暴露与结果之间的关系", "measurement_semantics": [], "effect_request": None}
 
 
 def revise(parameters=PARAMETERS, history=None, *, patch=None, source=11):
-    return apply_parameter_patch(
+    return commit(
         parameters, history or [], patch=patch or {}, job_id=JOB, source_input_id=source,
     )
 
@@ -46,14 +47,17 @@ def test_no_change_does_not_advance_revision_and_derived_profile_does_not_change
     assert parameter_identity(final) == parameter_identity({**final, "data_profile": {"rows": 20}})
 
 
-def test_same_input_replay_is_idempotent_even_after_later_changes():
+def test_same_input_can_support_a_later_correction_but_stale_snapshots_are_rejected():
     first, history = revise(patch={"target": "new_outcome"})
-    second, history = revise(first, history, patch={"target": "latest_outcome"}, source=12)
-    replay, records = revise(second, history, patch={"target": "new_outcome"})
-    assert replay == second
-    assert records == history
-    with pytest.raises(ParameterContractError, match="conflicts"):
-        revise(second, history, patch={"target": "conflicting"})
+    replay, records = commit(first, history, patch={"target": "new_outcome"}, job_id=JOB,
+        source_input_id=11, expected_revision=0)
+    assert replay == first and records == history
+    corrected, history = commit(first, history, patch={"target": "correct_outcome"}, job_id=JOB,
+        source_input_id=11, reason="correction")
+    assert corrected["target"] == "correct_outcome" and len(history) == 2
+    with pytest.raises(ParameterContractError, match="stale"):
+        commit(corrected, history, patch={"target": "new_outcome"}, job_id=JOB,
+               source_input_id=11, expected_revision=0)
 
 
 @pytest.mark.parametrize("source", [None, True, 0, -1, "11"])
@@ -75,42 +79,16 @@ def test_history_rejects_tampering(mutation):
         validate_parameter_history(final, history, job_id=JOB)
 
 
-def test_extraction_accepts_explanatory_evidence_and_keeps_ambiguous_answer_uncommitted():
-    extracted = ParameterExtraction.model_validate({"updates": [
-        {"field": "target", "value": None, "evidence": "不指定结果变量"},
-    ]})
-    assert extraction_patch(extracted) == {"target": None}
-    extracted = ParameterExtraction.model_validate({"updates": [
-        {"field": "target", "value": "收入", "evidence": "用户接受当前问题中的目标变量提议"},
-    ]})
-    assert extraction_patch(extracted) == {"target": "收入"}
-    ambiguous = ParameterExtraction(needs_clarification=True, clarification_question="每天还是每周？",
-                                    updates=extracted.updates)
-    assert extraction_patch(ambiguous) == {}
-
-
-def test_unknown_patch_fields_and_model_supplied_provenance_are_rejected():
-    with pytest.raises(ParameterContractError):
-        revise(patch={"source_input_id": 1})
-    with pytest.raises(ValueError):
-        ParameterExtraction.model_validate({"source_input_id": 1})
-
-
-def test_measurement_patch_preserves_other_columns_and_allows_explicit_clear():
+def test_full_measurement_replacement_removes_wrong_old_entries():
     current = {**PARAMETERS, "measurement_semantics": [
-        {"column": "x", "kind": "continuous", "evidence": "x是连续测量"},
-        {"column": "y", "kind": "continuous", "evidence": "y是连续测量"},
-    ]}
-    extraction = ParameterExtraction.model_validate({"updates": [{
-        "field": "measurement_semantics", "evidence": "y实际是计数",
-        "value": [{"column": "y", "kind": "count", "evidence": "y实际是计数"}],
-    }]})
-    patch = extraction_patch(extraction, current_parameters=current)
-    final, history = revise(current, patch=patch)
-    assert final["measurement_semantics"][0] == current["measurement_semantics"][0]
-    assert final["measurement_semantics"][1]["kind"] == "count"
-    cleared, history = revise(final, history, patch={"measurement_semantics": None}, source=12)
-    assert cleared["measurement_semantics"] is None and len(history) == 2
+        {"column": "全部11列", "kind": "continuous", "evidence": "全部列连续"}]}
+    corrected, history = revise(current, patch={"measurement_semantics": [
+        {"column": "x", "kind": "continuous", "evidence": "全部列连续"},
+        {"column": "y", "kind": "continuous", "evidence": "全部列连续"}]})
+    assert [item["column"] for item in corrected["measurement_semantics"]] == ["x", "y"]
+    assert len(history) == 1
+    cleared, history = revise(corrected, history, patch={"measurement_semantics": []}, source=12)
+    assert cleared["measurement_semantics"] == [] and len(history) == 2
 
 
 def test_candidate_round_trip_binds_parameters_and_revision_chain():
@@ -151,7 +129,7 @@ def test_independent_validator_rejects_new_parameters_with_old_candidate():
 
 
 def test_null_roles_and_one_compatible_algorithm_still_allow_analysis():
-    parameters = {"target": None, "treatment": None, "measurement_semantics": None}
+    parameters = {"target": None, "treatment": None, "measurement_semantics": None, "effect_request": None}
     metadata = {PARAMETER_BINDING_KEY: parameter_binding(parameters, [], job_id=JOB),
                 "summary": "保留原始观察行", "observation_unit": "每行一个观察",
                 "transformations": ["保留原始字段"],

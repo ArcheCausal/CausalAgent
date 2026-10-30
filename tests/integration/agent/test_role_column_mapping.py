@@ -14,7 +14,7 @@ from langgraph.runtime import Runtime
 from Agent.Processing.fold_processing import get_data_summary
 from Agent.Processing.fold_verify import validate_analysis
 from Agent.causal_agent.graph import _finalization_gate_node
-from Agent.causal_agent.nodes import foldQuery
+from tests.support.research_specs import spec_from_parameters
 from Agent.data_processing.agent import ProcessingPlanInput
 from Agent.data_processing.graph import _validation_retry_message
 from Agent.data_processing.parameters import (
@@ -59,7 +59,7 @@ def validate(parameters, metadata):
 
 
 def test_semantic_roles_are_preserved_while_validation_and_preprocess_use_real_columns():
-    parameters = foldQuery.model_validate({
+    parameters = spec_from_parameters({
         **ROLES, "observation_unit": "每行代表一件工件的一次独立加工",
     }).model_dump()
     original = deepcopy(parameters)
@@ -115,7 +115,7 @@ def test_resolved_roles_reach_real_algorithm_tools_and_parent_finalization_gate(
             algorithm_executor=executor, filesystem_backend=build_in_memory_backend(user_id=7))
         registry = build_default_registry(build_default_adapters(executor=executor, raw_backend=context.filesystem_backend))
         parent = {"analysis_parameters": {**ROLES, "columns": list(pd.read_csv(StringIO(csv_data)).columns)},
-            "prepared_dataset_metadata": deepcopy(PLAN), "data_profile": executor.data_profile, "route_decision": "fold"}
+            "prepared_dataset_metadata": deepcopy(PLAN), "data_profile": executor.data_profile, "route_decision": "data_processing"}
         original = deepcopy(parent["analysis_parameters"])
         child = to_deep_agent_input(parent)
         child["message_execution_id"] = "role-mapping-response"

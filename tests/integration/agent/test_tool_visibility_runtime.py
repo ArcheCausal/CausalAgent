@@ -20,6 +20,7 @@ import pytest
 from Agent.deep_agent.context import AgentRunContext, TrustedJobIdentity
 from Agent.deep_agent.finalization import FinalizationGate, StructuredResponseError
 from Agent.deep_agent.graph import DeepAgentGraphConfig, build_deep_agent
+from Agent.deep_agent.model import DeepSeekResponsesChatOpenAI
 from Agent.deep_agent.state import (
     ProjectDeepAgentState, initial_deep_agent_state, retry_deep_agent_from_checkpoint,
 )
@@ -76,17 +77,21 @@ def _was_captured(error):
 def test_real_graph_serializes_isolated_concurrent_tools_and_retry_requests():
     async def run():
         observed = []
+        tool_choices = []
         current_flag = ContextVar("visibility_test_flag", default=False)
 
         async def capture(request):
             payload = json.loads(request.content)
+            tool_choices.append(payload.get("tool_choice"))
+            assert payload.get("reasoning") == {"effort": "high"}
             observed.append((current_flag.get(), {tool["name"] for tool in payload["tools"]}))
             raise ModelRequestCaptured()
 
         async with httpx.AsyncClient(event_hooks={"request": [capture]}) as client:
-            model = ChatOpenAI(
+            model = DeepSeekResponsesChatOpenAI(
                 api_key=require_secret("DEEP_AGENT_API_KEY"),
                 model="deepseek-v4-flash", use_responses_api=True,
+                reasoning={"effort": "high"},
                 http_async_client=client, max_retries=0,
             )
             registry = _registry()
@@ -118,6 +123,7 @@ def test_real_graph_serializes_isolated_concurrent_tools_and_retry_requests():
                     raise outcome
             assert all(_was_captured(outcome) for outcome in outcomes)
             assert len(observed) == len(flags)
+            assert tool_choices == ["auto"] * len(flags)
             baseline = {
                 "causal_pc", "causal_direct_lingam", "causal_cdfm",
                 "rag_evidence_search", "read_file", "edit_file",
@@ -203,7 +209,7 @@ def test_gate_reuses_complete_same_attempt_but_requires_new_attempt_web_call():
     kwargs = dict(
         decision=decision, algorithm_results=state["algorithm_results"],
         action_ledger=state["action_ledger"], trusted_identity=context.trusted_identity,
-        route_decision="fold", web_search_enabled=True,
+        route_decision="data_processing", web_search_enabled=True,
     )
     assert gate.validate(**kwargs) == decision
     retry = retry_deep_agent_from_checkpoint(state, retry_instruction="修正最终决策。")
