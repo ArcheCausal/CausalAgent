@@ -14,7 +14,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 DEPLOY = ROOT / "deploy/opensandbox"
-COMPOSES = ("docker-compose.yml", "docker-compose.replica.yml", "docker-compose.staging.yml", "docker-compose.prod.yml")
+COMPOSES = ("docker-compose.yml", "docker-compose.staging.yml", "docker-compose.prod.yml")
 CLIENT_KEYS = {
     "CAUSALAGENT_SANDBOX_CONTROLLER_URL",
     "CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS",

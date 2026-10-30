@@ -60,7 +60,6 @@ class StagingComposeContractTests(unittest.TestCase):
         for filename in (
             "docker-compose.yml",
             "docker-compose.prod.yml",
-            "docker-compose.replica.yml",
             "docker-compose.staging.yml",
         ):
             with self.subTest(filename=filename):
@@ -84,7 +83,7 @@ class StagingComposeContractTests(unittest.TestCase):
 
     def test_worker_compose_contract_has_bounded_drain_and_release_mounts(self) -> None:
         """worker Compose 应传递 drain 配置，并暴露只读 runtime 与检索策略目录。"""
-        for filename in ("docker-compose.yml", "docker-compose.replica.yml"):
+        for filename in ("docker-compose.yml",):
             compose = (REPOSITORY_ROOT / filename).read_text(encoding="utf-8")
             self.assertIn("JOB_DRAIN_TIMEOUT_SECONDS=${JOB_DRAIN_TIMEOUT_SECONDS:-60}", compose)
             self.assertIn("stop_grace_period: 75s", compose)
@@ -114,7 +113,7 @@ class StagingComposeContractTests(unittest.TestCase):
                 self.assertNotIn("kb-indexes-sync", compose)
 
         # 开发环境直接挂载宿主源码目录，不再使用一次性同步容器。
-        for filename in ("docker-compose.yml", "docker-compose.replica.yml"):
+        for filename in ("docker-compose.yml",):
             with self.subTest(filename=filename):
                 compose = (REPOSITORY_ROOT / filename).read_text(encoding="utf-8")
                 self.assertNotIn("kb-indexes-sync", compose)

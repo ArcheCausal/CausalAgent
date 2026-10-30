@@ -28,13 +28,12 @@ SAFE_UNITTEST_TARGETS = {
     "tests.unit.rag_eval.test_rag_eval_run_lifecycle",
     "tests.unit.rag_eval.test_rag_eval_worker_queue",
 }
-SAFE_COMPOSE_FILES = {"docker-compose.yml", "docker-compose.prod.yml", "docker-compose.replica.yml"}
+SAFE_COMPOSE_FILES = {"docker-compose.yml", "docker-compose.prod.yml"}
 SAFE_READINESS_TARGETS = {"repository_metadata"}
 READINESS_REQUIRED_FILES = (
     Path("Document/rag_eval_production_acceptance_matrix.json"),
     Path("docker-compose.yml"),
     Path("docker-compose.prod.yml"),
-    Path("docker-compose.replica.yml"),
     Path("alembic.ini"),
     Path("app/rag_eval/routes.py"),
     Path("app/rag_eval/worker.py"),

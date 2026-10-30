@@ -63,7 +63,7 @@ Worker 使用两套模型配置：`MODEL`、`BASE_URL` 与密钥文件中的 `AP
 `loadtest/` 的数据库只读采集器从部署环境文件读取账号和库名，通过数据库容器内的 `secret-env.sh` 读取密码；密码不放入 SSH 或 Docker 命令参数。本地 Grafana 日志核查默认从仓库根目录 `causalagent.env` 读取口令，可用 `CAUSALAGENT_SECRET_FILE` 指定其他受控文件；使用步骤见 [`loadtest/README.md`](../../loadtest/README.md)。
 Shell 密钥读取器兼容 LF 和 CRLF 换行，只移除行尾属于分隔符的回车，避免 Windows 保存的文件使密码多出一个字符；移除分隔符后为空的值仍然拒绝。本地 Grafana 核查读取统一密钥文件时使用相同规则，保留口令中的引号和空格。
 
-开发 `docker-compose.yml` 与兼容入口 `docker-compose.replica.yml` 为所有读取密钥的服务固定设置已有的 `ENVIRONMENT=development`。Python 密钥加载器和官方镜像的 Shell 适配器在该环境下跳过 POSIX 权限位和属主检查，直接读取主机文件，以兼容 Windows Docker Desktop 呈现的挂载权限；文件仍须存在并可读，各入口原有的内容校验继续执行。不增加权限策略开关、密钥准备服务或密钥卷。预发、生产以及未显式设置 development 的 Linux 进程保留现有权限检查，服务器发布校验仍要求 `0640 root:3000`。
+开发入口 `docker-compose.yml` 为所有读取密钥的服务固定设置已有的 `ENVIRONMENT=development`。Python 密钥加载器和官方镜像的 Shell 适配器在该环境下跳过 POSIX 权限位和属主检查，直接读取主机文件，以兼容 Windows Docker Desktop 呈现的挂载权限；文件仍须存在并可读，各入口原有的内容校验继续执行。不增加权限策略开关、密钥准备服务或密钥卷。预发、生产以及未显式设置 development 的 Linux 进程保留现有权限检查，服务器发布校验仍要求 `0640 root:3000`。
 
 开发 Python 服务通过仓库源码挂载读取当前实现；`causal-mcp` 只读挂载 `config/secret_file.py`，因此本地调整密钥读取逻辑后只需重建容器，不需要为了这项修改重新下载镜像中的 CDFM 权重。预发和生产继续使用镜像内代码。
 

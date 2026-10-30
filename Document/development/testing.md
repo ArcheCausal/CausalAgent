@@ -61,6 +61,8 @@ Docker unit 镜像按 `tests/README.md` 中的固定 lock 构建，由 `docker/b
 
 Compose 校验只展开配置，不启动服务。静态 Dockerfile 按构建相关路径触发，不会生成或推送镜像；实际 app、MCP、MySQL 主从和数据处理镜像只由人工触发的发布工作流构建。
 
+部署契约检查当前的 `docker-compose.yml`、`docker-compose.staging.yml` 与 `docker-compose.prod.yml`，分别覆盖开发、预发与生产拓扑。RAG 验收矩阵的 Compose 检查和仓库元数据 readiness 只引用现存文件；[test_rag_eval_acceptance_metadata.py](../../tests/contracts/deployment/test_rag_eval_acceptance_metadata.py) 核对 Compose 白名单和实际元数据检查结果，不启动服务，也不代表生产服务或数据库就绪。
+
 发布工作流的静态契约及镜像解析器参数失败路径由 `tests/contracts/deployment/test_release_workflow.py` 检查，包括五个构建全部成功后才打包、同一源码提交传递、处理镜像的构建上下文与平台、本次构建 digest 的任务输出传递、独立打包的手动输入、无效输入不写清单，以及拒绝无法验证 revision 的元数据。该文件不模拟 GHCR 成功响应；通过静态检查不代表仓库鉴权、真实镜像查询或 GitHub Actions 执行成功。真实发布需在 Actions 中检查五个 digest、完整源码提交、处理镜像引用传递、制品上传及服务器验收。
 
 本地复现预发静态检查：

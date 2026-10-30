@@ -18,7 +18,7 @@ rg -n -i 'FinalizationGate|Action Ledger' changelog
 
 | 月份 | 主要主题 | 发布关联 |
 | --- | --- | --- |
-| [2026-10](changelog/2026/2026-10.md) | DeepAgent、CDFM 边预测概率、显式效应请求与干预支持、独立主图与主效应、统一研究需求提交、研究参数修订与提取纠错、角色列映射、测量语义校验、后门 OLS 准入与门禁、测试契约与分层、数据处理失败终态、沙盒控制服务、统一密钥管理、OpenSandbox、算法调度、分析事实、工具可见性、部署与容量、暂停交互与方案确认、日志归档 | — |
+| [2026-10](changelog/2026/2026-10.md) | DeepAgent、CDFM 边预测概率、显式效应请求与干预支持、独立主图与主效应、统一研究需求提交、研究参数修订与提取纠错、角色列映射、测量语义校验、后门 OLS 准入与门禁、测试契约与分层、数据处理失败终态、沙盒控制服务、统一密钥管理、OpenSandbox、算法调度、分析事实、工具可见性、Compose 入口契约、部署与容量、暂停交互与方案确认、日志归档 | — |
 | [2026-09](changelog/2026/2026-09.md) | DeepAgent、Action Ledger、FinalizationGate、MCP、设计系统、官网、预发部署 | — |
 | [2026-08](changelog/2026/2026-08.md) | PostgreSQL checkpoint、RAG 评测运行台、Gold v2、release readiness、开发者预览 | `v0.1.0` |
 | [2026-07](changelog/2026/2026-07.md) | Job/SSE、文件生命周期、多模态索引、Gold、隔离评测、Ragas | — |
