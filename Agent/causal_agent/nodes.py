@@ -20,7 +20,7 @@ from langgraph.func import task
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 from Agent.llm_structured_output import StructuredOutputError, ainvoke_structured
-from Agent.data_processing.parameters import execution_parameters
+from Agent.data_processing.parameters import execution_parameters, parameter_identity
 from .fault_tolerance import (
     RAG_DEGRADATION_SUMMARY,
     build_rag_degradation_result,
@@ -573,6 +573,7 @@ def _switched_context_state(
         "deep_agent_web_evidence": {},
         "deep_agent_decision": None,
         "deep_agent_structured_response": None,
+        "deep_agent_accepted_decision": None,
         "deep_agent_retry_instruction": "",
         "finalization_retry_count": 0,
         "finalization_status": None,
@@ -827,6 +828,7 @@ async def preprocess_node(
         content_hash=str(bound_identity["data_hash"]),
         filename=str(bound_identity["filename"]),
         semantic_kinds=bound_identity["semantic_kinds"],
+        research_identity=parameter_identity(bound_identity["analysis_parameters"]),
     )
     bound_data = await asyncio.to_thread(
         read_bound_dataset,
@@ -1875,6 +1877,12 @@ def _report_execution_summary(state: CausalAgentState) -> dict[str, Any]:
             }
         )
     decision = facts.get("decision") or {}
+    primary_effect = next(
+        (result for result in facts.get("results", [])
+         if result.get("result_ref") == facts.get("primary_effect_result_ref")
+         and result.get("status") == "valid"),
+        None,
+    )
     return {
         "analysis_outcome": decision.get("outcome"),
         "report_completeness": "complete",
@@ -1885,7 +1893,7 @@ def _report_execution_summary(state: CausalAgentState) -> dict[str, Any]:
         "budget_exhausted": facts.get("budget_exhausted", False),
         "preliminary_ols": bool(
             (facts.get("analysis_limitations") or facts.get("budget_exhausted"))
-            and (report_primary_result(facts) or {}).get("algorithm") == "causal.backdoor_ols"
+            and (primary_effect or {}).get("algorithm") == "causal.backdoor_ols"
         ),
     }
 
@@ -1990,11 +1998,14 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         - 统计检验限制须依据实际检验方法说明，不把离散列联表的格子频数要求套用于 Fisher-Z；没有执行的适用性诊断只列为未检验事项。
         - PC 算法的一般性质与本次 independence_test 的条件分别解释；若使用 Fisher-Z，不能声称本次检验不受线性或分布条件限制。
         - 没有可引用的知识库或联网证据时只说明缺少证据；除非存在明确失败状态，不得将未执行、未启用或不可用猜测为检索失败。
-        - 函数形式只读取 functional_form：verdict=not_detected 写“未检出非线性”，不得写成“已确认线性”；
-          linear 写“线性与灵活估计一致”并给出 effect_difference 与 difference_se；
-          nonlinear 写“线性近似偏离”并说明主结果采用灵活估计；
-          flexible_primary 写“采用灵活估计，未做线性对比”；
-          undetermined 写“非线性检查未完成”并写明 reason 对应的真实终态或缺失原因。不得自行写死或改写判定阈值。
+        - 主图读取 primary_graph_result_ref，主效应只读取 primary_effect_result_ref；旧 primary_result_ref 只是兼容投影。主效应为空时如实说明 effect_status 和 effect_reason。
+        - 效应定义只读取 effect_request 和实际结果中的同名定义，不能将每单位系数写成指定区间的变化。
+        - 方法比较只读取 effect_comparisons 中 comparable=true 的组，说明差值方向、成对 bootstrap 差值区间及支持诊断。不同源图作为结构敏感性结果分别说明。方法差异不能直接证明非线性，没有业务阈值不能断言实质差异，也不能根据估计器名称替 Agent 选择主结果。
+        - effect_difference 的方向是 difference_direction（right_minus_left）；成对差值点值读取 paired_effect_difference，区间读取 difference_ci95，二者方向为 paired_difference_direction（linear_minus_flexible）。两种方向不可混用，不能将 right_minus_left 点值配上 linear_minus_flexible 的区间。缺少成对点值时仅报告已有区间及其方向，不自行填值。
+        - 差值区间包含零只表示本次比较未能区分两种估计，不证明线性、方法等价、无设定偏差或无实质偏差；没有业务容忍阈值及相应检验时不能作等价或实质性判断。模型 selection_rationale 或 assessment 若有此推断，应按实际比较事实解释，不能当作已验证结论复述。
+        - 每个效应数值都须对应其实际源图与估计器。同一图的两种估计不能计作两张图的效应证据，没有执行估计的图不能算作效应支持。跨图结果同号只描述本次结构敏感性观察，不证明结构正确或效应结论不依赖结构。
+        - selection_rationale、assessment、conflicts 和 revision_proposals 都是模型评估文本，Gate 接受不代表这些科学解释已被证明。若其数值、源图或估计器归属与 results 不符，报告必须按 results 更正解释；不能在冲突章节再次复述错误归属。
+        - 不同单位的边权不能仅按绝对数值大小判为不合理，必须结合量纲、变量尺度和已知业务约束；没有这些依据时，只能列出尚未检查的尺度与方向假设。
         - analysis_limitations 是程序确认的检查缺口，必须如实说明；预算跳过不是算法执行失败，也不表示检查通过。
           存在检查缺口时，图称为“候选因果结构”，OLS 称为“线性假设下的初步估计”；区间仅反映该模型下的不确定性。
 

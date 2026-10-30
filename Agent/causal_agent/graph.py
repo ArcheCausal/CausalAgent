@@ -76,7 +76,7 @@ from Agent.data_processing.graph import (
     validate_dataset_node,
     validation_router,
 )
-from Agent.data_processing.parameters import execution_parameters, PROCESSING_GRAPH_NAME
+from Agent.data_processing.parameters import execution_parameters, parameter_identity, PROCESSING_GRAPH_NAME
 from Agent.deep_agent_tools.models import (
     AlgorithmResult,
     EvidenceResult,
@@ -542,7 +542,7 @@ def _legacy_analysis_result(
     if decision is not None:
         payload["decision"] = decision.model_dump(mode="json")
 
-    primary_ref = getattr(decision, "primary_result_ref", None)
+    primary_ref = getattr(decision, "primary_graph_result_ref", None)
     primary = normalized_results.get(primary_ref) if primary_ref else None
     if (
         finalization_status == "valid"
@@ -553,7 +553,11 @@ def _legacy_analysis_result(
     ):
         payload["success"] = True
         payload["data"] = primary.standardized_graph.model_dump(mode="json")
-        payload["primary_result_ref"] = primary.result_ref
+        payload["primary_result_ref"] = decision.primary_result_ref
+        payload["primary_graph_result_ref"] = primary.result_ref
+        payload["primary_effect_result_ref"] = decision.primary_effect_result_ref
+        payload["effect_status"] = decision.effect_status
+        payload["effect_reason"] = decision.effect_reason
         payload["algorithm"] = primary.capability_id
         payload["method"] = primary.method.model_dump(mode="json") if primary.method else None
     elif finalization_status == "valid" and getattr(decision, "outcome", None) == "evidence_only":
@@ -718,6 +722,7 @@ async def _deep_agent_parent_node(
         content_hash=str(bound_dataset["data_hash"]),
         filename=str(bound_dataset["filename"]),
         semantic_kinds=bound_dataset["semantic_kinds"],
+        research_identity=parameter_identity(bound_dataset["analysis_parameters"]),
     )
     await _ensure_official_memory_files(
         store=store,
@@ -760,6 +765,7 @@ async def _deep_agent_parent_node(
         current_scope = build_deep_agent_analysis_scope(
             job_id=trusted_identity.job_id,
             input_identity=trusted_identity.current_input_identity(),
+            research_identity=analysis_input.research_identity,
             spec_digests=(
                 registry.spec_digests()
                 if registry is not None and hasattr(registry, "spec_digests")
@@ -786,6 +792,8 @@ async def _deep_agent_parent_node(
         and current_scope
         and checkpoint_values.get("execution_scope") == current_scope
     )
+    if isinstance(checkpoint_values, Mapping) and checkpoint_values and not checkpoint_matches:
+        raise RuntimeError("已保存的因果分析状态与当前研究定义或算法版本不一致，请重新发起任务；原记录保留。")
     if checkpoint_matches:
         assert_checkpoint_state_safe(checkpoint_values)
         if isinstance(retry_instruction, str) and retry_instruction.strip():
@@ -1007,8 +1015,7 @@ async def _finalization_gate_node(
     limitations = []
     try:
         decision = gate.validate(
-            decision=state.get("deep_agent_structured_response")
-            or state.get("deep_agent_decision"),
+            decision=state.get("deep_agent_structured_response"),
             algorithm_results=state.get("deep_agent_algorithm_results"),
             action_ledger=state.get("deep_agent_action_ledger"),
             trusted_identity=identity,
@@ -1050,6 +1057,8 @@ async def _finalization_gate_node(
         safe_error = "FINALIZATION_CONTRACT_INVALID"
         return {
             "finalization_status": "degraded",
+            "deep_agent_accepted_decision": None,
+            "deep_agent_decision": None,
             "finalization_error": safe_error,
             "analysis_limitations": [],
             "deep_agent_retry_instruction": "",
@@ -1071,7 +1080,7 @@ async def _finalization_gate_node(
     )
     return {
         "deep_agent_decision": decision,
-        "deep_agent_structured_response": decision,
+        "deep_agent_accepted_decision": decision,
         "deep_agent_retry_instruction": "",
         "finalization_status": "valid",
         "analysis_limitations": limitations,
@@ -1105,6 +1114,8 @@ def _emit_public_final_decision(
 
     disposition_labels = {
         "primary": "主结果",
+        "primary_graph": "主图",
+        "primary_effect": "主效应",
         "supporting": "辅助结果",
         "discarded": "未采用",
     }
