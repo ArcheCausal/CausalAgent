@@ -106,6 +106,16 @@ def _resolve_graph_artifacts(
 
     if spec.kind != "causal_estimation":
         return None, {}
+    parameters = state.get("analysis_parameters") or {}
+    confirmed = parameters.get("effect_request") if isinstance(parameters, Mapping) else None
+    if not isinstance(confirmed, Mapping) or dict(confirmed) != arguments.get("effect_request") or (
+        arguments.get("treatment"), arguments.get("outcome")
+    ) != (parameters.get("treatment"), parameters.get("target")):
+        return {
+            "status": "invalid_input",
+            "reason": "本次没有已确认的效应请求，或工具定义及变量与确认方案不同。",
+            "next_action": "仅执行结构探索；需要调整研究问题时返回原有参数修订与确认流程。",
+        }, {}
     available = _trusted_graph_result_refs(
         state, trusted_identity=trusted_identity
     )
@@ -249,6 +259,7 @@ class AlgorithmTool:
         if result is not None:
             safe_error_code = result.diagnostics.safe_error_code
         return InvocationRecord(
+            research_identity=getattr(active_context.trusted_identity.analysis_input, "research_identity", None),
             invocation_id=invocation_id,
             response_identity=response_identity,
             response_identity_source=response_identity_source,
@@ -487,6 +498,7 @@ class AlgorithmTool:
                         ),
                     ),
                     provenance=AlgorithmResultProvenance(
+                        research_identity=getattr(trusted.analysis_input, "research_identity", None),
                         job_id=str(trusted.job_id), attempt_count=trusted.attempt_count,
                         lease_epoch=trusted.lease_epoch, input_identity=current_input_identity(trusted),
                         source_input_identity=source, analysis_dataset_id=dataset_id,

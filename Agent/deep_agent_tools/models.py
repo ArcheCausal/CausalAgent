@@ -207,6 +207,8 @@ class SafeWarning(ContractModel):
 class AlgorithmResultProvenance(ContractModel):
     """结果归属、输入身份和 spec 版本的可信证明字段。"""
 
+    research_identity: str | None = None
+
     job_id: str
     attempt_count: int = Field(ge=0)
     lease_epoch: int = Field(ge=0)
@@ -328,6 +330,10 @@ class CausalEffect(ContractModel):
     contrast: tuple[float, float] | None = None
     outcome_model: str | None = None
     bootstrap_n: int | None = Field(default=None, ge=0)
+    effect_request: dict[str, Any] | None = None
+    sample_identity: str | None = None
+    adjustment_rule: str | None = None
+    support: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("graph_result_ref", "treatment", "outcome", "estimator")
     @classmethod
@@ -336,6 +342,9 @@ class CausalEffect(ContractModel):
 
     @model_validator(mode="after")
     def validate_effect_numbers(self) -> "CausalEffect":
+        if self.effect_request is not None:
+            from Agent.effect_request import normalize_effect_request
+            object.__setattr__(self, "effect_request", normalize_effect_request(self.effect_request))
         if not math.isfinite(self.estimate):
             raise ValueError("estimate must be finite")
         if self.standard_error is not None and (
@@ -542,6 +551,8 @@ class EffectQuery(ContractModel):
     outcome: str
     contrast: tuple[float, float] | None = None
     outcome_model: str | None = None
+    effect_request: dict[str, Any] | None = None
+    estimator_config: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("graph_result_ref", "treatment", "outcome")
     @classmethod
@@ -572,6 +583,12 @@ class EffectQuery(ContractModel):
 
         return self == other
 
+    @field_validator("effect_request")
+    @classmethod
+    def validate_query_definition(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        from Agent.effect_request import normalize_effect_request
+        return normalize_effect_request(value)
+
 
 class ActionAttempt(ContractModel):
     """一次实际执行 attempt 的单调 revision 快照。"""
@@ -592,6 +609,8 @@ class ActionAttempt(ContractModel):
 
 class InvocationRecord(ContractModel):
     """一个逻辑 function call 及其全部 retry/revision 历史。"""
+
+    research_identity: str | None = None
 
     invocation_id: str
     response_identity: str
@@ -804,7 +823,7 @@ class ResultAssessment(ContractModel):
             "检索证据不要写进这个字段。"
         ),
     )
-    disposition: Literal["primary", "supporting", "discarded"]
+    disposition: Literal["primary_graph", "primary_effect", "supporting", "discarded"]
     rationale: str
 
     @field_validator("result_ref", "rationale")
@@ -817,6 +836,10 @@ class FinalAnalysisDecision(ContractModel):
     """ToolStrategy 的静态终态契约；动态归属由后续 FinalizationGate 校验。"""
 
     outcome: Literal["evidence_only", "algorithm_supported", "no_valid_algorithm"]
+    primary_graph_result_ref: str | None = Field(default=None, description="独立选定的主图，必须引用本次因果发现结果。")
+    primary_effect_result_ref: str | None = Field(default=None, description="采用的主效应；没有采用效应时为 null，不能由旧主结果字段推断。")
+    effect_status: Literal["not_recorded", "not_requested", "not_applicable", "not_identifiable", "incomplete", "not_adopted", "adopted"] = "not_recorded"
+    effect_reason: str | None = None
     primary_result_ref: str | None = Field(
         default=None,
         description="主结果 result_ref；必须是本次运行返回且状态有效的算法结果。",
@@ -835,7 +858,7 @@ class FinalAnalysisDecision(ContractModel):
     confidence: Literal["low", "medium", "high"]
     confidence_basis: list[str] = Field(default_factory=list)
 
-    @field_validator("primary_result_ref")
+    @field_validator("primary_result_ref", "primary_graph_result_ref", "primary_effect_result_ref", "effect_reason")
     @classmethod
     def validate_primary_ref(cls, value: str | None) -> str | None:
         return None if value is None else _non_blank(value, field_name="primary_result_ref")
@@ -851,20 +874,25 @@ class FinalAnalysisDecision(ContractModel):
         if len(refs) != len(set(refs)):
             raise ValueError("result_assessments must not repeat result_ref")
 
-        primary_assessments = [
-            assessment
-            for assessment in self.result_assessments
-            if assessment.disposition == "primary"
-        ]
-        if len(primary_assessments) > 1:
-            raise ValueError("at most one result assessment may be primary")
-        if self.primary_result_ref is not None:
-            if not primary_assessments or (
-                primary_assessments[0].result_ref != self.primary_result_ref
-            ):
-                raise ValueError(
-                    "primary_result_ref must point to the sole primary assessment"
-                )
+        roles = {"primary_graph": self.primary_graph_result_ref, "primary_effect": self.primary_effect_result_ref}
+        for role, ref in roles.items():
+            selected = [item.result_ref for item in self.result_assessments if item.disposition == role]
+            if selected != ([ref] if ref is not None else []):
+                raise ValueError(f"{role} assessment must match its explicit reference")
+        primary_assessments = [item for item in self.result_assessments if item.disposition in roles]
+        projection = self.primary_effect_result_ref or self.primary_graph_result_ref
+        if projection is not None:
+            if self.primary_result_ref not in (None, projection):
+                raise ValueError("primary_result_ref conflicts with the compatibility projection")
+            object.__setattr__(self, "primary_result_ref", projection)
+        elif self.primary_result_ref is not None:
+            raise ValueError("explicit primary graph/effect references are required")
+        if self.primary_effect_result_ref is not None and self.primary_graph_result_ref is None:
+            raise ValueError("an adopted effect requires its source graph")
+        if self.primary_effect_result_ref is not None and self.effect_status != "adopted":
+            raise ValueError("primary effect requires effect_status=adopted")
+        if self.primary_effect_result_ref is None and self.effect_status == "adopted":
+            raise ValueError("adopted requires a primary effect")
         if self.outcome in {"evidence_only", "no_valid_algorithm"}:
             if self.primary_result_ref is not None or primary_assessments:
                 raise ValueError(
@@ -879,6 +907,8 @@ class FinalAnalysisDecision(ContractModel):
 
 class McpInvocationContext(ContractModel):
     """worker 注入、MCP 验签并再次查库的可信调用上下文。"""
+
+    research_identity: str | None = None
 
     invocation_id: str
     job_id: str
@@ -932,6 +962,7 @@ class AlgorithmExecutionCommand(ContractModel):
     spec_digest: str
     provider_call_id: str
     input_identity: str
+    research_identity: str | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
     result_index: int = Field(default=0, ge=0)
     timeout_seconds: int | None = Field(default=None, gt=0)

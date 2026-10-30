@@ -16,6 +16,7 @@ from Agent.deep_agent_tools.ate_applicability import (
 )
 from Agent.deep_agent_tools.models import StandardizedGraph
 from Agent.deep_agent_tools.preprocessing import build_data_profile
+from .interventions import prepare_intervention, sample_identity
 
 
 class AteNotApplicable(ValueError):
@@ -35,6 +36,8 @@ def estimate_ate(
     treatment: str,
     outcome: str,
     semantic_kinds: Mapping[str, str] | None = None,
+    effect_request: dict[str, Any] | None = None,
+    execution_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """估计 treatment 对 outcome 的线性总效应；不可识别时抛 AteNotApplicable。"""
 
@@ -62,6 +65,11 @@ def estimate_ate(
 
     treatment_values = values[:, 0]
     outcome_values = values[:, 1]
+    request, baseline, changed, support = prepare_intervention(
+        treatment_values=treatment_values, treatment=treatment, outcome=outcome,
+        effect_request=effect_request, execution_context=execution_context,
+    )
+    magnitude = float(changed[0] - baseline[0])
     design = np.column_stack(
         [np.ones(len(values)), treatment_values, values[:, 2:]]
     )
@@ -77,8 +85,8 @@ def estimate_ate(
 
     residual_variance = float(residuals @ residuals) / dof
     covariance = residual_variance * np.linalg.inv(design.T @ design)
-    estimate = float(coefficients[1])
-    standard_error = float(np.sqrt(max(covariance[1, 1], 0.0)))
+    estimate = float(coefficients[1]) * magnitude
+    standard_error = float(np.sqrt(max(covariance[1, 1], 0.0))) * abs(magnitude)
     if (
         not np.isfinite(coefficients).all()
         or not np.isfinite(residual_variance)
@@ -121,5 +129,14 @@ def estimate_ate(
         "ci95": ci95,
         "estimator": "backdoor_ols",
         "n_rows": int(n_rows),
+        "effect_request": request,
+        "sample_identity": sample_identity(data.loc[:, columns]),
+        "adjustment_rule": "parents_of_treatment",
+        "support": support,
+        "contrast": (
+            (request["intervention"]["from"], request["intervention"]["to"])
+            if request["intervention"]["type"] == "fixed_contrast"
+            and request["intervention"]["from"] != request["intervention"]["to"] else None
+        ),
         "diagnostics_metrics": diagnostics_metrics,
     }

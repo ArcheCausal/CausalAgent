@@ -240,6 +240,7 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                                      else SafeErrorCode.ALGORITHM_CANCELED),
                 ),
                 provenance=AlgorithmResultProvenance(
+                    research_identity=getattr(identity.analysis_input, "research_identity", None),
                     job_id=str(identity.job_id),
                     attempt_count=int(identity.attempt_count),
                     lease_epoch=int(identity.lease_epoch),
@@ -410,6 +411,7 @@ class AlgorithmDependencyDispatchMiddleware(AgentMiddleware):
                 ),
                 provenance=AlgorithmResultProvenance(
                     job_id=str(trusted.job_id), attempt_count=int(trusted.attempt_count),
+                    research_identity=getattr(trusted.analysis_input, "research_identity", None),
                     lease_epoch=int(trusted.lease_epoch),
                     input_identity=current_input_identity(trusted),
                     source_input_identity=trusted.source_input_identity(),

@@ -66,6 +66,7 @@ def validate_executor_command(
 
     checks = {
         "invocation_id": (command.invocation_id, trusted_context.invocation_id),
+        "research_identity": (command.research_identity, trusted_context.research_identity),
         "input_identity": (
             command.input_identity,
             trusted_context.input_snapshot_digest,
@@ -123,6 +124,9 @@ def validate_executor_result(
             result.provenance.analysis_dataset_id,
             trusted_context.analysis_dataset_id,
         ),
+        "provenance.research_identity": (
+            result.provenance.research_identity, trusted_context.research_identity,
+        ),
     }
     for field_name, (actual, expected) in checks.items():
         if actual != expected:
@@ -139,6 +143,18 @@ def validate_executor_result(
             "executor result contract mismatch: result_ref",
             safe_error_code=SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID,
         )
+    if command.capability_id in {"causal.backdoor_ols", "causal.g_formula"} and result.status == "valid":
+        effect = result.causal_effect
+        if (effect is None or effect.effect_request != command.parameters.get("effect_request")
+            or effect.graph_result_ref != command.parameters.get("graph_result_ref")
+            or effect.treatment != command.parameters.get("treatment")
+            or effect.outcome != command.parameters.get("outcome")
+            or not effect.sample_identity or effect.adjustment_rule != "parents_of_treatment"
+            or effect.support.get("status") != "supported"):
+            raise AlgorithmExecutorError(
+                "executor result contract mismatch: confirmed effect",
+                safe_error_code=SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID,
+            )
     if command.capability_id == "causal.backdoor_ols":
         try:
             # model_copy(update=...) 不触发 Pydantic 校验，入站边界重新验证。
