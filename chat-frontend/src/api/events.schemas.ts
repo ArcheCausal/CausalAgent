@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { effectRequestSchema, effectExecutionContextSchema } from './effect-request.schemas'
 import type { PublicEvent } from '../types/domain'
 
 const phaseEventBase = {
@@ -107,6 +108,8 @@ export const processingPlanSummarySchema = z.object({
     treatment: z.string().min(1).max(255).nullable().optional(),
   }).optional(),
   limitations: z.array(z.string()).optional(),
+  effect_request: effectRequestSchema.nullable().optional(),
+  effect_execution_context: effectExecutionContextSchema.nullable().optional(),
 }).passthrough()
 
 export const interactionPayloadSchema = z.object({

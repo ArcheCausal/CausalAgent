@@ -28,7 +28,6 @@ from Agent.deep_agent_tools.identity import build_data_processing_run_id
 from Agent.deep_agent_tools.interaction import (
     DATA_PROCESSING_PLAN_CONFIRMATION_TYPE,
     DATA_PROCESSING_QUESTION_TYPE,
-    DataProcessingPlanConfirmationRequest,
     DataProcessingQuestionRequest,
 )
 from Agent.deep_agent_tools.models import canonical_json_bytes
@@ -41,6 +40,7 @@ from Agent.data_processing.persistence import (
     record_validation,
 )
 from Agent.data_processing.lifecycle import confirmed_version, require_candidate_binding
+from Agent.data_processing.contracts import ResearchPlanConfirmationRequest
 from Agent.data_processing.parameters import (
     PROCESSING_STATE_VERSION, ParameterContractError, UnsupportedProcessingCheckpointError, parameter_identity,
     research_parameters, validate_parameter_history,
@@ -192,7 +192,7 @@ def _public_interrupt(value: Any) -> dict[str, Any]:
         )
         return request.public_payload()
     if interaction_type == DATA_PROCESSING_PLAN_CONFIRMATION_TYPE:
-        request = DataProcessingPlanConfirmationRequest(
+        request = ResearchPlanConfirmationRequest(
             prompt=str(raw.get("message") or raw.get("prompt") or ""),
             question_id=str(raw.get("question_id") or ""),
             expires_at=str(raw.get("expires_at") or ""),
@@ -434,7 +434,7 @@ async def data_processing_parent_node(
     from Agent.data_processing.agent import build_initial_message
 
     initial_input = {
-        "analysis_parameters": research_parameters({}),
+        "analysis_parameters": research_parameters({"effect_request": None}),
         "analysis_parameter_changes": [],
         "data_processing_state_version": PROCESSING_STATE_VERSION,
         "data_processing_run_id": run_id,

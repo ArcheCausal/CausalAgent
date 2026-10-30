@@ -33,7 +33,7 @@ def build_processing_plan_version(
         raise ValueError("metadata must be a JSON object")
 
     payload = {
-        "schema": "causalagent-data-processing-plan-v1",
+        "schema": "causalagent-data-processing-plan-v2",
         "job_id": job_id,
         "source_hash": _validated_sha256(source_hash, field_name="source_hash"),
         "semantic_identity": _validated_sha256(

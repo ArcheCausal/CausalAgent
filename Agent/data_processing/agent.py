@@ -26,8 +26,6 @@ from Agent.deep_agent.graph import (
 from Agent.deep_agent.profile import DeepAgentProfile
 from Agent.deep_agent.state import ProjectDeepAgentState
 from Agent.deep_agent_tools.interaction import (
-    DataProcessingPlanConfirmationRequest,
-    DataProcessingPlanSummary,
     DataProcessingQuestionRequest,
     with_tool_runtime_schema,
 )
@@ -44,7 +42,10 @@ from Agent.data_processing.lifecycle import (
 )
 from Agent.data_processing.parameters import (
     ResearchSpecInput, ParameterContractError, commit_research_spec,
-    parameter_identity, sandbox_request_id,
+    execution_parameters, parameter_identity, sandbox_request_id,
+)
+from Agent.data_processing.contracts import (
+    ProcessingPlanSummary, ResearchPlanSummary, ResearchPlanConfirmationRequest,
 )
 from Agent.data_processing.plans import (
     build_processing_plan_version, _answer_object,
@@ -64,7 +65,7 @@ class ScriptInput(ContractModel):
     script: str = Field(min_length=1, max_length=16000)
 
 
-class ProcessingPlanInput(DataProcessingPlanSummary):
+class ProcessingPlanInput(ProcessingPlanSummary):
     """供用户确认的处理方案；不接收执行后说明。"""
 
 
@@ -169,11 +170,22 @@ def _plan_tool() -> Any:
     async def call(runtime: Any, **kwargs: Any) -> Any:
         payload = ProcessingPlanInput.model_validate(kwargs)
         metadata = payload.model_dump(mode="json")
+        if payload.effect_execution_context is not None:
+            metadata["effect_execution_context"] = payload.effect_execution_context.model_dump(mode="json", exclude_none=True)
+            for key in ("treatment_transform", "outcome_transform"):
+                metadata["effect_execution_context"].setdefault(key, None)
         if not _research_ready(runtime.state):
             return _tool_message(runtime, name="set_data_processing_plan", content="先检查冻结数据并通过 set_research_spec 提交参数和处理待处理输入。")
         input_columns = runtime.state.get("data_processing_input_columns") or []
         if set(metadata.get("measurement_columns", {})) - set(input_columns):
             return _tool_message(runtime, name="set_data_processing_plan", content="measurement_columns 只能引用冻结输入的实际列名。")
+        transformation = payload.effect_execution_context.treatment_transform if payload.effect_execution_context else None
+        if transformation is not None and transformation.source_column not in input_columns:
+            return _tool_message(runtime, name="set_data_processing_plan", content="effect_execution_context.treatment_transform.source_column 必须是冻结输入的实际列名。")
+        try:
+            execution_parameters(runtime.state["analysis_parameters"], metadata)
+        except ParameterContractError as exc:
+            return _tool_message(runtime, name="set_data_processing_plan", content=str(exc))
         return Command(
             update={
                 "messages": [
@@ -195,6 +207,7 @@ def _plan_tool() -> Any:
         description=(
             "设置待确认处理方案的观察单位、字段含义、角色列映射、计划转换和限制。方案变化会清空确认与当前候选。"
             "role_columns 将已指定的 target、treatment 映射到处理后 CSV 的实际列名；研究角色名称保持原意，未指定时留空。"
+            "effect_execution_context 明确实际 treatment_column/outcome_column、业务 treatment_unit 和 treatment_transform/outcome_transform。处理转换记录原始列、输出列、两侧单位；原值保留可明确 identity，标准化用 affine 的实际 scale/offset，非线性写说明。结果变量原值保留才写 identity；未知转换为 null，禁止猜 identity。"
             "执行后补充说明必须使用 save_data_processing_execution_report，不得改写方案。"
             "只写你能从用户说明或实际脚本确认的内容；不要推测字段含义。"
         ),
@@ -299,7 +312,7 @@ def _research_spec_tool() -> Any:
         })
     call.__annotations__["runtime"] = ToolRuntime
     return StructuredTool.from_function(coroutine=call, name="set_research_spec",
-        description="提交下一版完整研究参数。先检查冻结列结构；未修改字段保留当前值，取消用 null，测量声明完整替换。首次、用户修改和明确纠错使用同一入口。source_input_id 只能引用程序已提供的真实输入，expected_revision 使用当前修订号。全部原始列用 all_input_columns 声明，不能把范围写成列名。",
+        description="提交下一版完整研究参数，包括必填的可空 effect_request。没有效应需求填 null；有需求但干预和单位不明确时先通过现有提问工具提出具体方案，不得默认 (0,1)。先检查冻结列结构；未修改字段保留当前值，取消用 null，测量声明完整替换。首次、用户修改和明确纠错使用同一入口。source_input_id 只能引用程序已提供的真实输入，expected_revision 使用当前修订号。全部原始列用 all_input_columns 声明，不能把范围写成列名。",
         args_schema=with_tool_runtime_schema(ResearchSpecInput, tool_name="set_research_spec", tool_runtime_type=ToolRuntime))
 
 
@@ -437,14 +450,14 @@ def _plan_confirmation_tool() -> Any:
                        "category": "类别", "binary": "二元值", "unknown": "未知"}
         research_summary += "；测量声明：" + ("、".join(kind_labels[kind] + str(count) + "列"
             for kind, count in kinds.items()) or "未指定")
-        request = DataProcessingPlanConfirmationRequest(
+        request = ResearchPlanConfirmationRequest(
             prompt="请确认当前研究参数与处理方案。研究参数：" + research_summary[:1000] + "。确认后执行；如需修改请说明。",
             question_id=call_id,
             expires_at=(
                 datetime.now(timezone.utc) + timedelta(seconds=300)
             ).isoformat().replace("+00:00", "Z"),
             plan_version=plan_version,
-            plan=DataProcessingPlanSummary.model_validate(metadata),
+            plan=ResearchPlanSummary.model_validate({**metadata, "effect_request": parameters["effect_request"]}),
         )
         answer = interrupt(request.public_payload())
         await context.check_after_call()
@@ -469,7 +482,7 @@ def _plan_confirmation_tool() -> Any:
         parameter_update = {}
         if matches is None:
             plan_question = request.prompt + "\n当前展示的方案摘要：\n" + json.dumps(
-                request.plan.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"),
+                request.plan.model_dump(mode="json", by_alias=True), ensure_ascii=False, separators=(",", ":"),
             )
             parameter_update = await _receive_user_answer(
                 runtime, question_id=call_id, question=plan_question, answer=answer,
@@ -725,6 +738,10 @@ def data_processing_system_prompt() -> str:
             "独立校验节点会检查实际输出文件。报告中的 research_roles 保留研究角色，role_columns 是方案中的角色列映射，target、treatment 是解析后的执行列名，columns 是候选 CSV 的实际列名；角色为空本身不构成缺失错误。算法输入兼容不代表科学假设已经成立。",
             "收到校验失败反馈后，先区分角色列映射缺失或错误、脚本遗漏、用户信息不足和参数提取错误。角色名称与实际列名不同，应通过 set_data_processing_plan 修正 role_columns，按现有流程确认并重新执行；不需要改写研究角色或让用户重复选择。脚本遗漏可在原确认范围内修复；只有用户信息确实存在多个合理含义时，才提出具体澄清问题。",
             "研究参数只能通过 set_research_spec 提交。首次先提交完整草稿，后续用户修改或明确提取错误使用相同工具。工具返回确定性错误时自行纠正；不要要求用户重复回答明确的问题。只有真实歧义才提问。",
+            "effect_request 是唯一可选效应请求。用户只要求结构探索或没有提出效应需求时明确为 null，即使已有 target 和 treatment 也不能推断为要估计。",
+            "用户已有估计意图但没有明确干预方式、数值或单位时，先用 ask_data_processing_question 提出具体自然语言方案并允许自由修改，不能暂填 null 后继续，也不能默填 (0,1)。问题已明确时填写 average_total_effect 和 fixed_contrast 的 from/to/unit，或 additive_shift 的 delta/unit，再由现有方案确认工具统一确认。",
+            "effect_request.target_population 仅在用户要求额外限定目标观测子群时填写筛选限制；使用全部已确认观测时省略或为 null，不要把‘全部样本’或‘不删行’写成额外限制。原有 aggregation_scope 表示研究参与与聚合范围，不能把选择哪些列当作选择哪些观测。不得自行删样本、截断干预或缩小总体。取消效应需求须设 effect_request=null；保留需求但取消角色时先澄清。识别与估计器适用性留给因果阶段。",
+            "处理方案的 effect_execution_context 必须说明请求业务单位与实际处理列的关系。treatment_transform 保留原值或仅重命名可明确 identity；标准化、单位换算填写 affine 的实际系数 output=scale*source+offset；取对数等填写 nonlinear 及说明；不明确时为 null。outcome_transform 仅在结果变量原值保留时写 identity，其他转换明确类型及说明，未知为 null。不能把业务单位的干预值直接用于标准化或取对数的列。",
             "参数修订号等于 analysis_parameter_changes 的长度。使用程序提供的 source_input_id，初始 reason=initial，用户新要求=user_change，依据原输入纠错=correction。未修改字段保留；measurement_semantics 是完整替换，全部输入列用 all_input_columns，columns 留空。",
             "用户明确改变研究意图时，可以同步更新 analysis_question 和 aggregation_scope，使它们表达新的研究问题及参与范围；不能仅为润色改写无关参数。未改变的角色、观察单位和时间范围保持当前值。",
             "参与范围与研究角色相互独立。‘全部作为节点参与因果发现’只修改参与范围，不表示取消已有目标或干预；只有用户明确取消某个角色，才将对应角色设为 null。",

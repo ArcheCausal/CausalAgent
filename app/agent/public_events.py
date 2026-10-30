@@ -6,6 +6,8 @@ from itertools import islice
 import re
 from typing import Any
 
+from Agent.effect_request import EffectExecutionContext, normalize_effect_request
+
 
 _COMMON_FIELDS = {"type", "step_id", "node_name", "title"}
 _EVENT_FIELDS = {
@@ -145,4 +147,22 @@ def _public_processing_plan(value: Any) -> dict[str, Any] | None:
             if isinstance(source, str) and 0 < len(source) <= 255
             and (output is None or isinstance(output, str) and 0 < len(output) <= 255)
         }
+    # 效应定义不能截断、部分过滤或把校验失败改为 null。缺字段继续表示未记录。
+    if "effect_request" in value:
+        try:
+            public["effect_request"] = normalize_effect_request(value["effect_request"])
+        except ValueError:
+            return None
+    if "effect_execution_context" in value:
+        execution_context = value["effect_execution_context"]
+        if execution_context is not None:
+            try:
+                execution_context = EffectExecutionContext.model_validate(execution_context).model_dump(
+                    mode="json", exclude_none=True,
+                )
+            except ValueError:
+                return None
+            execution_context.setdefault("treatment_transform", None)
+            execution_context.setdefault("outcome_transform", None)
+        public["effect_execution_context"] = execution_context
     return public

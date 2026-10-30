@@ -20,7 +20,7 @@ from Database.analysis_contexts import context_has_results, final_context_action
 
 JOB = "00000000-0000-0000-0000-000000000951"
 PARAMETERS = {"target": "outcome", "treatment": "exposure",
-              "analysis_question": "研究暴露与结果之间的关系", "measurement_semantics": []}
+              "analysis_question": "研究暴露与结果之间的关系", "measurement_semantics": [], "effect_request": None}
 
 
 def revise(parameters=PARAMETERS, history=None, *, patch=None, source=11):
@@ -129,7 +129,7 @@ def test_independent_validator_rejects_new_parameters_with_old_candidate():
 
 
 def test_null_roles_and_one_compatible_algorithm_still_allow_analysis():
-    parameters = {"target": None, "treatment": None, "measurement_semantics": None}
+    parameters = {"target": None, "treatment": None, "measurement_semantics": None, "effect_request": None}
     metadata = {PARAMETER_BINDING_KEY: parameter_binding(parameters, [], job_id=JOB),
                 "summary": "保留原始观察行", "observation_unit": "每行一个观察",
                 "transformations": ["保留原始字段"],

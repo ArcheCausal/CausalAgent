@@ -11,6 +11,7 @@ import type {
   ThinkingStep,
 } from '../../types/domain'
 import type { DecodedSseEvent } from '../../api/events.schemas'
+import { effectRequestSchema, effectExecutionContextSchema } from '../../api/effect-request.schemas'
 import { acceptEventId, createEventCursor, markRendered } from './event-cursor'
 import {
   appendDetails,
@@ -161,7 +162,11 @@ function parseProcessingPlan(value: unknown): ProcessingPlanSummary | null {
   const measurementColumns = typeof item.measurement_columns === 'object' && item.measurement_columns !== null
     ? Object.fromEntries(Object.entries(item.measurement_columns).filter((entry): entry is [string, string | null] => entry[1] === null || typeof entry[1] === 'string'))
     : {}
-  return { summary: item.summary, observationUnit: item.observation_unit, transformations, variableSemantics, roleColumns, measurementColumns, limitations }
+  const effect = effectRequestSchema.nullable().optional().safeParse(item.effect_request)
+  const context = effectExecutionContextSchema.nullable().optional().safeParse(item.effect_execution_context)
+  if (!effect.success || !context.success) return null
+  return { summary: item.summary, observationUnit: item.observation_unit, transformations, variableSemantics, roleColumns, measurementColumns, limitations,
+    effectRequest: effect.data, effectExecutionContext: context.data }
 }
 
 export function waitingInputFromInteraction(

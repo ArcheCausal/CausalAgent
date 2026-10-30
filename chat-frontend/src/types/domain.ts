@@ -1,3 +1,5 @@
+import type { EffectRequest, EffectExecutionContext } from '../api/effect-request.schemas'
+
 export type Locale = 'zh' | 'en'
 
 export type JsonPrimitive = string | number | boolean | null
@@ -172,6 +174,8 @@ export interface ProcessingPlanSummary {
   roleColumns?: { target?: string | null; treatment?: string | null }
   measurementColumns?: Record<string, string | null>
   limitations: string[]
+  effectRequest?: EffectRequest | null
+  effectExecutionContext?: EffectExecutionContext | null
 }
 
 export interface WaitingInput {

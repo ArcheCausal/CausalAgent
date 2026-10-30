@@ -6,13 +6,14 @@ import hashlib
 import json
 from typing import Any, Literal, Mapping
 from pydantic import BaseModel, ConfigDict, Field
+from Agent.effect_request import EffectRequest, EffectExecutionContext, normalize_effect_request
 from Agent.measurement_semantics import normalize_measurement_semantics
 
 ParameterField = Literal["target", "treatment", "analysis_question", "measurement_semantics",
-                         "observation_unit", "time_window", "aggregation_scope"]
+                         "observation_unit", "time_window", "aggregation_scope", "effect_request"]
 RESEARCH_FIELDS = frozenset(ParameterField.__args__)
 PARAMETER_BINDING_KEY = "analysis_parameter_identity"
-PROCESSING_STATE_VERSION = 3
+PROCESSING_STATE_VERSION = 4
 PROCESSING_GRAPH_NAME = "causalagent"
 RevisionReason = Literal["initial", "user_change", "correction"]
 
@@ -38,6 +39,7 @@ class ResearchSpec(BaseModel):
     time_window: str | None = Field(description="用户指定或接受的研究时间范围；后续未修改时保留当前值。")
     aggregation_scope: str | None = Field(description="用户指定或接受的研究参与范围及聚合范围；后续未修改时保留当前值。")
     measurement_semantics: list[MeasurementScope] = Field(description="完整的原始列测量声明，不从数值或列名猜测；全体原始列使用 all_input_columns，无明确列级声明时为空列表。")
+    effect_request: EffectRequest | None = Field(description="唯一效应请求。没有估计需求明确提交 null；存在需求时提交平均总效应及用户明确或确认的干预和单位。不得默认补 (0,1)。目标和处理角色引用现有字段。")
 
 class ResearchSpecInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -53,9 +55,16 @@ def _digest(value: Any) -> str:
 def research_parameters(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ParameterContractError("analysis parameters must be an object")
-    result = {key: deepcopy(value.get(key)) for key in RESEARCH_FIELDS}
+    # 缺字段的历史记录保留缺席，不能被投影为明确的未请求。
+    result = {key: deepcopy(value.get(key)) for key in RESEARCH_FIELDS
+              if key != "effect_request" or key in value}
     for key, item in result.items():
-        if key == "measurement_semantics":
+        if key == "effect_request":
+            try:
+                result[key] = normalize_effect_request(item)
+            except ValueError as exc:
+                raise ParameterContractError("invalid effect_request") from exc
+        elif key == "measurement_semantics":
             if item is None:
                 continue
             normalize_measurement_semantics(item)
@@ -95,10 +104,13 @@ def execution_measurement_semantics(parameters: Mapping[str, Any], metadata: Map
     return output
 
 def execution_parameters(parameters: Mapping[str, Any], metadata: Mapping[str, Any]) -> dict[str, Any]:
+    if "effect_request" not in parameters:
+        raise UnsupportedProcessingCheckpointError("effect_request was not recorded; start a new analysis")
     role_columns = metadata.get("role_columns", {})
     if not isinstance(role_columns, Mapping) or set(role_columns) - {"target", "treatment"}:
         raise ParameterContractError("role_columns must map target and treatment to output columns")
     result = dict(parameters)
+    result["effect_request"] = research_parameters(parameters)["effect_request"]
     result["measurement_semantics"] = execution_measurement_semantics(parameters, metadata)
     for role, column in role_columns.items():
         if column is None:
@@ -109,12 +121,33 @@ def execution_parameters(parameters: Mapping[str, Any], metadata: Mapping[str, A
         if not isinstance(declared, str) or not declared.strip():
             raise ParameterContractError("role column requires a declared research role")
         result[role] = column.strip()
+    execution_context = metadata.get("effect_execution_context")
+    if execution_context is not None:
+        try:
+            parsed = EffectExecutionContext.model_validate(execution_context)
+        except ValueError as exc:
+            raise ParameterContractError("invalid effect_execution_context") from exc
+        if (not parameters.get("treatment") or not parameters.get("target")
+                or parsed.treatment_column != result.get("treatment")
+                or parsed.outcome_column != result.get("target")):
+            raise ParameterContractError("effect execution context must refer to the resolved research columns")
+        request = result["effect_request"]
+        if request is not None and parsed.treatment_unit != request["intervention"]["unit"]:
+            raise ParameterContractError("effect execution context unit conflicts with the confirmed request")
+        execution_context = parsed.model_dump(mode="json", exclude_none=True)
+        # null 不能因序列化而变成算法层的 identity 默认值。
+        execution_context.setdefault("treatment_transform", None)
+        execution_context.setdefault("outcome_transform", None)
+    # 不从同名列、自由文本或上次执行参数推断 identity。
+    result["effect_execution_context"] = execution_context
     return result
 
 def resolve_research_spec(spec: ResearchSpec, *, input_columns: list[str]) -> dict[str, Any]:
     if not input_columns or len(set(input_columns)) != len(input_columns):
         raise ParameterContractError("complete unique frozen input columns are required")
-    result = spec.model_dump(mode="json")
+    result = spec.model_dump(mode="json", by_alias=True)
+    if spec.effect_request is not None and (not spec.target or not spec.treatment):
+        raise ParameterContractError("effect_request requires declared target and treatment roles")
     declarations = {}
     for item in spec.measurement_semantics:
         if not item.evidence.strip():
@@ -142,6 +175,8 @@ def parameter_update_id(*, job_id: str, source_input_id: int, changes: Mapping[s
     return _digest({"job_id": job_id, "source_input_id": source_input_id, "changes": changes, "reason": reason})
 
 def validate_parameter_history(parameters: Mapping[str, Any], changes: Any, *, job_id: str) -> list[dict[str, Any]]:
+    if not isinstance(parameters, Mapping) or "effect_request" not in parameters:
+        raise UnsupportedProcessingCheckpointError("effect_request was not recorded; start a new analysis")
     current = research_parameters(parameters)
     if not isinstance(changes, list):
         raise ParameterContractError("parameter changes must be a list")
@@ -202,11 +237,22 @@ def restore_parameter_binding(metadata: Mapping[str, Any], *, job_id: str) -> di
     binding = metadata.get(PARAMETER_BINDING_KEY)
     if not isinstance(binding, dict) or set(binding) != {"state_version", "parameters", "changes", "identity", "revision"}:
         raise ParameterContractError("candidate has no current parameter binding")
+    if type(binding["state_version"]) is not int or binding["state_version"] != PROCESSING_STATE_VERSION:
+        raise UnsupportedProcessingCheckpointError("legacy processing candidate requires a new analysis")
     expected = parameter_binding(binding["parameters"], binding["changes"], job_id=job_id)
     if type(binding["revision"]) is not int or binding != expected:
         raise ParameterContractError("candidate parameter identity conflicts with its snapshot")
     return {"analysis_parameters": expected["parameters"],
             "analysis_parameter_changes": expected["changes"]}
+
+
+def historical_parameter_identity(metadata: Mapping[str, Any], *, job_id: str) -> str | None:
+    """比较历史研究身份；旧版本不能证明相同，也不尝试恢复执行。"""
+    binding = metadata.get(PARAMETER_BINDING_KEY)
+    if not isinstance(binding, Mapping) or binding.get("state_version") != PROCESSING_STATE_VERSION:
+        return None
+    restored = restore_parameter_binding(metadata, job_id=job_id)
+    return parameter_identity(restored["analysis_parameters"])
 
 
 def sandbox_request_id(*, tool_call_id: str, job_id: str, source_hash: str, purpose: str) -> str:

@@ -12,7 +12,7 @@ def declaration(scope="all_input_columns", columns=None, kind="continuous"):
 
 
 def draft(items):
-    value = spec_from_parameters({}).model_dump()
+    value = spec_from_parameters({"effect_request": None}).model_dump()
     value["measurement_semantics"] = items
     return ResearchSpec.model_validate(value)
 

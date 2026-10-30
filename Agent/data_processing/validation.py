@@ -208,6 +208,8 @@ def validate_candidate(
         "treatment": treatment,
         "research_roles": {role: parameters.get(role) for role in ("target", "treatment")},
         "role_columns": role_columns,
+        "effect_request": resolved.get("effect_request"),
+        "effect_execution_context": resolved.get("effect_execution_context"),
         "algorithm_compatibility": algorithm_compatibility,
         "compatible_algorithm_count": compatible_count,
         "scope_note": "输入兼容检查不证明算法科学假设成立，也不证明因果结论正确。",

@@ -23,10 +23,10 @@ VERSION = build_processing_plan_version(job_id=JOB, source_hash=SOURCE, semantic
 
 
 def current_state():
-    return {"analysis_parameters": {}, "analysis_parameter_changes": [],
+    return {"analysis_parameters": {"effect_request": None}, "analysis_parameter_changes": [],
             "data_processing_research_spec_ready": True, "data_processing_pending_input_id": None,
             "data_processing_input_columns": ["x", "y"],
-            "data_processing_plan_parameter_identity": parameter_identity({}),
+            "data_processing_plan_parameter_identity": parameter_identity({"effect_request": None}),
             "data_processing_metadata": deepcopy(PLAN), "data_processing_confirmed_plan": deepcopy(PLAN),
             "data_processing_confirmed_plan_version": VERSION, "data_processing_semantic_identity": SEMANTIC,
             "data_processing_draft_script": SCRIPT, "data_processing_candidate_id": 12,
@@ -41,7 +41,7 @@ def candidate():
             "script_bytes": SCRIPT.encode(), "script_hash": hashlib.sha256(SCRIPT.encode()).hexdigest(),
             "metadata": {**deepcopy(PLAN), "processing_plan_identity": {
                 "plan_version": VERSION, "semantic_identity": SEMANTIC},
-                PARAMETER_BINDING_KEY: parameter_binding({}, [], job_id=JOB)}}
+                PARAMETER_BINDING_KEY: parameter_binding({"effect_request": None}, [], job_id=JOB)}}
 
 
 def test_identical_plan_and_script_preserve_confirmation_candidate_and_budgets():

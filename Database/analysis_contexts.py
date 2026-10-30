@@ -19,7 +19,7 @@ from uuid import uuid4
 import mysql.connector
 
 from Agent.data_processing.parameters import (
-    parameter_identity, restore_parameter_binding,
+    historical_parameter_identity, parameter_identity, restore_parameter_binding,
 )
 
 from app.db import (
@@ -454,9 +454,9 @@ def apply_fold_context(
             if historical_job and historical_job.get("metadata"):
                 historical_metadata = _json_loads(historical_job["metadata"])
                 if isinstance(historical_metadata, dict) and "analysis_parameter_identity" in historical_metadata:
-                    historical_identity = parameter_identity(restore_parameter_binding(
+                    historical_identity = historical_parameter_identity(
                         historical_metadata, job_id=str(historical_job["job_id"]),
-                    )["analysis_parameters"])
+                    )
             action = final_context_action(
                 bound, parameters, has_history=has_history, historical_identity=historical_identity,
                 file_object_id=int(file_object_id),
