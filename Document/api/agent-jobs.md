@@ -62,9 +62,37 @@ Last-Event-ID: 42
 
 数据处理语义澄清使用同一 `interrupt`、SSE 和 `resume` 契约，`interaction_type` 为 `data_processing_question`；交互载荷包含 `question_id`、公开问题文本、`expires_at` 和 `allow_other=true`，不包含算法选项。用户通过 `resume` 提交文本答复后，同一个 Job 从数据处理 Agent 的原中断位置继续；现有等待时限与幂等规则不变。
 
-方案确认使用 `interaction_type=data_processing_plan_confirmation`，并公开 `plan_version` 与 `plan`。版本为 64 位小写 SHA-256；方案只包含 `summary`、`observation_unit`、`transformations`、`variable_semantics`、`role_columns`、`measurement_columns` 和 `limitations`。`role_columns` 是可省略的角色列映射，只允许 `target`、`treatment`，值为实际输出列名或 `null`；列名最多 255 字符，未指定角色保持为空。事件输出逐字段限制类型、数量与长度，不透传脚本或内部运行时字段。SSE 重连及聊天历史恢复使用相同的公开投影，前端据此显示方案、角色对应列和确认按钮。
+方案确认使用 `interaction_type=data_processing_plan_confirmation`，并公开 `plan_version` 与 `plan`。版本为 64 位小写 SHA-256；方案包含 `summary`、`observation_unit`、`transformations`、`variable_semantics`、`role_columns`、`measurement_columns`、`limitations`、`effect_request` 和可空的 `effect_execution_context`。`role_columns` 是可省略的角色列映射，只允许 `target`、`treatment`，值为实际输出列名或 `null`；列名最多 255 字符，未指定角色保持为空。事件输出逐字段限制类型、数量与长度，不透传脚本或内部运行时字段。SSE 重连及聊天历史恢复使用相同公开投影，前端据此显示方案、角色、效应定义和转换尺度。
 
-方案确认中的 `measurement_columns` 是原始测量列到输出列的公开映射；null 表示不传递原始测量类型，缺席表示同名保留。确认提示同时显示当前研究参数摘要。自由文本答复不触发隐藏模型提取，也不形成执行授权；它先成为待处理输入，参数工具处理后重新制定或提交方案。旧流程 checkpoint 不迁移，恢复失败提示重新发起，历史数据保留。
+方案确认中的 `measurement_columns` 是原始测量列到输出列的公开映射；null 表示不传递原始测量类型，缺席表示同名保留。`effect_request` 由程序从当前研究参数投影：null 表示本次未请求效应，对象表示明确请求，历史载荷缺字段表示未记录，前端不能将其显示成未请求或允许直接确认。请求严格接受 `effect=average_total_effect`，干预为 `fixed_contrast` 的 `from/to/unit` 或 `additive_shift` 的 `delta/unit`。可选 `target_population` 仅表示额外子群限制，全样本时省略或为 null，不代表分析列范围；当前估计器不能验证指定子群成员资格时返回不适用，不能以全样本替代。
+
+`effect_execution_context` 与角色映射一起展示实际 `treatment_column`、`outcome_column`、原始业务 `treatment_unit`、`treatment_transform` 和 `outcome_transform`。处理转换包含源列、输出列及两侧单位，`affine` 还包含有限且非零的 `scale` 与有限 `offset`，按 `output = scale × source + offset` 解释；原始值保留使用显式 `identity`，未知转换为 null，不能由同名列推定。schema 可表达带说明的非线性或结果转换，但当前估计执行只支持处理 identity/affine 和结果 identity，其他转换不授予执行适用性。非法请求或 context 不会被截断或降为 null，公开适配器不发布这份无效方案。
+
+例如，确认卡 `plan` 中的效应字段可为：
+
+```json
+{
+  "effect_request": {
+    "effect": "average_total_effect",
+    "intervention": {"type": "fixed_contrast", "from": 6, "to": 9, "unit": "L/min"}
+  },
+  "effect_execution_context": {
+    "treatment_column": "flow",
+    "outcome_column": "yield",
+    "treatment_unit": "L/min",
+    "treatment_transform": {
+      "type": "identity",
+      "source_column": "flow",
+      "output_column": "flow",
+      "source_unit": "L/min",
+      "output_unit": "L/min"
+    },
+    "outcome_transform": {"type": "identity"}
+  }
+}
+```
+
+平移干预将 `intervention` 替换为带 `type=additive_shift`、`delta=1`、`unit=L/min` 的对象。存在估计意图但干预、数值或单位不明确时，仍使用 `data_processing_question` 提出自然语言方案，接受后通过参数工具保存，再进入现有方案确认，不新增 API 或确认层。自由文本答复不触发隐藏模型提取，也不形成执行授权；它先成为待处理输入，参数工具处理后重新制定或提交方案。处理状态为第 4 版，方案散列 schema 为 `causalagent-data-processing-plan-v2`；不受支持的旧 checkpoint 不迁移，恢复失败提示重新发起，历史数据保留。
 
 `decision` 事件除既有路由说明外，还可包含 `decision_kind=algorithm|evidence|final`。`algorithm` 表示模型在同一次算法 Tool Call 中显式提交的公开选择依据，`evidence` 表示同一位置的 `rag_evidence_search`/`web_evidence_search` 检索依据，两者都可同时带公开工具名；`final` 只在 FinalizationGate 验证成功后产生，可带 `low|medium|high` 置信度。模型工具参数流中的公开摘要会先以 `decision_delta` 增量事件发送，工具开始/结果仍分别由可信工具边界发布；完整 `decision` 仍作为历史回放和无增量回退。公开说明是展示文本而非隐藏思维链，不包含内部结果引用；缺失或格式无效的工具说明不会阻止工具执行。相关事件都持久化到 `analysis_job_events`，SSE 重连按原 Event ID 续传，历史回放直接展示完整 `decision` 文本。
 
@@ -184,7 +212,7 @@ Agent 在每轮开始时判断用户意图，再由图路由执行；用户不�
 
 ## Resume 与 Cancel
 
-数据处理方案的明确确认通过结构化 answer 提交：{"action":"confirm","plan_version":"<当前方案的 SHA-256>"}。该版本来自服务端发布并保存的交互载荷。服务端在锁定的 waiting_input Job 上核对问题 ID 和方案版本，并把确认写入 analysis_job_inputs；执行脚本、保存候选、独立校验和绑定产物时，还会核对冻结文件、研究语义、方案说明、最新确认输入和当前 Job 租约。自由文本修改或拒绝不会授权执行；新的语义答复或方案说明变化会产生新版本。已确认语义范围内的脚本修正可以继续使用该确认，方案含义变化时必须重新确认。既有算法处理选项继续提交 option_id。
+数据处理方案的明确确认通过结构化 answer 提交：{"action":"confirm","plan_version":"<当前方案的 SHA-256>"}。该版本来自服务端发布并保存的交互载荷。服务端在锁定的 waiting_input Job 上核对问题 ID 和方案版本，并把确认写入 analysis_job_inputs；执行脚本、保存候选、独立校验和绑定产物时，还会核对冻结文件、完整研究语义（含 `effect_request`）、方案 metadata（含 `effect_execution_context`）、最新确认输入和当前 Job 租约。自由文本修改或拒绝不会授权执行；新的语义答复、效应定义、角色映射或转换说明变化会产生新版本并使旧确认失效。已确认语义范围内的脚本修正可以继续使用该确认，方案含义变化时必须重新确认。浏览器不通过 resume 自行替换效应定义或执行 context；既有算法处理选项继续提交 option_id。
 
 恢复请求示例：
 

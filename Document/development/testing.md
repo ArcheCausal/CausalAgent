@@ -10,6 +10,7 @@
 | --- | --- | --- |
 | 后端 unit | `tests/unit/` | 单模块状态机、权限、Job fencing、结构化输出和 monitor 逻辑 |
 | 后端 integration | `tests/integration/` | 多个实际组件之间的数据传递、生命周期和协作行为；真实数据库用例放在 `tests/e2e/` |
+| 效应真实计算组件 integration | `tests/integration/agent/test_effect_interventions_real.py`、`test_effect_decisions_real.py` | 正式数值内核、runner/进程池、定义与比较身份、Gate 和报告接受边界；不包含 HTTP、数据库、模型或完整 Job |
 | 静态契约 | `tests/contracts/` | Compose、Dockerfile、发布 workflow、migration 图与日志政策的跨文件一致性 |
 | RAG/多模态与隔离评测 | `tests/unit/agent/test_multimodal_*.py`、`tests/unit/rag_eval/`、`tests/acceptance/` | 来源/索引/release 契约、隔离队列与评测矩阵的分层检查 |
 | 管理员 Vue unit | `admin-frontend/tests/*.spec.ts` | API DTO、组件、看板/设置语义和 SQL digest 展示 |
@@ -146,7 +147,7 @@ docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p
 
 方案、确认快照与执行说明的纯规则测试在 [test_data_processing_lifecycle.py](../../tests/unit/agent/test_data_processing_lifecycle.py)，真实 ToolNode、StateGraph 和 InMemorySaver 的状态传递检查在 [test_data_processing_plan_state.py](../../tests/integration/agent/test_data_processing_plan_state.py)。它们检查相同方案保留确认、方案变化清空绑定、脚本变化要求重新执行、执行说明事实绑定及结束纠正预算，不使用模型或外部服务替身，也不证明 MySQL、PostgreSQL 或 OpenSandbox 已验证。
 
-[test_role_column_mapping.py](../../tests/integration/agent/test_role_column_mapping.py) 覆盖中文研究角色到英文输出列的映射、缺失列、角色冲突、未指定角色及原研究参数身份保留；串联真实 CSV 校验、摘要校验、Deep Agent 投影、本地 DirectLiNGAM/ATE 和父图最终校验，检查缺少 ATE 检查时仍要求补充。它不连接模型、数据库或 OpenSandbox；可将该文件加入下列 Docker pytest 命令执行。
+[test_role_column_mapping.py](../../tests/integration/agent/test_role_column_mapping.py) 是中文研究角色到英文输出列的映射入口，涉及缺失列、角色冲突、未指定角色及研究参数身份保留。效应检查只适用于明确提交 `effect_request` 的研究，不能因存在 target/treatment 就要求估计。第 4 版请求、确认和恢复的纯函数验证使用下述 [效应定义与真实计算入口](#因果效应估计与函数形式检查)；映射测试本身不证明模型、数据库或 OpenSandbox 已验证。
 
 ```bash
 docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_data_processing_lifecycle.py tests/integration/agent/test_data_processing_plan_state.py
@@ -355,19 +356,30 @@ passed/skipped/failed；历史通过数量不能代替当前工作树证据。`t
 
 ## 因果效应估计与函数形式检查
 
-`tests/unit/agent/test_ate_applicability.py` 使用真实纯检查和内核验证完整调整集、参与列准入、数值编码分类语义拒绝、结构原因码与检查记录契约；`test_g_formula_kernel.py` 验证调整后直接标准化的线性一致性、非线性差异、bootstrap 可复现性与拒绝路径。`tests/integration/agent/test_ate_tool_checks.py` 使用固定输入图、正式 ToolRuntime/Adapter/MCP 服务与真实进程 runner，验证连续调整变量估计、非参与分类列、工具消息与账本一致、错误引用拒绝、当前查询的诊断与估计匹配、函数形式检查的对比区间与结局模型要求、报告快照重新生成和预算身份收尾。`tests/integration/agent/test_ate_service_checks.py` 直接验证 MCP 使用实际 CSV 及保存语义复核，并保留内核共线等具体不适用理由。固定图是被测入口的已知输入，不代表因果发现准确性。
+本节入口分为预处理纯函数 unit 和真实计算组件 integration。当前契约为两个效应 MCP 能力 `3.0`、处理状态第 4 版、确认方案 schema `causalagent-data-processing-plan-v2` 和报告事实 `analysis-facts-v3`；行为定义见 [Agent 运行时](../architecture/agent-runtime.md#因果效应估计与最终门禁)。
 
-`tests/unit/agent/test_effect_diagnose_tool.py` 校验诊断工具对图引用、身份、变量与结构条件的判定，以及 `verdict`、`recommended_capability_id` 和 `recommended_tool_name` 的输出契约；`tests/unit/agent/test_functional_form.py` 与 `test_functional_form_prompt.py` 校验判定纯函数和提示词中的工具名。`tests/integration/agent/test_role_column_mapping.py` 从研究角色出发，经过方案映射得到执行列，再实际调用发现工具、诊断工具和后门 OLS，确认成功估计成为主结果。
+[test_effect_request_preprocessing.py](../../tests/unit/agent/test_effect_request_preprocessing.py) 直接调用正式 schema 和纯函数，检查固定对比与平移请求、额外总体限制、非法字段与数值拒绝、显式 null 和旧缺字段的区别、参数指纹与修订、确认失效、角色及转换 context 投影、候选快照恢复和公开事件投影。它不调用模型或数据库，不替代真实确认和恢复链路。
 
-调度 deadline 用例通过真实进程池初始化阶段的信号量屏障阻止 runner 开始，确定触发截止时间，并检查已完成的本地适用性记录只归属于对应调用。该用例不依赖 OLS 运行速度，不替换算法或 MCP 服务；它验证进程启动阶段超时，不表示回归已经开始执行。既有 FakeAlgorithmExecutor 用例仅检查传输无关的身份契约，默认结果和模板重绑定都必须从可信上下文复制来源身份及分析数据集 ID，不能作为真实算法链路证据。
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps unit-test python -m pytest -p no:cacheprovider --noconftest tests/unit/agent/test_effect_request_preprocessing.py
+```
 
-~~~powershell
-docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_ate_applicability.py tests/unit/agent/test_ate_kernel.py tests/unit/agent/test_ate_worker_gate.py tests/unit/agent/test_g_formula_kernel.py tests/unit/agent/test_g_formula_mcp_execution.py tests/unit/agent/test_effect_diagnose_tool.py tests/unit/agent/test_functional_form.py tests/integration/agent/test_ate_tool_checks.py tests/integration/agent/test_ate_service_checks.py tests/integration/agent/test_role_column_mapping.py
-~~~
+两个真实计算入口使用已知生成过程的数值数据和明确输入图，不替换算法或 Gate；生成数据用于检验数值性质，不证明真实业务数据的因果发现正确。
 
-上述进程内组件测试不访问 MySQL，不运行 HTTP MCP、PostgreSQL checkpoint 或完整模型 Job，不能替代真实环境验收。真实环境需另验证权威数据集绑定、HTTP 鉴权和传输、checkpoint 恢复后的记录、真实预算跳过及最终报告。缺少效应请求或检查记录的旧结果应可读但不能满足新门禁；检查后超时可保留 `ready`，仍禁止成功图和 raw artifact；检查前失败及预算收尾不可生成记录。
+| 入口 | 实际执行与验证 | 证据边界 |
+| --- | --- | --- |
+| [test_effect_interventions_real.py](../../tests/integration/agent/test_effect_interventions_real.py) | 正式 OLS/g-formula 内核、runner、服务结果正规化及 `BoundedProcessPool`；对比幅度和反向区间、HGB 成对 bootstrap、同定义样本与调整集、固定对比及 shift 越界、affine 业务单位还原、未知转换/未请求/未验证子群拒绝、工具 schema、样本身份和候选确认快照 | 本地真实数值及组件协作；不运行 MCP HTTP 或 MySQL 权威读取 |
+| [test_effect_decisions_real.py](../../tests/integration/agent/test_effect_decisions_real.py) | 实际 OLS/g-formula 结果进入正式 Gate；独立主图、任选估计器或不采用主效应、不同图/样本/调整规则的不可比性、研究身份及诊断定义冲突、无主效应原因绑定主图与定义、accepted-only 报告、OLS 限制按主效应判断和历史未记录状态 | 账本及拒绝状态由测试直接构造为 Gate 输入，不是 worker 实际持久化事件；不证明数据库恢复或完整 Job |
 
-算法在独立进程中执行，进程池默认使用 `forkserver`。父进程先使用过线程化的数值库时，直接 `fork` 的子进程运行梯度提升树会崩溃，因此函数形式检查的 `outcome_model=hgb` 用例必须在真实进程池中执行；单独运行这些用例通过不代表已在父进程预热后的顺序下验证，合并执行 `tests/unit/agent` 与 `tests/integration/agent` 才能覆盖该交互。
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps unit-test python -m pytest -p no:cacheprovider `
+  tests/integration/agent/test_effect_interventions_real.py `
+  tests/integration/agent/test_effect_decisions_real.py
+```
+
+比较身份包括来源、数据集、研究身份、实际样本及行数、源图、变量、完整效应定义、调整集和调整规则，排除估计器配置；完整执行查询仍校验各估计器配置。支持检查只证明干预在全局观测处理范围内，`conditional_overlap=not_assessed`，不能据此声称条件重叠或识别假设成立。诊断事实和方法差值不强制指定主估计器，报告只消费 Gate accepted 决策。
+
+进程池用例在独立进程运行两个正式估计器，g-formula 在该用例使用 `linear`；HGB 成对 bootstrap 用例直接调用正式内核，不能据此声称已验证 HGB 的进程池执行。Linux 默认 `forkserver`，Windows 使用默认 `spawn`。这些入口不包含 HTTP MCP、MySQL、PostgreSQL checkpoint、OpenSandbox、真实模型、SSE 或浏览器。完整验收需分别记录权威候选绑定、确认修订、恢复身份、远端执行、预算终态与最终报告的真实证据；上述入口或构建通过不能写成真实 E2E 已通过。
 
 ## causal-mcp 纵向验证
 
@@ -543,4 +555,4 @@ MCP execute/control lane 改造的定向回归还应覆盖 `tests/unit/agent/tes
 
 所有文档变更还必须检查相对链接、顶部职责声明、失效路径和旧 acceptance 入口引用，以及 `git diff --check`；如果任务涉及根 README 的入口或部署说明，还必须核对 README 中的命令、链接和目录导航。只有用户明确要求时才修改根 README；完整验收通过前不追加完成态 CHANGELOG。
 
-统一研究需求重构的离线组件检查包括 `tests/unit/agent/test_research_parameter_revisions.py`、`test_parameter_extraction_feedback.py`、`test_measurement_column_mapping.py` 与 `tests/integration/agent/test_processing_checkpoint_version.py`。它们分别检查实际差异与同源纠正、完整列集合解析、显式输出映射、真实 StateGraph/InMemorySaver 的旧版本拒绝及缺少冻结输入的失败路径，不替代真实模型、数据库、OpenSandbox 或浏览器证据。
+统一研究需求的目录入口包括 `tests/unit/agent/test_research_parameter_revisions.py`、`test_parameter_extraction_feedback.py`、`test_measurement_column_mapping.py` 与 `tests/integration/agent/test_processing_checkpoint_version.py`，分别涉及修订、集合解析、输出映射和 checkpoint。第 4 版新增效应定义的纯函数检查使用 [test_effect_request_preprocessing.py](../../tests/unit/agent/test_effect_request_preprocessing.py)；需要限制为无替身验证时使用本节给出的明确文件命令，不用目录级通过数量代替分层证据。
