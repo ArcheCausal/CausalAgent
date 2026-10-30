@@ -18,7 +18,7 @@ import numpy as np
 from Agent.deep_agent_tools.algorithm_specs import CDFM_SPEC
 
 
-CDFM_RUNNER_VERSION = "cdfm-runner-v2"
+CDFM_RUNNER_VERSION = "cdfm-runner-v3"
 CDFM_ALGORITHM = "cdfm"
 
 
@@ -125,7 +125,9 @@ def _validate_threshold(threshold: Any) -> float | None:
 def adjacency_to_edges(
     adjacency: np.ndarray,
     column_names: Sequence[str],
-) -> list[dict[str, str]]:
+    *,
+    probabilities: np.ndarray | None = None,
+) -> list[dict[str, Any]]:
     """按行→列的成对二值编码解码；对称两个 1 表示一条双箭头边。"""
 
     matrix = np.asarray(adjacency, dtype=np.float64)
@@ -136,7 +138,14 @@ def adjacency_to_edges(
     if not np.isin(matrix, (0, 1)).all():
         raise _CdfmResultError("adjacency 必须是 0/1 矩阵。")
 
-    edges: list[dict[str, str]] = []
+    scores = None if probabilities is None else np.asarray(probabilities, dtype=np.float64)
+    if scores is not None and (
+        scores.shape != matrix.shape or not np.isfinite(scores).all()
+        or np.any(scores < 0) or np.any(scores > 1)
+    ):
+        raise _CdfmResultError("probabilities 必须是与邻接矩阵同形的有限概率矩阵。")
+
+    edges: list[dict[str, Any]] = []
     for first in range(len(column_names)):
         # 非零对角线也保留，交由共享结构校验报告 self_loop。
         if matrix[first, first] == 1:
@@ -152,6 +161,14 @@ def adjacency_to_edges(
             else:
                 source, target, arrows = second, first, "to"
             edges.append({"from": str(column_names[source]), "to": str(column_names[target]), "arrows": arrows})
+    if scores is not None:
+        positions = {str(name): index for index, name in enumerate(column_names)}
+        for edge in edges:
+            source, target = positions[edge["from"]], positions[edge["to"]]
+            edge["prediction"] = {
+                "forward_probability": float(scores[source, target]),
+                "reverse_probability": float(scores[target, source]),
+            }
     return edges
 
 
@@ -256,7 +273,7 @@ def run_cdfm_analysis(
         logits, probabilities, adjacency, actual_threshold, runtime_seconds = _validate_result(
             result, len(column_names)
         )
-        edges = adjacency_to_edges(adjacency, column_names)
+        edges = adjacency_to_edges(adjacency, column_names, probabilities=probabilities)
     except _CdfmResultError as exc:
         return _failure("ResultValidationError", str(exc))
     except Exception as exc:

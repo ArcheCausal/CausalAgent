@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from pydantic import ValidationError
+
 from .algorithm_specs import get_algorithm_spec
 
 from .error_codes import SafeErrorCode
@@ -14,6 +16,7 @@ from .models import (
     AlgorithmResult,
     AlgorithmResultProvenance,
     Diagnostics,
+    EdgePrediction,
     GraphEdge,
     McpInvocationContext,
     MethodDefinition,
@@ -80,6 +83,13 @@ def _nodes_and_edges(payload: Mapping[str, Any]) -> tuple[list[str], list[GraphE
         if not isinstance(source, str) or not isinstance(target, str):
             raise RunnerContractError("runner edge endpoints are missing")
         arrows = str(raw_edge.get("arrows") or "")
+        try:
+            prediction = (
+                EdgePrediction.model_validate(raw_edge["prediction"])
+                if raw_edge.get("prediction") is not None else None
+            )
+        except ValidationError as exc:
+            raise RunnerContractError("runner edge prediction is invalid") from exc
         dashes = bool(raw_edge.get("dashes"))
         if not arrows:
             edge_type = "undirected"
@@ -87,6 +97,11 @@ def _nodes_and_edges(payload: Mapping[str, Any]) -> tuple[list[str], list[GraphE
             edge_type = "directed"
         elif arrows == "from":
             source, target = target, source
+            if prediction is not None:
+                prediction = EdgePrediction(
+                    forward_probability=prediction.reverse_probability,
+                    reverse_probability=prediction.forward_probability,
+                )
             edge_type = "directed"
         elif {part.strip() for part in arrows.split(",")} == {"to", "from"}:
             edge_type = "bidirected"
@@ -121,6 +136,7 @@ def _nodes_and_edges(payload: Mapping[str, Any]) -> tuple[list[str], list[GraphE
                 target=target,
                 edge_type=edge_type,
                 weight=normalized_weight,
+                prediction=prediction,
             )
         )
     return nodes, edges

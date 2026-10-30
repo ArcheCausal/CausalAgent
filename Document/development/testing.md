@@ -28,6 +28,14 @@
 
 `tests/README.md` 是后端测试目录和 Docker 单元测试环境的补充入口。测试层级说明这项测试证明什么，CI 执行组说明它在什么条件下运行，两者不要求一一对应。默认 pytest 范围由 `pytest.ini` 的 `testpaths` 限定为 `tests/unit`、`tests/integration` 和 `tests/contracts`，并排除 `smoke` 与 `db_integration`；`e2e/`、`acceptance/` 和 `smoke/` 使用各自的显式入口。
 
+## CDFM 边概率
+
+`tests/integration/agent/test_cdfm_prediction_projection.py` 直接调用正式矩阵解码、结果标准化、事实投影和报告资源转换，检查非字母列顺序、反向有向边、双箭头、完整精度、非法概率拒绝与旧字段缺失；不执行推理或数据库。前端专项命令 `npm run test:cdfm` 直接运行 Zod、绘图投影与 Vue SSR，使用独立配置，不替换图形库。
+
+人工入口 `tests/acceptance/p2_mcp/cdfm_prediction_acceptance.py --dataset <现有 CSV> --output-dir <隔离证据目录>` 在包含真实 CDFM 依赖和本地权重的环境中执行推理。`--transport mcp` 另外启动正式 Streamable HTTP 服务、算法进程池及 `McpAlgorithmExecutor`；输入 authority 明确为该本地冻结 CSV，不调用数据库 readiness，也不证明 MySQL 授权或租约。它核对所有已输出边的正反概率与原始矩阵位置、实际阈值、公开矩阵边界和 JSON 往返；输出原始结果、标准结果、事实与图资源文件，必须存放于不入库的验收目录。
+
+真实 MySQL 报告附件保存读取、浏览器 canvas 及完整新会话须分别验收，不能把本地 JSON 往返或组件 SSR 作为替代。完整新会话可使用现有 `tests/acceptance/p2_mcp/profile_dispatch_job_acceptance.py` 创建隔离环境；模型调用超时或数据处理等待确认时必须报告实际阻塞，不能自动批准或预设算法结果。
+
 ## GitHub Actions CI
 
 `lightweight-ci.yml` 的验证门禁由面向 `main`、`develop` 的 Pull Request 触发，并按改动路径决定执行范围。`push` 到 `main` 或 `develop` 保留镜像缓存预热，手动触发沿用同一缓存预热语义；预热任务不产生检查结果，合入 Pull Request 后自动写入缓存，供后续 Pull Request 只读恢复。

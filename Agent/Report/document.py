@@ -16,6 +16,8 @@ from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from Agent.deep_agent_tools.models import EdgePrediction
+
 
 REPORT_SCHEMA_VERSION = 1
 
@@ -218,6 +220,7 @@ class CausalGraphEdge(ReportModel):
         "partially_oriented",
     ] = "directed"
     weight: float | None = None
+    prediction: EdgePrediction | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     evidence_refs: list[str] = Field(default_factory=list)
 

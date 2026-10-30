@@ -124,13 +124,22 @@ ResponseIdentitySource: TypeAlias = Literal[
 
 FinalizationStatus: TypeAlias = Literal["valid", "degraded"]
 
+
+class EdgePrediction(ContractModel):
+    """输出边两个矩阵位置的模型预测概率，不表示效应量或统计置信度。"""
+
+    forward_probability: float = Field(ge=0, le=1, allow_inf_nan=False, strict=True)
+    reverse_probability: float = Field(ge=0, le=1, allow_inf_nan=False, strict=True)
+
+
 class GraphEdge(ContractModel):
-    """标准化图中的一条有向或部分定向边。"""
+    """标准化图中的一条边；预测概率与结构系数分别保存。"""
 
     source: str
     target: str
     edge_type: str = "directed"
     weight: float | None = None
+    prediction: EdgePrediction | None = None
 
     _validate_source = field_validator("source", "target")(
         lambda value, info: _non_blank(value, field_name=info.field_name)

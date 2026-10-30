@@ -1732,7 +1732,10 @@ def _report_graph_asset(state: CausalAgentState):
     primary = report_primary_result(build_report_analysis_context(state))
     if primary is None or not primary.get("graph"):
         return None
-    selected_graph = dict(primary["graph"], graph_semantics=primary.get("graph_semantics"))
+    selected_graph = dict(
+        primary["graph"], graph_semantics=primary.get("graph_semantics"),
+        diagnostics=primary.get("diagnostics"),
+    )
     return build_causal_graph_model(
         selected_graph,
         graph_id=REPORT_GRAPH_ASSET_KEY,

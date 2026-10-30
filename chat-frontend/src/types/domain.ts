@@ -29,6 +29,10 @@ export interface CausalGraphEdge {
   target: string
   edge_type: string
   weight?: number | null
+  prediction?: {
+    forward_probability: number
+    reverse_probability: number
+  } | null
   metadata?: Record<string, unknown>
   evidence_refs?: string[]
 }

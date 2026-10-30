@@ -557,11 +557,11 @@ DIRECT_LINGAM_SPEC = AlgorithmSpec(
 
 CDFM_SPEC = AlgorithmSpec(
     capability_id="causal.cdfm",
-    version="2.0",
+    version="2.1",
     graph_semantics="acyclic_directed_mixed_graph",
     matrix_convention="row_to_column_pair_binary",
     edge_meanings={"directed": "模型推断的候选因果方向", "bidirected": "潜在共同原因候选，不代表已经证实存在共同原因"},
-    limitations=("机制覆盖不保证当前数据上的可识别性或准确率", "阈值可改变结构；边不携带效应量或置信度", "不继承 LiNGAM 的线性、非高斯和无潜在混杂假设"),
+    limitations=("机制覆盖不保证当前数据上的可识别性或准确率", "阈值可改变结构；模型预测概率不是结构系数、效应量或统计置信度，不能自动提高整体置信度或决定主图", "不继承 LiNGAM 的线性、非高斯和无潜在混杂假设"),
     tool_name="causal_cdfm",
     public_name="CDFM 因果发现",
     description=(
@@ -572,7 +572,11 @@ CDFM_SPEC = AlgorithmSpec(
         "不传 threshold 时由服务端按模型自带校准器自动决定判决边界，传入 0 到 1 的数值可覆盖它。"
         "缺失值按 NaN/±Inf 掩码传递给模型；当前接收数值存储列，不接受未编码的非数值分类列。"
         "数值准入不证明测量语义连续，也不保证训练机制适用于当前分布。"
-        "输出只有边及其方向，不包含权重和置信度：方向可能随阈值变化，"
+        "CDFM 提供候选结构及模型预测概率。仅输出已解码边的正反两个矩阵位置概率，"
+        "forward_probability 对应 source→target，reverse_probability 对应 target→source；"
+        "双箭头边的两个分数是共同决定边型的编码概率，不是两条互反因果边。"
+        "概率由程序提取，不能由模型重新计算或补写，不代表结构系数、效应量或统计置信度。"
+        "实际阈值见 diagnostics.metrics.threshold；不根据概率自动提高整体置信度或强制选择主图。方向可能随阈值变化，"
         "不可识别场景下方向证据不足；成对的两个 1 解码为一条双箭头边，表示潜在共同原因候选，"
         "结果不构成准确率或生产能力证明。"
     ),

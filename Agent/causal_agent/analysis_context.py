@@ -108,6 +108,7 @@ def normalize_algorithm_summary(
                     "target": edge.target,
                     "edge_type": edge.edge_type,
                     "weight": edge.weight,
+                    "prediction": edge.prediction.model_dump(mode="json") if edge.prediction else None,
                 }
                 for edge in standardized.edges
             ],

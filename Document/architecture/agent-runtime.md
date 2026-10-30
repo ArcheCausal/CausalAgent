@@ -117,7 +117,7 @@ cleanup outbox 在同一次清理中删除父图 Job thread 和独立的 Deep Ag
 
 `AlgorithmDependencyDispatchMiddleware` 在 ToolNode 边界收集同一模型响应中的算法调用，按 `requires/produces` 分层：无依赖调用可并行，有依赖调用按层执行，并受单 Job 并发和工具总预算约束。`DependencyPlan.missing_artifacts_by_call` 以原始 call ID 保存没有现存输入且没有本轮生产者的 artifact；该字段只属于运行时计划，不进入数据库 schema 或模型工具参数。被阻塞调用仍保留在拓扑批次内，执行前分别检查直接缺失、上游终态和实际发布的产物。直接缺失或上游未成功发布时只为该调用返回 `not_ready`；独立调用继续进入真实 handler，并按其 `AlgorithmSpec` 检查已经绑定的数据集是否满足输入要求。输入不兼容的算法调用结束为安全的 `not_applicable` 或 `invalid_input` 结果，不会修改数据，也不会阻止其他独立调用。未执行结果使用固定安全说明，无因果图或 raw artifact；每个调用仍通过自己的 `Command` 保存 ToolMessage、AlgorithmResult、终态 Ledger 和公共结果事件。重复 call ID、工具与 capability 身份冲突和非法依赖图仍属于受控契约错误，不作为普通缺失输入处理；取消和 lease 撤销继续传播控制流。
 
-Adapter 负责模型参数和数据集输入契约检查、标准结果、raw result 完整性和 Ledger 更新；它不根据模型参数删除行、插补、编码或筛选字段。算法必需的数组转换、矩阵运算和算法原生缺失掩码仍由执行实现负责。`McpAlgorithmExecutor` 只负责签名传输、远端执行结果校验和安全错误映射。CDFM 的 logits/probabilities 通过仅供 Executor 与 Adapter 使用的私有 envelope 保存到 raw artifact，不进入 `AlgorithmResult`、ToolMessage、SSE 或公共日志。可信 Job、文件、lease、HMAC 与数据库身份不会进入模型参数。
+Adapter 负责模型参数和数据集输入契约检查、标准结果、raw result 完整性和 Ledger 更新；它不根据模型参数删除行、插补、编码或筛选字段。算法必需的数组转换、矩阵运算和算法原生缺失掩码仍由执行实现负责。`McpAlgorithmExecutor` 只负责签名传输、远端执行结果校验和安全错误映射。CDFM 的完整 logits/probabilities 矩阵通过仅供 Executor 与 Adapter 使用的私有 envelope 保存到 raw artifact，不进入 `AlgorithmResult`、ToolMessage、报告输入、前端图资源、SSE 或公共日志。runner 只从已输出边的矩阵位置提取 `prediction.forward_probability` 和 `prediction.reverse_probability`，经标准结果、工具回执和报告事实传递；`weight` 继续为空。可信 Job、文件、lease、HMAC 与数据库身份不会进入模型参数。
 
 `ToolCallProtocolMiddleware` 在完整模型响应之后检查最新 `AIMessage.invalid_tool_calls`。参数 JSON 解析失败时，它使用原调用 ID 追加 `status=error` 的 `ToolMessage`，说明工具未执行，并且不修改原参数、不把原始参数或底层异常写入返回内容；仅在本地 JSON 解析器能够确认时附带行列位置。当前响应任一调用缺少有效 ID，或调用 ID 重复时，运行以受控协议错误终止，不生成替代 ID。若仍有合法工具调用待执行，继续原工具路由；否则通过 `jump_to=model` 返回现有 `before_model` 链，继续接受模型预算检查。存在无效调用时，本轮 `structured_response` 会清空，父图继续使用既有 FinalizationGate 拒绝、一次修正和降级规则。该钩子只检查当前响应，不修复旧 checkpoint。
 
@@ -139,7 +139,7 @@ Adapter 负责模型参数和数据集输入契约检查、标准结果、raw re
 
 `causal-mcp` 是私网 Streamable HTTP/HTTP/1.1 服务。服务端以 MySQL primary strong read 校验 Job、attempt、lease 和 worker 身份，再使用有界队列及独立算法子进程运行 capability。MCP session 不保存 Job、checkpoint 或 Action Ledger。
 
-CDFM v0.1 在 runner 内保持 `directed_graph` 和输入列顺序，按 `adjacency[i,j]` 生成 `column_i → column_j`，不做 `remove_cycles()`；当前生产图也不因此承诺自动环路修复。它的预训练数据包含潜在混杂，对应真值形式是双向边，因此模型给出对称邻接时会被转成两条方向相反的边，这种形状不能直接读成互反因果。该接入只证明工程调用链和私有结果保存，不证明因果发现准确率。
+CDFM v0.1 在 runner 内保留输入列顺序，按变量对将二值矩阵解码为 `acyclic_directed_mixed_graph`；对称的两个 1 生成一条双箭头边，表示潜在共同原因候选。runner 不做 `remove_cycles()`；违反图约束时由共享结构检查拒绝作为主图，不自动删除边。该接入只证明工程调用链和私有结果保存，不证明因果发现准确率。
 
 当 heartbeat 或取消使 `JobExecutionGuard` 撤销时，worker 中断本地等待，并通过独立 control lane 发送签名 `cancel_algorithm`。服务端按完整 invocation 身份取消排队任务或终止目标算法进程，不影响并行 sibling。重复取消返回稳定状态；客户端无法确认最终状态时使用 `unknown`，该值不能解释为远端一定未取消。取消属于控制流，不生成普通失败的 `AlgorithmResult`，也不进入算法重试或 FinalizationGate。
 
@@ -191,7 +191,7 @@ Gate 严格核验引用、来源、研究身份、终态账本及实际执行配
 
 ## 方法定义、图约束与数据画像
 
-[AlgorithmSpec](../../Agent/deep_agent_tools/algorithm_specs.py) 是方法解释的唯一来源，生成工具描述和执行时的 `MethodDefinition` 快照。当前 PC、DirectLiNGAM 和 CDFM 的方法契约版本为 `2.0`。`AlgorithmResult.method` 保存输入要求、假设、目标图类型、矩阵方向、边含义和边界；`implementation` 分开记录 runner、实际包版本、内嵌实现版本及权重身份，不把三者混作同一个版本。CDFM 本地权重记录实际 SHA256；只有本地 manifest 的文件摘要匹配时才采用其 revision，否则 revision 保持未知。
+[AlgorithmSpec](../../Agent/deep_agent_tools/algorithm_specs.py) 是方法解释的唯一来源，生成工具描述和执行时的 `MethodDefinition` 快照。当前 PC、DirectLiNGAM 的方法契约版本为 `2.0`，CDFM 为 `2.1`。`AlgorithmResult.method` 保存输入要求、假设、目标图类型、矩阵方向、边含义和边界；`implementation` 分开记录 runner、实际包版本、内嵌实现版本及权重身份，不把三者混作同一个版本。CDFM 本地权重记录实际 SHA256；只有本地 manifest 的文件摘要匹配时才采用其 revision，否则 revision 保持未知。新增可选边字段会改变共享标准图 schema 的 Spec 摘要，Worker 与 causal-mcp 必须使用同一源码一起更新。
 
 MCP 成功结果使用同一次解析得到的方法和实现元数据。runner 没有提供有效版本时，`implementation.runner_version` 和 `provenance.algorithm_runner_version` 均保持 `None`；不推断版本，也不把未知值转为空字符串而触发结果契约错误。
 
@@ -204,6 +204,8 @@ MCP 成功结果使用同一次解析得到的方法和实现元数据。runner 
 | CDFM | `acyclic_directed_mixed_graph`，二值矩阵行指向列，按变量对解码 | 学习得到的结构候选；不能套用 LiNGAM 的线性、非高斯假设，也不能把候选共同原因写成已证实 |
 
 CDFM 对每对变量读取 `(A[i,j], A[j,i])`：`00` 无边、`10` 为 `i→j`、`01` 为 `j→i`、`11` 为一条 `i↔j`。双箭头表示潜在共同原因候选，不能拆成两条普通有向边。raw artifact 继续保存原始邻接矩阵、变量顺序、logits、probabilities 和实际阈值。编码依据是实际安装包的方向实现及 CDFM 方法约定，不能将没有编码字段的 checkpoint 描述为自行声明了编码。
+
+CDFM 提供候选结构及模型预测概率。runner 按输出边端点和原始变量顺序提取两个分数：`forward_probability = probabilities[source_index,target_index]`，`reverse_probability = probabilities[target_index,source_index]`；反向有向边仍以实际 source/target 为准，双箭头分别保存两个编码分数。`diagnostics.metrics.threshold` 保存模型实际使用的阈值，包括自动校准值。标准化、报告事实快照与图资源保留相同精度，报告模型只解释已提供数值，不重新计算或补写。概率不是结构系数、效应量或统计置信度；程序不据此提高整体置信度或强制选择主图。旧报告缺少字段时保持缺失，不从矩阵回填。展示规则见[普通用户前端](../development/chat-frontend.md)。
 
 CDFM 的输入准入检查确认数值存储和可计算性，不将整数列或低基数数值列自动解释为分类语义，也不把数值存储证明为连续测量。内部沿用的 `continuous_tabular_dataset` 能力前提目前只依据数值列画像形成，方法说明单独表达这个边界；训练机制覆盖及当前分布适用性仍是需要证据支持的条件。
 
