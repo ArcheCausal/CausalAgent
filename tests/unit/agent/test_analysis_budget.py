@@ -115,3 +115,39 @@ def test_unexecuted_algorithm_is_recorded_as_budget_skip_without_scientific_chec
     assert result.standardized_graph is None and result.ate_check is None
     assert record.effect_query is None
     assert executor.calls == []
+    assert executor.validation_report["accepted"] is True
+    assert executor.validation_report["errors"] == []
+    assert executor.analysis_parameters["effect_request"] is None
+    assert executor.validated_input.effect_parameters["effect_request"] is None
+
+
+def test_local_input_preserves_explicit_request_and_validated_transform():
+    from Agent.data_processing.parameters import parameter_identity
+
+    request = {"effect": "average_total_effect", "intervention": {
+        "type": "fixed_contrast", "from": -0.5, "to": 0.5, "unit": "L/min"}}
+    execution = {"treatment_column": "x", "outcome_column": "y", "treatment_unit": "L/min",
+        "treatment_transform": {"type": "identity", "source_column": "x", "output_column": "x",
+            "source_unit": "L/min", "output_unit": "L/min"}, "outcome_transform": {"type": "identity"}}
+    executor = LocalAlgorithmExecutor(semantic_kinds={"x": "continuous", "y": "continuous"},
+        analysis_parameters={"target": "y", "treatment": "x", "effect_request": request},
+        effect_execution_context=execution)
+    assert executor.validation_report["accepted"] is True
+    assert executor.validation_report["errors"] == []
+    assert executor.validated_input.effect_parameters["effect_request"] == request
+    assert executor.validated_input.effect_parameters["effect_execution_context"] == execution
+    assert executor.validated_input.effect_parameters["research_identity"] == parameter_identity(executor.analysis_parameters)
+
+
+def test_local_input_does_not_override_rejected_transform_validation():
+    with pytest.raises(ValueError, match="accepted validation report"):
+        LocalAlgorithmExecutor(analysis_parameters={"target": "y", "treatment": "x",
+            "effect_request": {"effect": "average_total_effect", "intervention": {
+                "type": "fixed_contrast", "from": -0.5, "to": 0.5, "unit": "L/min"}}},
+            effect_execution_context={"treatment_column": "x", "outcome_column": "y", "treatment_unit": "L/min",
+                "treatment_transform": {"type": "identity"}, "outcome_transform": {"type": "identity"}})
+
+
+def test_local_input_rejects_explicit_legacy_parameters_without_request():
+    with pytest.raises(ValueError, match="accepted validation report"):
+        LocalAlgorithmExecutor(analysis_parameters={"target": "y", "treatment": "x"})

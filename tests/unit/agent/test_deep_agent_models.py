@@ -146,16 +146,76 @@ def test_mcp_context_canonicalizes_uuid_and_requires_aware_window() -> None:
         McpInvocationContext.model_validate(invalid_payload)
 
 
-def test_final_analysis_decision_rejects_multiple_primary_results() -> None:
-    with pytest.raises(ValidationError, match="at most one"):
+def test_final_analysis_decision_rejects_multiple_primary_graphs() -> None:
+    with pytest.raises(ValidationError, match="primary_graph assessment"):
         FinalAnalysisDecision(
             outcome="algorithm_supported",
-            primary_result_ref="r1",
+            primary_graph_result_ref="r1",
+            effect_status="not_requested",
             result_assessments=[
-                ResultAssessment(result_ref="r1", disposition="primary", rationale="a"),
-                ResultAssessment(result_ref="r2", disposition="primary", rationale="b"),
+                ResultAssessment(result_ref="r1", disposition="primary_graph", rationale="a"),
+                ResultAssessment(result_ref="r2", disposition="primary_graph", rationale="b"),
             ],
             conflict_status="none",
             selection_rationale="选择 r1",
             confidence="medium",
         )
+
+
+def _decision_payload():
+    return {"outcome": "algorithm_supported", "primary_graph_result_ref": "graph:0",
+            "primary_effect_result_ref": "effect:0", "effect_status": "adopted",
+            "result_assessments": [
+                {"result_ref": "graph:0", "disposition": "primary_graph", "rationale": "使用源图"},
+                {"result_ref": "effect:0", "disposition": "primary_effect", "rationale": "采用同图估计"},
+            ], "conflict_status": "none", "selection_rationale": "分别选择图和效应", "confidence": "medium"}
+
+
+def test_independent_primary_references_project_to_effect() -> None:
+    decision = FinalAnalysisDecision.model_validate(_decision_payload())
+    assert decision.primary_graph_result_ref == "graph:0"
+    assert decision.primary_effect_result_ref == "effect:0"
+    assert decision.primary_result_ref == "effect:0"
+    assert FinalAnalysisDecision.model_validate(decision.model_dump(mode="json")) == decision
+
+
+def test_graph_can_be_retained_without_adopting_effect() -> None:
+    payload = _decision_payload()
+    payload.update(primary_effect_result_ref=None, effect_status="not_adopted", effect_reason="模型假设尚未得到充分支持")
+    payload["result_assessments"][1]["disposition"] = "supporting"
+    decision = FinalAnalysisDecision.model_validate(payload)
+    assert decision.primary_graph_result_ref == decision.primary_result_ref == "graph:0"
+    assert decision.primary_effect_result_ref is None
+
+
+@pytest.mark.parametrize("updates,message", [
+    ({"primary_result_ref": "graph:0"}, "compatibility projection"),
+    ({"effect_status": "incomplete"}, "effect_status=adopted"),
+    ({"primary_graph_result_ref": None, "result_assessments": [
+        {"result_ref": "effect:0", "disposition": "primary_effect", "rationale": "估计"}]}, "requires its source graph"),
+])
+def test_decision_rejects_inconsistent_primary_contract(updates, message) -> None:
+    with pytest.raises(ValidationError, match=message):
+        FinalAnalysisDecision.model_validate({**_decision_payload(), **updates})
+
+
+def test_legacy_single_primary_cannot_infer_graph_or_effect() -> None:
+    payload = _decision_payload()
+    payload.pop("primary_graph_result_ref")
+    payload.pop("primary_effect_result_ref")
+    payload.update(primary_result_ref="effect:0", effect_status="not_recorded", result_assessments=[
+        {"result_ref": "effect:0", "disposition": "primary", "rationale": "旧版选择"}])
+    with pytest.raises(ValidationError) as failure:
+        FinalAnalysisDecision.model_validate(payload)
+    assert any(error["loc"] == ("result_assessments", 0, "disposition")
+               and error["type"] == "literal_error" for error in failure.value.errors())
+
+
+def test_legacy_primary_cannot_add_an_extra_primary_beside_explicit_roles() -> None:
+    payload = _decision_payload()
+    payload["result_assessments"].append({
+        "result_ref": "extra:0", "disposition": "primary", "rationale": "旧主结果不能形成额外选择"})
+    with pytest.raises(ValidationError) as failure:
+        FinalAnalysisDecision.model_validate(payload)
+    assert any(error["loc"] == ("result_assessments", 2, "disposition")
+               and error["type"] == "literal_error" for error in failure.value.errors())

@@ -91,6 +91,7 @@ class ParentStateUpdate(TypedDict, total=False):
     deep_agent_rag_evidence: dict[str, EvidenceResult]
     deep_agent_web_evidence: dict[str, WebEvidenceResult]
     deep_agent_decision: FinalAnalysisDecision | None
+    deep_agent_accepted_decision: FinalAnalysisDecision | None
     deep_agent_structured_response: FinalAnalysisDecision | None
     deep_agent_run_id: str
     deep_agent_status: str
@@ -338,7 +339,8 @@ def from_deep_agent_output(state: Mapping[str, Any]) -> ParentStateUpdate:
         "deep_agent_action_ledger": dict(state.get("action_ledger") or {}),
         "deep_agent_rag_evidence": dict(state.get("rag_evidence") or {}),
         "deep_agent_web_evidence": dict(state.get("web_evidence") or {}),
-        "deep_agent_decision": state.get("structured_response"),
+        "deep_agent_decision": None,
+        "deep_agent_accepted_decision": None,
         "deep_agent_structured_response": state.get("structured_response"),
         "deep_agent_status": "completed",
         "deep_agent_budget_exhausted": bool(state.get("analysis_budget_exhausted")),

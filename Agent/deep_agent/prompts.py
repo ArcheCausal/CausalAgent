@@ -45,6 +45,12 @@ RAG/Web 证据引用只能出现在 revision_proposals.evidence_refs，两类引
 selection_rationale 和逐结果 rationale 会直接向当前用户展示，应保持简短，并使用
 公开算法名称描述依据，不要写入 result_ref 等内部标识。revision_proposals 只能
 作为报告说明，不能替换或编辑算法生成的主图。
+必须分别填写 primary_graph_result_ref 和 primary_effect_result_ref。主图指向所选因果发现结果，
+主效应只能指向使用该主图、已确认定义和当前数据的有效估计；不采用主效应时保持 null，
+填写 effect_status（not_requested、not_applicable、not_identifiable、incomplete 或 not_adopted）及 effect_reason。
+可以保留主图并说明为何未采用有效估计。逐结果 disposition 分别使用 primary_graph 和 primary_effect，
+每种至多一个；其他结果为 supporting 或 discarded。primary_result_ref 仅作兼容投影，有主效应时指向
+主效应，否则指向主图。估计为零、标准误为零或区间为零不能单独作为有效性判断。
 """
 
 # 父图只有真正执行分析的路径会进入 Deep Agent：agent 的 start_analysis/rerun_analysis
@@ -60,7 +66,8 @@ MANDATORY_ALGORITHM_INSTRUCTION = (
     "analysis_parameters.nonlinearity.ratio 是数据集非线性强度相对噪声上限的倍数"
     "（≥1 才算检出）：明显大于 1 时优先考虑非线性能力更强的算法；小于 1 只代表"
     "未检出，不能据此排除非线性机制。"
-    "若 analysis_parameters 中 target 与 treatment 都已指定，在获得有效标准图后"
+    "只有 analysis_parameters.effect_request 是已确认对象时才执行效应流程；null 时仅做结构探索，"
+    "缺少字段表示未记录，不能推断意图或补猜(0,1)。有估计请求且在获得有效标准图后"
     "必须先用该图的 graph_result_ref、treatment、outcome 调用 effect_diagnose；"
     "诊断结论按 verdict 读取：proceed 时用同一张图和 recommended_tool_name"
     "（recommended_capability_id 是能力 ID，不是工具名）完成一次真实估计调用，"
@@ -70,8 +77,14 @@ MANDATORY_ALGORITHM_INSTRUCTION = (
     f"若估计结果的 diagnostics.metrics 中 residual_spearman_max 或 "
     f"residual_abs_spearman_max 达到 {SIGNAL_FLOOR}，或 "
     f"analysis_parameters.nonlinearity.ratio 达到 {RATIO_LINE}，"
-    f"必须用同一张图、相同 treatment/outcome 再调用 causal_g_formula，"
-    f"contrast 固定为 (0, 1)、outcome_model 明确指定 hgb；其余情况不要为比较而额外调用。"
+    f"考虑用同一张图、相同 treatment/outcome 和完全相同的已确认 effect_request 调用 causal_g_formula，"
+    f"可使用 hgb 检查模型敏感性。比较前核对样本、定义、单位、总体和调整集；"
+    f"不同源图分别说明。报告差值、成对bootstrap差值区间与支持诊断，不能以差异直接证明非线性。"
+    "差值区间包含零只表示该比较未能区分两种估计，不证明线性、方法等价、无设定偏差或无实质偏差；"
+    "没有业务容忍阈值及相应检验时不作等价或实质性判断。跨图方向相同仅为本次结构敏感性观察，"
+    "不能证明结构正确或结论不依赖结构。逐项区分源图与估计器，未执行估计的图不能算作效应支持。"
+    "不同单位的边权不能仅按绝对数值大小判为不合理，必须结合量纲、变量尺度和已知业务约束。"
+    "由你根据方法假设、诊断和稳定性选择主效应并说明理由，程序不按方法名强制采用结果。"
 )
 
 
