@@ -287,6 +287,7 @@ async def _run_job(
                 attempt_count,
                 {},
                 lease_epoch,
+                usage=usage_collector.snapshot(),
             )
             if not completed:
                 raise JobExecutionRevoked("success terminalization fenced")

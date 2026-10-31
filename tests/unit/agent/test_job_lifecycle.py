@@ -315,6 +315,34 @@ class JobLifecycleTests(unittest.TestCase):
         self.assertIn("WHERE job_id = %s", lock_sql)
         self.assertEqual(connection.fake_cursor.statements[-1][0], lock_sql)
 
+    def test_complete_job_attaches_usage_to_final_result_event(self):
+        """兜底成功路径落库的 final_result 事件必须携带用量快照。"""
+        usage = {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+        connection = FakeConnection()
+
+        with (
+            patch("app.agent.job_service.get_write_connection", return_value=connection),
+            patch("app.agent.job_service.get_job_by_id", return_value=build_job()),
+        ):
+            completed = complete_job(
+                "job-1",
+                "worker-a",
+                2,
+                {},
+                lease_epoch=1,
+                usage=usage,
+            )
+
+        self.assertTrue(completed)
+        _sql, params = next(
+            (sql, params)
+            for sql, params in connection.fake_cursor.statements
+            if "INSERT INTO analysis_job_events" in sql
+        )
+        payload = json.loads(params[3])
+        self.assertEqual(payload["type"], "final_result")
+        self.assertEqual(payload["usage"], usage)
+
     def test_claim_final_exhausted_job_as_failed_and_releases_session(self):
         """领取时应收敛过期且耗尽尝试次数的 running job，避免永久占用会话。"""
         connection = FakeConnection(

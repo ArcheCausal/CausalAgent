@@ -631,11 +631,17 @@ def _event_key(event_type: str, payload: dict[str, Any], question_id: str | None
 
 
 def _payload_matches(existing_payload: Any, payload: dict[str, Any]) -> bool:
-    """比较生命周期重放的受限 JSON payload。"""
+    """比较生命周期重放的受限 JSON payload，忽略会随重放变化的用量指标。"""
     try:
-        return _json_loads(existing_payload) == payload
+        stored = _json_loads(existing_payload)
     except (TypeError, ValueError, json.JSONDecodeError):
         return False
+    if not isinstance(stored, dict):
+        return stored == payload
+    return (
+        {key: value for key, value in stored.items() if key != "usage"}
+        == {key: value for key, value in payload.items() if key != "usage"}
+    )
 
 
 def _existing_event(cursor, job_id: str, event_key: str | None):
@@ -1592,16 +1598,21 @@ def complete_job(
     attempt_count: int,
     result: dict[str, Any] | None,
     lease_epoch: int | None = None,
+    *,
+    usage: Any | None = None,
 ) -> bool:
     """为没有显式终态事件的旧执行路径补写成功终态。"""
     job = get_job_by_id(job_id)
     if not job:
         return False
+    payload: dict[str, Any] = {"type": "final_result", "data": result or {}}
+    if usage is not None:
+        payload["usage"] = dict(usage)
     return _complete_job_lifecycle(
         job,
         worker_id,
         "final_result",
-        {"type": "final_result", "data": result or {}},
+        payload,
         lease_epoch=lease_epoch,
         result=result or {},
         status="succeeded",
