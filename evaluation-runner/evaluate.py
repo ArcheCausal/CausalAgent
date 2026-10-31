@@ -7,6 +7,15 @@ VARIABLE_PATTERN = re.compile(r"^X(\d+)$")
 UNDIRECTED_TYPES = {"undirected", "bidirected", "partially_directed", "partially_oriented"}
 
 
+def final_decision(records) -> tuple[str, str]:
+    """取最终决策事件（finalization_gate）的摘要与置信度。"""
+    for record in reversed(list(records)):
+        payload = record.get("payload") or {}
+        if record.get("type") == "decision" and payload.get("decision_kind") == "final":
+            return str(payload.get("summary") or ""), str(payload.get("confidence") or "")
+    return "", ""
+
+
 def variable_index(value) -> int | None:
     match = VARIABLE_PATTERN.match(str(value or "").strip())
     return int(match.group(1)) if match else None

@@ -58,7 +58,8 @@ def resolve_credentials(config: Config) -> tuple[str, str]:
 RESULT_HEADER = [
     "run_id", "dataset", "mechanism", "rep", "n_rows", "n_cols", "dim", "lambda",
     "n_gold_edges", "n_pred_edges", "n_undirected_edges", "recall", "precision",
-    "skeleton_recall", "skeleton_precision", "final_algorithm", "finalization_status",
+    "skeleton_recall", "skeleton_precision", "final_algorithm", "final_confidence",
+    "final_selection_rationale", "finalization_status",
     "interactions", "duration_s", "tokens", "status", "failure_reason",
 ]
 
@@ -179,6 +180,8 @@ def _run_once(spec, config: Config, client: AgentClient, run_dir: Path, run_id: 
         return row
 
     document = ((final_payload or {}).get("data") or {}).get("document") or {}
+    rationale, confidence = ev.final_decision(records)
+    row.update({"final_selection_rationale": rationale, "final_confidence": confidence})
     asset, reason = ev.find_graph_asset(document)
     (run_dir / "raw" / f"{ds.artifact_name(spec.dataset_id)}.json").write_text(
         json.dumps({"document": document, "interactions": interactions}, ensure_ascii=False),
@@ -238,7 +241,7 @@ def _run_dataset(spec, config, credentials, run_id, run_dir) -> dict:
 def _load_done(path: Path) -> set[str]:
     if not path.exists():
         return set()
-    with path.open(encoding="utf-8", newline="") as handle:
+    with path.open(encoding="utf-8-sig", newline="") as handle:
         return {row["dataset"] for row in csv.DictReader(handle) if row["status"] == "success"}
 
 
@@ -291,11 +294,17 @@ def main(argv=None) -> int:
     for name in ("csv", "raw"):
         (run_dir / name).mkdir(parents=True, exist_ok=True)
     results_path = run_dir / "results.csv"
+    if results_path.exists() and results_path.stat().st_size:
+        with results_path.open(encoding="utf-8-sig", newline="") as handle:
+            if next(csv.reader(handle), []) != RESULT_HEADER:
+                print("results.csv 表头与当前版本不一致，请换新目录运行", file=sys.stderr)
+                return 1
     done = _load_done(results_path) if args.resume else set()
     pending = [spec for spec in specs if spec.dataset_id not in done]
 
+    new_file = not results_path.exists() or results_path.stat().st_size == 0
     lock = threading.Lock()
-    with results_path.open("a", encoding="utf-8", newline="") as results:
+    with results_path.open("a", encoding="utf-8-sig" if new_file else "utf-8", newline="") as results:
         writer = csv.DictWriter(results, fieldnames=RESULT_HEADER)
         if results.tell() == 0:
             writer.writeheader()
@@ -311,7 +320,7 @@ def main(argv=None) -> int:
                     results.flush()
                 print(f"{row['status']:7s} {row['dataset']} {row['failure_reason']}")
 
-    rows = list(csv.DictReader(results_path.open(encoding="utf-8", newline="")))
+    rows = list(csv.DictReader(results_path.open(encoding="utf-8-sig", newline="")))
     for row in rows:
         for name in ("interactions", "n_rows", "n_cols", "dim", "n_gold_edges",
                      "n_pred_edges", "n_undirected_edges"):
@@ -326,7 +335,7 @@ def main(argv=None) -> int:
                      "per_cell": config.data.per_cell, "seed": config.run.seed},
     }
     summary = rp.summarize(rows, meta)
-    with (run_dir / "summary.csv").open("w", encoding="utf-8", newline="") as handle:
+    with (run_dir / "summary.csv").open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=rp.SUMMARY_HEADER)
         writer.writeheader()
         writer.writerow(summary)

@@ -307,6 +307,15 @@ def test_score_each_undirected_edge_counts_as_fp():
     assert metrics["skeleton_recall"] == 1.0
 
 
+def test_final_decision():
+    records = [
+        {"type": "decision", "payload": {"decision_kind": "algorithm", "summary": "调 PC"}},
+        {"type": "decision", "payload": {"decision_kind": "final", "summary": "选 PC 为主结果", "confidence": "low"}},
+    ]
+    assert evaluate.final_decision(records) == ("选 PC 为主结果", "low")
+    assert evaluate.final_decision([]) == ("", "")
+
+
 def test_parse_sse_events():
     lines = [
         "id: 7",
