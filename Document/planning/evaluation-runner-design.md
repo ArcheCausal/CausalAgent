@@ -69,7 +69,7 @@ output:
 - `mechanisms`/`dims`/`ns` 的取值在 runner 扫描数据目录后由 `validate_selection` 校验，非实际出现的机制、D 或 N 直接报错；`exclude` 可与之重叠，重叠以排除为准。
 - 账号：`username` 为空时读 `local/accounts.local.json`；不存在则自动注册并把凭据写入该文件（gitignore）。
 
-**启动确认**：先 `GET /api/check_auth` 探活，再打印摘要（机制数、格数、总集数、`parallel`、输出目录、TimeLag 是否排除），要求交互输入 `y`；`--dry-run` 打印摘要后退出，`--yes` 跳过确认（脚本化/后台运行）。
+**启动确认**：先 `GET /api/check_auth` 探活，再打印摘要（机制数、格数、总集数、`parallel`、输出目录），要求交互输入 `y`；`--dry-run` 打印摘要后退出，`--yes` 跳过确认（脚本化/后台运行）。
 
 ## 5. 数据集与抽样
 
@@ -87,7 +87,7 @@ output:
 2. `POST /api/upload_file`（multipart，字段 `file`，`text/csv`）→ `user_file_id`。
 3. `POST /api/new_chat` → `session_id`。
 4. `POST /api/agent/jobs`，body `{message, session_id, input_user_file_id, web_search_enabled: false}`，头 `Idempotency-Key: <uuid4>`。
-5. `GET /api/agent/jobs/{job_id}/events`（SSE，重连参数为 `last_event_id`，也可用 `Last-Event-ID` 头）；流在终态或 `interrupt` 后自行结束；断流或传输错误时带最后事件 `id` 重连，最多 3 次，仍失败记 `sse_error`。`timeout_minutes` 在 SSE 循环内检查（心跳/事件推进时触发），超时先 cancel 再记 `timeout`。
+5. `GET /api/agent/jobs/{job_id}/events`（SSE，重连只带查询参数 `last_event_id`）；流在终态或 `interrupt` 后自行结束；断流或传输错误时带最后事件 `id` 重连，最多 3 次，仍失败记 `sse_error`。`timeout_minutes` 在 SSE 循环内按事件到达检查（服务端发送真实的 `event: heartbeat` 事件，因此检查间隔约 15 s），超时先 cancel 再记 `timeout`。
 6. `interrupt` → 按第 7 节生成答复 → `POST /api/agent/jobs/{job_id}/resume`（body `{question_id, answer}`，新 `Idempotency-Key`）。
 7. 终态：`final_result` 继续；`error` / `canceled` 记对应失败。
 8. 解析图与指标 → 追加写 `results.csv` → 保存 `csv/` 与 `raw/` 证据。
@@ -168,7 +168,7 @@ failure_reasons
 
 ### 9.3 report.md
 
-依次包含：运行信息（commit、base_url、seed、parallel、抽样口径）→ 总体均值 → 按机制族表 → 按 D 表 → 按 N 表 → 失败分布 → recall 最低 Top 10 → 口径声明（严格定向 vs 骨架、TimeLag 以抽样配置 `exclude` 为准、diagnostic 不计均值）。
+依次包含：运行信息（commit、base_url、seed、parallel、抽样口径）→ 总体均值 → 按机制族表 → 按 D 表 → 按 N 表（按实测 `n_rows` 分组，非名义 N）→ 失败分布 → recall 最低 Top 10 → 口径声明（严格定向 vs 骨架、TimeLag 以抽样配置 `exclude` 为准、diagnostic 不计均值）。
 
 ### 9.4 证据
 
@@ -183,7 +183,7 @@ failure_reasons
 | `dataset_invalid` | 缺键/形状错/无 gold | 否 |
 | `auth_error` | 登录/注册失败 | 否 |
 | `upload_error` | 上传或建会话失败 | 否 |
-| `job_rejected` | 建 Job 非 2xx | 否 |
+| `job_rejected` | 建 Job 非 2xx 或传输失败 | 否 |
 | `timeout` | 超过 `timeout_minutes` 未终态 | 1 次 |
 | `sse_error` | 重连 3 次仍失败 | 否 |
 | `terminal_error` | 收到 `error` 事件；或请求传输错误/未预期异常 | 1 次 |
@@ -193,11 +193,11 @@ failure_reasons
 | `interaction_budget_exceeded` | 超轮数/时长 | 否 |
 | `edge_variable_unmapped` | 部分端点无法映射（`status=partial`） | 否 |
 
-`upload_error` 覆盖上传文件或建会话失败，`job_rejected` 只覆盖建 Job 非 2xx；`auth_error` 仅指登录/注册的 HTTP 层面失败，传输层错误统一归 `terminal_error`。重试必须新会话 + 新 Job + 新 `Idempotency-Key`，结果覆盖原行。超时先 cancel 再记失败。
+`upload_error` 覆盖上传文件或建会话失败（含传输失败），`job_rejected` 覆盖建 Job 非 2xx 或传输失败；SSE 传输断流最多重连 3 次后记 `sse_error`；`auth_error` 仅指登录/注册的 HTTP 层面失败；只有逃出 `_run_once` 的传输错误才归 `terminal_error`。此类 `terminal_error` 虽在 `RETRYABLE` 中，但不会被重试循环重新执行。重试必须新会话 + 新 Job + 新 `Idempotency-Key`，结果覆盖原行。超时先 cancel 再记失败。
 
 ## 11. 并发与续跑
 
-- `parallel` 来自配置：`ThreadPoolExecutor(max_workers=parallel)`，每集独立 `httpx.Client` 与独立会话，共享已登录 Cookie。
+- `parallel` 来自配置：`ThreadPoolExecutor(max_workers=parallel)`，每集独立 `httpx.Client` 与独立会话，并为该集登录一次（不共享 Cookie）。
 - 每完成一集（`as_completed`，按完成顺序而非提交顺序）立即追加写 `results.csv`（进程内锁），崩溃后不丢已完成的集。
 - `--resume <run_dir>`：读取已有 `results.csv`，跳过 `status == success` 的 `dataset`，其余重跑；结束后重建 `summary.csv` 与 `report.md`。
 
@@ -220,7 +220,7 @@ failure_reasons
 ## 13. 已知风险
 
 - 模型是否触发 data_processing 交互取决于分支行为；runner 对零交互与多轮交互都能处理。
-- SSE `interrupt` 事件短命，必须连接即读并按 `after_event_id` 回放。
+- SSE `interrupt` 事件短命，必须连接即读并按 `last_event_id` 回放。
 - 模型偶发空回答导致无图，归入 `no_causal_graph` 重试 1 次。
 - WSL 内存 6GB、`JOB_WORKERS` 默认 2：`parallel > 2` 只会排队且可能 OOM，启动摘要需提示。
 - 1875 集全量耗时极长，默认分层抽样 `per_cell=1`（350 集）用于回归。

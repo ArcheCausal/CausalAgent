@@ -1,4 +1,6 @@
 local/
 cdfm_bench_*/
+config.yaml
+config.smoke.yaml
 __pycache__/
 *.pyc
