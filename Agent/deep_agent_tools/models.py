@@ -147,6 +147,8 @@ class StandardizedGraph(ContractModel):
     graph_semantics: str
     nodes: list[str] = Field(default_factory=list)
     edges: list[GraphEdge] = Field(default_factory=list)
+    edge_score_matrix: list[list[float]] | None = None
+    score_type: str | None = None
 
     @field_validator("graph_semantics")
     @classmethod
@@ -174,6 +176,24 @@ class StandardizedGraph(ContractModel):
             raise ValueError(
                 "graph edges reference unknown nodes: " + ", ".join(sorted(missing))
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_edge_scores(self) -> "StandardizedGraph":
+        if (self.edge_score_matrix is None) != (self.score_type is None):
+            raise ValueError("edge_score_matrix and score_type must be provided together")
+        if self.edge_score_matrix is None:
+            return self
+        if self.score_type != "probability":
+            raise ValueError("unsupported score_type")
+        size = len(self.nodes)
+        matrix = self.edge_score_matrix
+        if len(matrix) != size or any(len(row) != size for row in matrix):
+            raise ValueError("edge_score_matrix must be square and match nodes")
+        for row in matrix:
+            for value in row:
+                if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                    raise ValueError("edge_score_matrix values must be probabilities in [0, 1]")
         return self
 
 
