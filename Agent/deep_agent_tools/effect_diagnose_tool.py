@@ -140,6 +140,11 @@ class EffectDiagnoseTool:
         treatment_type = _treatment_type(trusted, treatment)
         n_rows = _row_count(state)
         results = state.get("algorithm_results")
+        parameters = state.get("analysis_parameters") or {}
+        if not isinstance(parameters.get("effect_request"), Mapping) or (treatment, outcome) != (parameters.get("treatment"), parameters.get("target")):
+            return ({"verdict": "reject", "reasons": [{"code": "effect_not_requested",
+                "message": "没有与本变量角色一致的已确认效应定义，本次只做结构分析。"}]},
+                "not_applicable", None)
 
         def payload(verdict: str, checks: dict[str, bool], reasons: list[dict[str, str]]):
             return {
@@ -321,6 +326,7 @@ class EffectDiagnoseTool:
                     graph_result_ref=graph_result_ref,
                     treatment=treatment,
                     outcome=outcome,
+                    effect_request=(runtime.state.get("analysis_parameters") or {}).get("effect_request"),
                 ),
                 safe_error_code=safe_error_code,
             )

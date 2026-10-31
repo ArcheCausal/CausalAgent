@@ -1,12 +1,15 @@
 """真实参数规则、CSV 校验与内部重试反馈协作；不调用替代模型。"""
 
 from copy import deepcopy
+from io import BytesIO
 import json
 
+import pandas as pd
 import pytest
 
 from Agent.data_processing.graph import _validation_retry_message
-from Agent.data_processing.parameters import ParameterExtraction, apply_parameter_patch, extraction_patch
+from tests.support.research_specs import commit
+from Agent.data_processing.parameters import research_parameters
 from Agent.data_processing.validation import validate_candidate
 from Agent.deep_agent_tools.algorithm_specs import PC_SPEC
 from app.agent.worker.event_adapter import LangGraphEventAdapter
@@ -18,17 +21,12 @@ from app.agent.worker.event_adapter import LangGraphEventAdapter
     ({"treatment": None}, {"target": "收入", "treatment": None}),
 ])
 def test_absent_roles_and_explicit_null_use_existing_revision_contract(patch, expected):
-    before = {"target": "收入", "treatment": "培训"}
-    answer = "用户明确指定本次修订"
-    extraction = ParameterExtraction.model_validate({"updates": [
-        {"field": key, "value": value, "evidence": answer} for key, value in patch.items()
-    ]})
-    actual_patch = extraction_patch(extraction, current_parameters=before)
-    actual, changes = apply_parameter_patch(before, [], patch=actual_patch,
+    before = research_parameters({"target": "收入", "treatment": "培训", "measurement_semantics": []})
+    actual, changes = commit(before, [], patch=patch,
         job_id="00000000-0000-0000-0000-000000000963", source_input_id=1)
-    assert actual == expected
+    assert actual == research_parameters({**expected, "measurement_semantics": []})
     assert len(changes) == bool(patch)
-    assert before == {"target": "收入", "treatment": "培训"}
+    assert before["target"] == "收入" and before["treatment"] == "培训"
 
 
 def test_validation_feedback_uses_report_roles_and_actual_csv_columns():
@@ -89,3 +87,30 @@ def test_early_validation_failure_does_not_invent_roles_or_columns():
     assert details["target"] is None
     assert details["treatment"] is None
     assert details["columns"] == []
+
+
+@pytest.mark.parametrize("declare_dropped_column", [True, False])
+def test_output_csv_mapping_keeps_renamed_measurements_without_inheriting_derived_types(declare_dropped_column):
+    source = ("x,y,z\n" + "\n".join(f"{row / 7},{row % 13},{row / 9}" for row in range(120))).encode()
+    frame = pd.read_csv(BytesIO(source))
+    output = frame.rename(columns={"x": "feature"}).drop(columns=["y"])
+    output["total"] = frame["x"] + frame["y"]
+    parameters = {"target": None, "treatment": None, "measurement_semantics": [
+        {"column": column, "kind": "continuous", "evidence": "全部原始输入列是连续测量"}
+        for column in frame.columns]}
+    mapping = {"x": "feature"}
+    if declare_dropped_column:
+        mapping["y"] = None
+    report = validate_candidate(data_bytes=output.to_csv(index=False).encode(),
+        script_bytes=b"# This check validates CSV bytes, not script execution.\n",
+        metadata={"summary": "重命名 x、删除 y，并计算 total", "observation_unit": "一次测量",
+            "transformations": ["重命名", "删列", "计算"], "measurement_columns": mapping,
+            "variable_semantics": {"feature": "原 x 测量", "z": "原 z 测量", "total": "计算结果"}},
+        analysis_parameters=parameters, specifications=[PC_SPEC], max_bytes=100_000)
+    assert report["accepted"] is declare_dropped_column
+    if declare_dropped_column:
+        assert report["semantic_kinds"] == {"feature": "continuous", "z": "continuous"}
+        assert "total" not in report["semantic_kinds"]
+    else:
+        assert "measurement_semantics_invalid" in {item["code"] for item in report["errors"]}
+    assert [item["column"] for item in parameters["measurement_semantics"]] == ["x", "y", "z"]

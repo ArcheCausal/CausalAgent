@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.json_schema import WithJsonSchema
 from typing_extensions import Annotated
 
+from Agent.effect_request import normalize_effect_request
+
 from .models import (
     CausalEffect,
     ContractModel,
@@ -104,6 +106,39 @@ class CausalCdfmInput(ContractModel):
         return value
 
 
+EFFECT_REQUEST_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["effect", "intervention"],
+    "properties": {
+        "effect": {"type": "string", "enum": ["average_total_effect"]},
+        "target_population": {"type": ["string", "null"], "minLength": 1},
+        "intervention": {
+            "anyOf": [
+                {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["type", "from", "to", "unit"],
+                    "properties": {
+                        "type": {"type": "string", "enum": ["fixed_contrast"]},
+                        "from": {"type": "number"}, "to": {"type": "number"},
+                        "unit": {"type": "string", "minLength": 1},
+                    },
+                },
+                {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["type", "delta", "unit"],
+                    "properties": {
+                        "type": {"type": "string", "enum": ["additive_shift"]},
+                        "delta": {"type": "number"},
+                        "unit": {"type": "string", "minLength": 1},
+                    },
+                },
+            ],
+        },
+    },
+}
+
+
 class CausalBackdoorOlsInput(ContractModel):
     """后门调整 ATE 的模型可见参数；图只能通过结果引用提供。"""
 
@@ -112,6 +147,17 @@ class CausalBackdoorOlsInput(ContractModel):
     )
     treatment: str
     outcome: str
+    effect_request: Annotated[dict[str, Any], WithJsonSchema(EFFECT_REQUEST_SCHEMA)] = Field(
+        description="已确认的平均总效应请求；原始单位固定取值对比或增量干预。不得补猜默认对比。",
+    )
+
+    @field_validator("effect_request", mode="before")
+    @classmethod
+    def validate_request(cls, value: Any) -> dict[str, Any]:
+        request = normalize_effect_request(value)
+        if request is None:
+            raise ValueError("a confirmed effect_request object is required")
+        return request
 
     @field_validator("graph_result_ref", "treatment", "outcome")
     @classmethod
@@ -121,7 +167,7 @@ class CausalBackdoorOlsInput(ContractModel):
         return value
 
 
-class CausalGFormulaInput(ContractModel):
+class CausalGFormulaInput(CausalBackdoorOlsInput):
     """g-formula 的模型可见参数；随机种子由服务端固定。"""
 
     graph_result_ref: str = Field(
@@ -129,9 +175,6 @@ class CausalGFormulaInput(ContractModel):
     )
     treatment: str
     outcome: str
-    contrast: tuple[float, float] = Field(
-        description="要比较的两个处理取值 (x0, x1)，效应为 do(x1) 减 do(x0)。",
-    )
     outcome_model: Literal["linear", "hgb"] = "linear"
     bootstrap: int = Field(default=200, ge=0, le=2000)
 
@@ -145,8 +188,8 @@ class CausalGFormulaInput(ContractModel):
     @field_validator("bootstrap", mode="before")
     @classmethod
     def validate_bootstrap_type(cls, value: Any) -> Any:
-        if isinstance(value, bool):
-            raise ValueError("bootstrap must be an integer")
+        if type(value) is not int or value == 1:
+            raise ValueError("bootstrap must be zero or an integer of at least two")
         return value
 
 
@@ -514,11 +557,11 @@ DIRECT_LINGAM_SPEC = AlgorithmSpec(
 
 CDFM_SPEC = AlgorithmSpec(
     capability_id="causal.cdfm",
-    version="2.0",
+    version="2.1",
     graph_semantics="acyclic_directed_mixed_graph",
     matrix_convention="row_to_column_pair_binary",
     edge_meanings={"directed": "模型推断的候选因果方向", "bidirected": "潜在共同原因候选，不代表已经证实存在共同原因"},
-    limitations=("机制覆盖不保证当前数据上的可识别性或准确率", "阈值可改变结构；边不携带效应量或置信度", "不继承 LiNGAM 的线性、非高斯和无潜在混杂假设"),
+    limitations=("机制覆盖不保证当前数据上的可识别性或准确率", "阈值可改变结构；模型预测概率不是结构系数、效应量或统计置信度，不能自动提高整体置信度或决定主图", "不继承 LiNGAM 的线性、非高斯和无潜在混杂假设"),
     tool_name="causal_cdfm",
     public_name="CDFM 因果发现",
     description=(
@@ -529,7 +572,11 @@ CDFM_SPEC = AlgorithmSpec(
         "不传 threshold 时由服务端按模型自带校准器自动决定判决边界，传入 0 到 1 的数值可覆盖它。"
         "缺失值按 NaN/±Inf 掩码传递给模型；当前接收数值存储列，不接受未编码的非数值分类列。"
         "数值准入不证明测量语义连续，也不保证训练机制适用于当前分布。"
-        "输出只有边及其方向，不包含权重和置信度：方向可能随阈值变化，"
+        "CDFM 提供候选结构及模型预测概率。仅输出已解码边的正反两个矩阵位置概率，"
+        "forward_probability 对应 source→target，reverse_probability 对应 target→source；"
+        "双箭头边的两个分数是共同决定边型的编码概率，不是两条互反因果边。"
+        "概率由程序提取，不能由模型重新计算或补写，不代表结构系数、效应量或统计置信度。"
+        "实际阈值见 diagnostics.metrics.threshold；不根据概率自动提高整体置信度或强制选择主图。方向可能随阈值变化，"
         "不可识别场景下方向证据不足；成对的两个 1 解码为一条双箭头边，表示潜在共同原因候选，"
         "结果不构成准确率或生产能力证明。"
     ),
@@ -572,7 +619,7 @@ CDFM_SPEC = AlgorithmSpec(
 
 CAUSAL_BACKDOOR_OLS_SPEC = AlgorithmSpec(
     capability_id="causal.backdoor_ols",
-    version="2.0",
+    version="3.0",
     tool_name="causal_backdoor_ols",
     public_name="因果效应估计（后门调整）",
     description=(
@@ -587,7 +634,7 @@ CAUSAL_BACKDOOR_OLS_SPEC = AlgorithmSpec(
     assumptions=(
         "图包含查询的处理与结果变量，且无未定向边、双箭头边或有向环",
         "处理变量、结果变量和处理变量的全部父节点为数值存储，无缺失、常数或非有限值",
-        "函数形式近似线性，效应按每 1 单位变化解释，不对非线性或交互建模",
+        "函数形式近似线性，效应按已确认的干预幅度解释，不对非线性或交互建模",
         "调整集取处理变量的全部父节点，不搜索其他有效调整集",
     ),
     result_contract=CausalEffect,
@@ -623,7 +670,7 @@ CAUSAL_BACKDOOR_OLS_SPEC = AlgorithmSpec(
 
 CAUSAL_G_FORMULA_SPEC = AlgorithmSpec(
     capability_id="causal.g_formula",
-    version="1.0",
+    version="3.0",
     tool_name="causal_g_formula",
     public_name="因果效应估计（g-formula）",
     description=(
@@ -651,7 +698,7 @@ CAUSAL_G_FORMULA_SPEC = AlgorithmSpec(
     description_source=("用途", "图引用要求", "模型选择", "不适用边界"),
     data_requirements=(
         "standardized_graph",
-        "处理变量、结果变量及其祖先列为数值列",
+        "处理变量、结果变量及处理变量全部父节点为数值列",
         "无缺失值、空列、常数列或非有限值",
     ),
     requires_numeric_columns=True,

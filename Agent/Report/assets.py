@@ -16,8 +16,10 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from pydantic import ValidationError
 
 from Agent.Processing.fold_processing import PROFILE_THRESHOLDS
+from Agent.deep_agent_tools.models import EdgePrediction
 
 from Agent.Report.document import (
     ChartAsset,
@@ -346,6 +348,19 @@ def build_causal_graph_model(
         if raw_edge.get("arrows") == "from":
             source_id, target_id = target_id, source_id
 
+        try:
+            prediction = (
+                EdgePrediction.model_validate(raw_edge["prediction"])
+                if raw_edge.get("prediction") is not None else None
+            )
+        except ValidationError:
+            return None
+        if prediction is not None and raw_edge.get("arrows") == "from":
+            prediction = EdgePrediction(
+                forward_probability=prediction.reverse_probability,
+                reverse_probability=prediction.forward_probability,
+            )
+
         weight = raw_edge.get("weight")
         if not isinstance(weight, (int, float)) or isinstance(weight, bool):
             weight = None
@@ -362,6 +377,7 @@ def build_causal_graph_model(
                 target=target_id,
                 edge_type=_vis_edge_type(raw_edge),
                 weight=float(weight) if weight is not None else None,
+                prediction=prediction,
                 metadata={},
                 evidence_refs=[],
             )
@@ -370,6 +386,11 @@ def build_causal_graph_model(
     metadata: dict[str, Any] = {"graph_source": graph_source}
     if algorithm:
         metadata["algorithm"] = algorithm
+    diagnostics = graph.get("diagnostics")
+    if isinstance(diagnostics, Mapping):
+        metrics = diagnostics.get("metrics")
+        if isinstance(metrics, Mapping) and metrics.get("threshold") is not None:
+            metadata["diagnostics"] = {"metrics": {"threshold": metrics["threshold"]}}
     semantics = graph.get("graph_semantics")
     if isinstance(semantics, str) and semantics.strip():
         metadata["graph_semantics"] = semantics

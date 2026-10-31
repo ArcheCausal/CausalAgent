@@ -124,6 +124,8 @@ class BaseAlgorithmAdapter(ABC):
         data_view: DataViewSummary | None = None,
         ate_check: AteApplicabilityCheck | None = None,
     ) -> AlgorithmResult:
+        if self.spec.capability_id != "causal.backdoor_ols":
+            ate_check = None
         return AlgorithmResult(
             result_ref=build_result_ref(
                 invocation_id=command.invocation_id,
@@ -147,6 +149,7 @@ class BaseAlgorithmAdapter(ABC):
                 input_identity=command.input_identity,
                 source_input_identity=context.source_input_identity,
                 analysis_dataset_id=context.analysis_dataset_id,
+                research_identity=context.research_identity,
                 spec_digest=command.spec_digest,
                 invocation_id=command.invocation_id,
                 capability_id=command.capability_id,
@@ -350,7 +353,7 @@ class BaseAlgorithmAdapter(ABC):
             columns=adapter_input.data_profile.column_names,
         )
         ate_check = None
-        if self.spec.capability_id == "causal.backdoor_ols":
+        if self.spec.kind == "causal_estimation":
             graph_payload = adapter_input.artifacts.get("standardized_graph")
             if graph_payload is not None:
                 try:
@@ -377,6 +380,8 @@ class BaseAlgorithmAdapter(ABC):
                 publish_ate_check(invocation_id, ate_check)
             applicability = ate_check.applicability if ate_check else "ready"
             reason = ATE_REASON_SUMMARIES.get(ate_check.reason_code) if ate_check else None
+            if self.spec.capability_id != "causal.backdoor_ols":
+                ate_check = None
         else:
             applicability, reason = self.spec.assess_applicability(
                 profile=adapter_input.data_profile,
@@ -431,7 +436,16 @@ class BaseAlgorithmAdapter(ABC):
             result_index=result_index,
             timeout_seconds=self.spec.default_timeout_seconds,
             artifacts=dict(adapter_input.artifacts),
+            research_identity=context.research_identity,
         )
+        if self.spec.kind == "causal_estimation":
+            confirmed = adapter_input.artifacts.get("effect_request")
+            if confirmed is not None and confirmed != parsed_parameters.effect_request:
+                return self._base_result(
+                    command=command, context=context, status="invalid_input",
+                    safe_error_code=SafeErrorCode.ALGORITHM_INPUT_INVALID,
+                    summary="工具效应请求与已确认定义不一致。",
+                )
         not_ready = self.validate_input(adapter_input)
         if not_ready is not None:
             status, safe_error_code = not_ready

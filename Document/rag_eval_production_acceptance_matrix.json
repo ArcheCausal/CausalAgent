@@ -198,19 +198,6 @@
       ]
     },
     {
-      "id": "integration.compose.replica_contract",
-      "layer": "integration",
-      "capability": "兼容副本 Compose 静态部署合同",
-      "source_format": "not_applicable",
-      "runner": "compose",
-      "target": "docker-compose.replica.yml",
-      "expected": "pass",
-      "mutates_external_state": false,
-      "requires": [
-        "repository_metadata"
-      ]
-    },
-    {
       "id": "integration.migrations.single_head",
       "layer": "integration",
       "capability": "Alembic migration 单 head 合同",

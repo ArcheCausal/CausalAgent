@@ -7,7 +7,9 @@ from copy import deepcopy
 import hashlib
 from typing import Any
 
-from Agent.data_processing.parameters import PARAMETER_BINDING_KEY, ParameterContractError
+from Agent.data_processing.parameters import (
+    PARAMETER_BINDING_KEY, ParameterContractError, parameter_identity, validate_parameter_history,
+)
 from Agent.data_processing.plans import build_processing_plan_version
 from Agent.data_processing.validation import DatasetValidationError, _inspect_csv_shape
 
@@ -48,6 +50,10 @@ def confirmed_version(state: Mapping[str, Any], *, job_id: str, source_hash: str
         if snapshot is not None:
             raise ParameterContractError("unversioned processing confirmation snapshot")
         return None
+    validate_parameter_history(state.get("analysis_parameters"), state.get("analysis_parameter_changes"), job_id=job_id)
+    if (state.get("data_processing_pending_input_id") or not state.get("data_processing_research_spec_ready")
+            or state.get("data_processing_plan_parameter_identity") != parameter_identity(state.get("analysis_parameters") or {})):
+        raise ParameterContractError("processing confirmation has unresolved input or stale research parameters")
     if not isinstance(snapshot, dict) or snapshot != state.get("data_processing_metadata"):
         raise ParameterContractError("processing confirmation snapshot conflicts with draft")
     expected = build_processing_plan_version(

@@ -316,7 +316,7 @@ def test_finalization_gate_requires_algorithm_result_on_analysis_route() -> None
             algorithm_results={},
             action_ledger={},
             trusted_identity=identity,
-            route_decision="fold",
+            route_decision="data_processing",
         )
 
     accepted = FinalizationGate(registry=registry).validate(
@@ -355,7 +355,7 @@ def test_finalization_gate_allows_discarded_result_on_analysis_route() -> None:
             ledger.invocation_id: ledger,
         },
         trusted_identity=identity,
-        route_decision="fold",
+        route_decision="data_processing",
     )
     assert accepted.outcome == "evidence_only"
 
@@ -381,7 +381,7 @@ def test_finalization_gate_allows_analysis_without_rag_retrieval() -> None:
         algorithm_results={result.result_ref: result},
         action_ledger={ledger.invocation_id: ledger},
         trusted_identity=identity,
-        route_decision="fold",
+        route_decision="data_processing",
     )
     assert accepted.primary_result_ref == result.result_ref
 
@@ -419,7 +419,7 @@ def test_finalization_gate_rejects_nonterminal_evidence_ledger() -> None:
                 web_ledger.invocation_id: web_ledger,
             },
             trusted_identity=identity,
-            route_decision="fold",
+            route_decision="data_processing",
             web_search_enabled=True,
         )
 
@@ -449,7 +449,7 @@ def test_finalization_gate_requires_enabled_web_search_on_analysis_route() -> No
             algorithm_results={result.result_ref: result},
             action_ledger={ledger.invocation_id: ledger},
             trusted_identity=identity,
-            route_decision="fold",
+            route_decision="data_processing",
             web_search_enabled=True,
         )
 
@@ -462,7 +462,7 @@ def test_finalization_gate_requires_enabled_web_search_on_analysis_route() -> No
             web_ledger.invocation_id: web_ledger,
         },
         trusted_identity=identity,
-        route_decision="fold",
+        route_decision="data_processing",
         web_search_enabled=True,
     )
     assert accepted.primary_result_ref == result.result_ref
@@ -667,7 +667,8 @@ def test_gate_validated_decision_is_projected_with_public_algorithm_names() -> N
     assert result.result_ref not in repr(events[0])
 
 
-def test_finalization_gate_rejects_incomplete_current_ledger_ownership() -> None:
+@pytest.mark.parametrize("scientific_limitations", [None, []])
+def test_finalization_gate_rejects_incomplete_current_ledger_ownership(scientific_limitations) -> None:
     identity, registry, result, ledger = _algorithm_execution()
     decision = validate_structured_response(
         {
@@ -690,6 +691,7 @@ def test_finalization_gate_rejects_incomplete_current_ledger_ownership() -> None
             algorithm_results={result.result_ref: result},
             action_ledger={ledger.invocation_id: incomplete},
             trusted_identity=identity,
+            scientific_limitations=scientific_limitations,
         )
 
 
@@ -768,10 +770,11 @@ def test_finalization_gate_accepts_no_valid_algorithm_only_after_a_failed_call()
     assert accepted.outcome == "no_valid_algorithm"
 
 
-def test_effect_rule_uses_one_retry_then_degrades() -> None:
+def test_missing_effect_diagnosis_publishes_candidate_with_limitation() -> None:
+    from langgraph.runtime import Runtime
     identity, registry, result, ledger = _algorithm_execution()
     gate = FinalizationGate(registry=registry)
-    runtime = SimpleNamespace(
+    runtime = Runtime(
         context=AgentRunContext(execution_guard=None, trusted_identity=identity),
         stream_writer=[].append,
     )
@@ -779,27 +782,18 @@ def test_effect_rule_uses_one_retry_then_degrades() -> None:
         "deep_agent_structured_response": _primary_decision(result),
         "deep_agent_algorithm_results": {result.result_ref: result},
         "deep_agent_action_ledger": {ledger.invocation_id: ledger},
-        "route_decision": "fold",
+        "route_decision": "data_processing",
         "analysis_parameters": _EFFECT_PARAMETERS,
         "messages": [HumanMessage(content=_EFFECT_QUESTION)],
     }
 
-    retried = asyncio.run(
+    accepted = asyncio.run(
         _finalization_gate_node(state, runtime=runtime, config={}, gate=gate)
     )
-    assert retried["finalization_retry_count"] == 1
-    assert "effect_diagnose" in retried["deep_agent_retry_instruction"]
-
-    degraded = asyncio.run(
-        _finalization_gate_node(
-            {**state, "finalization_retry_count": 1},
-            runtime=runtime,
-            config={},
-            gate=gate,
-        )
-    )
-    assert degraded["finalization_status"] == "degraded"
-    assert degraded["finalization_error"] == "FINALIZATION_CONTRACT_INVALID"
+    assert accepted["finalization_status"] == "valid"
+    assert accepted["analysis_limitations"][0]["code"] == "effect_question_without_diagnose"
+    assert accepted["deep_agent_decision"].primary_result_ref == result.result_ref
+    assert accepted["causal_analysis_result"]["success"] is True
 
 
 def test_no_valid_algorithm_hint_still_demands_ate_for_effect_question() -> None:
@@ -825,7 +819,7 @@ def test_no_valid_algorithm_hint_still_demands_ate_for_effect_question() -> None
             algorithm_results={result.result_ref: result},
             action_ledger={ledger.invocation_id: ledger},
             trusted_identity=identity,
-            route_decision="fold",
+            route_decision="data_processing",
             analysis_parameters=_EFFECT_PARAMETERS,
             analysis_question=_EFFECT_QUESTION,
         )
@@ -1007,7 +1001,7 @@ def test_gate_requires_diagnose_whenever_variables_are_bound(question) -> None:
             algorithm_results={result.result_ref: result},
             action_ledger={ledger.invocation_id: ledger},
             trusted_identity=identity,
-            route_decision="fold",
+            route_decision="data_processing",
             analysis_parameters=_EFFECT_PARAMETERS,
             analysis_question=question,
         )
@@ -1037,7 +1031,7 @@ def test_gate_accepts_effect_question_after_diagnose(diagnose_status) -> None:
         algorithm_results=algorithm_results,
         action_ledger=action_ledger,
         trusted_identity=identity,
-        route_decision="fold",
+        route_decision="data_processing",
         analysis_parameters=_EFFECT_PARAMETERS,
         analysis_question=_EFFECT_QUESTION,
     )
@@ -1058,7 +1052,7 @@ def test_gate_requires_estimation_after_successful_diagnose() -> None:
                 diagnose.invocation_id: diagnose,
             },
             trusted_identity=identity,
-            route_decision="fold",
+            route_decision="data_processing",
             analysis_parameters=_EFFECT_PARAMETERS,
             analysis_question=_EFFECT_QUESTION,
         )
@@ -1105,7 +1099,7 @@ def test_gate_rejects_non_estimation_primary_when_estimation_exists() -> None:
                 diagnose.invocation_id: diagnose,
             },
             trusted_identity=identity,
-            route_decision="fold",
+            route_decision="data_processing",
             analysis_parameters=_EFFECT_PARAMETERS,
             analysis_question=_EFFECT_QUESTION,
         )
@@ -1130,7 +1124,7 @@ def test_gate_requires_estimation_on_the_diagnosed_graph() -> None:
                 diagnose.invocation_id: diagnose,
             },
             trusted_identity=identity,
-            route_decision="fold",
+            route_decision="data_processing",
             analysis_parameters=_EFFECT_PARAMETERS,
             analysis_question=_EFFECT_QUESTION,
         )
@@ -1153,7 +1147,7 @@ def test_gate_rejects_estimation_result_without_effect() -> None:
                 diagnose.invocation_id: diagnose,
             },
             trusted_identity=identity,
-            route_decision="fold",
+            route_decision="data_processing",
             analysis_parameters=_EFFECT_PARAMETERS,
             analysis_question=_EFFECT_QUESTION,
         )
@@ -1187,7 +1181,7 @@ def test_gate_skips_ate_requirement_when_trigger_is_incomplete(parameters, quest
         algorithm_results={result.result_ref: result},
         action_ledger={ledger.invocation_id: ledger},
         trusted_identity=identity,
-        route_decision="fold",
+        route_decision="data_processing",
         analysis_parameters=parameters,
         analysis_question=question,
     )
@@ -1216,7 +1210,7 @@ def test_gate_skips_ate_requirement_without_valid_graph() -> None:
         algorithm_results={result.result_ref: result},
         action_ledger={ledger.invocation_id: ledger},
         trusted_identity=identity,
-        route_decision="fold",
+        route_decision="data_processing",
         analysis_parameters=_EFFECT_PARAMETERS,
         analysis_question=_EFFECT_QUESTION,
     )
@@ -1290,7 +1284,7 @@ def test_diagnose_then_estimate_record_passes_finalization() -> None:
             estimation_record.invocation_id: estimation_record,
         },
         trusted_identity=identity,
-        route_decision="fold",
+        route_decision="data_processing",
         analysis_parameters=_EFFECT_PARAMETERS,
     )
 

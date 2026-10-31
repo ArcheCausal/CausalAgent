@@ -13,7 +13,8 @@ from Agent.deep_agent_tools.algorithm_specs import AlgorithmSpec
 from Agent.deep_agent_tools.preprocessing import build_data_profile
 from Agent.measurement_semantics import normalize_measurement_semantics
 from Agent.data_processing.parameters import (
-    PARAMETER_BINDING_KEY, ParameterContractError, execution_parameters, parameter_identity,
+    PARAMETER_BINDING_KEY, ParameterContractError, execution_measurement_semantics,
+    execution_parameters, parameter_identity,
 )
 
 
@@ -123,10 +124,17 @@ def validate_candidate(
     declared_semantics = parameters.get("measurement_semantics")
     if declared_semantics is None:
         declared_semantics = []
+    output_declarations: list[dict[str, str]] = []
     try:
+        # 研究声明绑定原始输入；只有投影后的声明才要求出现在候选输出中。
+        normalize_measurement_semantics(declared_semantics)
+        output_declarations = execution_measurement_semantics(parameters, metadata)
         semantic_kinds = normalize_measurement_semantics(
-            declared_semantics, columns=columns,
+            output_declarations, columns=columns,
         )
+    except ParameterContractError:
+        semantic_kinds = {}
+        errors.append(_issue("measurement_columns_invalid", "测量列映射包含非法来源、输出或冲突声明"))
     except ValueError:
         semantic_kinds = {}
         errors.append(_issue("measurement_semantics_invalid", "测量语义包含非法类型、字段或冲突声明"))
@@ -144,7 +152,9 @@ def validate_candidate(
     for role, column in (("target", target), ("treatment", treatment)):
         if column and column not in columns:
             errors.append(_issue(f"{role}_missing", f"处理后数据中缺少已声明的{_role_name(role)}"))
-        elif column and not _has_semantics(column, variable_semantics, parameters):
+        elif column and not _has_semantics(
+            column, variable_semantics, {"measurement_semantics": output_declarations},
+        ):
             errors.append(_issue(f"{role}_semantics_missing", f"缺少{_role_name(role)}的测量含义"))
 
     if isinstance(declared_semantics, (list, tuple)):
@@ -152,12 +162,9 @@ def validate_candidate(
             if not isinstance(item, Mapping):
                 errors.append(_issue("measurement_semantics_invalid", "用户声明的字段语义格式无效"))
                 continue
-            column = item.get("column")
             evidence = item.get("evidence")
-            if not isinstance(column, str) or column not in columns:
-                errors.append(_issue("measurement_column_missing", "用户声明的测量字段不在处理后数据中"))
             if not isinstance(evidence, str) or not evidence.strip():
-                errors.append(_issue("measurement_evidence_missing", "字段测量含义缺少用户原话依据"))
+                errors.append(_issue("measurement_evidence_missing", "字段测量含义缺少非空声明依据"))
 
     algorithm_compatibility: list[dict[str, Any]] = []
     compatible_count = 0
@@ -201,6 +208,8 @@ def validate_candidate(
         "treatment": treatment,
         "research_roles": {role: parameters.get(role) for role in ("target", "treatment")},
         "role_columns": role_columns,
+        "effect_request": resolved.get("effect_request"),
+        "effect_execution_context": resolved.get("effect_execution_context"),
         "algorithm_compatibility": algorithm_compatibility,
         "compatible_algorithm_count": compatible_count,
         "scope_note": "输入兼容检查不证明算法科学假设成立，也不证明因果结论正确。",

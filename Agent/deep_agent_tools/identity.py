@@ -62,6 +62,9 @@ def provenance_matches_identity(provenance: Any, identity: Any) -> bool:
         and int(provenance.attempt_count) == int(identity.attempt_count)
         and int(provenance.lease_epoch) == int(identity.lease_epoch)
         and provenance.input_identity == current_input_identity(identity)
+        and getattr(provenance, "research_identity", None) == getattr(
+            getattr(identity, "analysis_input", identity), "research_identity", None,
+        )
     )
 
 
@@ -205,6 +208,7 @@ def build_deep_agent_analysis_scope(
     *,
     job_id: str | UUID,
     input_identity: str,
+    research_identity: str | None = None,
     spec_digests: Mapping[str, str] | None = None,
 ) -> str:
     """生成跨 worker/attempt 稳定的分析身份。
@@ -217,6 +221,7 @@ def build_deep_agent_analysis_scope(
     payload = {
         "job_id": canonical_job_id,
         "input_identity": _non_blank(input_identity, field_name="input_identity"),
+        "research_identity": research_identity,
         "spec_digests": dict(sorted((spec_digests or {}).items())),
     }
     digest = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()

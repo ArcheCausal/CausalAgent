@@ -59,7 +59,7 @@ def test_process_runtime_returns_explicit_llm_and_rag_state():
 
 
 def test_deep_agent_model_uses_validated_responses_profile(monkeypatch, secret_file_path):
-    """生产模型必须沿用 P0 验证过的无 reasoning Responses 配置。"""
+    """实际模型实例应默认启用 high，并保持 Responses 工具消息格式。"""
     monkeypatch.setenv("DEEP_AGENT_MODEL", "deepseek-v4-flash")
     monkeypatch.setenv("DEEP_AGENT_BASE_URL", "https://provider.example")
     # Deep Agent 密钥只来自密钥文件；这里指向 conftest 提供的测试密钥文件。
@@ -67,21 +67,46 @@ def test_deep_agent_model_uses_validated_responses_profile(monkeypatch, secret_f
     from config import secret_file as secret_file_module
 
     secret_file_module.reset_secret_cache()
-    configured = Mock(name="deep-agent-model")
+    monkeypatch.delenv("DEEP_AGENT_REASONING_EFFORT", raising=False)
+    model = create_deep_agent_model()
+    assert isinstance(model, ChatOpenAI)
+    assert model.model_name == "deepseek-v4-flash"
+    assert model.streaming is True
+    assert model.use_responses_api is True
+    assert model.output_version == "responses/v1"
+    assert model.reasoning == {"effort": "high"}
+    for effort in ("none", "low", "high", "max"):
+        monkeypatch.setenv("DEEP_AGENT_REASONING_EFFORT", effort)
+        configured = create_deep_agent_model()
+        assert configured.reasoning == {"effort": effort}
+        tool = {"type": "function", "function": {"name": "record_number",
+            "description": "Record a number", "parameters": {"type": "object", "properties": {}}}}
+        for forced in ("any", "required", "record_number", {"type": "function", "function": {"name": "record_number"}}):
+            bound = configured.bind_tools([tool], tool_choice=forced)
+            if effort != "none":
+                assert bound.kwargs["tool_choice"] == "auto"
+            else:
+                assert bound.kwargs["tool_choice"] != "auto"
+        for choice in ("none", "auto"):
+            assert configured.bind_tools([tool], tool_choice=choice).kwargs["tool_choice"] == choice
 
-    with patch("app.agent.worker.runtime.ChatOpenAI", return_value=configured) as model_cls:
-        model = create_deep_agent_model()
 
-    assert model is configured
-    model_cls.assert_called_once_with(
-        model="deepseek-v4-flash",
-        base_url="https://provider.example",
-        api_key="unit-test-deep-agent-api-key",
-        streaming=True,
-        use_responses_api=True,
-        output_version="responses/v1",
-        reasoning={"effort": "none"},
-    )
+def test_deep_agent_model_rejects_invalid_reasoning_effort(monkeypatch, secret_file_path):
+    import pytest
+
+    monkeypatch.setenv("CAUSALAGENT_SECRET_FILE", str(secret_file_path))
+    monkeypatch.setenv("DEEP_AGENT_BASE_URL", "https://provider.example")
+    monkeypatch.setenv("DEEP_AGENT_REASONING_EFFORT", "unexpected")
+    with pytest.raises(RuntimeError, match="DEEP_AGENT_REASONING_EFFORT"):
+        create_deep_agent_model()
+
+
+def test_outer_model_explicitly_disables_thinking():
+    from app.agent.worker.runtime import create_llm
+
+    model = create_llm()
+    assert isinstance(model, ChatOpenAI)
+    assert model.extra_body == {"thinking": {"type": "disabled"}}
 
 
 def test_rag_readiness_returns_release_identity_without_heavy_runtime_creation():

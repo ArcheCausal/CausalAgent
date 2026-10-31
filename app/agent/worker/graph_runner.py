@@ -22,6 +22,9 @@ from app.agent.worker.result_presenter import process_final_result
 from config.settings import settings
 from Agent.causal_agent.analysis_context import build_context_commit, build_context_index
 from Agent.causal_agent.context import AgentRunContext
+from Agent.data_processing.parameters import (
+    PROCESSING_GRAPH_NAME, PROCESSING_STATE_VERSION, UnsupportedProcessingCheckpointError,
+)
 from Database.analysis_contexts import load_active_context, load_context_index
 
 
@@ -291,6 +294,11 @@ async def ai_call_stream(
         await execution_guard.check_after_call()
     interrupts = _snapshot_interrupts(state)
     has_checkpoint = _snapshot_has_checkpoint(state)
+    current_processing_graph = getattr(graph, "name", None) == PROCESSING_GRAPH_NAME
+    if current_processing_graph and has_checkpoint and (
+        (getattr(state, "values", None) or {}).get("data_processing_state_version") != PROCESSING_STATE_VERSION
+    ):
+        raise UnsupportedProcessingCheckpointError("processing checkpoint requires a new Job")
     if interrupts:
         if input_type != "resume":
             raise RuntimeError("checkpoint 存在 pending interrupt，但当前输入不是 resume")
@@ -332,6 +340,8 @@ async def ai_call_stream(
     if execution_guard is not None:
         await execution_guard.check_after_call()
 
+    if current_processing_graph and isinstance(input_data, dict):
+        input_data["data_processing_state_version"] = PROCESSING_STATE_VERSION
     adapter = LangGraphEventAdapter(job_id, job_attempt)
     streamed_interrupts: list[Any] = []
     handler_recovered = False

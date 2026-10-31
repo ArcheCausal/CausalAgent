@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -12,8 +13,11 @@ from sklearn.linear_model import LinearRegression
 from Agent.deep_agent_tools.ate_applicability import (
     ATE_REASON_SUMMARIES,
     check_ate_graph,
+    check_ate_profile,
 )
 from Agent.deep_agent_tools.models import StandardizedGraph
+from Agent.deep_agent_tools.preprocessing import build_data_profile
+from .interventions import prepare_intervention, sample_identity
 
 
 class GFormulaNotApplicable(ValueError):
@@ -33,9 +37,7 @@ def _estimator(model: str) -> Any:
 def _design(frame: pd.DataFrame, adjustment: list[str]) -> np.ndarray:
     """处理变量在前、调整变量在后；对照取值直接替换第一列。"""
 
-    columns = ["__treatment__", *adjustment]
-    values = frame.loc[:, columns].to_numpy(dtype=float)
-    return values
+    return frame.to_numpy(dtype=float)
 
 
 def _effect(
@@ -44,19 +46,18 @@ def _effect(
     treatment: str,
     outcome: str,
     adjustment: list[str],
-    contrast: tuple[float, float],
+    baseline: np.ndarray,
+    changed: np.ndarray,
     outcome_model: str,
 ) -> float:
     """按调整后直接标准化估计条件均值差 E[m(x1,Z)] - E[m(x0,Z)]。"""
 
-    working = frame.loc[:, [treatment, *adjustment, outcome]].copy()
-    working = working.rename(columns={treatment: "__treatment__"})
-    design = _design(working, adjustment)
-    target = working[outcome].to_numpy(dtype=float)
+    design = _design(frame.loc[:, [treatment, *adjustment]], adjustment)
+    target = frame[outcome].to_numpy(dtype=float)
     model = _estimator(outcome_model)
     model.fit(design, target)
     effects: list[float] = []
-    for value in (contrast[0], contrast[1]):
+    for value in (baseline, changed):
         counterfactual = design.copy()
         counterfactual[:, 0] = value
         effects.append(float(model.predict(counterfactual).mean()))
@@ -69,17 +70,19 @@ def _linear_effect(
     treatment: str,
     outcome: str,
     adjustment: list[str],
-    contrast: tuple[float, float],
+    magnitude: float,
 ) -> float:
     """与 backdoor_ols 同式同列，按对比区间缩放的线性效应。"""
 
     columns = [treatment, *adjustment]
     values = frame[columns].to_numpy(dtype=float)
     design = np.column_stack([np.ones(len(values)), values])
+    if np.linalg.matrix_rank(design) < design.shape[1]:
+        raise GFormulaNotApplicable("设计矩阵奇异，不能计算成对线性比较。")
     coefficients, *_ = np.linalg.lstsq(
         design, frame[outcome].to_numpy(dtype=float), rcond=None
     )
-    return float(coefficients[1]) * (contrast[1] - contrast[0])
+    return float(coefficients[1]) * magnitude
 
 
 def estimate_g_formula(
@@ -88,7 +91,9 @@ def estimate_g_formula(
     data: pd.DataFrame,
     treatment: str,
     outcome: str,
-    contrast: tuple[float, float],
+    effect_request: dict[str, Any] | None = None,
+    execution_context: Mapping[str, Any] | None = None,
+    semantic_kinds: Mapping[str, str] | None = None,
     outcome_model: str = "linear",
     bootstrap: int = 200,
 ) -> dict[str, Any]:
@@ -96,12 +101,8 @@ def estimate_g_formula(
 
     if outcome_model not in ("linear", "hgb"):
         raise GFormulaNotApplicable("不支持的结果方程模型")
-    if bootstrap < 0:
-        raise GFormulaNotApplicable("bootstrap 次数不能为负")
-
-    contrast_values = (float(contrast[0]), float(contrast[1]))
-    if not all(np.isfinite(value) for value in contrast_values):
-        raise GFormulaNotApplicable("对比取值必须是有限数值")
+    if type(bootstrap) is not int or not 0 <= bootstrap <= 2000 or bootstrap == 1:
+        raise GFormulaNotApplicable("bootstrap 次数须为 0 或 2 至 2000 的整数")
 
     # 调整集沿用后门 OLS 的处理变量父节点规则，适用性检查与内核共用同一份规则。
     check = check_ate_graph(
@@ -119,19 +120,38 @@ def estimate_g_formula(
     adjustment = list(check.adjustment_set or ())
 
     columns = [treatment, outcome, *adjustment]
+    if not data.columns.is_unique:
+        raise GFormulaNotApplicable("估计数据列名称重复")
     missing = sorted(set(columns) - set(data.columns))
     if missing:
         raise GFormulaNotApplicable("数据缺少估计所需列：" + "、".join(missing))
-    frame = data.loc[:, columns].apply(pd.to_numeric, errors="coerce").astype(float)
+    if any(
+        not pd.api.types.is_numeric_dtype(data[column].dtype)
+        or pd.api.types.is_complex_dtype(data[column].dtype) for column in columns
+    ):
+        raise GFormulaNotApplicable("估计所用列必须为实数数值存储")
+    check = check_ate_profile(
+        check, profile=build_data_profile(data.loc[:, columns]),
+        semantic_kinds=semantic_kinds,
+    )
+    if check.applicability == "not_applicable":
+        raise GFormulaNotApplicable(ATE_REASON_SUMMARIES[check.reason_code])
+    frame = data.loc[:, columns].astype(float)
     if not np.isfinite(frame.to_numpy(dtype=float)).all():
         raise GFormulaNotApplicable("估计所用列包含缺失值、非数值或非有限值")
+    request, baseline, changed, support = prepare_intervention(
+        treatment_values=frame[treatment].to_numpy(dtype=float),
+        treatment=treatment, outcome=outcome,
+        effect_request=effect_request, execution_context=execution_context,
+    )
+    magnitude = float(changed[0] - baseline[0])
 
     estimate = _effect(
         frame,
         treatment=treatment,
         outcome=outcome,
         adjustment=adjustment,
-        contrast=contrast_values,
+        baseline=baseline, changed=changed,
         outcome_model=outcome_model,
     )
     if not np.isfinite(estimate):
@@ -142,7 +162,7 @@ def estimate_g_formula(
         treatment=treatment,
         outcome=outcome,
         adjustment=adjustment,
-        contrast=contrast_values,
+        magnitude=magnitude,
     )
     diagnostics_metrics: dict[str, float] = {
         "linear_estimate": linear_estimate,
@@ -157,15 +177,14 @@ def estimate_g_formula(
         effects: list[float] = []
         differences: list[float] = []
         for _ in range(bootstrap):
-            sample = frame.iloc[
-                rng.integers(0, len(frame), len(frame))
-            ].reset_index(drop=True)
+            indices = rng.integers(0, len(frame), len(frame))
+            sample = frame.iloc[indices].reset_index(drop=True)
             flexible = _effect(
                 sample,
                 treatment=treatment,
                 outcome=outcome,
                 adjustment=adjustment,
-                contrast=contrast_values,
+                baseline=baseline[indices], changed=changed[indices],
                 outcome_model=outcome_model,
             )
             effects.append(flexible)
@@ -175,17 +194,23 @@ def estimate_g_formula(
                     treatment=treatment,
                     outcome=outcome,
                     adjustment=adjustment,
-                    contrast=contrast_values,
+                    magnitude=magnitude,
                 ) - flexible
             )
+        if not np.isfinite(effects).all() or not np.isfinite(differences).all():
+            raise ValueError("bootstrap 结果包含非有限值，未删除重采样记录")
         standard_error = float(np.std(effects, ddof=1))
         low, high = np.percentile(effects, [2.5, 97.5])
         ci95 = (float(low), float(high))
-        finite_differences = [value for value in differences if np.isfinite(value)]
-        if len(finite_differences) >= 2:
-            difference_se = float(np.std(finite_differences, ddof=1))
+        difference_se = float(np.std(differences, ddof=1))
+        diff_low, diff_high = np.percentile(differences, [2.5, 97.5])
+        diagnostics_metrics["difference_ci95_low"] = float(diff_low)
+        diagnostics_metrics["difference_ci95_high"] = float(diff_high)
+        diagnostics_metrics["paired_bootstrap_n"] = bootstrap
+        diagnostics_metrics["bootstrap_seed"] = 0
     if difference_se is not None:
         diagnostics_metrics["difference_se"] = difference_se
+        diagnostics_metrics["difference_direction"] = "linear_minus_g_formula"
 
     return {
         "estimand": "ATE",
@@ -197,7 +222,15 @@ def estimate_g_formula(
         "ci95": ci95,
         "estimator": "g_formula",
         "n_rows": int(len(frame)),
-        "contrast": contrast_values,
+        "contrast": (
+            (request["intervention"]["from"], request["intervention"]["to"])
+            if request["intervention"]["type"] == "fixed_contrast"
+            and request["intervention"]["from"] != request["intervention"]["to"] else None
+        ),
+        "effect_request": request,
+        "sample_identity": sample_identity(frame),
+        "adjustment_rule": "parents_of_treatment",
+        "support": support,
         "outcome_model": outcome_model,
         "bootstrap_n": int(bootstrap),
         "diagnostics_metrics": diagnostics_metrics,

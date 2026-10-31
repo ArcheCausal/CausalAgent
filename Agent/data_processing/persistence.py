@@ -30,21 +30,19 @@ def _verify_parameter_sources(
     cursor: Any, job_id: str, changes: list[dict[str, Any]], *, include_initial: bool = False,
 ) -> str:
     evidence: list[str] = []
-    previous_sequence = -1
+    seen_sources: set[int] = set()
     for record in changes:
         cursor.execute(
             "SELECT input_id, input_text, sequence FROM analysis_job_inputs "
-            "WHERE job_id = %s AND input_id = %s AND input_type = 'resume'",
+            "WHERE job_id = %s AND input_id = %s AND input_type IN ('initial', 'resume')",
             (job_id, record["source_input_id"]),
         )
         row = cursor.fetchone()
         if not row:
             raise DatasetPersistenceError("parameter revision source does not belong to this Job")
-        if int(row["sequence"]) <= previous_sequence:
-            raise DatasetPersistenceError("parameter revision sources are not in input order")
-        previous_sequence = int(row["sequence"])
-        if include_initial:
+        if include_initial and int(row["input_id"]) not in seen_sources:
             evidence.append(str(row["input_text"]))
+        seen_sources.add(int(row["input_id"]))
     if include_initial:
         cursor.execute(
             "SELECT input_text FROM analysis_job_inputs WHERE job_id = %s AND input_type = 'initial' "
@@ -55,6 +53,30 @@ def _verify_parameter_sources(
             raise DatasetPersistenceError("parameter evidence has no initial Job input")
         evidence.insert(0, str(initial["input_text"]))
     return "\n".join(evidence)
+
+
+def read_research_inputs(identity: Any) -> list[dict[str, Any]]:
+    """从当前 Job 的可信输入账本读取来源，不能由模型提供输入正文。"""
+    with get_write_connection() as connection:
+        try:
+            connection.start_transaction()
+            cursor = connection.cursor(dictionary=True)
+            job_id, _worker, _attempt, _epoch, _user, source_hash = _identity_values(identity)
+            _lock_current_job(cursor, identity, source_hash)
+            cursor.execute(
+                "SELECT input_id, input_type, input_text FROM analysis_job_inputs "
+                "WHERE job_id = %s AND input_type IN ('initial', 'resume') ORDER BY sequence",
+                (job_id,),
+            )
+            result = [{"source_input_id": int(row["input_id"]), "input_type": row["input_type"],
+                       "text": row["input_text"]} for row in cursor.fetchall()]
+            if not result or result[0]["input_type"] != "initial":
+                raise DatasetPersistenceError("research specification requires the initial Job input")
+            connection.commit()
+            return result
+        except BaseException:
+            connection.rollback()
+            raise
 
 
 def read_parameter_answer(identity: Any, *, question_id: str, answer: Any) -> dict[str, Any]:

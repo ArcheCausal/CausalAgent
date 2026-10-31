@@ -10,6 +10,9 @@ services:
     extends:
       file: ./deploy/opensandbox/services.yml
       service: sandbox-controller
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     build:
       context: .
       dockerfile: Dockerfile
@@ -30,6 +33,9 @@ services:
     extends:
       file: ./deploy/opensandbox/services.yml
       service: opensandbox
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
     environment:
       ENVIRONMENT: development
     networks: [sandbox_upstream]
@@ -279,6 +285,7 @@ services:
       - BASE_URL=${BASE_URL}
       - MODEL=${MODEL}
       - DEEP_AGENT_MODEL=${DEEP_AGENT_MODEL:-deepseek-v4-flash}
+      - DEEP_AGENT_REASONING_EFFORT=${DEEP_AGENT_REASONING_EFFORT:-high}
       - DEEP_AGENT_BASE_URL=${DEEP_AGENT_BASE_URL:-${BASE_URL}}
       - DEEP_AGENT_CONTEXT_WINDOW_TOKENS=${DEEP_AGENT_CONTEXT_WINDOW_TOKENS:-1000000}
       - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-}

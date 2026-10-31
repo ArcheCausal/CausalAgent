@@ -6,7 +6,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 from typing import Literal, Optional, Any, List, Tuple, Dict
 import copy
 import logging
@@ -21,14 +21,14 @@ from langgraph.func import task
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 from Agent.llm_structured_output import StructuredOutputError, ainvoke_structured
-from Agent.measurement_semantics import normalize_measurement_semantics
-from Agent.data_processing.parameters import execution_parameters
+from Agent.data_processing.parameters import execution_parameters, parameter_identity
 from .fault_tolerance import (
     RAG_DEGRADATION_SUMMARY,
     build_rag_degradation_result,
 )
 from .analysis_context import (
     build_context_index,
+    latest_user_message_text as _latest_human_text,
     rebuild_context_index as _rebuild_context_index,
     build_report_analysis_context,
     report_primary_result,
@@ -152,10 +152,10 @@ class AgentIntentDecision(BaseModel):
 # 意图到路由的映射由后端固定，模型不能直接决定图路由。
 INTENT_ROUTES: Dict[str, str] = {
     "normal_chat": "normal_chat",
-    "start_analysis": "fold",
+    "start_analysis": "data_processing",
     "answer_report": "inquiry_answer",
     "revise_report": "report",
-    "rerun_analysis": "fold",
+    "rerun_analysis": "data_processing",
     "switch_analysis_context": "context_switch",
     "clarify": "inquiry_answer",
 }
@@ -185,15 +185,6 @@ _CSV_NAME_PATTERN = re.compile(r"[\w\-.]+\.csv", flags=re.IGNORECASE)
 # 整段重复进入提示词。
 INTENT_HISTORY_MESSAGE_CHARS = 400
 INTENT_HISTORY_TOTAL_CHARS = 2000
-
-
-def _latest_human_text(state: CausalAgentState) -> str:
-    """Return the latest human message content from the graph state."""
-    for message in reversed(state.get("messages", [])):
-        if isinstance(message, HumanMessage):
-            content = getattr(message, "content", "")
-            return content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-    return ""
 
 
 def _recent_history_text(state: CausalAgentState, limit: int = 20) -> str:
@@ -326,10 +317,10 @@ def _resolve_agent_route(
         return "context_switch", "normal_generation", None
     if intent == "rerun_analysis":
         hint = (decision.context_hint or "").strip()
-        route = "context_switch" if hint else "fold"
+        route = "context_switch" if hint else "data_processing"
         return route, "normal_generation", None
     if intent == "start_analysis":
-        return "fold", "normal_generation", None
+        return "data_processing", "normal_generation", None
     return INTENT_ROUTES.get(intent, "normal_chat"), "normal_generation", None
 
 
@@ -398,10 +389,11 @@ async def agent_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         latest_human_text,
         _frozen_filename(state),
     ):
-        response_message = AIMessage(content="决策：信息不全，启动文件加载模块。", name="agent")
+        response_message = AIMessage(content="决策：进入数据处理流程。", name="agent")
         return {
             "messages": [response_message],
-            "route_decision": "fold",
+            "route_decision": "data_processing",
+            "analysis_question": latest_human_text,
             "agent_decision": {"intent": "start_analysis"},
             "report_revision_mode": "normal_generation",
         }
@@ -441,7 +433,7 @@ async def agent_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
     )
 
     # 根据后端映射出的路由生成用于审计的展示消息。
-    if route_decision == "fold":
+    if route_decision == "data_processing":
         response_message = AIMessage(content="决策：进入因果分析流程。", name="agent")
     elif route_decision == "report":
         response_message = AIMessage(content="决策：按当前分析上下文重新生成报告。", name="agent")
@@ -457,6 +449,8 @@ async def agent_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         "route_decision": route_decision,
         "report_revision_mode": revision_mode,
     }
+    if route_decision in {"data_processing", "context_switch"}:
+        update["analysis_question"] = latest_human_text
     if decision is not None:
         decision_dump = decision.model_dump()
         if _clarification:
@@ -518,10 +512,10 @@ def _context_has_confirmed_facts(context_row: dict) -> bool:
 def _switch_followup_route(*, intent: Optional[str], context_row: dict) -> str:
     """按原意图和目标上下文的事实决定切换之后的下一步。"""
     if intent == "rerun_analysis":
-        return "fold"
+        return "data_processing"
     if _context_has_confirmed_facts(context_row):
         return "inquiry_answer"
-    return "fold"
+    return "data_processing"
 
 
 def _context_candidates_text(candidates: list) -> str:
@@ -580,10 +574,13 @@ def _switched_context_state(
         "deep_agent_web_evidence": {},
         "deep_agent_decision": None,
         "deep_agent_structured_response": None,
+        "deep_agent_accepted_decision": None,
         "deep_agent_retry_instruction": "",
         "finalization_retry_count": 0,
         "finalization_status": None,
         "finalization_error": None,
+        "deep_agent_budget_exhausted": False,
+        "analysis_limitations": [],
     }
     if file_snapshot:
         update["file_summary"] = {
@@ -751,11 +748,11 @@ async def context_switch_node(
                     previous_context=previous_context,
                     previous_index=previous_index,
                     file_snapshot=result.get("file_snapshot"),
-                    route="fold",
+                    route="data_processing",
                     resolution={
                         "status": result.get("status"),
                         "analysis_context_id": result["analysis_context_id"],
-                        "followup_route": "fold",
+                        "followup_route": "data_processing",
                     },
                 )
         if len(files) > 1:
@@ -774,40 +771,6 @@ async def context_switch_node(
             )
     return _clarification_update(question=None, status="no_match")
 
-class MeasurementDeclaration(BaseModel):
-    column: str = Field(description="用户明确说明测量含义的单个变量名称；观察单位和整句研究要求不是变量名。")
-    kind: Literal["count", "ordinal", "category", "continuous", "binary", "unknown"]
-    evidence: str = Field(description="包含列名和测量含义的用户原话，必须逐字摘录；没有明确声明则不输出该条。")
-
-
-class foldQuery(BaseModel):
-    """只从用户对话中提取因果分析所需的关键参数。"""
-    target: Optional[str] = Field(
-        None,
-        description="用户指定的目标变量(target)或结果变量(outcome)名称；分析范围、算法和指令不是变量名。未指定时为 null，名称不必与 CSV 列名一致。"
-    )
-    treatment: Optional[str] = Field(
-        None,
-        description="用户指定的处理变量(treatment)或干预变量(intervention)名称；分析范围、算法和指令不是变量名。未指定时为 null，名称不必与 CSV 列名一致。"
-    )
-    observation_unit: Optional[str] = Field(
-        None, description="用户明确说明的每行代表什么观测对象或一次什么记录；未说明时为 null。"
-    )
-    measurement_semantics: list[MeasurementDeclaration] = Field(
-        default_factory=list, description="仅保存用户明确声明的变量测量类型；每行代表什么属于 observation_unit，没有列级声明时返回空列表。"
-    )
-
-    @model_validator(mode="after")
-    def validate_measurement_declarations(self):
-        normalize_measurement_semantics([item.model_dump() for item in self.measurement_semantics])
-        if any(not item.evidence.strip() for item in self.measurement_semantics):
-            raise ValueError("measurement evidence must be non-blank")
-        return self
-
-## fold节点用到的函数
-from Agent.Processing.fold_processing import get_data_summary, apply_measurement_semantics
-from Agent.Processing.fold_verify import validate_analysis
-from Agent.Processing.nonlinearity import measure_nonlinearity
 from Agent.Report.assets import (
     build_causal_graph_model,
     build_chart_assets,
@@ -826,121 +789,6 @@ from Agent.Report.document import (
     report_document_summary,
 )
 
-
-FILE_LOAD_INTERRUPT_MESSAGE = (
-    "当前任务冻结的 CSV 文件无法读取或解析。请取消任务，重新上传可用的 CSV 文件后再试。"
-)
-
-
-def _normalize_optional_llm_text(value: str | None) -> str | None:
-    """将 LLM 可空文本中的明确缺失哨兵转换为 None。"""
-    if value is None:
-        return None
-    normalized = value.strip()
-    if not normalized or normalized.casefold() in {"none", "null"}:
-        return None
-    return value
-
-
-def _initial_parameter_extraction_prompt() -> ChatPromptTemplate:
-    """初始提取与真实模型验收共用提示词；不包含增量修订语义。"""
-    return ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                """从用户的最新消息中提取目标变量、处理变量、观察单位和明确声明的字段测量含义。
-文件已由当前 Job 的冻结输入确定，不要从自然语言中选择文件。
-target 表示用户指定的目标或结果变量；treatment 表示用户指定的处理或干预变量。
-分析范围、算法名称、处理要求和完整指令不能作为这两个字段的值。用户使用的变量名称不必与 CSV 列名相同，提取阶段不进行列名成员检查，也不自行映射名称。
-结合对话理解用户的研究意图；没有明确指定某个角色，或明确取消该角色时，该字段返回 null。
-例如，“目标是收入，干预变量是培训”提取 target="收入"、treatment="培训"；“全部作为节点参与因果发现”只说明分析范围，不能作为角色值；“取消之前的目标，只做无目标的结构发现”表示 target=null。
-字段含义只能摘录用户明确说明的内容，不能从列名或数值推断。
-observation_unit 保存用户明确说明的每行所代表的观测对象或记录，没有说明时返回 null。
-measurement_semantics 只保存单个变量的测量类型声明；观察单位、分析范围和研究要求都不能作为 column。
-例如，“每行代表一件工件的一次独立加工”写入 observation_unit，measurement_semantics=[]；“每行是一台设备的一次测量，温度是连续测量值”只把温度写入 measurement_semantics，观察单位单独保存。不能因为用户说明了观察单位就添加 kind=unknown 的列声明。
-严格按 foldQuery schema 返回 JSON。""",
-            ),
-            MessagesPlaceholder(variable_name="messages"),
-        ]
-    )
-
-
-async def fold_node(
-    state: CausalAgentState,
-    llm: ChatOpenAI,
-    *,
-    runtime: Any = None,
-) -> dict:
-    """提取初始研究参数；最终上下文在数据处理父节点中绑定。"""
-    file_summary = state.get("file_summary") or {}
-    input_user_file_id = file_summary.get("user_file_id")
-    input_object_id = file_summary.get("object_id")
-    if not input_user_file_id or not input_object_id:
-        return {
-            "messages": [
-                AIMessage(
-                    content="请先上传并选择一个 CSV 文件，再开始因果分析。",
-                    name="fold",
-                )
-            ],
-            "fold_decision": "normal_chat",
-        }
-
-    try:
-        structured_response = await ainvoke_structured(
-            llm=llm,
-            schema=foldQuery,
-            prompt=_initial_parameter_extraction_prompt(),
-            inputs={"messages": llm_prompt_messages(state["messages"])},
-            node_name="fold",
-        )
-        target = _normalize_optional_llm_text(structured_response.target)
-        treatment = _normalize_optional_llm_text(structured_response.treatment)
-        observation_unit = _normalize_optional_llm_text(structured_response.observation_unit)
-        semantic_declarations = [
-            item.model_dump() for item in structured_response.measurement_semantics
-        ]
-    except StructuredOutputError:
-        _log_node_degradation("structured_output_error", "empty_parameters")
-        target = None
-        treatment = None
-        observation_unit = None
-        semantic_declarations = []
-
-    user_text = "\n".join(
-        message.content
-        for message in state.get("messages", [])
-        if isinstance(message, HumanMessage) and isinstance(message.content, str)
-    )
-    file_summary = {
-        "user_file_id": input_user_file_id,
-        "object_id": input_object_id,
-        "file_hash": file_summary.get("file_hash"),
-        "filename": file_summary.get("filename"),
-        "rows": None,
-        "columns": [],
-    }
-    analysis_parameters = {
-        "target": target,
-        "treatment": treatment,
-        "analysis_question": user_text[-6000:],
-        "observation_unit": observation_unit,
-        "measurement_semantics": semantic_declarations,
-    }
-    update = {
-        "messages": [
-            AIMessage(
-                content="原始文件已由当前任务冻结，接下来先准备并校验分析数据。",
-                name="fold",
-            )
-        ],
-        "analysis_parameters": analysis_parameters,
-        "analysis_parameter_changes": [],
-        "file_summary": file_summary,
-        "tool_call_request": False,
-        "fold_decision": "preprocess",
-    }
-    return update
 
 async def preprocess_node(
     state: CausalAgentState,
@@ -981,6 +829,7 @@ async def preprocess_node(
         content_hash=str(bound_identity["data_hash"]),
         filename=str(bound_identity["filename"]),
         semantic_kinds=bound_identity["semantic_kinds"],
+        research_identity=parameter_identity(bound_identity["analysis_parameters"]),
     )
     bound_data = await asyncio.to_thread(
         read_bound_dataset,
@@ -998,7 +847,6 @@ async def preprocess_node(
     profile = build_data_profile(df)
 
     from Agent.Processing.fold_processing import (
-        apply_measurement_semantics,
         get_data_summary,
     )
     from Agent.Processing.fold_verify import validate_analysis
@@ -1008,10 +856,13 @@ async def preprocess_node(
     prepared_metadata = bound_data["metadata"]
     resolved_parameters = execution_parameters(source_parameters, prepared_metadata)
     summary = get_data_summary(df)
-    declarations = source_parameters.get("measurement_semantics") or []
-    apply_measurement_semantics(
-        summary, declarations, user_text=bound_identity["parameter_evidence_text"],
-    )
+    for column, kind in bound_identity["semantic_kinds"].items():
+        if column not in summary["column_profiles"]:
+            raise RuntimeError("已校验的测量声明引用了缺失的输出列。")
+        summary["column_profiles"][column]["measurement_semantics"] = {
+            "kind": kind, "status": "user_stated", "source": "validated_research_spec",
+            "candidates": [],
+        }
     validation_code, validation_issues, recommendations = validate_analysis(
         summary,
         target=resolved_parameters.get("target"),
@@ -1028,6 +879,7 @@ async def preprocess_node(
                 "treatment": source_parameters.get("treatment"),
             },
             "role_columns": prepared_metadata.get("role_columns", {}),
+            "measurement_columns": prepared_metadata.get("measurement_columns", {}),
             "transformations": prepared_metadata.get("transformations", []),
             "variable_semantics": prepared_metadata.get("variable_semantics", {}),
             "processing_summary": prepared_metadata.get("summary", ""),
@@ -1881,7 +1733,10 @@ def _report_graph_asset(state: CausalAgentState):
     primary = report_primary_result(build_report_analysis_context(state))
     if primary is None or not primary.get("graph"):
         return None
-    selected_graph = dict(primary["graph"], graph_semantics=primary.get("graph_semantics"))
+    selected_graph = dict(
+        primary["graph"], graph_semantics=primary.get("graph_semantics"),
+        diagnostics=primary.get("diagnostics"),
+    )
     return build_causal_graph_model(
         selected_graph,
         graph_id=REPORT_GRAPH_ASSET_KEY,
@@ -2037,12 +1892,24 @@ def _report_execution_summary(state: CausalAgentState) -> dict[str, Any]:
             }
         )
     decision = facts.get("decision") or {}
+    primary_effect = next(
+        (result for result in facts.get("results", [])
+         if result.get("result_ref") == facts.get("primary_effect_result_ref")
+         and result.get("status") == "valid"),
+        None,
+    )
     return {
         "analysis_outcome": decision.get("outcome"),
         "report_completeness": "complete",
         "finalization_status": facts.get("finalization_status"),
         "algorithms": algorithms,
         "data_views_differ": (facts.get("data_view_comparison") or {}).get("data_views_differ"),
+        "analysis_limitations": facts.get("analysis_limitations", []),
+        "budget_exhausted": facts.get("budget_exhausted", False),
+        "preliminary_ols": bool(
+            (facts.get("analysis_limitations") or facts.get("budget_exhausted"))
+            and (primary_effect or {}).get("algorithm") == "causal.backdoor_ols"
+        ),
     }
 
 
@@ -2146,11 +2013,16 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         - 统计检验限制须依据实际检验方法说明，不把离散列联表的格子频数要求套用于 Fisher-Z；没有执行的适用性诊断只列为未检验事项。
         - PC 算法的一般性质与本次 independence_test 的条件分别解释；若使用 Fisher-Z，不能声称本次检验不受线性或分布条件限制。
         - 没有可引用的知识库或联网证据时只说明缺少证据；除非存在明确失败状态，不得将未执行、未启用或不可用猜测为检索失败。
-        - 函数形式只读取 functional_form：verdict=not_detected 写“未检出非线性”，不得写成“已确认线性”；
-          linear 写“线性与灵活估计一致”并给出 effect_difference 与 difference_se；
-          nonlinear 写“线性近似偏离”并说明主结果采用灵活估计；
-          flexible_primary 写“采用灵活估计，未做线性对比”；
-          undetermined 写“非线性检查未完成”并写明 reason 对应的真实终态或缺失原因。不得自行写死或改写判定阈值。
+        - 主图读取 primary_graph_result_ref，主效应只读取 primary_effect_result_ref；旧 primary_result_ref 只是兼容投影。主效应为空时如实说明 effect_status 和 effect_reason。
+        - 效应定义只读取 effect_request 和实际结果中的同名定义，不能将每单位系数写成指定区间的变化。
+        - 方法比较只读取 effect_comparisons 中 comparable=true 的组，说明差值方向、成对 bootstrap 差值区间及支持诊断。不同源图作为结构敏感性结果分别说明。方法差异不能直接证明非线性，没有业务阈值不能断言实质差异，也不能根据估计器名称替 Agent 选择主结果。
+        - effect_difference 的方向是 difference_direction（right_minus_left）；成对差值点值读取 paired_effect_difference，区间读取 difference_ci95，二者方向为 paired_difference_direction（linear_minus_flexible）。两种方向不可混用，不能将 right_minus_left 点值配上 linear_minus_flexible 的区间。缺少成对点值时仅报告已有区间及其方向，不自行填值。
+        - 差值区间包含零只表示本次比较未能区分两种估计，不证明线性、方法等价、无设定偏差或无实质偏差；没有业务容忍阈值及相应检验时不能作等价或实质性判断。模型 selection_rationale 或 assessment 若有此推断，应按实际比较事实解释，不能当作已验证结论复述。
+        - 每个效应数值都须对应其实际源图与估计器。同一图的两种估计不能计作两张图的效应证据，没有执行估计的图不能算作效应支持。跨图结果同号只描述本次结构敏感性观察，不证明结构正确或效应结论不依赖结构。
+        - selection_rationale、assessment、conflicts 和 revision_proposals 都是模型评估文本，Gate 接受不代表这些科学解释已被证明。若其数值、源图或估计器归属与 results 不符，报告必须按 results 更正解释；不能在冲突章节再次复述错误归属。
+        - 不同单位的边权不能仅按绝对数值大小判为不合理，必须结合量纲、变量尺度和已知业务约束；没有这些依据时，只能列出尚未检查的尺度与方向假设。
+        - analysis_limitations 是程序确认的检查缺口，必须如实说明；预算跳过不是算法执行失败，也不表示检查通过。
+          存在检查缺口时，图称为“候选因果结构”，OLS 称为“线性假设下的初步估计”；区间仅反映该模型下的不确定性。
 
         ## 报告文档结构
         你必须返回一个 JSON 对象，只包含 title 和 blocks 两个字段：

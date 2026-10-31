@@ -43,7 +43,8 @@ const identityMatches = computed(() => Boolean(props.identity.jobId)
   && props.identity.questionId === props.waiting.questionId
   && props.identity.planVersion === props.waiting.planVersion,
 )
-const disabled = computed(() => !isWaiting.value || props.submitting || !identityMatches.value)
+const disabled = computed(() => !isWaiting.value || props.submitting || !identityMatches.value
+  || isPlanConfirmation.value && props.waiting.plan?.effectRequest === undefined)
 const countdown = computed(() => {
   const seconds = remainingSeconds.value
   if (seconds === null) return ''
@@ -136,6 +137,45 @@ function other(): void {
       <dl>
         <dt>观察单位</dt>
         <dd>{{ waiting.plan.observationUnit }}</dd>
+        <dt>效应估计</dt>
+        <dd v-if="waiting.plan.effectRequest === undefined">未记录效应请求，请重新发起任务。</dd>
+        <dd v-else-if="waiting.plan.effectRequest === null">未请求，仅进行结构探索。</dd>
+        <dd v-else>
+          平均总效应；
+          <template v-if="waiting.plan.effectRequest.intervention.type === 'fixed_contrast'">
+            将处理变量从 {{ waiting.plan.effectRequest.intervention.from }} 改为 {{ waiting.plan.effectRequest.intervention.to }} {{ waiting.plan.effectRequest.intervention.unit }}。
+          </template>
+          <template v-else>
+            对每个观测的当前处理值增加 {{ waiting.plan.effectRequest.intervention.delta }} {{ waiting.plan.effectRequest.intervention.unit }}。
+          </template>
+          <p v-if="waiting.plan.effectRequest.target_population">目标总体限制：{{ waiting.plan.effectRequest.target_population }}</p>
+          <p v-else>目标总体为已确认分析数据的全部观测，没有额外子群限制。</p>
+          <p>此处确认研究定义；因果识别与干预支持由后续分析检查。</p>
+        </dd>
+        <template v-if="waiting.plan.effectExecutionContext?.treatment_transform">
+          <dt>处理变量转换</dt>
+          <dd>
+            {{ waiting.plan.effectExecutionContext.treatment_transform.source_column }}（{{ waiting.plan.effectExecutionContext.treatment_transform.source_unit }}）→
+            {{ waiting.plan.effectExecutionContext.treatment_transform.output_column }}（{{ waiting.plan.effectExecutionContext.treatment_transform.output_unit }}）；
+            <template v-if="waiting.plan.effectExecutionContext.treatment_transform.type === 'identity'">保留原始数值。</template>
+            <template v-else-if="waiting.plan.effectExecutionContext.treatment_transform.type === 'affine'">
+              输出值 = {{ waiting.plan.effectExecutionContext.treatment_transform.scale }} × 原始值 + {{ waiting.plan.effectExecutionContext.treatment_transform.offset }}。
+            </template>
+            <template v-else>{{ waiting.plan.effectExecutionContext.treatment_transform.description }}</template>
+          </dd>
+        </template>
+        <template v-else-if="waiting.plan.effectRequest">
+          <dt>处理变量转换</dt>
+          <dd>未明确，后续估计不能直接套用业务单位的干预值。</dd>
+        </template>
+        <template v-if="waiting.plan.effectRequest">
+          <dt>结果变量转换</dt>
+          <dd v-if="waiting.plan.effectExecutionContext?.outcome_transform?.type === 'identity'">保留原始数值。</dd>
+          <dd v-else-if="waiting.plan.effectExecutionContext?.outcome_transform">
+            {{ waiting.plan.effectExecutionContext.outcome_transform.description }}；后续估计需检查适用性。
+          </dd>
+          <dd v-else>未明确，后续估计需先确认结果变量尺度。</dd>
+        </template>
         <template v-if="waiting.plan.roleColumns?.target">
           <dt>结果变量对应列</dt>
           <dd>{{ waiting.plan.roleColumns.target }}</dd>
@@ -143,6 +183,16 @@ function other(): void {
         <template v-if="waiting.plan.roleColumns?.treatment">
           <dt>处理变量对应列</dt>
           <dd>{{ waiting.plan.roleColumns.treatment }}</dd>
+        </template>
+        <template v-if="Object.keys(waiting.plan.measurementColumns ?? {}).length">
+          <dt>原始测量列处理</dt>
+          <dd>
+            <ul>
+              <li v-for="(output, source) in waiting.plan.measurementColumns" :key="source">
+                {{ source }}：{{ output === null ? '不传递原始测量类型' : output === source ? '保留' : `重命名为 ${output}` }}
+              </li>
+            </ul>
+          </dd>
         </template>
         <dt>处理步骤</dt>
         <dd>

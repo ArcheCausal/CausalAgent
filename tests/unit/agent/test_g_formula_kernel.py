@@ -14,6 +14,22 @@ from Agent.CausalAgentMCP.inference.g_formula import (
 from Agent.deep_agent_tools.models import GraphEdge, StandardizedGraph
 
 
+def _request(start=0.0, stop=1.0):
+    return {"effect": "average_total_effect", "intervention": {
+        "type": "fixed_contrast", "from": start, "to": stop, "unit": "L/min",
+    }}
+
+
+def _context():
+    return {"treatment_column": "x", "outcome_column": "y", "treatment_unit": "L/min",
+            "treatment_transform": {"type": "identity"}, "outcome_transform": {"type": "identity"}}
+
+
+def _estimate(**kwargs):
+    return estimate_g_formula(**kwargs, execution_context=_context(),
+        semantic_kinds={"x": "continuous", "y": "continuous", "z": "continuous"})
+
+
 def _graph(nodes, edges) -> StandardizedGraph:
     return StandardizedGraph(
         graph_semantics="causal_estimation_input",
@@ -36,15 +52,17 @@ def _linear_dag() -> tuple[StandardizedGraph, pd.DataFrame]:
 
 def test_linear_g_formula_matches_backdoor_ols() -> None:
     graph, frame = _linear_dag()
-    g_formula = estimate_g_formula(
+    g_formula = _estimate(
         graph=graph,
         data=frame,
         treatment="x",
         outcome="y",
-        contrast=(0.0, 1.0),
+        effect_request=_request(),
         bootstrap=0,
     )
-    ols = estimate_ate(graph=graph, data=frame, treatment="x", outcome="y")
+    ols = estimate_ate(graph=graph, data=frame, treatment="x", outcome="y",
+        effect_request=_request(), execution_context=_context(),
+        semantic_kinds={"x": "continuous", "y": "continuous", "z": "continuous"})
     assert abs(g_formula["estimate"] - ols["estimate"]) < 0.02
     assert g_formula["estimator"] == "g_formula"
     assert g_formula["standard_error"] is None
@@ -60,13 +78,13 @@ def test_flexible_model_captures_nonlinear_effect() -> None:
     graph = _graph(["x", "y"], [("x", "y")])
     frame = pd.DataFrame({"x": x, "y": y})
 
-    linear = estimate_g_formula(
+    linear = _estimate(
         graph=graph, data=frame, treatment="x", outcome="y",
-        contrast=(0.0, 1.0), outcome_model="linear", bootstrap=200,
+        effect_request=_request(), outcome_model="linear", bootstrap=200,
     )
-    flexible = estimate_g_formula(
+    flexible = _estimate(
         graph=graph, data=frame, treatment="x", outcome="y",
-        contrast=(0.0, 1.0), outcome_model="hgb", bootstrap=0,
+        effect_request=_request(), outcome_model="hgb", bootstrap=0,
     )
 
     low, high = linear["ci95"]
@@ -75,13 +93,13 @@ def test_flexible_model_captures_nonlinear_effect() -> None:
 
 def test_bootstrap_is_reproducible_and_contains_point_estimate() -> None:
     graph, frame = _linear_dag()
-    first = estimate_g_formula(
+    first = _estimate(
         graph=graph, data=frame.head(400), treatment="x", outcome="y",
-        contrast=(0.0, 1.0), bootstrap=20,
+        effect_request=_request(), bootstrap=20,
     )
-    second = estimate_g_formula(
+    second = _estimate(
         graph=graph, data=frame.head(400), treatment="x", outcome="y",
-        contrast=(0.0, 1.0), bootstrap=20,
+        effect_request=_request(), bootstrap=20,
     )
     assert first == second
     low, high = first["ci95"]
@@ -92,9 +110,9 @@ def test_bootstrap_is_reproducible_and_contains_point_estimate() -> None:
 
 def test_linear_dag_difference_is_zero_with_finite_se() -> None:
     graph, frame = _linear_dag()
-    result = estimate_g_formula(
+    result = _estimate(
         graph=graph, data=frame.head(1500), treatment="x", outcome="y",
-        contrast=(0.0, 1.0), bootstrap=20,
+        effect_request=_request(), bootstrap=20,
     )
     metrics = result["diagnostics_metrics"]
     assert abs(metrics["effect_difference"]) < 0.05
@@ -107,9 +125,9 @@ def test_nonlinear_outcome_has_large_difference() -> None:
     x = rng.normal(size=1200)
     y = 3.0 * x**2 + 0.3 * rng.normal(size=1200)
     graph = _graph(["x", "y"], [("x", "y")])
-    result = estimate_g_formula(
+    result = _estimate(
         graph=graph, data=pd.DataFrame({"x": x, "y": y}),
-        treatment="x", outcome="y", contrast=(0.0, 1.0),
+        treatment="x", outcome="y", effect_request=_request(),
         outcome_model="hgb", bootstrap=40,
     )
     metrics = result["diagnostics_metrics"]
@@ -119,9 +137,9 @@ def test_nonlinear_outcome_has_large_difference() -> None:
 
 def test_linear_estimate_scales_with_contrast() -> None:
     graph, frame = _linear_dag()
-    result = estimate_g_formula(
+    result = _estimate(
         graph=graph, data=frame.head(1500), treatment="x", outcome="y",
-        contrast=(1.0, 3.0), bootstrap=0,
+        effect_request=_request(1.0, 3.0), bootstrap=0,
     )
     assert result["diagnostics_metrics"]["linear_estimate"] == pytest.approx(4.0, abs=0.1)
     assert "difference_se" not in result["diagnostics_metrics"]
@@ -158,7 +176,7 @@ def test_linear_estimate_scales_with_contrast() -> None:
 )
 def test_g_formula_rejects_invalid_input(graph, treatment, outcome, frame, message) -> None:
     with pytest.raises(GFormulaNotApplicable, match=message):
-        estimate_g_formula(
+        _estimate(
             graph=graph, data=frame, treatment=treatment, outcome=outcome,
-            contrast=(0.0, 1.0), bootstrap=0,
+            effect_request=_request(), bootstrap=0,
         )

@@ -8,7 +8,7 @@ import pytest
 from Agent.data_processing.lifecycle import (
     confirmed_version, execution_report, invalidate_plan, require_candidate_binding, update_plan, update_script,
 )
-from Agent.data_processing.parameters import PARAMETER_BINDING_KEY, ParameterContractError, parameter_binding
+from Agent.data_processing.parameters import PARAMETER_BINDING_KEY, ParameterContractError, parameter_binding, parameter_identity
 from Agent.data_processing.plans import build_processing_plan_version
 
 
@@ -16,14 +16,18 @@ JOB = "00000000-0000-0000-0000-000000000978"
 SOURCE = "a" * 64
 SEMANTIC = "b" * 64
 PLAN = {"summary": "保留观测值", "observation_unit": "一次观测",
-        "transformations": ["保留字段"], "variable_semantics": {"x": "测量值"}, "role_columns": {}, "limitations": []}
+        "transformations": ["保留字段"], "variable_semantics": {"x": "测量值"}, "role_columns": {}, "measurement_columns": {}, "limitations": []}
 SCRIPT = "print('prepare')"
 DATA = b"x,y\n1,2\n3,4\n"
 VERSION = build_processing_plan_version(job_id=JOB, source_hash=SOURCE, semantic_identity=SEMANTIC, metadata=PLAN)
 
 
 def current_state():
-    return {"data_processing_metadata": deepcopy(PLAN), "data_processing_confirmed_plan": deepcopy(PLAN),
+    return {"analysis_parameters": {"effect_request": None}, "analysis_parameter_changes": [],
+            "data_processing_research_spec_ready": True, "data_processing_pending_input_id": None,
+            "data_processing_input_columns": ["x", "y"],
+            "data_processing_plan_parameter_identity": parameter_identity({"effect_request": None}),
+            "data_processing_metadata": deepcopy(PLAN), "data_processing_confirmed_plan": deepcopy(PLAN),
             "data_processing_confirmed_plan_version": VERSION, "data_processing_semantic_identity": SEMANTIC,
             "data_processing_draft_script": SCRIPT, "data_processing_candidate_id": 12,
             "data_processing_candidate_revision": 2, "data_processing_execution_report": execution_report(
@@ -37,7 +41,7 @@ def candidate():
             "script_bytes": SCRIPT.encode(), "script_hash": hashlib.sha256(SCRIPT.encode()).hexdigest(),
             "metadata": {**deepcopy(PLAN), "processing_plan_identity": {
                 "plan_version": VERSION, "semantic_identity": SEMANTIC},
-                PARAMETER_BINDING_KEY: parameter_binding({}, [], job_id=JOB)}}
+                PARAMETER_BINDING_KEY: parameter_binding({"effect_request": None}, [], job_id=JOB)}}
 
 
 def test_identical_plan_and_script_preserve_confirmation_candidate_and_budgets():

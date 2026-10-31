@@ -98,7 +98,7 @@ class AdminFrontendDeploymentTests(unittest.TestCase):
         self.assertIn("SET PERSIST super_read_only = ON;", replica_init)
 
     def test_rag_eval_dataset_and_concurrency_compose_contract(self):
-        """三份运行 Compose 必须共享数据集目录并使用实际并发配置键。"""
+        """开发与生产 Compose 必须共享数据集目录并使用实际并发配置键。"""
         concurrency_defaults = {
             "RAG_EVAL_INGESTION_CONCURRENCY_LIMIT": "${RAG_EVAL_INGESTION_CONCURRENCY_LIMIT:-1}",
             "RAG_EVAL_CANDIDATE_GENERATION_CONCURRENCY_LIMIT": "${RAG_EVAL_CANDIDATE_GENERATION_CONCURRENCY_LIMIT:-1}",
@@ -112,7 +112,6 @@ class AdminFrontendDeploymentTests(unittest.TestCase):
 
         for filename in (
             "docker-compose.yml",
-            "docker-compose.replica.yml",
             "docker-compose.prod.yml",
         ):
             with self.subTest(filename=filename):
@@ -146,7 +145,7 @@ class AdminFrontendDeploymentTests(unittest.TestCase):
 
     def test_rag_eval_worker_uses_project_llm_config_without_host_override(self):
         """隔离评测 worker 只从 Compose 注入非密钥模型地址；密钥只来自密钥文件。"""
-        for filename in ("docker-compose.yml", "docker-compose.replica.yml"):
+        for filename in ("docker-compose.yml",):
             with self.subTest(filename=filename):
                 compose = yaml.safe_load(Path(filename).read_text(encoding="utf-8"))
                 worker = compose["services"]["rag-eval-worker"]

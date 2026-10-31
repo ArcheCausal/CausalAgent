@@ -23,7 +23,6 @@ from Agent.deep_agent_tools.runtime_updates import (
 
 NODE_DESCRIPTIONS = {
     "agent": "分析用户意图",
-    "fold": "加载文件并验证数据",
     "preprocess": "预处理数据",
     "data_processing": "理解并处理数据",
     "validate_dataset": "独立校验分析数据",
@@ -49,7 +48,7 @@ TOOL_STAGE_NODES = {
     "rag_finalize": "rag",
 }
 DECISION_PROGRESS = {
-    "fold": "已识别为因果分析请求",
+    "data_processing": "已识别为因果分析请求",
     "normal_chat": "已识别为普通问答",
     "inquiry_answer": "已识别为报告追问",
     "postprocess": "已识别为已有结果的后续处理",
@@ -58,7 +57,7 @@ DECISION_PROGRESS = {
 }
 DECISION_FIELDS = {
     "agent": "route_decision",
-    "fold": "fold_decision",
+    "context_switch": "route_decision",
 }
 _SAFE_TOOL_NAME = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 _SAFE_ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
@@ -92,6 +91,8 @@ def sanitize_public_error(error: Any) -> str:
     """把内部异常归类为有限的用户可见错误，避免泄露连接和路径信息。"""
     name = error if isinstance(error, str) else type(error).__name__
     normalized = str(name).lower()
+    if normalized == "unsupportedprocessingcheckpointerror":
+        return "此任务的处理流程版本已不支持恢复，请重新发起分析；历史记录和产物仍保留。"
     if "timeout" in normalized:
         return "调用超时"
     if any(token in normalized for token in ("connection", "connect", "network")):

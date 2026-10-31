@@ -143,25 +143,8 @@ def route_to_normal_chat(state: CausalAgentState, error: NodeError) -> Command:
     )
 
 
-def recover_fold_to_agent(state: CausalAgentState, error: NodeError) -> Command:
-    """Fold 节点失败后的恢复：记录审计决策并回到 agent。"""
-    return Command(
-        update={
-            "messages": [
-                AIMessage(
-                    content=f"决策：节点失败，返回 agent 重新判断。{_error_message(error)}",
-                    name=error.node,
-                )
-            ],
-            "tool_call_request": False,
-            "fold_decision": "agent",
-        },
-        goto="agent",
-    )
-
-
 def recover_preprocess_to_agent(state: CausalAgentState, error: NodeError) -> Command:
-    """Preprocess 节点失败后的恢复：回到 agent，但不伪造 fold 决策。"""
+    """Preprocess 节点失败后的恢复：保留失败消息并回到 agent。"""
     return Command(
         update={
             "messages": [

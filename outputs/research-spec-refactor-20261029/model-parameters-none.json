@@ -1,0 +1,538 @@
+{
+  "status": "FAIL",
+  "started_at": "2026-10-29T07:50:37.579550+00:00",
+  "model_http_requests": 132,
+  "model_http_request_limit": 144,
+  "max_output_tokens_per_request": 8192,
+  "request_timeout_seconds": 90,
+  "repetitions": 2,
+  "expected_case_count": 78,
+  "separate_initial_model_config": false,
+  "credential_scope": "model credentials only; application secrets and databases remain isolated",
+  "limitations": [
+    "tool calls, questions and user answers are explicit test inputs",
+    "initial cases verify real model tool arguments and deterministic resolution; source id is explicit test input",
+    "answer cases execute the actual unified parameter tool against isolated databases; no autonomous planning",
+    "real MySQL/PostgreSQL and production graph runner/event writer; no sandbox execution",
+    "no model credentials, endpoints or answer bodies in public reports"
+  ],
+  "source_sha256": {
+    "tests/acceptance/real_model_parameter_extraction.py": "8fae0b1a996da0400f8194f9f8db98a8ead67bc2bdc736193ded525ae8e2379c",
+    "tests/acceptance/research_parameter_tool_sources.py": "157c7b957418e54b4886a9061dafeda5fa20f277e7db0ab803e0dbefb591dec4",
+    "Agent/causal_agent/nodes.py": "528bd68c9aa19e2d00ee4b82c0b304e4f518f7b2d92fdba06c7077dda2e8fcdc",
+    "Agent/data_processing/agent.py": "80ab36caf18d23649146c8d1795c562dd263c5039d658124a24856bfcb50a255",
+    "Agent/data_processing/persistence.py": "4ec04e9b5aad8c36cacb4dcbcc6eefb71eb8878dff8319b14747c9a57ea36c99",
+    "Agent/data_processing/parameters.py": "9adf4c533e2e4697195e3262e97834f9e20da5ae19a03395cae951d8d904850e"
+  },
+  "reasoning_effort": "none",
+  "cases": [
+    {
+      "scenario": "all_input_measurements",
+      "entry": "initial",
+      "repetition": 1,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "all_input_measurements",
+      "entry": "ask_data_processing_question",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "all_input_measurements",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "all_input_measurements",
+      "entry": "initial",
+      "repetition": 2,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "all_input_measurements",
+      "entry": "ask_data_processing_question",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "all_input_measurements",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "original_all_nodes",
+      "entry": "initial",
+      "repetition": 1,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "original_all_nodes",
+      "entry": "ask_data_processing_question",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "original_all_nodes",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "original_all_nodes",
+      "entry": "initial",
+      "repetition": 2,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "original_all_nodes",
+      "entry": "ask_data_processing_question",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "original_all_nodes",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "scope_paraphrase",
+      "entry": "initial",
+      "repetition": 1,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "scope_paraphrase",
+      "entry": "ask_data_processing_question",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "scope_paraphrase",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "scope_paraphrase",
+      "entry": "initial",
+      "repetition": 2,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "scope_paraphrase",
+      "entry": "ask_data_processing_question",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "scope_paraphrase",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "scope_preserves_roles",
+      "entry": "initial",
+      "repetition": 1,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "scope_preserves_roles",
+      "entry": "ask_data_processing_question",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "scope_preserves_roles",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "scope_preserves_roles",
+      "entry": "initial",
+      "repetition": 2,
+      "status": "FAIL",
+      "model_attempts": 2,
+      "failure_type": "OpenAIInvalidRequestError",
+      "http_status": 400
+    },
+    {
+      "scenario": "scope_preserves_roles",
+      "entry": "ask_data_processing_question",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "scope_preserves_roles",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "explicit_named_roles",
+      "entry": "initial",
+      "repetition": 1,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "explicit_named_roles",
+      "entry": "ask_data_processing_question",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "explicit_named_roles",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "explicit_named_roles",
+      "entry": "initial",
+      "repetition": 2,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "explicit_named_roles",
+      "entry": "ask_data_processing_question",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "explicit_named_roles",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "explicit_target_cancel",
+      "entry": "initial",
+      "repetition": 1,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "explicit_target_cancel",
+      "entry": "ask_data_processing_question",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "explicit_target_cancel",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "explicit_target_cancel",
+      "entry": "initial",
+      "repetition": 2,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "explicit_target_cancel",
+      "entry": "ask_data_processing_question",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "explicit_target_cancel",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "cancel_both_roles",
+      "entry": "initial",
+      "repetition": 1,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "cancel_both_roles",
+      "entry": "ask_data_processing_question",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "cancel_both_roles",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "cancel_both_roles",
+      "entry": "initial",
+      "repetition": 2,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "cancel_both_roles",
+      "entry": "ask_data_processing_question",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "cancel_both_roles",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "unmentioned_roles",
+      "entry": "initial",
+      "repetition": 1,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "unmentioned_roles",
+      "entry": "ask_data_processing_question",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "unmentioned_roles",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "unmentioned_roles",
+      "entry": "initial",
+      "repetition": 2,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "unmentioned_roles",
+      "entry": "ask_data_processing_question",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "unmentioned_roles",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "explicit_treatment_cancel",
+      "entry": "initial",
+      "repetition": 1,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "explicit_treatment_cancel",
+      "entry": "ask_data_processing_question",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "explicit_treatment_cancel",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "explicit_treatment_cancel",
+      "entry": "initial",
+      "repetition": 2,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "explicit_treatment_cancel",
+      "entry": "ask_data_processing_question",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "explicit_treatment_cancel",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "proposal_full_confirmation",
+      "entry": "initial",
+      "repetition": 1,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "proposal_full_confirmation",
+      "entry": "ask_data_processing_question",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "proposal_full_confirmation",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "proposal_full_confirmation",
+      "entry": "initial",
+      "repetition": 2,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "proposal_full_confirmation",
+      "entry": "ask_data_processing_question",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "proposal_full_confirmation",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "proposal_partial_confirmation",
+      "entry": "initial",
+      "repetition": 1,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "proposal_partial_confirmation",
+      "entry": "ask_data_processing_question",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "proposal_partial_confirmation",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "proposal_partial_confirmation",
+      "entry": "initial",
+      "repetition": 2,
+      "status": "FAIL",
+      "model_attempts": 2,
+      "failure_type": "OpenAIInvalidRequestError",
+      "http_status": 400
+    },
+    {
+      "scenario": "proposal_partial_confirmation",
+      "entry": "ask_data_processing_question",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "proposal_partial_confirmation",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "proposal_partial_modification",
+      "entry": "initial",
+      "repetition": 1,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "proposal_partial_modification",
+      "entry": "ask_data_processing_question",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "proposal_partial_modification",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "proposal_partial_modification",
+      "entry": "initial",
+      "repetition": 2,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "proposal_partial_modification",
+      "entry": "ask_data_processing_question",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "proposal_partial_modification",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "proposal_paraphrase_confirmation",
+      "entry": "initial",
+      "repetition": 1,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "proposal_paraphrase_confirmation",
+      "entry": "ask_data_processing_question",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "proposal_paraphrase_confirmation",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 1,
+      "status": "PASS"
+    },
+    {
+      "scenario": "proposal_paraphrase_confirmation",
+      "entry": "initial",
+      "repetition": 2,
+      "status": "PASS",
+      "model_attempts": 1
+    },
+    {
+      "scenario": "proposal_paraphrase_confirmation",
+      "entry": "ask_data_processing_question",
+      "repetition": 2,
+      "status": "PASS"
+    },
+    {
+      "scenario": "proposal_paraphrase_confirmation",
+      "entry": "request_data_processing_plan_confirmation",
+      "repetition": 2,
+      "status": "PASS"
+    }
+  ],
+  "counts": {
+    "PASS": 76,
+    "FAIL": 2
+  },
+  "failure_types": [
+    "AssertionError"
+  ],
+  "failure_reason": "real_model_semantic_cases_failed",
+  "source_unchanged_during_run": true,
+  "finished_at": "2026-10-29T07:53:27.379373+00:00"
+}

@@ -17,8 +17,8 @@ def _service_environment_names(service: dict) -> set[str]:
     return {str(item).split("=", 1)[0] for item in environment}
 
 
-def test_replica_compat_compose_reads_database_passwords_from_the_secret_file() -> None:
-    compose = yaml.safe_load((REPO_ROOT / "docker-compose.replica.yml").read_text(encoding="utf-8"))
+def test_development_compose_reads_database_passwords_from_the_secret_file() -> None:
+    compose = yaml.safe_load((REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
 
     for service_name in ("mysql-primary", "mysql-replica"):
         service = compose["services"][service_name]
@@ -45,7 +45,6 @@ def test_database_secret_readers_join_the_dedicated_secret_group() -> None:
         "docker-compose.yml": ("mysql-primary", "mysql-replica", "postgres-checkpoint"),
         "docker-compose.staging.yml": ("mysql-primary", "mysql-replica", "postgres-checkpoint"),
         "docker-compose.prod.yml": ("mysql", "postgres-checkpoint"),
-        "docker-compose.replica.yml": ("mysql-primary", "mysql-replica", "postgres-checkpoint"),
     }
 
     for filename, service_names in database_services.items():
@@ -56,7 +55,7 @@ def test_database_secret_readers_join_the_dedicated_secret_group() -> None:
 
 
 def test_only_development_compose_relaxes_secret_permissions() -> None:
-    for filename in ("docker-compose.yml", "docker-compose.replica.yml"):
+    for filename in ("docker-compose.yml",):
         compose = yaml.safe_load((REPO_ROOT / filename).read_text(encoding="utf-8"))
         assert "dev-secrets-init" not in compose["services"]
         assert "dev_secrets" not in compose["volumes"]

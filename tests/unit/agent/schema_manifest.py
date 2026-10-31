@@ -27,6 +27,7 @@ MODEL_NAMES = (
     "DataViewSummary",
     "Diagnostics",
     "EvidenceResult",
+    "EffectQuery",
     "FinalAnalysisDecision",
     "GraphEdge",
     "GraphValidation",

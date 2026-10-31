@@ -46,6 +46,10 @@ const causalGraphModelSchema = z.object({
     target: z.string(),
     edge_type: z.string(),
     weight: z.number().nullable().optional(),
+    prediction: z.object({
+      forward_probability: z.number().finite().min(0).max(1),
+      reverse_probability: z.number().finite().min(0).max(1),
+    }).nullable().optional(),
   })),
   metadata: z.record(z.string(), z.unknown()).optional(),
 })
@@ -153,6 +157,7 @@ export function projectCausalGraphModel(raw: unknown): CausalGraphModel | null {
       target: edge.target,
       edge_type: edge.edge_type,
       weight: typeof edge.weight === 'number' ? edge.weight : null,
+      ...(edge.prediction ? { prediction: edge.prediction } : {}),
     })),
     metadata: parsed.data.metadata,
   }

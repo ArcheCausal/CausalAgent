@@ -1,0 +1,47 @@
+{
+  "status": "PASS",
+  "started_at": "2026-10-29T10:53:18.795202+00:00",
+  "limitations": [
+    "dedicated PostgreSQL; real file tool and provider; no business MySQL, MCP, RAG, sandbox or full Job"
+  ],
+  "requests": [
+    {
+      "reasoning_text_chars": 0,
+      "tool_outputs": 0,
+      "reasoning_effort": "high"
+    },
+    {
+      "reasoning_text_chars": 0,
+      "tool_outputs": 1,
+      "reasoning_effort": "high"
+    },
+    {
+      "reasoning_text_chars": 348,
+      "tool_outputs": 2,
+      "reasoning_effort": "high"
+    },
+    {
+      "reasoning_text_chars": 444,
+      "tool_outputs": 3,
+      "reasoning_effort": "high"
+    },
+    {
+      "reasoning_text_chars": 0,
+      "tool_outputs": 0,
+      "reasoning_effort": "none"
+    }
+  ],
+  "sync_stream": "PASS",
+  "nonstream": "PASS",
+  "stateless_serialization": "PASS",
+  "parent_boundary_and_real_file_tool_roundtrip": "PASS",
+  "postgres_reconnect_and_model_followup": "PASS",
+  "tool_budget_boundary_and_gate_retry_input": "PASS",
+  "tool_call_limit": 1,
+  "thread_tool_call_counts": [
+    1,
+    2
+  ],
+  "nonthinking_stream": "PASS",
+  "finished_at": "2026-10-29T10:53:32.299189+00:00"
+}

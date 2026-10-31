@@ -1,13 +1,10 @@
 import asyncio
 import json
 import os
-import sys
 import types
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langchain_openai import ChatOpenAI
-from secrets import token_hex
 
 
 for key, value in {
@@ -23,17 +20,8 @@ for key, value in {
     os.environ.setdefault(key, value)
 
 
-def _install_import_stubs():
-    """隔离路由测试不需要的数据库和向量库依赖。"""
-    agent_connect = types.ModuleType("Database.agent_connect")
-    agent_connect.require_frozen_file_for_job = lambda *args, **kwargs: None
-    sys.modules.setdefault("Database.agent_connect", agent_connect)
-
-_install_import_stubs()
-
 from Agent.causal_agent import edges, nodes
 from Agent.causal_agent.fault_tolerance import (
-    recover_fold_to_agent,
     recover_preprocess_to_agent,
     route_to_normal_chat,
 )
@@ -47,7 +35,7 @@ from Agent.tool_node.mcp_tool_call_adapter import normalize_mcp_tool_call_messag
 
 
 def _state(message="普通问题", **updates):
-    """构造 Agent/Fold 路由所需的最小状态。"""
+    """构造入口和数据处理路由所需的最小状态。"""
     state = {
         "messages": [HumanMessage(content=message)],
         "user_id": 1,
@@ -84,7 +72,7 @@ def _mcp_tool(name="causal_pc"):
     "intent,expected_route",
     [
         ("normal_chat", "normal_chat"),
-        ("start_analysis", "fold"),
+        ("start_analysis", "data_processing"),
         ("answer_report", "inquiry_answer"),
         ("switch_analysis_context", "context_switch"),
     ],
@@ -127,7 +115,7 @@ def test_agent_deterministic_and_failure_routes_overwrite_old_state(monkeypatch)
     tool_failure = asyncio.run(
         nodes.agent_node(
             _state(
-                route_decision="fold",
+                route_decision="data_processing",
                 causal_analysis_result={"success": False, "error": "tool failed"},
             ),
             object(),
@@ -144,17 +132,17 @@ def test_agent_deterministic_and_failure_routes_overwrite_old_state(monkeypatch)
     monkeypatch.setattr(nodes, "ainvoke_structured", fail_structured)
     structured_failure = asyncio.run(
         nodes.agent_node(
-            _state(route_decision="fold"),
+            _state(route_decision="data_processing"),
             object(),
         )
     )
 
-    assert explicit["route_decision"] == "fold"
+    assert explicit["route_decision"] == "data_processing"
     assert tool_failure["route_decision"] == "normal_chat"
     assert structured_failure["route_decision"] == "normal_chat"
 
 
-def test_mcp_protocol_failure_returns_to_agent_without_restarting_fold():
+def test_mcp_protocol_failure_returns_to_agent_without_restarting_data_processing():
     """MCP 协议失败必须成为显式失败，使 Agent 结束本轮分析而不是重新加载文件。"""
     tool_call = AIMessage(
         content="",
@@ -176,56 +164,17 @@ def test_mcp_protocol_failure_returns_to_agent_without_restarting_fold():
     assert decision["route_decision"] == "normal_chat"
 
 
-def test_fold_extraction_failure_preserves_frozen_identity_without_reading_csv():
-    """真实连接被拒绝时使用空参数，CSV 读取和校验留给数据处理阶段。"""
-    llm = ChatOpenAI(
-        model="gpt-4o-mini", base_url="http://127.0.0.1:1/v1",
-        api_key=token_hex(16), timeout=0.2, max_retries=0,
-    )
-    original = _state()
-    result = asyncio.run(nodes.fold_node(original, llm))
-
-    assert result["fold_decision"] == "preprocess"
-    assert result["analysis_parameters"]["target"] is None
-    assert result["analysis_parameters"]["treatment"] is None
-    assert result["analysis_parameters"]["measurement_semantics"] == []
-    assert result["analysis_parameter_changes"] == []
-    assert result["file_summary"] == {**original["file_summary"], "rows": None, "columns": []}
-
-
-@pytest.mark.parametrize("missing_field", ["user_file_id", "object_id"])
-def test_fold_missing_frozen_reference_returns_to_normal_chat(missing_field):
-    """缺少冻结输入引用时直接请求上传，不进入模型或数据处理。"""
-    state = _state()
-    state["file_summary"].pop(missing_field)
-    result = asyncio.run(nodes.fold_node(state, None))
-
-    assert result["fold_decision"] == "normal_chat"
-    assert "请先上传并选择一个 CSV 文件" in result["messages"][0].content
-    assert "analysis_parameters" not in result
-    assert "awaiting_input" not in result
-
-
-@pytest.mark.parametrize("route", ["fold", "postprocess", "normal_chat", "inquiry_answer"])
+@pytest.mark.parametrize("route", ["data_processing", "postprocess", "normal_chat", "inquiry_answer"])
 def test_decision_router_reads_only_explicit_state(route):
     """中文展示消息不能覆盖显式 agent 路由。"""
     state = {"route_decision": route, "messages": [AIMessage(content="决策：信息不全，报告已获取")]}
     assert edges.decision_router(state) == route
 
 
-@pytest.mark.parametrize("route", ["preprocess", "agent"])
-def test_fold_router_reads_only_explicit_state(route):
-    """中文展示消息不能覆盖显式 fold 路由。"""
-    state = {"fold_decision": route, "messages": [AIMessage(content="信息完备，返回 agent")]}
-    assert edges.fold_router(state) == route
-
-
 def test_routers_use_safe_defaults_for_missing_or_invalid_state():
     """缺失或非法 checkpoint 字段走稳定保守分支。"""
     assert edges.decision_router({"messages": [AIMessage(content="信息完备")]}) == "normal_chat"
     assert edges.decision_router({"route_decision": "invalid", "messages": []}) == "normal_chat"
-    assert edges.fold_router({"messages": [AIMessage(content="信息完备")]}) == "agent"
-    assert edges.fold_router({"fold_decision": "invalid", "messages": []}) == "agent"
 
 
 def test_mcp_subgraph_routes_only_valid_tool_calls_and_results():
@@ -274,17 +223,14 @@ def test_mcp_parser_preserves_subgraph_failure_without_tool_message():
 
 
 def test_recovery_handlers_keep_route_audit_fields_separate():
-    """Agent、Fold、Preprocess 恢复只写各自拥有的路由审计字段。"""
+    """Agent、Preprocess 恢复只写各自拥有的路由审计字段。"""
     error = types.SimpleNamespace(node="test_node", error=RuntimeError("failed"))
 
     agent_command = route_to_normal_chat({}, error)
-    fold_command = recover_fold_to_agent({}, error)
     preprocess_command = recover_preprocess_to_agent({}, error)
 
     assert agent_command.goto == "normal_chat"
     assert agent_command.update["route_decision"] == "normal_chat"
-    assert fold_command.goto == "agent"
-    assert fold_command.update["fold_decision"] == "agent"
     assert preprocess_command.goto == "agent"
     assert "fold_decision" not in preprocess_command.update
 

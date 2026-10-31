@@ -45,6 +45,7 @@ function planWaiting(overrides: Partial<WaitingInput> = {}): WaitingInput {
       transformations: ['按设备和日期分组并计数'],
       variableSemantics: { ['device_alarm_count_'.repeat(12)]: '该设备当天的告警次数' },
       limitations: ['不包含未触发告警的设备日期'],
+      effectRequest: null,
     },
     ...overrides,
   })
@@ -53,6 +54,44 @@ function planWaiting(overrides: Partial<WaitingInput> = {}): WaitingInput {
 const waitForTick = () => new Promise<void>((resolve) => window.setTimeout(resolve, 1_100))
 
 describe('ProcessingOptions', () => {
+  it('shows the exact contrast, population and confirmed transformation', () => {
+    const current = planWaiting()
+    current.plan!.effectRequest = { effect: 'average_total_effect', intervention: { type: 'fixed_contrast', from: 5, to: 7, unit: 'L/min' }, target_population: '设备 A 的观测' }
+    current.plan!.effectExecutionContext = {
+      treatment_column: 'flow_z', outcome_column: 'yield', treatment_unit: 'L/min',
+      treatment_transform: { type: 'affine', source_column: 'flow', output_column: 'flow_z', source_unit: 'L/min', output_unit: '无量纲', scale: 0.5, offset: -3 },
+      outcome_transform: { type: 'identity' },
+    }
+    const wrapper = mount(ProcessingOptions, { props: { waiting: current, identity: { ...identity, planVersion: current.planVersion } } })
+    expect(wrapper.text()).toContain('从 5 改为 7 L/min')
+    expect(wrapper.text()).toContain('设备 A 的观测')
+    expect(wrapper.text()).toContain('输出值 = 0.5 × 原始值 + -3')
+    expect(wrapper.text()).toContain('因果识别与干预支持由后续分析检查')
+  })
+
+  it('shows a shift and leaves unspecified transformation facts unknown', () => {
+    const current = planWaiting()
+    current.plan!.effectRequest = { effect: 'average_total_effect', intervention: { type: 'additive_shift', delta: -1, unit: 'L/min' } }
+    const wrapper = mount(ProcessingOptions, { props: { waiting: current, identity: { ...identity, planVersion: current.planVersion } } })
+    expect(wrapper.text()).toContain('当前处理值增加 -1 L/min')
+    expect(wrapper.text()).toContain('后续估计不能直接套用业务单位的干预值')
+    expect(wrapper.text()).toContain('需先确认结果变量尺度')
+  })
+
+  it('distinguishes explicit no-request from a historical unrecorded request and blocks old confirmation', async () => {
+    const current = planWaiting()
+    const wrapper = mount(ProcessingOptions, { props: { waiting: current, identity: { ...identity, planVersion: current.planVersion } } })
+    expect(wrapper.text()).toContain('未请求，仅进行结构探索')
+    expect(wrapper.get('.processing-plan-confirm').attributes('disabled')).toBeUndefined()
+    const legacy = planWaiting()
+    delete legacy.plan!.effectRequest
+    await wrapper.setProps({ waiting: legacy })
+    expect(wrapper.text()).toContain('未记录效应请求')
+    expect(wrapper.get('.processing-plan-confirm').attributes('disabled')).toBeDefined()
+    await wrapper.get('.processing-plan-confirm').trigger('click')
+    expect(wrapper.emitted('choose')).toBeUndefined()
+  })
+
   it('emits the chosen option and shows impact text', async () => {
     const wrapper = mount(ProcessingOptions, { props: { waiting: waiting(), identity } })
     expect(wrapper.text()).toContain('删除“age”中含缺失值的行')
@@ -115,7 +154,9 @@ describe('ProcessingOptions', () => {
             transformations: ['按设备和日期分组并计数'],
             variableSemantics: { alarm_count: '该设备当天的告警次数' },
             roleColumns: { target: 'alarm_count', treatment: 'coolant_flow_l_min' },
+            measurementColumns: { device: 'device_id', raw_alarm: null, date: 'date' },
             limitations: ['不包含未触发告警的设备日期'],
+            effectRequest: null,
           },
         }),
       },
@@ -127,6 +168,10 @@ describe('ProcessingOptions', () => {
     expect(wrapper.text()).toContain('alarm_count')
     expect(wrapper.text()).toContain('处理变量对应列')
     expect(wrapper.text()).toContain('coolant_flow_l_min')
+    expect(wrapper.text()).toContain('原始测量列处理')
+    expect(wrapper.text()).toContain('device：重命名为 device_id')
+    expect(wrapper.text()).toContain('raw_alarm：不传递原始测量类型')
+    expect(wrapper.text()).toContain('date：保留')
     expect(wrapper.text()).toContain('修改或拒绝方案')
     expect(wrapper.text()).toContain('确认方案并继续')
     await wrapper.get('.processing-plan-confirm').trigger('click')

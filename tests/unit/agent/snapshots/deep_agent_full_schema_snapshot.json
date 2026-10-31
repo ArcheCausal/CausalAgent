@@ -14,6 +14,7 @@
             "ALGORITHM_EXECUTION_FAILED",
             "ALGORITHM_TIMED_OUT",
             "ALGORITHM_CANCELED",
+            "ALGORITHM_BUDGET_EXHAUSTED",
             "ALGORITHM_RESULT_CONTRACT_INVALID",
             "UNKNOWN_CAPABILITY",
             "DUPLICATE_INVOCATION",
@@ -136,6 +137,18 @@
           "title": "Input Identity",
           "type": "string"
         },
+        "research_identity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Research Identity"
+        },
         "parameters": {
           "additionalProperties": true,
           "title": "Parameters",
@@ -183,6 +196,18 @@
           "additionalProperties": false,
           "description": "结果归属、输入身份和 spec 版本的可信证明字段。",
           "properties": {
+            "research_identity": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Research Identity"
+            },
             "job_id": {
               "title": "Job Id",
               "type": "string"
@@ -487,6 +512,48 @@
               ],
               "default": null,
               "title": "Bootstrap N"
+            },
+            "effect_request": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Effect Request"
+            },
+            "sample_identity": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Sample Identity"
+            },
+            "adjustment_rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Adjustment Rule"
+            },
+            "support": {
+              "additionalProperties": true,
+              "title": "Support",
+              "type": "object"
             }
           },
           "required": [
@@ -663,9 +730,33 @@
           "title": "Diagnostics",
           "type": "object"
         },
+        "EdgePrediction": {
+          "additionalProperties": false,
+          "description": "输出边两个矩阵位置的模型预测概率，不表示效应量或统计置信度。",
+          "properties": {
+            "forward_probability": {
+              "maximum": 1,
+              "minimum": 0,
+              "title": "Forward Probability",
+              "type": "number"
+            },
+            "reverse_probability": {
+              "maximum": 1,
+              "minimum": 0,
+              "title": "Reverse Probability",
+              "type": "number"
+            }
+          },
+          "required": [
+            "forward_probability",
+            "reverse_probability"
+          ],
+          "title": "EdgePrediction",
+          "type": "object"
+        },
         "GraphEdge": {
           "additionalProperties": false,
-          "description": "标准化图中的一条有向或部分定向边。",
+          "description": "标准化图中的一条边；预测概率与结构系数分别保存。",
           "properties": {
             "source": {
               "title": "Source",
@@ -691,6 +782,17 @@
               ],
               "default": null,
               "title": "Weight"
+            },
+            "prediction": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EdgePrediction"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             }
           },
           "required": [
@@ -889,6 +991,7 @@
             "ALGORITHM_EXECUTION_FAILED",
             "ALGORITHM_TIMED_OUT",
             "ALGORITHM_CANCELED",
+            "ALGORITHM_BUDGET_EXHAUSTED",
             "ALGORITHM_RESULT_CONTRACT_INVALID",
             "UNKNOWN_CAPABILITY",
             "DUPLICATE_INVOCATION",
@@ -1218,6 +1321,18 @@
       "additionalProperties": false,
       "description": "结果归属、输入身份和 spec 版本的可信证明字段。",
       "properties": {
+        "research_identity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Research Identity"
+        },
         "job_id": {
           "title": "Job Id",
           "type": "string"
@@ -1522,6 +1637,48 @@
           ],
           "default": null,
           "title": "Bootstrap N"
+        },
+        "effect_request": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effect Request"
+        },
+        "sample_identity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sample Identity"
+        },
+        "adjustment_rule": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Adjustment Rule"
+        },
+        "support": {
+          "additionalProperties": true,
+          "title": "Support",
+          "type": "object"
         }
       },
       "required": [
@@ -1783,6 +1940,7 @@
             "ALGORITHM_EXECUTION_FAILED",
             "ALGORITHM_TIMED_OUT",
             "ALGORITHM_CANCELED",
+            "ALGORITHM_BUDGET_EXHAUSTED",
             "ALGORITHM_RESULT_CONTRACT_INVALID",
             "UNKNOWN_CAPABILITY",
             "DUPLICATE_INVOCATION",
@@ -2048,6 +2206,83 @@
       "title": "EvidenceResult",
       "type": "object"
     },
+    "EffectQuery": {
+      "additionalProperties": false,
+      "description": "一次效应调用实际请求的变量对、对比区间与结局模型。\n\n值只来自工具参数的程序解析，不接受模型事后补写；诊断只需源图与变量对，\n估计比较完整请求。缺少该字段的旧 checkpoint 仍可读取，但不能满足新门禁。",
+      "properties": {
+        "graph_result_ref": {
+          "title": "Graph Result Ref",
+          "type": "string"
+        },
+        "treatment": {
+          "title": "Treatment",
+          "type": "string"
+        },
+        "outcome": {
+          "title": "Outcome",
+          "type": "string"
+        },
+        "contrast": {
+          "anyOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Contrast"
+        },
+        "outcome_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Outcome Model"
+        },
+        "effect_request": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effect Request"
+        },
+        "estimator_config": {
+          "additionalProperties": true,
+          "title": "Estimator Config",
+          "type": "object"
+        }
+      },
+      "required": [
+        "graph_result_ref",
+        "treatment",
+        "outcome"
+      ],
+      "title": "EffectQuery",
+      "type": "object"
+    },
     "FinalAnalysisDecision": {
       "$defs": {
         "ResultAssessment": {
@@ -2061,7 +2296,8 @@
             },
             "disposition": {
               "enum": [
-                "primary",
+                "primary_graph",
+                "primary_effect",
                 "supporting",
                 "discarded"
               ],
@@ -2176,6 +2412,58 @@
           "title": "Outcome",
           "type": "string"
         },
+        "primary_graph_result_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "独立选定的主图，必须引用本次因果发现结果。",
+          "title": "Primary Graph Result Ref"
+        },
+        "primary_effect_result_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "采用的主效应；没有采用效应时为 null，不能由旧主结果字段推断。",
+          "title": "Primary Effect Result Ref"
+        },
+        "effect_status": {
+          "default": "not_recorded",
+          "enum": [
+            "not_recorded",
+            "not_requested",
+            "not_applicable",
+            "not_identifiable",
+            "incomplete",
+            "not_adopted",
+            "adopted"
+          ],
+          "title": "Effect Status",
+          "type": "string"
+        },
+        "effect_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effect Reason"
+        },
         "primary_result_ref": {
           "anyOf": [
             {
@@ -2251,8 +2539,34 @@
       "type": "object"
     },
     "GraphEdge": {
+      "$defs": {
+        "EdgePrediction": {
+          "additionalProperties": false,
+          "description": "输出边两个矩阵位置的模型预测概率，不表示效应量或统计置信度。",
+          "properties": {
+            "forward_probability": {
+              "maximum": 1,
+              "minimum": 0,
+              "title": "Forward Probability",
+              "type": "number"
+            },
+            "reverse_probability": {
+              "maximum": 1,
+              "minimum": 0,
+              "title": "Reverse Probability",
+              "type": "number"
+            }
+          },
+          "required": [
+            "forward_probability",
+            "reverse_probability"
+          ],
+          "title": "EdgePrediction",
+          "type": "object"
+        }
+      },
       "additionalProperties": false,
-      "description": "标准化图中的一条有向或部分定向边。",
+      "description": "标准化图中的一条边；预测概率与结构系数分别保存。",
       "properties": {
         "source": {
           "title": "Source",
@@ -2278,6 +2592,17 @@
           ],
           "default": null,
           "title": "Weight"
+        },
+        "prediction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EdgePrediction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -2454,6 +2779,24 @@
               ],
               "default": null,
               "title": "Outcome Model"
+            },
+            "effect_request": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Effect Request"
+            },
+            "estimator_config": {
+              "additionalProperties": true,
+              "title": "Estimator Config",
+              "type": "object"
             }
           },
           "required": [
@@ -2476,6 +2819,7 @@
             "ALGORITHM_EXECUTION_FAILED",
             "ALGORITHM_TIMED_OUT",
             "ALGORITHM_CANCELED",
+            "ALGORITHM_BUDGET_EXHAUSTED",
             "ALGORITHM_RESULT_CONTRACT_INVALID",
             "UNKNOWN_CAPABILITY",
             "DUPLICATE_INVOCATION",
@@ -2494,6 +2838,18 @@
       "additionalProperties": false,
       "description": "一个逻辑 function call 及其全部 retry/revision 历史。",
       "properties": {
+        "research_identity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Research Identity"
+        },
         "invocation_id": {
           "title": "Invocation Id",
           "type": "string"
@@ -2715,6 +3071,18 @@
       "additionalProperties": false,
       "description": "worker 注入、MCP 验签并再次查库的可信调用上下文。",
       "properties": {
+        "research_identity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Research Identity"
+        },
         "invocation_id": {
           "title": "Invocation Id",
           "type": "string"
@@ -3006,7 +3374,8 @@
         },
         "disposition": {
           "enum": [
-            "primary",
+            "primary_graph",
+            "primary_effect",
             "supporting",
             "discarded"
           ],
@@ -3082,6 +3451,7 @@
             "ALGORITHM_EXECUTION_FAILED",
             "ALGORITHM_TIMED_OUT",
             "ALGORITHM_CANCELED",
+            "ALGORITHM_BUDGET_EXHAUSTED",
             "ALGORITHM_RESULT_CONTRACT_INVALID",
             "UNKNOWN_CAPABILITY",
             "DUPLICATE_INVOCATION",
@@ -3165,9 +3535,33 @@
     },
     "StandardizedGraph": {
       "$defs": {
+        "EdgePrediction": {
+          "additionalProperties": false,
+          "description": "输出边两个矩阵位置的模型预测概率，不表示效应量或统计置信度。",
+          "properties": {
+            "forward_probability": {
+              "maximum": 1,
+              "minimum": 0,
+              "title": "Forward Probability",
+              "type": "number"
+            },
+            "reverse_probability": {
+              "maximum": 1,
+              "minimum": 0,
+              "title": "Reverse Probability",
+              "type": "number"
+            }
+          },
+          "required": [
+            "forward_probability",
+            "reverse_probability"
+          ],
+          "title": "EdgePrediction",
+          "type": "object"
+        },
         "GraphEdge": {
           "additionalProperties": false,
-          "description": "标准化图中的一条有向或部分定向边。",
+          "description": "标准化图中的一条边；预测概率与结构系数分别保存。",
           "properties": {
             "source": {
               "title": "Source",
@@ -3193,6 +3587,17 @@
               ],
               "default": null,
               "title": "Weight"
+            },
+            "prediction": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EdgePrediction"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             }
           },
           "required": [
@@ -3437,10 +3842,10 @@
   "tools": [
     {
       "capability_id": "causal.backdoor_ols",
-      "spec_digest": "0028098acaf85a189cdf822c54017d22b86b08e4e3942338be5c3ec9d6c01516",
+      "spec_digest": "043f5c83df1e31007be68a8ead3a5d683cac719bc50a3355ffc687bbd2d7af66",
       "tool": {
         "name": "causal_backdoor_ols",
-        "description": "在后门调整下估计处理变量对结果变量的线性总效应。必须引用本次运行中已经发现且有效的因果图；不支持未定向边、双箭头边、有向环或处理变量不是结果变量祖先的图。同一张图只能与产生它的数据版本一起使用。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；至少 3 行、2 列。\n方法假设：图包含查询的处理与结果变量，且无未定向边、双箭头边或有向环；处理变量、结果变量和处理变量的全部父节点为数值存储，无缺失、常数或非有限值；函数形式近似线性，效应按每 1 单位变化解释，不对非线性或交互建模；调整集取处理变量的全部父节点，不搜索其他有效调整集。\n目标图：causal_estimation_input；矩阵约定：backdoor_ols。\n边语义：directed：后门调整所用的因果方向。\n适用边界：只做父节点调整；未声明的测量语义仍未充分确认，不根据整数类型或唯一值数量推断连续语义；不删除调整变量、不删除行、不填值、不编码或改变源图；不处理未观测混杂、选择偏倚或测量误差；不做 bootstrap，区间为线性模型内区间。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
+        "description": "在后门调整下估计处理变量对结果变量的线性总效应。必须引用本次运行中已经发现且有效的因果图；不支持未定向边、双箭头边、有向环或处理变量不是结果变量祖先的图。同一张图只能与产生它的数据版本一起使用。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；至少 3 行、2 列。\n方法假设：图包含查询的处理与结果变量，且无未定向边、双箭头边或有向环；处理变量、结果变量和处理变量的全部父节点为数值存储，无缺失、常数或非有限值；函数形式近似线性，效应按已确认的干预幅度解释，不对非线性或交互建模；调整集取处理变量的全部父节点，不搜索其他有效调整集。\n目标图：causal_estimation_input；矩阵约定：backdoor_ols。\n边语义：directed：后门调整所用的因果方向。\n适用边界：只做父节点调整；未声明的测量语义仍未充分确认，不根据整数类型或唯一值数量推断连续语义；不删除调整变量、不删除行、不填值、不编码或改变源图；不处理未观测混杂、选择偏倚或测量误差；不做 bootstrap，区间为线性模型内区间。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
         "parameters": {
           "additionalProperties": false,
           "properties": {
@@ -3456,6 +3861,87 @@
             "outcome": {
               "title": "Outcome",
               "type": "string"
+            },
+            "effect_request": {
+              "additionalProperties": false,
+              "description": "已确认的平均总效应请求；原始单位固定取值对比或增量干预。不得补猜默认对比。",
+              "properties": {
+                "effect": {
+                  "enum": [
+                    "average_total_effect"
+                  ],
+                  "type": "string"
+                },
+                "target_population": {
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "intervention": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "type": {
+                          "enum": [
+                            "fixed_contrast"
+                          ],
+                          "type": "string"
+                        },
+                        "from": {
+                          "type": "number"
+                        },
+                        "to": {
+                          "type": "number"
+                        },
+                        "unit": {
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "from",
+                        "to",
+                        "unit"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "type": {
+                          "enum": [
+                            "additive_shift"
+                          ],
+                          "type": "string"
+                        },
+                        "delta": {
+                          "type": "number"
+                        },
+                        "unit": {
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "delta",
+                        "unit"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "effect",
+                "intervention"
+              ],
+              "title": "Effect Request",
+              "type": "object"
             },
             "public_decision": {
               "anyOf": [
@@ -3488,7 +3974,8 @@
           "required": [
             "graph_result_ref",
             "treatment",
-            "outcome"
+            "outcome",
+            "effect_request"
           ],
           "title": "CausalBackdoorOlsInputToolInput",
           "type": "object"
@@ -3497,10 +3984,10 @@
     },
     {
       "capability_id": "causal.cdfm",
-      "spec_digest": "a193a8f641049ab946846a0011eb23e62eed767da7bb02b30b6964c6ae74b670",
+      "spec_digest": "0d28f5d6eda546df490f48541da9200582b924a308d44277939468ce0e0362cd",
       "tool": {
         "name": "causal_cdfm",
-        "description": "用预训练因果发现基础模型 CDFM 在数值表格数据上做零样本图推断，一次调用返回整张候选混合图。同一个 checkpoint 的训练机制包括线性、非线性、异方差、有序或离散观测、测量误差与潜在混杂等多类机制，因此机制未知或明显非线性时，可以作为候选方法，并与 PC、DirectLiNGAM 的结果分别对照。不传 threshold 时由服务端按模型自带校准器自动决定判决边界，传入 0 到 1 的数值可覆盖它。缺失值按 NaN/±Inf 掩码传递给模型；当前接收数值存储列，不接受未编码的非数值分类列。数值准入不证明测量语义连续，也不保证训练机制适用于当前分布。输出只有边及其方向，不包含权重和置信度：方向可能随阈值变化，不可识别场景下方向证据不足；成对的两个 1 解码为一条双箭头边，表示潜在共同原因候选，结果不构成准确率或生产能力证明。\n数据要求：全部输入变量必须是数值列；分类列必须先按确定性顺序编码；缺失值按原生掩码处理；非有限值仍需显式处理；至少 2 行、2 列。\n方法假设：输入采用数值存储；实际测量语义和分布适用性须依据证据评估；零样本识别以预训练机制覆盖当前数据分布为前提；变量名、样本顺序和冻结输入身份由外层准入固定；CDFM checkpoint 可由 causal-mcp 服务端加载。\n目标图：acyclic_directed_mixed_graph；矩阵约定：row_to_column_pair_binary。\n边语义：directed：模型推断的候选因果方向；bidirected：潜在共同原因候选，不代表已经证实存在共同原因。\n适用边界：机制覆盖不保证当前数据上的可识别性或准确率；阈值可改变结构；边不携带效应量或置信度；不继承 LiNGAM 的线性、非高斯和无潜在混杂假设。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
+        "description": "用预训练因果发现基础模型 CDFM 在数值表格数据上做零样本图推断，一次调用返回整张候选混合图。同一个 checkpoint 的训练机制包括线性、非线性、异方差、有序或离散观测、测量误差与潜在混杂等多类机制，因此机制未知或明显非线性时，可以作为候选方法，并与 PC、DirectLiNGAM 的结果分别对照。不传 threshold 时由服务端按模型自带校准器自动决定判决边界，传入 0 到 1 的数值可覆盖它。缺失值按 NaN/±Inf 掩码传递给模型；当前接收数值存储列，不接受未编码的非数值分类列。数值准入不证明测量语义连续，也不保证训练机制适用于当前分布。CDFM 提供候选结构及模型预测概率。仅输出已解码边的正反两个矩阵位置概率，forward_probability 对应 source→target，reverse_probability 对应 target→source；双箭头边的两个分数是共同决定边型的编码概率，不是两条互反因果边。概率由程序提取，不能由模型重新计算或补写，不代表结构系数、效应量或统计置信度。实际阈值见 diagnostics.metrics.threshold；不根据概率自动提高整体置信度或强制选择主图。方向可能随阈值变化，不可识别场景下方向证据不足；成对的两个 1 解码为一条双箭头边，表示潜在共同原因候选，结果不构成准确率或生产能力证明。\n数据要求：全部输入变量必须是数值列；分类列必须先按确定性顺序编码；缺失值按原生掩码处理；非有限值仍需显式处理；至少 2 行、2 列。\n方法假设：输入采用数值存储；实际测量语义和分布适用性须依据证据评估；零样本识别以预训练机制覆盖当前数据分布为前提；变量名、样本顺序和冻结输入身份由外层准入固定；CDFM checkpoint 可由 causal-mcp 服务端加载。\n目标图：acyclic_directed_mixed_graph；矩阵约定：row_to_column_pair_binary。\n边语义：directed：模型推断的候选因果方向；bidirected：潜在共同原因候选，不代表已经证实存在共同原因。\n适用边界：机制覆盖不保证当前数据上的可识别性或准确率；阈值可改变结构；模型预测概率不是结构系数、效应量或统计置信度，不能自动提高整体置信度或决定主图；不继承 LiNGAM 的线性、非高斯和无潜在混杂假设。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
         "parameters": {
           "additionalProperties": false,
           "properties": {
@@ -3554,7 +4041,7 @@
     },
     {
       "capability_id": "causal.direct_lingam",
-      "spec_digest": "94ebf2f00c889a2e84826499f1d443817ff5bd0700c2025ac597e9254f2d451e",
+      "spec_digest": "d4081c00e524ba4819c5f1980d4506d8112ac381f6ae5fc997a5f080802d23b2",
       "tool": {
         "name": "causal_direct_lingam",
         "description": "在连续数值数据上使用 DirectLiNGAM 估计有向无环因果结构。适用于线性、非高斯、误差独立且没有潜在混杂的场景。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；至少 2 行、2 列。\n方法假设：输入为连续数值变量；因果机制近似线性且噪声非高斯；误差独立并且不存在潜在混杂。\n目标图：dag_target_to_source；矩阵约定：target_to_source。\n边语义：directed：线性结构方程中的候选直接作用；权重是系数而非置信度。\n适用边界：线性、非高斯、误差独立和无潜在混杂须分别检验或保持未检验；图中系数不是已识别的干预效应。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
@@ -3596,7 +4083,7 @@
     },
     {
       "capability_id": "causal.g_formula",
-      "spec_digest": "c7c03be8853488aa2137890786a1783a0876912a98884d30c2e9a4a99c1625bf",
+      "spec_digest": "9ed3276ace565645c1937a3aa969343a024de204e875c32cdb010400ac85f86f",
       "tool": {
         "name": "causal_g_formula",
         "description": "在给定因果图上用调整后直接标准化估计处理变量对比的因果效应。调整集取处理变量的全部父节点，结局方程可选线性或梯度提升；不支持未定向边、双箭头边、有向环或处理变量不是结果变量祖先的图。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；至少 3 行、2 列。\n方法假设：图包含查询的处理与结果变量，且无未定向边、双箭头边或有向环；处理变量是结果变量的祖先；相关列均为有限数值，缺失值已在执行前处理；调整集取处理变量的全部父节点，不搜索其他有效调整集；调整集有效且无未观测混杂时，条件均值差等于总效应；结局方程由 outcome_model 决定，只拟合 E[Y|T,Z]。\n目标图：causal_estimation_input；矩阵约定：g_formula。\n边语义：directed：确定调整集与可识别性的因果方向。\n适用边界：结局模型只估计条件均值差；存在未建模交互时线性模型仍可能有偏；不处理二值/计数/有序结局的尺度转换；bootstrap 为 percentile 区间，不做 BCa；不处理未观测混杂、选择偏倚或测量误差。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
@@ -3616,20 +4103,86 @@
               "title": "Outcome",
               "type": "string"
             },
-            "contrast": {
-              "description": "要比较的两个处理取值 (x0, x1)，效应为 do(x1) 减 do(x0)。",
-              "maxItems": 2,
-              "minItems": 2,
-              "prefixItems": [
-                {
-                  "type": "number"
+            "effect_request": {
+              "additionalProperties": false,
+              "description": "已确认的平均总效应请求；原始单位固定取值对比或增量干预。不得补猜默认对比。",
+              "properties": {
+                "effect": {
+                  "enum": [
+                    "average_total_effect"
+                  ],
+                  "type": "string"
                 },
-                {
-                  "type": "number"
+                "target_population": {
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "intervention": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "type": {
+                          "enum": [
+                            "fixed_contrast"
+                          ],
+                          "type": "string"
+                        },
+                        "from": {
+                          "type": "number"
+                        },
+                        "to": {
+                          "type": "number"
+                        },
+                        "unit": {
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "from",
+                        "to",
+                        "unit"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "type": {
+                          "enum": [
+                            "additive_shift"
+                          ],
+                          "type": "string"
+                        },
+                        "delta": {
+                          "type": "number"
+                        },
+                        "unit": {
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "delta",
+                        "unit"
+                      ],
+                      "type": "object"
+                    }
+                  ]
                 }
+              },
+              "required": [
+                "effect",
+                "intervention"
               ],
-              "title": "Contrast",
-              "type": "array"
+              "title": "Effect Request",
+              "type": "object"
             },
             "outcome_model": {
               "default": "linear",
@@ -3679,7 +4232,7 @@
             "graph_result_ref",
             "treatment",
             "outcome",
-            "contrast"
+            "effect_request"
           ],
           "title": "CausalGFormulaInputToolInput",
           "type": "object"
@@ -3688,7 +4241,7 @@
     },
     {
       "capability_id": "causal.pc",
-      "spec_digest": "4d96b624246f6237262dc80967227fb0064f05e1e07b6a886e2534b757d381a2",
+      "spec_digest": "13ce4b31c5ffe4e09bdd26c00d2329f50ef24c9122fe8b2f382e8e5eb2e8156d",
       "tool": {
         "name": "causal_pc",
         "description": "在表格数据上使用 PC 方法发现条件独立结构并生成部分有向图。适用于一般观测因果发现；需要数值或可确定性编码的表格数据，不应在明显存在潜在混杂且需要专门处理时作为唯一方法。\n数据要求：分类列必须先按确定性顺序编码；不允许存在缺失值、空列或非有限值；至少 2 行、2 列。\n方法假设：条件独立性检验适用于当前数据；因果马尔可夫性、忠实性和无潜在混杂的因果充分性；数据中的变量名和样本身份已经由外层准入冻结。\n目标图：pdag；矩阵约定：causal_learn_endpoints。\n边语义：directed：候选因果方向；undirected：方向尚未识别的相邻关系。\n适用边界：条件独立性检验和有限样本会影响结构；具体条件按实际 independence_test 判断；Fisher-Z 基于偏相关与高斯条件独立关系，不能因 PC 是通用算法就声称本次检验不受线性或分布条件限制；骨架相近不等于方向得到验证；不直接估计因果效应。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",

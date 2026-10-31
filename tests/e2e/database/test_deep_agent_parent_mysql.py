@@ -89,7 +89,7 @@ def _parent_input(identity, *, message="parent message"):
         "analysis_parameter_changes": bound["analysis_parameter_changes"],
         "analysis_context": bound["analysis_context"],
         "file_summary": {}, "data_profile": build_data_profile_from_csv(PC_CSV),
-        "route_decision": "fold", "prepared_dataset_id": bound["dataset_id"],
+        "route_decision": "data_processing", "prepared_dataset_id": bound["dataset_id"],
         "prepared_dataset_hash": bound["data_hash"],
         "chart_assets": {"parent-only": {"description": "不传入 child 的父图字段"}},
     }

@@ -20,6 +20,7 @@ from Agent.deep_agent_tools.models import (
     McpInvocationContext,
 )
 from Agent.execution_control import JobExecutionRevoked
+from Agent.effect_request import normalize_effect_request
 
 from app.agent.worker.mcp_client_pool import (
     McpClientPool,
@@ -77,6 +78,13 @@ class McpAlgorithmExecutor:
         trusted_context: McpInvocationContext,
     ) -> AlgorithmResult | AlgorithmExecutionResponse:
         validate_executor_command(command, trusted_context=trusted_context)
+        if command.capability_id in {"causal.backdoor_ols", "causal.g_formula"}:
+            request = normalize_effect_request(command.parameters.get("effect_request"))
+            if request is None or request != command.parameters.get("effect_request"):
+                raise AlgorithmExecutorError(
+                    "MCP effect request is missing or non-canonical",
+                    safe_error_code=SafeErrorCode.ALGORITHM_INPUT_INVALID,
+                )
         with log_context(
             invocation_id=command.invocation_id,
             tool=command.capability_id,

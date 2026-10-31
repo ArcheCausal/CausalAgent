@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import csv
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import io
 import inspect
+import json
 import logging
 import math
 import re
@@ -14,6 +16,9 @@ import time
 from typing import Any, Callable, Mapping
 
 from Agent.deep_agent_tools.error_codes import SafeErrorCode
+from Agent.CausalAgentMCP.inference.interventions import (
+    EFFECT_REASONS, validate_effect_request,
+)
 from Agent.deep_agent_tools.algorithm_specs import DEFAULT_ALGORITHM_SPECS
 from Agent.deep_agent_tools.ate_applicability import (
     ATE_REASON_SUMMARIES,
@@ -52,6 +57,42 @@ from observability.logging_runtime import log_context, log_event
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class EffectValidatedInput(ValidatedAlgorithmInput):
+    effect_parameters: dict[str, Any] | None = None
+
+
+def effect_parameters_from_snapshot(
+    metadata: Any, *, job_id: str, source_hash: str,
+) -> dict[str, Any] | None:
+    """从已绑定候选重建已确认参数，检查参数链和方案正文的身份。"""
+    from Agent.data_processing.parameters import (
+        PARAMETER_BINDING_KEY, execution_parameters, restore_parameter_binding, parameter_identity,
+    )
+    from Agent.data_processing.plans import build_processing_plan_version
+
+    if isinstance(metadata, (str, bytes, bytearray)):
+        metadata = json.loads(metadata)
+    if not isinstance(metadata, Mapping):
+        return None
+    binding = metadata.get(PARAMETER_BINDING_KEY)
+    if not isinstance(binding, dict) or "effect_request" not in binding.get("parameters", {}):
+        return None
+    parameters = restore_parameter_binding(metadata, job_id=job_id)["analysis_parameters"]
+    plan = dict(metadata)
+    plan.pop(PARAMETER_BINDING_KEY)
+    identity = plan.pop("processing_plan_identity", None)
+    if not isinstance(identity, Mapping) or identity.get("plan_version") != build_processing_plan_version(
+        job_id=job_id, source_hash=source_hash,
+        semantic_identity=identity["semantic_identity"], metadata=plan,
+    ):
+        raise ValueError("candidate confirmation identity does not match its snapshot")
+    result = execution_parameters(parameters, plan)
+    result["research_identity"] = parameter_identity(parameters)
+    result["confirmed_plan_version"] = identity["plan_version"]
+    return result
 
 
 class McpServiceError(RuntimeError):
@@ -101,7 +142,7 @@ def load_validated_input_from_connection(
         cursor.execute(
             """
             SELECT d.id, d.source_hash, d.data_hash, data.content_hash,
-                   data.file_content, d.validation_report
+                   data.file_content, d.validation_report, d.metadata
             FROM analysis_job_datasets AS d
             JOIN file_objects AS data
               ON data.id = d.data_object_id
@@ -115,6 +156,28 @@ def load_validated_input_from_connection(
             (context.user_id, context.analysis_dataset_id, context.job_id),
         )
         row = cursor.fetchone()
+        effect_parameters = None
+        if row and row.get("source_hash") == context.source_input_identity:
+            try:
+                effect_parameters = effect_parameters_from_snapshot(
+                    row.get("metadata"), job_id=context.job_id,
+                    source_hash=context.source_input_identity,
+                )
+            except (ValueError, KeyError, TypeError) as exc:
+                raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID) from exc
+            if effect_parameters is not None:
+                if effect_parameters["research_identity"] != context.research_identity:
+                    raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
+                from Agent.data_processing.plans import plan_confirmation_version
+
+                cursor.execute(
+                    "SELECT input_type, input_text FROM analysis_job_inputs "
+                    "WHERE job_id = %s ORDER BY sequence DESC LIMIT 1", (context.job_id,),
+                )
+                confirmation = cursor.fetchone()
+                if (not confirmation or confirmation["input_type"] != "resume"
+                    or plan_confirmation_version(confirmation["input_text"]) != effect_parameters["confirmed_plan_version"]):
+                    raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
     finally:
         cursor.close()
     if (
@@ -127,9 +190,10 @@ def load_validated_input_from_connection(
         raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
     try:
         semantic_kinds = semantic_kinds_from_validation_report(row.get("validation_report"))
-        return ValidatedAlgorithmInput(
+        return EffectValidatedInput(
             csv_data=row["file_content"].decode("utf-8"),
             semantic_kinds=semantic_kinds,
+            effect_parameters=effect_parameters,
         )
     except (AttributeError, UnicodeError, ValueError, TypeError) as exc:
         raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID) from exc
@@ -262,7 +326,7 @@ def _error_result(
         capability_id=command.capability_id,
         capability_version=capability_version,
         status=_failure_status(code),
-        ate_check=ate_check,
+        ate_check=ate_check if command.capability_id == "causal.backdoor_ols" else None,
         method=spec.method_definition() if spec is not None and spec.version == capability_version else None,
         diagnostics=Diagnostics(
             summary=(
@@ -279,6 +343,7 @@ def _error_result(
             input_identity=command.input_identity,
             source_input_identity=context.source_input_identity,
             analysis_dataset_id=context.analysis_dataset_id,
+            research_identity=context.research_identity,
             spec_digest=command.spec_digest,
             invocation_id=command.invocation_id,
             capability_id=command.capability_id,
@@ -319,6 +384,8 @@ def _estimation_result(
     if not isinstance(effect_payload, Mapping):
         raise ValueError("estimation runner did not return causal_effect")
     diagnostics_metrics = _finite_metrics(effect_payload.get("diagnostics_metrics"))
+    if effect_payload.get("diagnostics_metrics", {}).get("difference_direction") == "linear_minus_g_formula":
+        diagnostics_metrics["difference_direction"] = "linear_minus_g_formula"
     effect = CausalEffect.model_validate(
         {
             "graph_result_ref": command.parameters.get("graph_result_ref"),
@@ -333,6 +400,10 @@ def _estimation_result(
         effect.treatment != command.parameters.get("treatment")
         or effect.outcome != command.parameters.get("outcome")
         or effect.graph_result_ref != command.parameters.get("graph_result_ref")
+        or effect.effect_request != command.parameters.get("effect_request")
+        or effect.support.get("status") != "supported"
+        or effect.sample_identity is None
+        or effect.adjustment_rule != "parents_of_treatment"
     ):
         raise ValueError("estimation result does not match the requested pair")
     if ate_check is not None and (
@@ -363,7 +434,7 @@ def _estimation_result(
         standardized_graph=graph,
         graph_validation=validation,
         causal_effect=effect,
-        ate_check=ate_check,
+        ate_check=ate_check if command.capability_id == "causal.backdoor_ols" else None,
         summary="算法调用完成。",
         data_view=data_view,
         diagnostics=Diagnostics(
@@ -384,6 +455,7 @@ def _estimation_result(
             input_identity=command.input_identity,
             source_input_identity=context.source_input_identity,
             analysis_dataset_id=context.analysis_dataset_id,
+            research_identity=context.research_identity,
             spec_digest=command.spec_digest,
             invocation_id=command.invocation_id,
             capability_id=command.capability_id,
@@ -473,7 +545,8 @@ class CausalMcpService:
             "invocation_id": context.invocation_id,
             "retry_ordinal": request.retry_ordinal,
         }
-        if command.invocation_id != context.invocation_id:
+        if (command.invocation_id != context.invocation_id
+            or command.research_identity != context.research_identity):
             log_event(
                 LOGGER,
                 "mcp.request.rejected",
@@ -571,8 +644,27 @@ class CausalMcpService:
                 mode="json"
             )
             artifacts = dict(command.artifacts)
-            if set(artifacts) - set(spec.requires):
+            allowed_artifacts = set(spec.requires)
+            if spec.kind == "causal_estimation":
+                allowed_artifacts.update({"effect_request", "effect_execution_context"})
+            if set(artifacts) - allowed_artifacts:
                 raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID)
+            if spec.kind == "causal_estimation":
+                confirmed = getattr(trusted_input, "effect_parameters", None)
+                if not isinstance(confirmed, Mapping) or not isinstance(confirmed.get("effect_request"), dict):
+                    raise McpServiceError(SafeErrorCode.ALGORITHM_NOT_APPLICABLE)
+                if (
+                    validate_effect_request(parameters["effect_request"]) != confirmed["effect_request"]
+                    or parameters["treatment"] != confirmed.get("treatment")
+                    or parameters["outcome"] != confirmed.get("target")
+                    or ("effect_request" in artifacts and artifacts["effect_request"] != confirmed["effect_request"])
+                    or ("effect_execution_context" in artifacts
+                        and artifacts["effect_execution_context"] != confirmed.get("effect_execution_context"))
+                    or context.research_identity != confirmed.get("research_identity")
+                ):
+                    raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
+                artifacts["effect_execution_context"] = confirmed.get("effect_execution_context")
+                artifacts["semantic_kinds"] = dict(trusted_input.semantic_kinds)
             graph: StandardizedGraph | None = None
             if "standardized_graph" in artifacts:
                 try:
@@ -593,7 +685,7 @@ class CausalMcpService:
             semantic_kinds = normalize_semantic_kinds(
                 trusted_input.semantic_kinds, columns=processed_profile.column_names,
             )
-            if command.capability_id == "causal.backdoor_ols":
+            if spec.kind == "causal_estimation":
                 graph_check = check_ate_graph(
                     graph=graph,
                     graph_result_ref=parameters["graph_result_ref"],
@@ -616,6 +708,8 @@ class CausalMcpService:
                     else SafeErrorCode.ALGORITHM_INPUT_INVALID
                 )
                 raise McpServiceError(code)
+            if command.capability_id != "causal.backdoor_ols":
+                ate_check = None
             data_view = DataViewSummary(
                 row_count=processed_profile.row_count,
                 column_count=processed_profile.column_count,
@@ -896,7 +990,13 @@ class CausalMcpService:
                 if error_type == "ResultValidationError"
                 else SafeErrorCode.ALGORITHM_EXECUTION_FAILED
             )
-            if command.capability_id == "causal.backdoor_ols" and error_type == "NotApplicable":
+            support_reason = raw_result.get("reason_code")
+            if (error_type == "NotApplicable" and support_reason in EFFECT_REASONS
+                and isinstance(raw_result.get("support"), Mapping)):
+                # 干预支持不适用保留独立诊断，图/数据检查可以仍然通过。
+                code = SafeErrorCode.ALGORITHM_NOT_APPLICABLE
+                ate_check = None
+            elif command.capability_id == "causal.backdoor_ols" and error_type == "NotApplicable":
                 reason = raw_result.get("reason_code")
                 if isinstance(reason, str) and reason in ATE_REASON_SUMMARIES and ate_check is not None:
                     try:
@@ -933,6 +1033,17 @@ class CausalMcpService:
                 capability_version=entry.version,
                 ate_check=ate_check,
             )
+            if error_type == "NotApplicable" and support_reason in EFFECT_REASONS:
+                support = raw_result["support"]
+                result.diagnostics = Diagnostics(
+                    summary=EFFECT_REASONS[support_reason], safe_error_code=code,
+                    metrics={
+                        "support_status": "not_applicable",
+                        "support_reason": support_reason,
+                        **{key: value for key, value in support.items()
+                           if isinstance(value, (str, int, float, bool)) or value is None},
+                    },
+                )
             try:
                 result = AlgorithmResult.model_validate({
                     **result.model_dump(),
@@ -990,6 +1101,7 @@ class CausalMcpService:
                             input_identity=command.input_identity,
                             source_input_identity=context.source_input_identity,
                             analysis_dataset_id=context.analysis_dataset_id,
+                            research_identity=context.research_identity,
                             spec_digest=command.spec_digest,
                             invocation_id=command.invocation_id,
                             capability_id=command.capability_id,

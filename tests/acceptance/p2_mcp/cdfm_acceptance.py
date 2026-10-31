@@ -287,8 +287,8 @@ async def _valid_cdfm_call(csv_data: str) -> dict[str, Any]:
         )
         if result.status != "valid" or result.standardized_graph is None:
             raise AssertionError(f"CDFM result status was {result.status}")
-        if result.standardized_graph.graph_semantics != "directed_graph":
-            raise AssertionError("CDFM graph semantics were not directed_graph")
+        if result.standardized_graph.graph_semantics != CDFM_SPEC.graph_semantics:
+            raise AssertionError("CDFM graph semantics differ from the method contract")
         if any(edge.weight is not None for edge in result.standardized_graph.edges):
             raise AssertionError("CDFM edges unexpectedly exposed weights")
         if result.raw_result_ref is None:
@@ -302,6 +302,14 @@ async def _valid_cdfm_call(csv_data: str) -> dict[str, Any]:
             "threshold",
         }.issubset(raw_results):
             raise AssertionError("CDFM raw artifact is missing private fields")
+        positions = {name: index for index, name in enumerate(raw_results["variable_order"])}
+        for edge in result.standardized_graph.edges:
+            source, target = positions[edge.source], positions[edge.target]
+            if edge.prediction is None or (
+                edge.prediction.forward_probability != raw_results["probabilities"][source][target]
+                or edge.prediction.reverse_probability != raw_results["probabilities"][target][source]
+            ):
+                raise AssertionError("CDFM edge probability differs from its raw matrix position")
         private_payload = recording_pool.last_payload or {}
         if not isinstance(private_payload.get("raw_payload"), dict):
             raise AssertionError("MCP private raw envelope is missing")

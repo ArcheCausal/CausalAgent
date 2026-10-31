@@ -402,6 +402,7 @@ def build_terminal_invocation(
         "skipped": "skipped",
     }[attempt_status]
     return InvocationRecord(
+        research_identity=getattr(identity.runtime_context.trusted_identity.analysis_input, "research_identity", None),
         invocation_id=invocation_id,
         response_identity=identity.response_identity,
         response_identity_source=identity.response_identity_source,
@@ -452,6 +453,7 @@ def build_pending_invocation(
     )
     return InvocationRecord(
         invocation_id=invocation_id,
+        research_identity=getattr(trusted.analysis_input, "research_identity", None),
         response_identity=identity.response_identity,
         response_identity_source=identity.response_identity_source,
         provider_response_id=identity.provider_response_id,

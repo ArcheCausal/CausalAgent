@@ -8,16 +8,7 @@ from typing import Any
 
 from Agent.deep_agent_tools.identity import build_invocation_id, current_input_identity
 from Agent.deep_agent_tools.algorithm_specs import get_algorithm_spec
-from Agent.deep_agent_tools.functional_form import (
-    FLEX_CAPABILITY,
-    FLEX_TOOL_NAME,
-    OLS_CAPABILITY,
-    assess_functional_form,
-    estimation_pair,
-    flex_status_from_results,
-    select_result,
-    signal_triggered,
-)
+from Agent.deep_agent_tools.functional_form import estimation_pair
 from Agent.deep_agent_tools.graph_validation import validate_graph_structure
 from Agent.deep_agent_tools.runtime_updates import normalize_tool_status
 from Agent.deep_agent_tools.models import (
@@ -27,6 +18,13 @@ from Agent.deep_agent_tools.models import (
     validate_result_ref_for_invocation,
 )
 from Agent.deep_agent.prompts import ANALYSIS_ROUTE
+
+
+SCIENTIFIC_LIMITATIONS = {
+    "effect_question_without_diagnose": "效应可估计性诊断未完成；候选结构不能替代效应识别。",
+    "effect_question_without_estimation": "效应诊断已完成，但估计未实际执行；当前仅展示候选结构。",
+    "analysis_route_without_web_invocation": "本次已开启联网检索，但未实际执行；分析缺少该通道的外部证据核对。",
+}
 
 
 class StructuredResponseError(ValueError):
@@ -81,6 +79,9 @@ def validate_decision_references(
             "primary_result_ref is not an available result",
             rule="primary_ref_unknown_result",
         )
+    for ref in (decision.primary_graph_result_ref, decision.primary_effect_result_ref):
+        if ref is not None and ref not in result_refs:
+            raise StructuredResponseError("primary reference is unavailable", rule="primary_ref_unknown_result")
     for proposal in decision.revision_proposals:
         if proposal.result_ref not in result_refs:
             raise StructuredResponseError(
@@ -315,6 +316,7 @@ class FinalizationGate:
         input_identity: str,
         source_input_identity: str,
         analysis_dataset_id: int,
+        research_identity: str,
     ) -> list[InvocationRecord]:
         """诊断记录不是算法记录，必须直接扫描完整 ledger。"""
 
@@ -345,6 +347,8 @@ class FinalizationGate:
                 or record.analysis_dataset_id != analysis_dataset_id
             ):
                 continue
+            if record.research_identity != research_identity:
+                raise StructuredResponseError("diagnosis research identity differs from confirmed parameters")
             if record.final_status == "pending" or not record.attempts:
                 raise StructuredResponseError("diagnose action ledger is not terminal")
             latest = max(
@@ -368,6 +372,7 @@ class FinalizationGate:
         lease_epoch: int,
         worker_id: str,
         input_identity: str,
+        effect_request: Any,
     ) -> bool:
         """只有当前查询、且源图已被诊断的估计调用才算一次真实尝试。"""
 
@@ -381,6 +386,7 @@ class FinalizationGate:
                 or query is None
                 or (query.treatment, query.outcome) != (treatment, outcome)
                 or query.graph_result_ref not in diagnosed_graphs
+                or query.effect_request != effect_request
             ):
                 continue
             if (
@@ -395,58 +401,6 @@ class FinalizationGate:
             }:
                 return True
         return False
-
-    def _current_flex_check(
-        self,
-        ledger: Mapping[str, InvocationRecord],
-        *,
-        treatment: str,
-        outcome: str,
-        attempt_count: int,
-        lease_epoch: int,
-        worker_id: str,
-        input_identity: str,
-    ) -> InvocationRecord | None:
-        """返回当前查询按 (0, 1) 与 hgb 发起的灵活检查；其他尺度和模型不算。"""
-
-        for record in ledger.values():
-            query = record.effect_query
-            if (
-                record.tool_name != FLEX_TOOL_NAME
-                or query is None
-                or (query.treatment, query.outcome) != (treatment, outcome)
-                or query.contrast != (0.0, 1.0)
-                or query.outcome_model != "hgb"
-            ):
-                continue
-            if (
-                record.attempt_count != attempt_count
-                or record.lease_epoch != lease_epoch
-                or record.worker_id != worker_id
-                or record.input_identity != input_identity
-            ):
-                continue
-            return record
-        return None
-
-    def _results_for_pair(
-        self,
-        results: Any,
-        *,
-        current_ledger: Mapping[str, InvocationRecord],
-        treatment: str,
-        outcome: str,
-    ) -> list[AlgorithmResult]:
-        """只保留当前查询且带账本记录的估计结果；其他变量对不能代替。"""
-
-        selected: list[AlgorithmResult] = []
-        for result in results:
-            record = current_ledger.get(result.invocation_id)
-            query = record.effect_query if record is not None else None
-            if query is None or (query.treatment, query.outcome) != (treatment, outcome):
-                continue
-            selected.append(result)
-        return selected
 
     def _validate_result_ledger_pair(
         self,
@@ -479,6 +433,9 @@ class FinalizationGate:
         if record.final_status != expected_status:
             raise StructuredResponseError("result and ledger terminal status differ")
         provenance = result.provenance
+        research_identity = getattr(getattr(identity, "analysis_input", None), "research_identity", None)
+        if not research_identity or provenance.research_identity != research_identity or record.research_identity != research_identity:
+            raise StructuredResponseError("result research identity differs from confirmed parameters")
         if provenance.job_id != str(identity.job_id):
             raise StructuredResponseError("result does not belong to the trusted Job")
         if provenance.attempt_count != int(identity.attempt_count):
@@ -536,10 +493,18 @@ class FinalizationGate:
         web_search_enabled: bool | None = None,
         analysis_parameters: Mapping[str, Any] | None = None,
         analysis_question: str | None = None,
+        scientific_limitations: list[dict[str, str]] | None = None,
     ) -> FinalAnalysisDecision:
         """校验并返回可安全交给 report 的 decision 副本。"""
 
         normalized_decision = validate_structured_response(decision)
+
+        def incomplete_check(message: str, *, rule: str) -> None:
+            # 未传收集器的独立严格校验入口保留原有合同；报告入口显式收集缺口。
+            if scientific_limitations is None:
+                raise StructuredResponseError(message, rule=rule)
+            scientific_limitations.append({"code": rule, "message": SCIENTIFIC_LIMITATIONS[rule]})
+
         results = self._coerce_results(algorithm_results)
         ledger = self._coerce_ledger(action_ledger)
         job_id = str(self._identity_value(trusted_identity, "job_id"))
@@ -654,7 +619,7 @@ class FinalizationGate:
                 )
             if (
                 result.status in {"not_applicable", "skipped"}
-                and assessment.disposition == "primary"
+                and assessment.disposition in {"primary_graph", "primary_effect"}
             ):
                 raise StructuredResponseError(
                     "a non-viable result cannot be the primary result",
@@ -714,13 +679,13 @@ class FinalizationGate:
             input_identity=current_input,
             source_input_identity=current_source,
             analysis_dataset_id=current_dataset_id,
+            research_identity=getattr(trusted_identity.analysis_input, "research_identity", None),
         )
         pair = estimation_pair(analysis_parameters)
-        # 诊断只比较源图与变量对；`verdict=proceed/reject/error` 与账本状态
-        # `succeeded/not_applicable/failed` 是两层事实，这里按状态读取判定。
+        effect_request = (analysis_parameters or {}).get("effect_request")
         current_pair_diagnoses = [
             record for record in current_diagnoses
-            if _diagnosis_matches(record, pair)
+            if _effect_query_matches(record, pair, effect_request)
         ]
         diagnose_statuses = {
             normalize_tool_status(record.final_status)
@@ -732,7 +697,7 @@ class FinalizationGate:
             and _requires_effect_estimation(analysis_parameters)
         )
         if effect_question and not diagnose_statuses & {"succeeded", "not_applicable"}:
-            raise StructuredResponseError(
+            incomplete_check(
                 "effect question requires an effect_diagnose decision",
                 rule="effect_question_without_diagnose",
             )
@@ -749,9 +714,10 @@ class FinalizationGate:
                 lease_epoch=current_lease,
                 worker_id=current_worker,
                 input_identity=current_input,
+                effect_request=effect_request,
             )
         ):
-            raise StructuredResponseError(
+            incomplete_check(
                 "successful diagnosis requires a real estimation attempt",
                 rule="effect_question_without_estimation",
             )
@@ -762,103 +728,67 @@ class FinalizationGate:
             if result.status == "valid"
             and get_algorithm_spec(result.capability_id).kind == "causal_estimation"
         }
-        if normalized_decision.outcome == "algorithm_supported" and estimation_refs:
-            primary_ref = normalized_decision.primary_result_ref
-            if primary_ref not in estimation_refs:
-                raise StructuredResponseError(
-                    "effect estimation result must be the primary result",
-                    rule="primary_not_estimation_result",
-                )
-            effect = eligible[primary_ref].causal_effect
-            if effect is None:
-                raise StructuredResponseError(
-                    "valid estimation result is missing causal_effect",
-                    rule="estimation_result_missing_effect",
-                )
-            # 估计请求已带源图与变量对；这里只补充检查该源图确有成功诊断记录。
-            if effect.graph_result_ref not in {
-                record.effect_query.graph_result_ref
-                for record in current_diagnoses
-                if record.effect_query is not None
-                and normalize_tool_status(record.final_status) == "succeeded"
-            }:
-                raise StructuredResponseError(
-                    "estimation source graph has no successful diagnosis",
-                    rule="estimation_graph_not_diagnosed",
-                )
-
-        # 函数形式判定：信号触发就必须真的跑过一次灵活路；非线性结论要求
-        # 灵活估计成为主结果。两条规则都从程序事实重算，不信任模型自述。
-        proceed_graphs = {
-            record.subject_ref
-            for record in current_pair_diagnoses
-            if normalize_tool_status(record.final_status) == "succeeded"
-        }
-        # 诊断判定为 reject（not_applicable）时不再强制灵活检查；只有当前查询
-        # 的诊断结论为 proceed 才进入函数形式比较。
-        if effect_question and pair is not None and proceed_graphs:
-            treatment, outcome = pair
-            nonlinearity = (
-                analysis_parameters.get("nonlinearity")
-                if isinstance(analysis_parameters, Mapping) else None
-            )
-            ols = select_result(
-                self._results_for_pair(
-                    eligible.values(), current_ledger=current_ledger,
-                    treatment=treatment, outcome=outcome,
-                ),
-                capability=OLS_CAPABILITY, treatment=treatment, outcome=outcome,
-            )
-            flex = select_result(
-                self._results_for_pair(
-                    eligible.values(), current_ledger=current_ledger,
-                    treatment=treatment, outcome=outcome,
-                ),
-                capability=FLEX_CAPABILITY, treatment=treatment, outcome=outcome,
-            )
-            assessment = assess_functional_form(
-                nonlinearity=nonlinearity if isinstance(nonlinearity, Mapping) else None,
-                ols_metrics=ols.diagnostics.metrics if ols is not None else None,
-                flex_metrics=flex.diagnostics.metrics if flex is not None else None,
-                flex_status=(
-                    "valid" if flex is not None
-                    else flex_status_from_results(
-                        self._results_for_pair(
-                            eligible.values(), current_ledger=current_ledger,
-                            treatment=treatment, outcome=outcome,
-                        ),
-                        treatment=treatment, outcome=outcome,
+        # 科学方法由 Agent 选择；程序验证定义、来源和已知适用性。
+        graph_ref = normalized_decision.primary_graph_result_ref
+        effect_ref = normalized_decision.primary_effect_result_ref
+        if graph_ref is not None:
+            graph_result = eligible[graph_ref]
+            if graph_ref not in valid_refs or get_algorithm_spec(graph_result.capability_id).kind != "causal_discovery":
+                raise StructuredResponseError("primary graph must be a valid discovery result", rule="primary_graph_invalid")
+        requested = isinstance(analysis_parameters, Mapping) and isinstance(analysis_parameters.get("effect_request"), Mapping)
+        if effect_ref is not None:
+            if not requested:
+                raise StructuredResponseError("effect estimation was not requested", rule="effect_not_requested")
+            if effect_ref not in estimation_refs:
+                raise StructuredResponseError("primary effect must be a valid estimation", rule="primary_result_not_valid")
+            result = eligible[effect_ref]
+            effect = result.causal_effect
+            record = current_ledger[result.invocation_id]
+            query = record.effect_query
+            if effect is None or query is None or effect.effect_request != analysis_parameters["effect_request"] or query.effect_request != effect.effect_request:
+                raise StructuredResponseError("effect definition differs from confirmed request", rule="effect_definition_mismatch")
+            if (effect.treatment, effect.outcome) != pair or (query.treatment, query.outcome) != pair:
+                raise StructuredResponseError("effect roles differ from confirmed roles", rule="effect_definition_mismatch")
+            if result.capability_id == "causal.g_formula" and (
+                effect.outcome_model != query.estimator_config.get("outcome_model")
+                or effect.bootstrap_n != query.estimator_config.get("bootstrap")
+            ):
+                raise StructuredResponseError("effect execution configuration differs from ledger")
+            if effect.graph_result_ref != graph_ref or query.graph_result_ref != graph_ref:
+                raise StructuredResponseError("primary effect source differs from primary graph")
+            if not effect.sample_identity or not effect.adjustment_rule or effect.support.get("status") != "supported":
+                raise StructuredResponseError("effect lacks sample or support evidence", rule="effect_support_missing")
+            source = eligible[graph_ref]
+            if result.standardized_graph != source.standardized_graph:
+                raise StructuredResponseError("estimation graph differs from its source")
+            if graph_ref not in {record.effect_query.graph_result_ref for record in current_pair_diagnoses
+                                 if record.effect_query is not None and normalize_tool_status(record.final_status) == "succeeded"}:
+                raise StructuredResponseError("estimation source graph has no successful diagnosis", rule="estimation_graph_not_diagnosed")
+        else:
+            if not requested:
+                status = "not_requested" if isinstance(analysis_parameters, Mapping) and "effect_request" in analysis_parameters else "not_recorded"
+                reason = "本次未请求效应估计。" if status == "not_requested" else "历史记录没有保存效应请求，不能推断估计意图。"
+            else:
+                status, reason = normalized_decision.effect_status, normalized_decision.effect_reason
+                if status in {"not_requested", "not_recorded", "adopted"} or not reason:
+                    raise StructuredResponseError("missing effect needs an explicit status and reason", rule="effect_absence_reason_missing")
+                if status == "not_applicable" and not any(
+                    item.status == "not_applicable"
+                    and get_algorithm_spec(item.capability_id).kind == "causal_estimation"
+                    and _effect_query_matches(
+                        current_ledger[item.invocation_id], pair, effect_request,
+                        graph_result_ref=graph_ref,
                     )
-                ),
-            )
-            flex_check = self._current_flex_check(
-                current_ledger,
-                treatment=treatment,
-                outcome=outcome,
-                attempt_count=current_attempt,
-                lease_epoch=current_lease,
-                worker_id=current_worker,
-                input_identity=current_input,
-            )
-            if (
-                signal_triggered(assessment["signals"])
-                and flex_check is None
-            ):
-                raise StructuredResponseError(
-                    "nonlinearity signal requires a flexible check",
-                    rule="form_check_not_attempted",
-                )
-            if (
-                assessment["verdict"] == "nonlinear"
-                and flex is not None
-                and flex.status == "valid"
-                and normalized_decision.outcome == "algorithm_supported"
-                and normalized_decision.primary_result_ref != flex.result_ref
-            ):
-                raise StructuredResponseError(
-                    "nonlinear verdict requires the flexible estimate as primary",
-                    rule="linear_primary_despite_nonlinear_verdict",
-                )
+                    for item in eligible.values()
+                ):
+                    raise StructuredResponseError("not_applicable requires an estimation diagnostic for the selected graph and request", rule="effect_absence_reason_missing")
+                if status == "not_identifiable" and not any(
+                    normalize_tool_status(record.final_status) == "not_applicable"
+                    and _effect_query_matches(record, pair, effect_request, graph_result_ref=graph_ref)
+                    for record in current_pair_diagnoses
+                ):
+                    raise StructuredResponseError("not_identifiable requires a rejected diagnosis for the selected graph and request", rule="effect_absence_reason_missing")
+            normalized_decision = normalized_decision.model_copy(update={"effect_status": status, "effect_reason": reason})
 
         if (
             route_decision == ANALYSIS_ROUTE
@@ -873,7 +803,7 @@ class FinalizationGate:
                 input_identity=current_input,
             )
         ):
-            raise StructuredResponseError(
+            incomplete_check(
                 "analysis route requires at least one web evidence invocation",
                 rule="analysis_route_without_web_invocation",
             )
@@ -905,23 +835,28 @@ class FinalizationRetryController:
         return self.retries_used
 
 
-def _diagnosis_matches(
+def _effect_query_matches(
     record: InvocationRecord, pair: tuple[str, str] | None,
+    effect_request: Any, *, graph_result_ref: str | None = None,
 ) -> bool:
-    """诊断只比较源图与变量对；缺少查询证明的旧记录不能满足新门禁。"""
+    """调用必须证明同一变量对、已确认效应定义及指定的源图。"""
 
     query = record.effect_query
     if pair is None or query is None:
         return False
     if record.subject_ref is not None and record.subject_ref != query.graph_result_ref:
         return False
-    return (query.treatment, query.outcome) == pair
+    if graph_result_ref is not None and query.graph_result_ref != graph_result_ref:
+        return False
+    return (query.treatment, query.outcome) == pair and query.effect_request == effect_request
 
 
 def _requires_effect_estimation(parameters: Mapping[str, Any] | None) -> bool:
-    """target 与 treatment 都已确定即视为效应问题，与提示词的强制估计条件一致。"""
+    """只有显式效应定义才启动效应流程。"""
 
     if not isinstance(parameters, Mapping):
+        return False
+    if not isinstance(parameters.get("effect_request"), Mapping):
         return False
     target = parameters.get("target")
     treatment = parameters.get("treatment")
@@ -1004,23 +939,14 @@ FINALIZATION_RETRY_HINTS: dict[str, str] = {
         "causal_g_formula，能力 ID 见 recommended_capability_id），并保留真实终态；"
         "不能只用文字结论代替估计调用。"
     ),
-    "primary_not_estimation_result": (
-        "本次已产生有效的因果效应估计结果。主结果必须是该估计结果；"
-        "报告展示的因果图会随估计结果取回其源图。"
-    ),
     "estimation_graph_not_diagnosed": (
         "主结果所指的估计结果缺少对应的成功诊断记录。请先用同一张图调用 "
         "effect_diagnose，待其返回 succeeded 后再用该图估计。"
     ),
-    "form_check_not_attempted": (
-        "当前数据或残差显示可能存在非线性。请用同一张图、相同 treatment/outcome "
-        "调用 causal_g_formula，contrast 使用 (0, 1) 与线性估计同尺度，"
-        "outcome_model 明确指定 hgb，保留真实终态后再提交最终决策。"
-    ),
-    "linear_primary_despite_nonlinear_verdict": (
-        "线性与灵活估计已出现实质差异。主结果必须采用 causal_g_formula 的灵活估计结果，"
-        "不能用线性估计作为主结果。"
-    ),
+    "effect_not_requested": ("本次没有确认效应请求，请保留主图，主效应为空并说明未请求。"),
+    "effect_definition_mismatch": ("估计请求与确认定义不同；不能改变问题，请采用与当前定义一致的结果或说明未采用原因。"),
+    "effect_support_missing": ("当前估计缺少样本及支持证明，请保留有效主图，主效应为空并说明限制。"),
+    "effect_absence_reason_missing": ("主效应为空时必须填写与执行事实一致的 effect_status 及 effect_reason，可保留独立的主图。"),
     "analysis_route_without_web_invocation": (
         "本次运行已开启联网搜索。请先调用一次 web_evidence_search 并等待真实返回，"
         "即使没有结果或服务暂不可用，也要保留该真实状态后再提交最终决策。"

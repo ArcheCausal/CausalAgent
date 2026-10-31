@@ -20,6 +20,7 @@ from langgraph.store.memory import InMemoryStore
 
 from Agent.deep_agent.context import AgentRunContext, TrustedJobIdentity
 from Agent.deep_agent.graph import DeepAgentGraphConfig, build_deep_agent
+from Agent.deep_agent.model import DeepSeekResponsesChatOpenAI
 from Agent.deep_agent.state import initial_deep_agent_state
 from Agent.deep_agent_tools.adapters import build_default_adapters
 from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
@@ -47,10 +48,12 @@ async def run() -> dict:
         ])
 
     async with httpx.AsyncClient(event_hooks={"request": [capture]}) as client:
-        model = ChatOpenAI(
+        model_class = DeepSeekResponsesChatOpenAI if model_name.startswith("deepseek-") else ChatOpenAI
+        model = model_class(
             api_key=require_secret("DEEP_AGENT_API_KEY"), base_url=base_url,
             model=model_name, streaming=True, use_responses_api=True,
-            output_version="responses/v1", reasoning={"effort": "none"},
+            output_version="responses/v1",
+            reasoning={"effort": os.getenv("DEEP_AGENT_REASONING_EFFORT", "high").strip()},
             http_async_client=client, timeout=60, max_retries=0,
         )
         pool = McpClientPool(McpClientPoolConfig.from_env())

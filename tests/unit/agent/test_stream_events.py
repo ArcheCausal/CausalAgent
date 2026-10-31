@@ -79,6 +79,19 @@ class StreamEventAdapterTests(unittest.TestCase):
         self.assertEqual((first["sequence"], second["sequence"]), (1, 2))
         self.assertEqual(first["stream_id"], second["stream_id"])
 
+    def test_responses_reasoning_blocks_are_not_public_text(self):
+        """Responses 推理块及其附加字段不能进入正文流。"""
+        self.adapter.convert(task_start("task-deep", "deep_agent"))
+        self.adapter.convert(task_start("task-report", "report"))
+        for node in ("deep_agent", "data_processing", "report"):
+            for chunk in (
+                AIMessageChunk(content=[{"type": "reasoning", "content": [
+                    {"type": "reasoning_text", "text": "private reasoning"}]}]),
+                AIMessageChunk(content="", additional_kwargs={"reasoning_content": "private reasoning"}),
+            ):
+                self.assertEqual(self.adapter.convert({"type": "messages", "ns": (),
+                    "data": (chunk, {"langgraph_node": node})}), [])
+
     def test_public_decision_tool_call_chunks_emit_decision_chunks(self):
         """工具参数流只提取公开决策摘要，不把半截 JSON 或隐藏内容外带。"""
         self.adapter.convert(task_start("task-deep", "deep_agent"))
@@ -168,14 +181,14 @@ class StreamEventAdapterTests(unittest.TestCase):
             "data": {
                 "agent": {
                     "messages": [AIMessage(content="route: report")],
-                    "route_decision": "fold",
+                    "route_decision": "data_processing",
                 }
             },
         })
 
         self.assertEqual([event["type"] for event in events], ["progress", "decision"])
         self.assertIn("因果分析", events[0]["summary"])
-        self.assertIn("加载文件", events[1]["summary"])
+        self.assertIn("理解并处理数据", events[1]["summary"])
 
     def test_inherited_decision_is_not_reemitted_on_tool_stage(self):
         """后续 MCP/RAG 阶段不能把继承的旧路由字段再次展示为新决策。"""
@@ -186,8 +199,8 @@ class StreamEventAdapterTests(unittest.TestCase):
                 "ns": (),
                 "data": {
                     stage: {
-                        "route_decision": "fold",
-                        "fold_decision": "preprocess",
+                        "route_decision": "data_processing",
+                        "dataset_validation_status": "accepted",
                     }
                 },
             })

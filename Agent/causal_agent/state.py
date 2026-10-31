@@ -83,7 +83,7 @@ class CausalAgentState(TypedDict):
 
     route_decision: NotRequired[
         Literal[
-            "fold",
+            "data_processing",
             "postprocess",
             "report",
             "normal_chat",
@@ -91,12 +91,13 @@ class CausalAgentState(TypedDict):
             "context_switch",
         ]
     ]
-    fold_decision: NotRequired[Literal["preprocess", "agent", "normal_chat"]]
 
     tool_call_request: Optional[bool]
 
     analysis_parameters: Optional[dict]
+    analysis_question: NotRequired[str]
     analysis_parameter_changes: NotRequired[list[dict[str, Any]]]
+    data_processing_state_version: NotRequired[int]
     data_processing_semantic_identity: NotRequired[str]
     data_processing_confirmed_plan_version: NotRequired[str | None]
     data_processing_execution_report: NotRequired[dict[str, Any] | None]
@@ -131,6 +132,7 @@ class CausalAgentState(TypedDict):
     deep_agent_rag_evidence: NotRequired[dict[str, EvidenceResult]]
     deep_agent_web_evidence: NotRequired[dict[str, WebEvidenceResult]]
     deep_agent_decision: NotRequired[Optional[FinalAnalysisDecision]]
+    deep_agent_accepted_decision: NotRequired[Optional[FinalAnalysisDecision]]
     deep_agent_structured_response: NotRequired[Optional[FinalAnalysisDecision]]
     deep_agent_run_id: NotRequired[str]
     deep_agent_status: NotRequired[Literal["running", "completed", "revoked", "failed"]]
@@ -138,6 +140,8 @@ class CausalAgentState(TypedDict):
     finalization_retry_count: NotRequired[int]
     finalization_status: NotRequired[Literal["valid", "degraded"]]
     finalization_error: NotRequired[str]
+    deep_agent_budget_exhausted: NotRequired[bool]
+    analysis_limitations: NotRequired[list[dict[str, str]]]
 
 
 class RagSubgraphState(TypedDict, total=False):

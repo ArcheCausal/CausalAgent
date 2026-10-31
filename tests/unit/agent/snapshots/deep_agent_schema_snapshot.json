@@ -14,7 +14,7 @@
         "revision",
         "status"
       ],
-      "sha256": "e4a033dbe4f9cf60810a3f543ce7fa96191f5a8d2faef031872d84ffe349e7db",
+      "sha256": "ac46b5ba6788eba73285acec25fdc2436b7e9e2adc04fa22f31d5e307a93a7e9",
       "title": "ActionAttempt"
     },
     "AlgorithmExecutionCommand": {
@@ -26,6 +26,7 @@
         "invocation_id",
         "parameters",
         "provider_call_id",
+        "research_identity",
         "result_index",
         "spec_digest",
         "timeout_seconds"
@@ -38,7 +39,7 @@
         "provider_call_id",
         "input_identity"
       ],
-      "sha256": "8fc12affa17d82b3dc952e3b7e5d627e1475dc405c990c40b9f3dd98d1caeb90",
+      "sha256": "8289eab1331dd6648c508c203bde4910b57ecb3c60d0ef40a1da19279cd56a16",
       "title": "AlgorithmExecutionCommand"
     },
     "AlgorithmResult": {
@@ -76,7 +77,7 @@
         "status",
         "provenance"
       ],
-      "sha256": "2a0b794bee0208394a3040140271e736c4933fa41b8cead1be606112841f9080",
+      "sha256": "456ade97ff96bf28b9837f1cd53b255696c3709ab18551917ddc76bccd136bdd",
       "title": "AlgorithmResult"
     },
     "AlgorithmResultProvenance": {
@@ -90,6 +91,7 @@
         "invocation_id",
         "job_id",
         "lease_epoch",
+        "research_identity",
         "source_input_identity",
         "spec_digest"
       ],
@@ -100,7 +102,7 @@
         "input_identity",
         "spec_digest"
       ],
-      "sha256": "85172284aacd192d5ec17dd5dd349013a6fe6f28891aceab62e66b6ab7d6c45e",
+      "sha256": "7651d3c7a5fe8f6722b2f853a8bd11a8a5fb71db55791d7813b78a8f9de7b3a6",
       "title": "AlgorithmResultProvenance"
     },
     "AteApplicabilityCheck": {
@@ -126,10 +128,12 @@
     },
     "CausalEffect": {
       "properties": [
+        "adjustment_rule",
         "adjustment_set",
         "bootstrap_n",
         "ci95",
         "contrast",
+        "effect_request",
         "estimand",
         "estimate",
         "estimator",
@@ -137,7 +141,9 @@
         "n_rows",
         "outcome",
         "outcome_model",
+        "sample_identity",
         "standard_error",
+        "support",
         "treatment"
       ],
       "required": [
@@ -149,7 +155,7 @@
         "estimator",
         "n_rows"
       ],
-      "sha256": "432729eecb659b0768aa2c8d9cc7088fdd6d20e3d37255197f4c7ddccc3f4fad",
+      "sha256": "12cbca79f116b1ff5dcb4cc1a68519cf656244e79661c699725341698ee32abc",
       "title": "CausalEffect"
     },
     "DataIssue": {
@@ -215,7 +221,7 @@
         "variable_count"
       ],
       "required": [],
-      "sha256": "255efc66b0d713f12b59bd37f08be7f1c59553ab576b4b959a08d7839faf11bc",
+      "sha256": "70a34c5a747266340c40317648185cac7454041380a9f19de38279e68cc49df6",
       "title": "Diagnostics"
     },
     "EvidenceResult": {
@@ -242,13 +248,35 @@
       "sha256": "12f2c95a8c0ef1ea41921daa8deda8a72cac2227481efa064830ab4ada30115c",
       "title": "EvidenceResult"
     },
+    "EffectQuery": {
+      "properties": [
+        "contrast",
+        "effect_request",
+        "estimator_config",
+        "graph_result_ref",
+        "outcome",
+        "outcome_model",
+        "treatment"
+      ],
+      "required": [
+        "graph_result_ref",
+        "treatment",
+        "outcome"
+      ],
+      "sha256": "eef9ea1fe602142709f316def1dc568a0f24bb746fb66ae7b53ca83af61fead5",
+      "title": "EffectQuery"
+    },
     "FinalAnalysisDecision": {
       "properties": [
         "confidence",
         "confidence_basis",
         "conflict_status",
         "conflicts",
+        "effect_reason",
+        "effect_status",
         "outcome",
+        "primary_effect_result_ref",
+        "primary_graph_result_ref",
         "primary_result_ref",
         "result_assessments",
         "revision_proposals",
@@ -260,12 +288,13 @@
         "selection_rationale",
         "confidence"
       ],
-      "sha256": "398a337fce47181bbc1994bbdef44ec75a9d485e1c6f9e6edb2decbda035909c",
+      "sha256": "9e4c3af13abf00d316a8e7d11b781fafe878861e41612f062c7b1991197d1fc6",
       "title": "FinalAnalysisDecision"
     },
     "GraphEdge": {
       "properties": [
         "edge_type",
+        "prediction",
         "source",
         "target",
         "weight"
@@ -274,7 +303,7 @@
         "source",
         "target"
       ],
-      "sha256": "31cb634ae48fad84dc221be40fcff438ddcba9b6b893ee55e2d5dc9abf6f3ae6",
+      "sha256": "bc3159b0e2dc3134b6410ae618c0402e27d7e2a3a31c4fcc178a7e5163b19c22",
       "title": "GraphEdge"
     },
     "GraphValidation": {
@@ -305,6 +334,7 @@
         "provider_call_id",
         "provider_item_id",
         "provider_response_id",
+        "research_identity",
         "response_identity",
         "response_identity_source",
         "result_ref",
@@ -321,7 +351,7 @@
         "tool_name",
         "final_status"
       ],
-      "sha256": "7abef9b44ce3191312c5b4f5c735412ab324ca253b7e84addc53635a55b08891",
+      "sha256": "2df1d0a8737d2e1db263f93e688e6698a5664c1c2025e3f0773d50df50fa9e2d",
       "title": "InvocationRecord"
     },
     "McpInvocationContext": {
@@ -335,6 +365,7 @@
         "job_id",
         "key_id",
         "lease_epoch",
+        "research_identity",
         "session_id",
         "source_input_identity",
         "user_id",
@@ -353,7 +384,7 @@
         "expires_at",
         "key_id"
       ],
-      "sha256": "8235d0c66da8b94c6919a05c1696822c24c5a4064360a7a2a657a9dd1863c743",
+      "sha256": "c6ea84ac47e8518cdd512acbef4767d2e4256724a0e3411fca391b22e65f9bb9",
       "title": "McpInvocationContext"
     },
     "MethodDefinition": {
@@ -429,7 +460,7 @@
         "disposition",
         "rationale"
       ],
-      "sha256": "470e990b2b72874ad955153a6b6f07952fedd7371059ce9cdf6d7eef674902f1",
+      "sha256": "28a4c6ab658b9fcf5e7a170833359f7b10cfed46e67a0e0156e32b89562165e6",
       "title": "ResultAssessment"
     },
     "RevisionProposal": {
@@ -456,7 +487,7 @@
         "code",
         "message"
       ],
-      "sha256": "f7eb121fdd4fa2bd6a26bf5c70ae39c0792e9259864a7c70cebc1e186279cf35",
+      "sha256": "fa6eb8e7f9d7888a2b5ff25758c9bc032131ea92681d91cb0dd952a334805a3b",
       "title": "SafeWarning"
     },
     "ScientificConflict": {
@@ -484,7 +515,7 @@
       "required": [
         "graph_semantics"
       ],
-      "sha256": "ed84c419ece3baf6a6cc1985d6bbeb848f7ef9c537956f90587c5f897628c4e8",
+      "sha256": "a3eb17feecaccac1b8bab5edbb68e5c8136743867c71d190a20d41537d49180f",
       "title": "StandardizedGraph"
     },
     "WebEvidenceResult": {
@@ -520,32 +551,32 @@
   "tools": [
     {
       "capability_id": "causal.backdoor_ols",
-      "schema_sha256": "604300092cbe08c114a7f3be5334300f0107486eacc212fd00facec0e914b9be",
-      "spec_digest": "0028098acaf85a189cdf822c54017d22b86b08e4e3942338be5c3ec9d6c01516",
+      "schema_sha256": "baee787153ee02d38b3bcf442ca00818ce3c62280f3a92f94f84a7a58398f84c",
+      "spec_digest": "043f5c83df1e31007be68a8ead3a5d683cac719bc50a3355ffc687bbd2d7af66",
       "tool_name": "causal_backdoor_ols"
     },
     {
       "capability_id": "causal.cdfm",
-      "schema_sha256": "833fc380608aec4179772f57e361693471758572646524839cbd60374db80dc7",
-      "spec_digest": "a193a8f641049ab946846a0011eb23e62eed767da7bb02b30b6964c6ae74b670",
+      "schema_sha256": "385c538df8c00298de501b5fc06ef4eff28b8e365f83f8811c492353f5fd829c",
+      "spec_digest": "0d28f5d6eda546df490f48541da9200582b924a308d44277939468ce0e0362cd",
       "tool_name": "causal_cdfm"
     },
     {
       "capability_id": "causal.direct_lingam",
       "schema_sha256": "97654a33c42ade597f332000a44f260e2db45bc7ea5581c85df01e5f2332d4a7",
-      "spec_digest": "94ebf2f00c889a2e84826499f1d443817ff5bd0700c2025ac597e9254f2d451e",
+      "spec_digest": "d4081c00e524ba4819c5f1980d4506d8112ac381f6ae5fc997a5f080802d23b2",
       "tool_name": "causal_direct_lingam"
     },
     {
       "capability_id": "causal.g_formula",
-      "schema_sha256": "1525b92f79239cf9b938b8d5c391d4aa5539d59cc5a95b3428126f9bda22c32a",
-      "spec_digest": "c7c03be8853488aa2137890786a1783a0876912a98884d30c2e9a4a99c1625bf",
+      "schema_sha256": "552bb504b088a2da00912c340f07ab089cade6029f0d944751e9e74a6091dccd",
+      "spec_digest": "9ed3276ace565645c1937a3aa969343a024de204e875c32cdb010400ac85f86f",
       "tool_name": "causal_g_formula"
     },
     {
       "capability_id": "causal.pc",
       "schema_sha256": "3a54f6cda9165744432f7f48b6f90d9cca2f1313401af842422461cc89bc1148",
-      "spec_digest": "4d96b624246f6237262dc80967227fb0064f05e1e07b6a886e2534b757d381a2",
+      "spec_digest": "13ce4b31c5ffe4e09bdd26c00d2329f50ef24c9122fe8b2f382e8e5eb2e8156d",
       "tool_name": "causal_pc"
     }
   ]
