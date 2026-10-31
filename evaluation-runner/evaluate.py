@@ -56,11 +56,12 @@ def parse_edges(asset: dict, dim: int | None = None) -> tuple[list[tuple[int, in
 
 def score(edges: list[tuple[int, int, str]], gold: set[tuple[int, int]]) -> dict:
     directed = {(source, target) for source, target, kind in edges if kind == "directed"}
-    undirected = {
+    undirected_edges = [
         frozenset((source, target))
         for source, target, kind in edges
         if kind in UNDIRECTED_TYPES
-    }
+    ]
+    undirected = set(undirected_edges)
     directed_pairs = {frozenset(edge) for edge in directed}
     mirrored = {
         pair for pair in directed_pairs
@@ -74,13 +75,13 @@ def score(edges: list[tuple[int, int, str]], gold: set[tuple[int, int]]) -> dict
         for source, target in ((min(pair), max(pair)), (max(pair), min(pair)))
     }
     n_pred_edges = len(directed)
-    n_undirected_edges = len(undirected) + len(mirrored)
+    n_undirected_edges = len(undirected_edges) + len(mirrored)
     true_positive = len(directed & gold)
     recall = true_positive / len(gold) if gold else 0.0
     denominator = n_pred_edges + n_undirected_edges
     precision = true_positive / denominator if denominator else 0.0
 
-    predicted_pairs = {frozenset(edge) for edge in directed} | undirected
+    predicted_pairs = {frozenset(edge) for edge in directed} | undirected | mirrored
     gold_pairs = {frozenset(edge) for edge in gold}
     intersection = len(predicted_pairs & gold_pairs)
     skeleton_recall = intersection / len(gold_pairs) if gold_pairs else 0.0

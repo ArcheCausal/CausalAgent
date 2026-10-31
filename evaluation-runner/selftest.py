@@ -275,13 +275,32 @@ def test_score_strict_and_skeleton():
     assert metrics["n_pred_edges"] == 1
     assert metrics["n_undirected_edges"] == 2
     assert metrics["recall"] == 0.0
-    assert metrics["skeleton_recall"] == 0.5
+    assert metrics["skeleton_recall"] == 1.0
 
 
 def test_score_empty_graph():
     metrics = evaluate.score([], {(0, 1)})
     assert metrics["recall"] == 0.0 and metrics["precision"] == 0.0
     assert metrics["n_pred_edges"] == 0 and metrics["n_undirected_edges"] == 0
+
+
+def test_score_mirror_counts_in_skeleton():
+    metrics = evaluate.score([(0, 1, "directed"), (1, 0, "directed")], {(0, 1)})
+    assert metrics["n_pred_edges"] == 0
+    assert metrics["n_undirected_edges"] == 1
+    assert metrics["recall"] == 0.0
+    assert metrics["skeleton_recall"] == 1.0
+    assert metrics["skeleton_precision"] == 1.0
+
+
+def test_score_each_undirected_edge_counts_as_fp():
+    metrics = evaluate.score(
+        [(0, 1, "undirected"), (0, 1, "bidirected"), (1, 2, "partially_directed")],
+        {(0, 1)},
+    )
+    assert metrics["n_undirected_edges"] == 3
+    assert metrics["precision"] == 0.0
+    assert metrics["skeleton_recall"] == 1.0
 
 
 def run_tests() -> int:
