@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 import re
 from collections.abc import Iterable, Mapping
@@ -378,7 +379,7 @@ def build_causal_graph_model(
     score_matrix = graph.get("edge_score_matrix")
     if score_type == "probability" and isinstance(score_matrix, list):
         metadata["score_type"] = score_type
-        metadata["edge_score_matrix"] = score_matrix
+        metadata["edge_score_matrix"] = copy.deepcopy(score_matrix)
 
     return CausalGraphModel(
         graph_id=graph_id,
