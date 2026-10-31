@@ -126,6 +126,33 @@ def _nodes_and_edges(payload: Mapping[str, Any]) -> tuple[list[str], list[GraphE
     return nodes, edges
 
 
+def _cdfm_probability_scores(
+    payload: Mapping[str, Any], nodes: list[str], capability_id: str
+) -> tuple[list[list[float]] | None, str | None]:
+    if capability_id != "causal.cdfm":
+        return None, None
+    raw = payload.get("probabilities")
+    if raw is None:
+        return None, None
+    size = len(nodes)
+    if not isinstance(raw, list) or len(raw) != size:
+        raise RunnerContractError("runner probabilities must be square")
+    matrix: list[list[float]] = []
+    for row in raw:
+        if not isinstance(row, list) or len(row) != size:
+            raise RunnerContractError("runner probabilities must be square")
+        converted: list[float] = []
+        for value in row:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise RunnerContractError("runner probabilities must be numeric")
+            number = float(value)
+            if not 0.0 <= number <= 1.0:
+                raise RunnerContractError("runner probabilities must be in [0, 1]")
+            converted.append(round(number, 6))
+        matrix.append(converted)
+    return matrix, "probability"
+
+
 def standardize_runner_graph(
     payload: Mapping[str, Any], *, capability_id: str
 ) -> StandardizedGraph:
@@ -133,7 +160,14 @@ def standardize_runner_graph(
         raise RunnerContractError("runner did not return success")
     nodes, edges = _nodes_and_edges(payload)
     semantics = get_algorithm_spec(capability_id).graph_semantics
-    return StandardizedGraph(graph_semantics=semantics, nodes=nodes, edges=edges)
+    matrix, score_type = _cdfm_probability_scores(payload, nodes, capability_id)
+    return StandardizedGraph(
+        graph_semantics=semantics,
+        nodes=nodes,
+        edges=edges,
+        edge_score_matrix=matrix,
+        score_type=score_type,
+    )
 
 
 def result_from_runner_payload(

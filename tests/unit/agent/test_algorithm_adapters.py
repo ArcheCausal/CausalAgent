@@ -379,3 +379,34 @@ def test_algorithm_tool_checks_guard_after_adapter_returns() -> None:
             )
         )
     assert guard.calls == 2
+
+
+def test_cdfm_runner_probabilities_become_edge_scores() -> None:
+    graph = standardize_runner_graph(
+        {
+            "success": True,
+            "data": {"nodes": [{"id": "x"}, {"id": "y"}], "edges": []},
+            "probabilities": [[0.0, 0.8123456], [0.2, 0.0]],
+        },
+        capability_id="causal.cdfm",
+    )
+    assert graph.score_type == "probability"
+    assert graph.edge_score_matrix == [[0.0, 0.812346], [0.2, 0.0]]
+
+    pc_graph = standardize_runner_graph(
+        {
+            "success": True,
+            "data": {"nodes": ["x", "y"], "edges": []},
+            "probabilities": [[0.0, 1.0], [0.0, 0.0]],
+        },
+        capability_id="causal.pc",
+    )
+    assert pc_graph.edge_score_matrix is None
+    assert pc_graph.score_type is None
+
+    plain = standardize_runner_graph(
+        {"success": True, "data": {"nodes": ["x", "y"], "edges": []}},
+        capability_id="causal.cdfm",
+    )
+    assert plain.edge_score_matrix is None
+    assert plain.score_type is None
