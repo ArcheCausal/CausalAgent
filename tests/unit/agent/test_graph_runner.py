@@ -121,6 +121,35 @@ class UsageGraph(FakeGraph):
         yield {"type": "updates", "ns": (), "data": {}}
 
 
+class TerminalUsageGraph(FakeGraph):
+    """在最后一个 chunk 之后才更新用量，只触发终态 flush。"""
+
+    def __init__(self, collector):
+        super().__init__([_snapshot(), _snapshot(values={"messages": []})])
+        self.collector = collector
+
+    async def astream(self, input_data, config, **_kwargs):
+        yield {"type": "updates", "ns": (), "data": {}}
+        self.collector.values = {
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "total_tokens": 12,
+        }
+
+
+class UsageErrorGraph(TerminalUsageGraph):
+    """在终态前更新用量，然后抛出节点异常。"""
+
+    async def astream(self, input_data, config, **_kwargs):
+        yield {"type": "updates", "ns": (), "data": {}}
+        self.collector.values = {
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "total_tokens": 12,
+        }
+        raise RuntimeError("boom")
+
+
 def _snapshot(*, interrupts=(), public_interrupts=None, values=None):
     """构造 graph_runner 所需的最小 StateSnapshot。"""
     return SimpleNamespace(
@@ -204,6 +233,26 @@ class GraphRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_without_collector_no_usage_events(self):
         events = await _collect(FakeGraph([_snapshot(), _snapshot()]))
         self.assertTrue(all(event["type"] != "usage" for event in events))
+
+    async def test_terminal_flush_emits_usage_after_last_chunk(self):
+        """最后一次 LLM 调用发生在终态前时，终态 flush 仍要发出 usage。"""
+        collector = StubCollector()
+        graph = TerminalUsageGraph(collector)
+
+        events = await _collect(graph, usage_collector=collector)
+
+        self.assertEqual([event["type"] for event in events][-2:], ["usage", "final_result"])
+        self.assertEqual(events[-2]["total_tokens"], 12)
+
+    async def test_error_terminal_flush_precedes_error_event(self):
+        """异常终态前也必须先发 usage，再发 error。"""
+        collector = StubCollector()
+        graph = UsageErrorGraph(collector)
+
+        events = await _collect(graph, usage_collector=collector)
+
+        self.assertEqual([event["type"] for event in events][-2:], ["usage", "error"])
+        self.assertEqual(events[-2]["total_tokens"], 12)
 
     async def test_job_root_identity_is_not_a_subgraph_namespace(self):
         """普通问答的两次状态查询都必须使用 Job ID 根 identity。"""
