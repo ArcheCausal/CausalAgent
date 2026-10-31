@@ -55,13 +55,16 @@ def resolve_credentials(config: Config) -> tuple[str, str]:
     return credentials["username"], credentials["password"]
 
 
+USAGE_FIELDS = ("tokens_input", "tokens_output", "tokens_total")
+_EVENT_USAGE_FIELDS = ("input_tokens", "output_tokens", "total_tokens")
+
 RESULT_HEADER = [
     "run_id", "dataset", "mechanism", "rep", "n_rows", "n_cols", "dim", "lambda",
     "n_gold_edges", "n_pred_edges", "n_undirected_edges", "recall", "precision", "f1",
     "skeleton_recall", "skeleton_precision", "shd", "auroc", "auprc",
     "final_algorithm", "final_confidence", "final_selection_rationale",
-    "finalization_status", "interactions", "duration_s", "tokens", "status",
-    "failure_reason",
+    "finalization_status", "interactions", "duration_s",
+    "tokens_input", "tokens_output", "tokens_total", "status", "failure_reason",
 ]
 
 
@@ -78,12 +81,45 @@ def _git_commit() -> str:
         return "unknown"
 
 
+def usage_totals(records) -> dict[str, int]:
+    """按 attempt 取累计最大值再求和；终态快照不重复计入。"""
+    per_attempt: dict[object, tuple[int, int, int]] = {}
+    for record in records:
+        if record.get("type") != "usage":
+            continue
+        payload = record.get("payload") or {}
+        values = tuple(payload.get(name) for name in _EVENT_USAGE_FIELDS)
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in values
+        ):
+            continue
+        key = payload.get("attempt")
+        previous = per_attempt.get(key, (0, 0, 0))
+        per_attempt[key] = tuple(
+            max(old, new) for old, new in zip(previous, values)
+        )
+    if not per_attempt:
+        return {}
+    return {
+        name: sum(item[index] for item in per_attempt.values())
+        for index, name in enumerate(USAGE_FIELDS)
+    }
+
+
+def _add_usage(total: dict[str, int], row: dict) -> None:
+    for name in USAGE_FIELDS:
+        value = row.get(name, "")
+        if value not in ("", None):
+            total[name] = total.get(name, 0) + int(value)
+
+
 def _failed_row(spec, run_id, reason: str) -> dict:
     row = {name: "" for name in RESULT_HEADER}
     row.update({
         "run_id": run_id, "dataset": spec.dataset_id, "mechanism": spec.mechanism,
         "rep": spec.rep if spec.rep is not None else "", "dim": spec.dim_nominal or "",
-        "tokens": "not_collected", "status": "failed", "failure_reason": reason,
+        "status": "failed", "failure_reason": reason,
         "interactions": 0, "duration_s": 0.0,
     })
     return row
@@ -177,6 +213,9 @@ def _run_once(spec, config: Config, client: AgentClient, run_dir: Path, run_id: 
     row.update({"n_rows": int(X.shape[0]), "n_cols": dim, "dim": dim,
                 "n_gold_edges": len(gold), "interactions": interactions,
                 "duration_s": duration, "status": "failed" if failure else "success"})
+    usage = usage_totals(records)
+    if usage:
+        row.update(usage)
     if failure:
         return row
 
@@ -224,11 +263,16 @@ def _run_dataset(spec, config, credentials, run_id, run_dir) -> dict:
     client = AgentClient(config.run.base_url)
     try:
         client.login(*credentials)
+        total_usage: dict[str, int] = {}
         row = _run_once(spec, config, client, run_dir, run_id)
+        _add_usage(total_usage, row)
         attempts = 0
         while row["status"] == "failed" and row["failure_reason"] in RETRYABLE and attempts < 1:
             attempts += 1
             row = _run_once(spec, config, client, run_dir, run_id)
+            _add_usage(total_usage, row)
+        if total_usage:
+            row.update(total_usage)
         return row
     except ds.DatasetInvalid:
         return _failed_row(spec, run_id, "dataset_invalid")
@@ -335,6 +379,9 @@ def main(argv=None) -> int:
         for name in ("recall", "precision", "skeleton_recall", "skeleton_precision", "duration_s"):
             row[name] = float(row[name] or 0)
         for name in ("f1", "shd", "auroc", "auprc"):
+            value = row.get(name, "")
+            row[name] = float(value) if value not in ("", None) else ""
+        for name in USAGE_FIELDS:
             value = row.get(name, "")
             row[name] = float(value) if value not in ("", None) else ""
     meta = {

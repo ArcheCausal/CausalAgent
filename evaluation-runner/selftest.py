@@ -506,6 +506,33 @@ def test_validate_selection_rejects_unknown_values():
             raise AssertionError(f"未知取值应报 ConfigError: {mechanisms} {dims} {ns}")
 
 
+def test_usage_totals_sums_attempts_and_ignores_terminal_snapshot():
+    records = [
+        {"type": "usage", "payload": {"attempt": 1, "input_tokens": 10, "output_tokens": 2, "total_tokens": 12}},
+        {"type": "usage", "payload": {"attempt": 1, "input_tokens": 15, "output_tokens": 5, "total_tokens": 20}},
+        {
+            "type": "final_result",
+            "payload": {"attempt": 1, "usage": {"input_tokens": 15, "output_tokens": 5, "total_tokens": 20}},
+        },
+        {"type": "usage", "payload": {"attempt": 2, "input_tokens": 7, "output_tokens": 1, "total_tokens": 8}},
+    ]
+    assert rn.usage_totals(records) == {
+        "tokens_input": 22,
+        "tokens_output": 6,
+        "tokens_total": 28,
+    }
+    assert rn.usage_totals([]) == {}
+    assert rn.usage_totals([{"type": "usage", "payload": {"attempt": 1}}]) == {}
+
+
+def test_add_usage_accumulates_jobs_and_skips_blank_rows():
+    total = {}
+    rn._add_usage(total, {"tokens_input": 10, "tokens_output": 2, "tokens_total": 12})
+    rn._add_usage(total, {"tokens_input": "", "tokens_output": "", "tokens_total": ""})
+    rn._add_usage(total, {"tokens_input": 5, "tokens_output": 1, "tokens_total": 6})
+    assert total == {"tokens_input": 15, "tokens_output": 3, "tokens_total": 18}
+
+
 def test_run_once_marks_missing_graph_failed():
     import tempfile as _tf
     class FakeClient:
@@ -513,7 +540,10 @@ def test_run_once_marks_missing_graph_failed():
         def new_session(self): return "s"
         def create_job(self, session_id, message, user_file_id): return "j"
         def events(self, job_id, last_event_id=0):
-            yield {"id": 1, "type": "final_result",
+            yield {"id": 1, "type": "usage",
+                   "payload": {"attempt": 1, "input_tokens": 10,
+                               "output_tokens": 2, "total_tokens": 12}}
+            yield {"id": 2, "type": "final_result",
                    "payload": {"data": {"document": {"blocks": [], "assets": {}}}}}
         def cancel(self, job_id): pass
     with _tf.TemporaryDirectory() as tmp:
@@ -530,6 +560,7 @@ def test_run_once_marks_missing_graph_failed():
             output=rn.OutputSettings(dir=run_dir))
         row = rn._run_once(spec, config, FakeClient(), run_dir, "r1")
         assert row["status"] == "failed" and row["failure_reason"] == "no_causal_graph"
+        assert (row["tokens_input"], row["tokens_output"], row["tokens_total"]) == (10, 2, 12)
 
 
 def test_run_dataset_corrupt_npz_returns_terminal_error():
