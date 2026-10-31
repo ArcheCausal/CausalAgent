@@ -1,0 +1,4 @@
+local/
+cdfm_bench_*/
+__pycache__/
+*.pyc

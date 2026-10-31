@@ -1,0 +1,19 @@
+run:
+  base_url: http://localhost:5001
+  parallel: 1
+  timeout_minutes: 15
+  max_interactions: 6
+  interaction_seconds: 300
+  seed: 20261030
+auth:
+  username: ""
+  password: ""
+data:
+  dir: ./cdfm_bench_D10_30_fixed_r5
+  mechanisms: all
+  exclude: [TimeLag]
+  dims: []
+  ns: []
+  per_cell: 1
+output:
+  dir: ./local/runs
