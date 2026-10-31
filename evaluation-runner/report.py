@@ -8,7 +8,9 @@ SUMMARY_HEADER = [
     "parallel", "mechanisms", "datasets", "succeeded", "failed", "recall_mean",
     "precision_mean", "skeleton_recall_mean", "skeleton_precision_mean",
     "f1_mean", "shd_mean", "auroc_mean", "auprc_mean", "auroc_n", "auprc_n",
-    "duration_mean_s", "interactions_mean", "algorithm_distribution", "failure_reasons",
+    "duration_mean_s", "interactions_mean",
+    "tokens_input_mean", "tokens_output_mean", "tokens_total_mean", "tokens_n",
+    "algorithm_distribution", "failure_reasons",
 ]
 
 
@@ -73,21 +75,38 @@ def summarize(rows: list[dict], meta: dict) -> dict:
         "auprc_n": len(_present(succeeded, "auprc")),
         "duration_mean_s": _mean([row["duration_s"] for row in succeeded]),
         "interactions_mean": _mean([row["interactions"] for row in succeeded]),
+        "tokens_input_mean": _mean_present(rows, "tokens_input"),
+        "tokens_output_mean": _mean_present(rows, "tokens_output"),
+        "tokens_total_mean": _mean_present(rows, "tokens_total"),
+        "tokens_n": len(_present(rows, "tokens_total")),
         "algorithm_distribution": _pairs(algorithms),
         "failure_reasons": _pairs(reasons),
     }
 
 
 def _table(title: str, groups: dict[str, list[dict]]) -> list[str]:
+    def tokens_cell(items):
+        present = [
+            row for row in items
+            if row.get("tokens_total", "") not in ("", None)
+        ]
+        if not present:
+            return "-"
+        return (
+            f"{_fmt(_mean_present(present, 'tokens_input'), 0)}"
+            f"/{_fmt(_mean_present(present, 'tokens_output'), 0)}"
+            f"/{_fmt(_mean_present(present, 'tokens_total'), 0)}"
+        )
+
     lines = [
         f"### {title}", "",
-        "| 分组 | n | recall | precision | F1 | SHD | 骨架 recall | 骨架 precision |",
-        "|---|---|---|---|---|---|---|---|",
+        "| 分组 | n | recall | precision | F1 | SHD | 骨架 recall | 骨架 precision | tokens(入/出/总) |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for key in sorted(groups):
         items = [row for row in groups[key] if row["status"] in ("success", "partial")]
         if not items:
-            lines.append(f"| {key} | 0 | - | - | - | - | - | - |")
+            lines.append(f"| {key} | 0 | - | - | - | - | - | - | - |")
             continue
         lines.append(
             f"| {key} | {len(items)} | {_fmt(_mean_present(items, 'recall'))} "
@@ -95,7 +114,8 @@ def _table(title: str, groups: dict[str, list[dict]]) -> list[str]:
             f"| {_fmt(_mean_present(items, 'f1'))} "
             f"| {_fmt(_mean_present(items, 'shd'), 2)} "
             f"| {_fmt(_mean_present(items, 'skeleton_recall'))} "
-            f"| {_fmt(_mean_present(items, 'skeleton_precision'))} |"
+            f"| {_fmt(_mean_present(items, 'skeleton_precision'))} "
+            f"| {tokens_cell(items)} |"
         )
     return lines + [""]
 
@@ -132,6 +152,10 @@ def report_markdown(rows: list[dict], meta: dict) -> str:
         f"骨架 precision {_fmt(summary['skeleton_precision_mean'])}",
         f"- AUROC {_fmt(summary['auroc_mean'])}，AUPRC {_fmt(summary['auprc_mean'])}"
         f"（CDFM 主结果 {summary['auroc_n']} 集）",
+        f"- tokens 平均 入/出/总: {_fmt(summary['tokens_input_mean'], 0)}"
+        f"/{_fmt(summary['tokens_output_mean'], 0)}"
+        f"/{_fmt(summary['tokens_total_mean'], 0)}"
+        f"（{summary['tokens_n']} 集）",
         f"- 平均耗时 {summary['duration_mean_s']:.1f}s，平均交互 {summary['interactions_mean']:.2f} 次",
         f"- 算法分布: {summary['algorithm_distribution'] or '-'}",
         f"- 失败分布: {summary['failure_reasons'] or '-'}",
@@ -160,6 +184,7 @@ def report_markdown(rows: list[dict], meta: dict) -> str:
         "- recall/precision 为严格定向口径：只有 directed 边计 TP，无向类边各计 1 FP，镜像对按一个无向边计。",
         "- 骨架口径把边无向化后比较，两套数值不可混比。",
         "- TimeLag 是否纳入见抽样配置；diagnostic 报告不计入均值。",
+        "- token 均值只统计产生过 LLM 用量的行；总体节含失败行，分组表沿用该表的成功/部分成功范围。",
         "",
     ]
     return "\n".join(lines)

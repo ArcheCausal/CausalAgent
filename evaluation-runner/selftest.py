@@ -405,7 +405,8 @@ def _row(dataset_id="CAM/D010_N00500/rep00", recall=1.0, precision=0.5, status="
         "auroc": 0.75, "auprc": 0.65,
         "final_algorithm": "pc", "final_confidence": "low",
         "final_selection_rationale": "示例", "finalization_status": "valid",
-        "interactions": 2, "duration_s": 120.0, "tokens": "not_collected",
+        "interactions": 2, "duration_s": 120.0,
+        "tokens_input": 1200, "tokens_output": 300, "tokens_total": 1500,
         "status": status, "failure_reason": reason,
     }
 
@@ -422,6 +423,24 @@ def test_summarize_counts_and_means():
     assert abs(summary["shd_mean"] - 3.0) < 1e-9
     assert abs(summary["auroc_mean"] - 0.75) < 1e-9
     assert summary["auroc_n"] == 1
+    assert summary["tokens_total_mean"] == 1500
+    assert summary["tokens_n"] == 2
+
+
+def test_summary_tokens_skip_blank_rows():
+    rows = [_row(), _row("Linear/D010_N00500/rep00", status="failed", reason="timeout")]
+    rows[1]["tokens_input"] = ""
+    rows[1]["tokens_output"] = ""
+    rows[1]["tokens_total"] = ""
+    summary = report.summarize(rows, {"sampling": {}})
+    assert summary["tokens_total_mean"] == 1500
+    assert summary["tokens_n"] == 1
+
+
+def test_report_markdown_contains_token_columns():
+    markdown = report.report_markdown([_row()], {"run_id": "r1", "git_commit": "abc"})
+    assert "tokens 平均" in markdown
+    assert "tokens(入/出/总)" in markdown
 
 
 def test_summary_skips_missing_ranking_metrics():
