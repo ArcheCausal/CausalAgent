@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
+import answer
 import dataset as ds
 from config import ConfigError, load_config
 
@@ -170,6 +171,44 @@ def test_load_rejects_missing_keys():
         except ds.DatasetInvalid:
             return
         raise AssertionError("缺少 adjacency 应报 DatasetInvalid")
+
+
+def _plan_interaction(dim=2, transformations=("standardize",)):
+    return {
+        "interaction_type": "data_processing_plan_confirmation",
+        "plan_version": "a" * 64,
+        "plan": {
+            "variable_semantics": {f"X{index}": f"变量{index}" for index in range(dim)},
+            "transformations": list(transformations),
+        },
+    }
+
+
+def test_answer_confirm_plan():
+    profile = {"n_rows": 10, "n_cols": 2, "kinds": ["numeric", "binary"], "missing": False,
+               "ranges": [(0.0, 1.0), (0.0, 1.0)], "uniques": [10, 2]}
+    payload, kind = answer.answer_for({"interaction": _plan_interaction()}, profile)
+    assert kind == "confirm"
+    assert payload == {"action": "confirm", "plan_version": "a" * 64}
+
+
+def test_answer_rejects_destructive_plan():
+    profile = {"n_rows": 10, "n_cols": 2, "kinds": ["numeric", "numeric"], "missing": False,
+               "ranges": [(0.0, 1.0), (0.0, 1.0)], "uniques": [10, 10]}
+    payload, kind = answer.answer_for({"interaction": _plan_interaction(2, ("drop", "standardize"))}, profile)
+    assert kind == "reject"
+    assert isinstance(payload, str) and "删除" in payload
+
+
+def test_answer_free_text_uses_profile():
+    profile = {"n_rows": 500, "n_cols": 3, "kinds": ["numeric"] * 3, "missing": False,
+               "ranges": [(0.0, 1.0)] * 3, "uniques": [100] * 3}
+    payload, kind = answer.answer_for(
+        {"interaction": {"interaction_type": "data_processing_question", "message": "数据是什么"}},
+        profile,
+    )
+    assert kind == "profile"
+    assert "500" in payload and "X0" in payload and "X2" in payload
 
 
 def run_tests() -> int:
