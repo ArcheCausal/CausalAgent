@@ -358,6 +358,43 @@ def test_report_markdown_contains_tables():
     assert "pc" in markdown
 
 
+def _resume_rows():
+    return [
+        {"dataset": "CAM/D010_N00500/rep00", "status": "failed", "failure_reason": "sse_error",
+         "final_algorithm": "", "recall": 0, "precision": 0, "skeleton_recall": 0,
+         "skeleton_precision": 0, "duration_s": 0.0, "interactions": 0,
+         "mechanism": "CAM", "dim": 10, "n_rows": 500},
+        {"dataset": "CAM/D010_N00500/rep00", "status": "success", "failure_reason": "",
+         "final_algorithm": "pc", "recall": 0.9, "precision": 0.8, "skeleton_recall": 1.0,
+         "skeleton_precision": 0.95, "duration_s": 120.0, "interactions": 2,
+         "mechanism": "CAM", "dim": 10, "n_rows": 500},
+    ]
+
+
+def test_summarize_dedupes_resumed_rows():
+    summary = report.summarize(_resume_rows(), {"sampling": {}})
+    assert summary["datasets"] == 1
+    assert summary["succeeded"] == 1
+    assert summary["failed"] == 0
+    assert summary["failure_reasons"] == ""
+
+
+def test_report_markdown_dedupes_resumed_rows():
+    markdown = report.report_markdown(_resume_rows(), {"run_id": "r1", "git_commit": "abc"})
+    failures = markdown.split("## 失败明细", 1)[1].split("## recall 最低", 1)[0]
+    assert "CAM/D010_N00500/rep00" not in failures
+    assert "数据集: 1" in markdown
+
+
+def test_scalar_exclude_rejected():
+    text = BASE_YAML.replace("per_cell: 1", "per_cell: 1\n  exclude: TimeLag")
+    try:
+        load_config(_write_yaml(text))
+    except ConfigError:
+        return
+    raise AssertionError("exclude 为标量应报 ConfigError")
+
+
 def test_build_prompt():
     assert rn.build_prompt(10) == "请读取上传的 CSV 数据文件，对变量 X0 到 X9 执行因果分析"
 

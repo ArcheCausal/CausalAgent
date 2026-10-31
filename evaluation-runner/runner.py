@@ -202,6 +202,12 @@ def _run_once(spec, config: Config, client: AgentClient, run_dir: Path, run_id: 
 
 
 def _run_dataset(spec, config, credentials, run_id, run_dir) -> dict:
+    try:
+        _, adjacency = ds.load(spec)
+        if not ds.gold_edges(adjacency):
+            raise ds.DatasetInvalid("gold 为空")
+    except ds.DatasetInvalid:
+        return _failed_row(spec, run_id, "dataset_invalid")
     client = AgentClient(config.run.base_url)
     try:
         client.login(*credentials)
@@ -273,8 +279,12 @@ def main(argv=None) -> int:
     finally:
         bootstrap.close()
 
-    run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + _git_commit()
-    run_dir = args.resume or (config.output.dir / run_id)
+    if args.resume:
+        run_dir = args.resume
+        run_id = run_dir.name
+    else:
+        run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + _git_commit()
+        run_dir = config.output.dir / run_id
     for name in ("csv", "raw"):
         (run_dir / name).mkdir(parents=True, exist_ok=True)
     results_path = run_dir / "results.csv"

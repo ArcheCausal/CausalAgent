@@ -56,6 +56,13 @@ def _positive(value, name: str) -> int:
     return value
 
 
+def _list_field(raw: dict, name: str) -> list:
+    value = raw.get(name) or []
+    if not isinstance(value, list):
+        raise ConfigError(f"data.{name} 必须是列表")
+    return value
+
+
 def load_config(path: str | Path) -> Config:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
@@ -98,9 +105,9 @@ def load_config(path: str | Path) -> Config:
     data = DataSettings(
         dir=Path(data_raw["dir"]),
         mechanisms=mechanisms,
-        exclude=tuple(data_raw.get("exclude") or ()),
-        dims=tuple(int(value) for value in data_raw.get("dims") or ()),
-        ns=tuple(int(value) for value in data_raw.get("ns") or ()),
+        exclude=tuple(str(value) for value in _list_field(data_raw, "exclude")),
+        dims=tuple(int(value) for value in _list_field(data_raw, "dims")),
+        ns=tuple(int(value) for value in _list_field(data_raw, "ns")),
         per_cell=per_cell,
     )
 

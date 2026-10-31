@@ -19,7 +19,16 @@ def _pairs(counter: Counter) -> str:
     return ";".join(f"{key}:{value}" for key, value in sorted(counter.items())) or ""
 
 
+def latest(rows: list[dict]) -> list[dict]:
+    """同一 dataset 只保留最后一行（--resume 重跑会追加）。"""
+    by_dataset = {}
+    for row in rows:
+        by_dataset[row["dataset"]] = row
+    return list(by_dataset.values())
+
+
 def summarize(rows: list[dict], meta: dict) -> dict:
+    rows = latest(rows)
     succeeded = [row for row in rows if row["status"] in ("success", "partial")]
     failed = [row for row in rows if row["status"] == "failed"]
     algorithms = Counter(row["final_algorithm"] for row in succeeded if row["final_algorithm"])
@@ -74,6 +83,7 @@ def _key(value) -> str:
 
 
 def report_markdown(rows: list[dict], meta: dict) -> str:
+    rows = latest(rows)
     summary = summarize(rows, meta)
     by_mechanism, by_dim, by_n = defaultdict(list), defaultdict(list), defaultdict(list)
     for row in rows:
