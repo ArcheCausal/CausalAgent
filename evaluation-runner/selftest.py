@@ -64,6 +64,15 @@ def test_parallel_must_be_positive():
     raise AssertionError("parallel=0 应报 ConfigError")
 
 
+def test_scalar_mechanisms_rejected():
+    text = BASE_YAML.replace("per_cell: 1", "per_cell: 1\n  mechanisms: TimeLag")
+    try:
+        load_config(_write_yaml(text))
+    except ConfigError:
+        return
+    raise AssertionError("mechanisms 为标量应报 ConfigError")
+
+
 def run_tests() -> int:
     tests = [(name, value) for name, value in sorted(globals().items()) if name.startswith("test_")]
     failures = 0

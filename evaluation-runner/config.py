@@ -86,7 +86,12 @@ def load_config(path: str | Path) -> Config:
     if not data_raw.get("dir"):
         raise ConfigError("data.dir 必填")
     mechanisms_raw = data_raw.get("mechanisms", "all")
-    mechanisms = None if mechanisms_raw in (None, "all") else tuple(mechanisms_raw)
+    if mechanisms_raw is None or mechanisms_raw == "all":
+        mechanisms = None
+    elif isinstance(mechanisms_raw, list):
+        mechanisms = tuple(str(value) for value in mechanisms_raw)
+    else:
+        raise ConfigError("data.mechanisms 必须是机制名列表或 all")
     per_cell = data_raw.get("per_cell", 1)
     if not isinstance(per_cell, int) or isinstance(per_cell, bool) or not 1 <= per_cell <= 5:
         raise ConfigError("data.per_cell 必须是 1..5 的整数")
