@@ -8,6 +8,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field, model_validator
 from typing import Literal, Optional, Any, List, Tuple, Dict
+import copy
 import logging
 import json
 import re
@@ -1889,6 +1890,17 @@ def _report_graph_asset(state: CausalAgentState):
     )
 
 
+def _prompt_analysis_facts(facts: Dict[str, Any]) -> Dict[str, Any]:
+    """报告提示词不使用图分数；剥离后与既有提示词保持一致。"""
+    projected = copy.deepcopy(facts)
+    for result in projected.get("results", []):
+        graph = result.get("graph")
+        if isinstance(graph, dict):
+            graph.pop("edge_score_matrix", None)
+            graph.pop("score_type", None)
+    return projected
+
+
 def _prompt_json(value: Any) -> str:
     """把结构化提示词输入渲染成稳定的 JSON 文本。
 
@@ -2206,7 +2218,7 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
             "messages": [message for message in state.get("messages", []) if isinstance(message, HumanMessage)][-1:],
             "preprocess_meta_data": _prompt_json(facts.get("data_metadata", {})),
             "preprocess_summary": "见数据概览和统计检查。",
-            "causal_analysis_result": _prompt_json(facts),
+            "causal_analysis_result": _prompt_json(_prompt_analysis_facts(facts)),
             "knowledge_base_result": knowledge_summary,
             "web_search_result": web_summary,
             "postprocess_result": "主图来自通过门禁的原始算法结果；修订建议不替换图。",
