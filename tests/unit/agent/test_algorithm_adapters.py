@@ -386,7 +386,7 @@ def test_cdfm_runner_probabilities_become_edge_scores() -> None:
         {
             "success": True,
             "data": {"nodes": [{"id": "x"}, {"id": "y"}], "edges": []},
-            "probabilities": [[0.0, 0.8123456], [0.2, 0.0]],
+            "raw_results": {"probabilities": [[0.0, 0.8123456], [0.2, 0.0]]},
         },
         capability_id="causal.cdfm",
     )
@@ -397,7 +397,7 @@ def test_cdfm_runner_probabilities_become_edge_scores() -> None:
         {
             "success": True,
             "data": {"nodes": ["x", "y"], "edges": []},
-            "probabilities": [[0.0, 1.0], [0.0, 0.0]],
+            "raw_results": {"probabilities": [[0.0, 1.0], [0.0, 0.0]]},
         },
         capability_id="causal.pc",
     )

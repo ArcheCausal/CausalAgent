@@ -131,7 +131,10 @@ def _cdfm_probability_scores(
 ) -> tuple[list[list[float]] | None, str | None]:
     if capability_id != "causal.cdfm":
         return None, None
-    raw = payload.get("probabilities")
+    raw_results = payload.get("raw_results")
+    if not isinstance(raw_results, Mapping):
+        return None, None
+    raw = raw_results.get("probabilities")
     if raw is None:
         return None, None
     size = len(nodes)
