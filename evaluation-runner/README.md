@@ -126,8 +126,8 @@ cp config.example.yaml config.yaml
 
 | 路径 | 内容 |
 | --- | --- |
-| `results.csv` | 逐集一行，28 列：`run_id, dataset, mechanism, rep, n_rows, n_cols, dim, lambda, n_gold_edges, n_pred_edges, n_undirected_edges, recall, precision, f1, skeleton_recall, skeleton_precision, shd, auroc, auprc, final_algorithm, final_confidence, final_selection_rationale, finalization_status, interactions, duration_s, tokens, status, failure_reason` |
-| `summary.csv` | 单行汇总，26 列，新增 `f1_mean, shd_mean, auroc_mean, auprc_mean, auroc_n, auprc_n`；`succeeded` 含 `success` 与 `partial`，均值只统计成功行，失败不补零；排名指标按有值行求均值，`auroc_n`/`auprc_n` 为覆盖集数 |
+| `results.csv` | 逐集一行，30 列：`run_id, dataset, mechanism, rep, n_rows, n_cols, dim, lambda, n_gold_edges, n_pred_edges, n_undirected_edges, recall, precision, f1, skeleton_recall, skeleton_precision, shd, auroc, auprc, final_algorithm, final_confidence, final_selection_rationale, finalization_status, interactions, duration_s, tokens_input, tokens_output, tokens_total, status, failure_reason` |
+| `summary.csv` | 单行汇总，30 列，新增 `f1_mean, shd_mean, auroc_mean, auprc_mean, auroc_n, auprc_n, tokens_input_mean, tokens_output_mean, tokens_total_mean, tokens_n`；`succeeded` 含 `success` 与 `partial`，均值只统计成功行，失败不补零；排名指标按有值行求均值，`auroc_n`/`auprc_n` 为覆盖集数 |
 | `report.md` | 运行信息、总体均值（含 F1/SHD 与 AUROC/AUPRC 及覆盖集数）、按机制 / 按实测 D / 按实测 `n_rows` 分组表（含 F1/SHD 列）、失败分布、recall 最低 10 集、口径声明 |
 | `csv/<dataset 净化>.csv` | 实际上传的 CSV，列 `X0..X{n-1}`，`%.8g` |
 | `raw/<dataset 净化>.jsonl` | 该集全量 SSE 事件 |
@@ -135,7 +135,7 @@ cp config.example.yaml config.yaml
 
 `summary.csv` 与 `report.md` 在运行结束后从 `results.csv` 重建；同一 dataset 出现多行时取最后一行，因此 `--resume` 重跑不会重复计数。
 
-`tokens` 固定写 `not_collected`；阶段 2 才采集 token 用量。`lambda` 列保留但当前数据集不存在该字段，留空。
+token 用量来自 Job 的 `usage` 事件：按 `(job, attempt)` 取每 attempt 累计最大值，再跨 attempt 与 runner 重试求和；无 LLM 用量的失败行留空。终态事件里的用量快照只服务 API 客户端，不重复计入。`lambda` 列保留但当前数据集不存在该字段，留空。
 
 ## 失败与重试
 
@@ -176,11 +176,11 @@ cp config.example.yaml config.yaml
 
 ## 已知限制
 
-- 不采集 token（`not_collected`），不评报告文字质量，不启用 `web_search`。
+- 不评报告文字质量，不启用 `web_search`。
 - `diagnostic` 报告或缺少因果图按失败计；模型空回答导致的 `no_causal_graph` 只重试 1 次。
 - 报告中变量名若不是 `X{k}`，整图无法映射，会集体落入 `partial` 或失败；冒烟必须先确认这一映射。
 - 报告按实测 `n_rows` 分组，名义 N 仅用于抽样筛选，两者可能不一致。
-- 阶段 2 才计划采集容器内 tokens、支持全量 1875 集与更细的失败分析。
+- 阶段 2 计划支持全量 1875 集与更细的失败分析。
 
 ## 目录
 
