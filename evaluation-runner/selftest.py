@@ -1,6 +1,7 @@
 """无网络自检：python selftest.py"""
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import traceback
@@ -9,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 import answer
+import client as cl
 import dataset as ds
 import evaluate
 from config import ConfigError, load_config
@@ -301,6 +303,28 @@ def test_score_each_undirected_edge_counts_as_fp():
     assert metrics["n_undirected_edges"] == 3
     assert metrics["precision"] == 0.0
     assert metrics["skeleton_recall"] == 1.0
+
+
+def test_parse_sse_events():
+    lines = [
+        "id: 7",
+        "event: interrupt",
+        'data: {"message": "hi", "question_id": "q1", "interaction": {"interaction_type": "data_processing_question"}}',
+        "",
+        "id: 8",
+        "event: heartbeat",
+        'data: {"job_id": "j1"}',
+        "",
+    ]
+    events = list(cl.parse_sse(lines))
+    assert events[0][0] == 7
+    assert events[0][1] == "interrupt"
+    assert events[0][2]["question_id"] == "q1"
+    assert events[1][1] == "heartbeat"
+
+
+def test_parse_sse_ignores_heartbeat_comments():
+    assert list(cl.parse_sse([": keep-alive", ""])) == []
 
 
 def run_tests() -> int:
