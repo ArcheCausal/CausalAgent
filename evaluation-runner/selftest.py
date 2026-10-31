@@ -6,6 +6,8 @@ import tempfile
 import traceback
 from pathlib import Path
 
+import numpy as np
+
 import dataset as ds
 from config import ConfigError, load_config
 
@@ -127,6 +129,47 @@ def test_select_excludes_mechanism_and_filters():
         assert ds.select(specs, ("TimeLag",), ("TimeLag",), (), (), 1, seed=1) == []
         picked = ds.select(specs, ("CAM",), (), (15,), (1000,), 1, seed=1)
         assert [spec.dataset_id for spec in picked] == ["CAM/D015_N01000/rep00"]
+
+
+def _make_npz(path: Path, X, adjacency) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, X=X, adjacency=adjacency)
+
+
+def test_load_write_profile_and_gold():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        X = np.array([[1, 0.5], [2, 0.25], [3, 1.0]], dtype=np.float32)
+        adjacency = np.array([[0, 1], [0, 0]], dtype=np.int8)
+        _make_npz(root / "CAM/D010_N00500/rep00.npz", X, adjacency)
+        spec = ds.scan(root)[0]
+        loaded, gold = ds.load(spec)
+        assert loaded.shape == (3, 2)
+        assert ds.gold_edges(gold) == {(0, 1)}
+
+        out = root / "upload.csv"
+        ds.write_csv(loaded, out)
+        lines = out.read_text(encoding="utf-8").splitlines()
+        assert lines[0] == "X0,X1"
+        assert lines[1] == "1,0.5"
+
+        report = ds.profile(loaded)
+        assert report["n_rows"] == 3
+        assert report["missing"] is False
+        assert report["uniques"] == [3, 3]
+
+
+def test_load_rejects_missing_keys():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "CAM/D010_N00500/rep00.npz"
+        path.parent.mkdir(parents=True)
+        np.savez(path, X=np.zeros((3, 2)))
+        spec = ds.scan(Path(tmp))[0]
+        try:
+            ds.load(spec)
+        except ds.DatasetInvalid:
+            return
+        raise AssertionError("缺少 adjacency 应报 DatasetInvalid")
 
 
 def run_tests() -> int:
