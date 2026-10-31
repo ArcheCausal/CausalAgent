@@ -105,6 +105,9 @@ def normalize_algorithm_summary(
                 for edge in standardized.edges
             ],
         }
+        if standardized.score_type is not None and standardized.edge_score_matrix is not None:
+            graph["score_type"] = standardized.score_type
+            graph["edge_score_matrix"] = standardized.edge_score_matrix
     diagnostics = result.diagnostics
     params = dict(parameters or {})
     return {

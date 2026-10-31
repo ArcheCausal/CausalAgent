@@ -46,3 +46,24 @@ def test_cdfm_numeric_storage_requirement_does_not_assert_continuous_measurement
     assert "连续数值" not in CDFM_SPEC.model_description()
     assert "数值准入不证明测量语义连续" in CDFM_SPEC.model_description()
     assert "continuous_tabular_dataset" not in method.input_requirements
+
+
+def test_cdfm_probability_scores_survive_context_projection():
+    result = AlgorithmResult(
+        result_ref="invocation:0", invocation_id="invocation", provider_call_id="call",
+        capability_id=CDFM_SPEC.capability_id, capability_version=CDFM_SPEC.version,
+        status="valid",
+        standardized_graph=StandardizedGraph(
+            graph_semantics=CDFM_SPEC.graph_semantics,
+            nodes=["X0", "X1"],
+            edge_score_matrix=[[0.0, 0.9], [0.1, 0.0]],
+            score_type="probability",
+        ),
+        provenance=AlgorithmResultProvenance(
+            job_id="job", attempt_count=1, lease_epoch=1,
+            input_identity="input", spec_digest=CDFM_SPEC.spec_digest,
+        ),
+    )
+    summary = json.loads(json.dumps(normalize_algorithm_summary(result)))
+    assert summary["graph"]["score_type"] == "probability"
+    assert summary["graph"]["edge_score_matrix"] == [[0.0, 0.9], [0.1, 0.0]]
