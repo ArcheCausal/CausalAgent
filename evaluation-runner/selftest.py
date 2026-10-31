@@ -14,6 +14,7 @@ import client as cl
 import dataset as ds
 import evaluate
 import report
+import runner as rn
 from config import ConfigError, load_config
 
 
@@ -355,6 +356,31 @@ def test_report_markdown_contains_tables():
     assert "# 评测报告" in markdown
     assert "按机制" in markdown
     assert "pc" in markdown
+
+
+def test_build_prompt():
+    assert rn.build_prompt(10) == "请读取上传的 CSV 数据文件，对变量 X0 到 X9 执行因果分析"
+
+
+def test_retryable_set():
+    assert rn.RETRYABLE == {"timeout", "terminal_error", "no_causal_graph"}
+
+
+def test_validate_selection_rejects_unknown_values():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        _make_tree(root, ["CAM/D010_N00500/rep00.npz"])
+        specs = ds.scan(root)
+        for mechanisms, dims, ns in (
+            (("Nope",), (), ()),
+            (None, (99,), ()),
+            (None, (), (99999,)),
+        ):
+            try:
+                rn.validate_selection(specs, mechanisms, dims, ns)
+            except ConfigError:
+                continue
+            raise AssertionError(f"未知取值应报 ConfigError: {mechanisms} {dims} {ns}")
 
 
 def run_tests() -> int:
