@@ -1663,6 +1663,7 @@ def fail_job(
     *,
     lease_epoch: int | None = None,
     write_error_event: bool = True,
+    usage: Any | None = None,
 ) -> FailJobResult:
     """在 Job 行锁内收敛失败，并明确返回 fencing 原因。
 
@@ -1670,7 +1671,9 @@ def fail_job(
     事务中写失败；这里先锁住 Job 行，锁获胜者才允许写入 failed。若锁住时
     已经是 canceled，调用方必须进入撤销清理路径，不能再生成 error 事件。
     """
-    payload = {"type": "error", "message": message}
+    payload: dict[str, Any] = {"type": "error", "message": message}
+    if usage is not None:
+        payload["usage"] = dict(usage)
     with get_write_connection() as connection:
         try:
             connection.start_transaction()

@@ -12,6 +12,7 @@ from app.agent.worker.event_writer import OrderedEventWriter
 from app.agent.worker.execution_guard import JobExecutionGuard, JobExecutionRevoked
 from app.agent.worker.graph_runner import ai_call_stream
 from app.agent.worker.runtime import SlotRuntime
+from app.agent.worker.usage_collector import UsageCollector
 from config.settings import settings
 from observability.logging_runtime import log_context, log_event
 from observability.noise_control import FailureTransitionTracker
@@ -148,6 +149,7 @@ async def _run_job(
         )
     )
     writer: OrderedEventWriter | None = None
+    usage_collector = UsageCollector()
     graph_stream = None
     revoked = False
     cleanup_complete = True
@@ -209,7 +211,12 @@ async def _run_job(
 
     try:
         await guard.ensure_active()
-        writer = OrderedEventWriter(job, worker_id, execution_guard=guard)
+        writer = OrderedEventWriter(
+            job,
+            worker_id,
+            execution_guard=guard,
+            usage_collector=usage_collector,
+        )
         build_run_context = getattr(slot_runtime, "build_run_context", None)
         agent_runtime_context = (
             build_run_context(
@@ -255,6 +262,7 @@ async def _run_job(
             execution_guard=guard,
             web_search_enabled=bool(job.get("web_search_enabled")),
             agent_runtime_context=agent_runtime_context,
+            usage_collector=usage_collector,
         )
         try:
             async for payload in graph_stream:
@@ -357,6 +365,7 @@ async def _run_job(
                 attempt_count,
                 sanitize_public_error(exc),
                 lease_epoch=lease_epoch,
+                usage=usage_collector.snapshot(),
             )
         except asyncio.CancelledError:
             cleanup_complete = False

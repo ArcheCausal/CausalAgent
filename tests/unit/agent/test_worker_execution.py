@@ -371,7 +371,7 @@ class WorkerExecutionTests(IsolatedAsyncioTestCase):
 
         with patch(
             "app.agent.worker.execution.OrderedEventWriter",
-            side_effect=lambda job, worker_id, execution_guard=None: TerminalWriter(
+            side_effect=lambda job, worker_id, execution_guard=None, usage_collector=None: TerminalWriter(
                 job,
                 worker_id,
                 execution_guard,
