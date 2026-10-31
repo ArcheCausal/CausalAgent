@@ -569,3 +569,21 @@ def test_report_document_summary_omits_chart_data() -> None:
     assert "[图表] 年龄分布" in summary
     assert "[因果图] 主要因果关系" in summary
     assert "bins" not in summary and "node_age" not in summary
+
+
+def test_build_causal_graph_model_carries_probability_scores() -> None:
+    graph = {
+        "graph_semantics": "acyclic_directed_mixed_graph",
+        "nodes": ["X0", "X1"],
+        "edges": [{"source": "X0", "target": "X1", "edge_type": "directed"}],
+        "score_type": "probability",
+        "edge_score_matrix": [[0.0, 0.9], [0.1, 0.0]],
+    }
+    model = build_causal_graph_model(graph, graph_id="graph_main", algorithm="causal.cdfm")
+    assert model is not None
+    assert model.metadata["score_type"] == "probability"
+    assert model.metadata["edge_score_matrix"] == [[0.0, 0.9], [0.1, 0.0]]
+
+    plain = build_causal_graph_model(ORIGINAL_GRAPH, graph_id="graph_main")
+    assert "score_type" not in plain.metadata
+    assert "edge_score_matrix" not in plain.metadata
