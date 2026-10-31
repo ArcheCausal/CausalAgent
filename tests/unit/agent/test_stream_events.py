@@ -461,6 +461,43 @@ class StreamEventAdapterTests(unittest.TestCase):
         self.assertNotIn("attempt", public)
         self.assertNotIn("raw_arguments", public)
 
+    def test_sse_public_payload_exposes_usage_event_and_terminal_usage(self):
+        usage = _public_event_payload(
+            {
+                "type": "usage",
+                "attempt": 2,
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "total_tokens": 12,
+                "prompt": "private",
+            }
+        )
+
+        self.assertEqual(
+            usage,
+            {
+                "type": "usage",
+                "attempt": 2,
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "total_tokens": 12,
+            },
+        )
+
+        final = _public_event_payload(
+            {
+                "type": "final_result",
+                "data": {"type": "text"},
+                "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+                "_context_commit": {"private": True},
+            }
+        )
+        self.assertEqual(
+            final["usage"],
+            {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+        )
+        self.assertNotIn("_context_commit", final)
+
     def test_canceled_tool_lifecycle_is_not_reported_as_succeeded(self):
         self.adapter.convert(task_start("task-deep", "deep_agent"))
         events = self.adapter.convert({

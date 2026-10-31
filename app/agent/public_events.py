@@ -24,10 +24,11 @@ _EVENT_FIELDS = {
         "decision_kind",
         "tool_name",
     },
-    "final_result": {"data"},
-    "interrupt": {"message", "question_id", "interaction"},
-    "error": {"message"},
-    "canceled": {"message"},
+    "usage": {"attempt", "input_tokens", "output_tokens", "total_tokens"},
+    "final_result": {"data", "usage"},
+    "interrupt": {"message", "question_id", "interaction", "usage"},
+    "error": {"message", "usage"},
+    "canceled": {"message", "usage"},
     "heartbeat": {"job_id"},
 }
 
