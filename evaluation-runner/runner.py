@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -18,7 +18,8 @@ import evaluate as ev
 import report as rp
 from answer import answer_for
 from client import AgentClient, ClientError
-from config import Config, ConfigError, load_config
+from config import (AuthSettings, Config, ConfigError, DataSettings, OutputSettings,
+                    RunSettings, load_config)
 
 RETRYABLE = {"timeout", "terminal_error", "no_causal_graph"}
 ACCOUNTS_PATH = Path("local/accounts.local.json")
@@ -122,6 +123,11 @@ def _run_once(spec, config: Config, client: AgentClient, run_dir: Path, run_id: 
             terminal = False
             answered = False
             for event in event_iter:
+                if time.monotonic() > deadline:
+                    failure = "timeout"
+                    client.cancel(job_id)
+                    terminal = True
+                    break
                 if event["id"] is not None:
                     last_event_id = event["id"]
                 records.append({"id": event["id"], "type": event["type"], "payload": event["payload"]})
@@ -179,6 +185,7 @@ def _run_once(spec, config: Config, client: AgentClient, run_dir: Path, run_id: 
         encoding="utf-8",
     )
     if asset is None:
+        row["status"] = "failed"
         row["failure_reason"] = reason
         return row
 
@@ -255,6 +262,14 @@ def main(argv=None) -> int:
     if not args.yes and input("开始评测？[y/N] ").strip().lower() != "y":
         return 1
     credentials = resolve_credentials(config)
+    bootstrap = AgentClient(config.run.base_url)
+    try:
+        bootstrap.login(*credentials)
+    except ClientError as exc:
+        print(f"登录失败：{exc}", file=sys.stderr)
+        return 1
+    finally:
+        bootstrap.close()
 
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + _git_commit()
     run_dir = args.resume or (config.output.dir / run_id)
@@ -274,7 +289,7 @@ def main(argv=None) -> int:
                 pool.submit(_run_dataset, spec, config, credentials, run_id, run_dir)
                 for spec in pending
             ]
-            for future in futures:
+            for future in as_completed(futures):
                 row = future.result()
                 with lock:
                     writer.writerow(row)

@@ -64,33 +64,43 @@ class AgentClient:
             headers["Idempotency-Key"] = idempotency_key
         return headers
 
+    def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
+        try:
+            return self.http.request(method, url, **kwargs)
+        except httpx.HTTPError as exc:
+            raise ClientError(str(exc)) from exc
+
+    def _request_json(self, method: str, url: str, **kwargs) -> dict:
+        return _json(self._send(method, url, **kwargs))
+
     def check_auth(self) -> dict:
-        payload = _json(self.http.get("/api/check_auth"))
+        payload = self._request_json("GET", "/api/check_auth")
         self.csrf_token = payload.get("csrf_token") or self.csrf_token
         return payload
 
     def _register(self, username: str, password: str) -> None:
-        payload = self.http.post(
-            "/api/register", json={"username": username, "password": password}
+        response = self._send(
+            "POST", "/api/register", json={"username": username, "password": password}
         )
-        if payload.status_code >= 400:
-            raise AuthError(f"注册失败: {payload.status_code}")
+        if response.status_code >= 400:
+            raise AuthError(f"注册失败: {response.status_code}")
 
     def login(self, username: str, password: str) -> None:
         try:
-            payload = _json(self.http.post(
-                "/api/login", json={"username": username, "password": password}
-            ))
+            payload = self._request_json(
+                "POST", "/api/login", json={"username": username, "password": password}
+            )
         except ClientError as exc:
             self._register(username, password)
-            payload = _json(self.http.post(
-                "/api/login", json={"username": username, "password": password}
-            ))
+            payload = self._request_json(
+                "POST", "/api/login", json={"username": username, "password": password}
+            )
         self.csrf_token = payload.get("csrf_token") or self.csrf_token
 
     def upload_csv(self, path: Path) -> int:
         content = Path(path).read_bytes()
-        response = self.http.post(
+        response = self._send(
+            "POST",
             "/api/upload_file",
             files={"file": (Path(path).name, content, "text/csv")},
             headers=self._headers(),
@@ -98,10 +108,13 @@ class AgentClient:
         return int(_json(response)["user_file_id"])
 
     def new_session(self) -> str:
-        return str(_json(self.http.post("/api/new_chat", headers=self._headers()))["new_session_id"])
+        return str(self._request_json(
+            "POST", "/api/new_chat", headers=self._headers()
+        )["new_session_id"])
 
     def create_job(self, session_id: str, message: str, user_file_id: int) -> str:
-        payload = _json(self.http.post(
+        payload = self._request_json(
+            "POST",
             "/api/agent/jobs",
             json={
                 "message": message,
@@ -110,33 +123,38 @@ class AgentClient:
                 "web_search_enabled": False,
             },
             headers=self._headers(str(uuid.uuid4())),
-        ))
+        )
         return str(payload["job_id"])
 
     def events(self, job_id: str, last_event_id: int = 0):
-        with self.http.stream(
-            "GET",
-            f"/api/agent/jobs/{job_id}/events",
-            params={"last_event_id": last_event_id},
-            headers=self._headers(),
-        ) as response:
-            if response.status_code >= 400:
-                raise ClientError(f"SSE 连接失败: {response.status_code}")
-            for event_id, event_type, payload in parse_sse(response.iter_lines()):
-                yield {"id": event_id, "type": event_type, "payload": payload}
+        try:
+            with self.http.stream(
+                "GET",
+                f"/api/agent/jobs/{job_id}/events",
+                params={"last_event_id": last_event_id},
+                headers=self._headers(),
+            ) as response:
+                if response.status_code >= 400:
+                    raise ClientError(f"SSE 连接失败: {response.status_code}")
+                for event_id, event_type, payload in parse_sse(response.iter_lines()):
+                    yield {"id": event_id, "type": event_type, "payload": payload}
+        except httpx.HTTPError as exc:
+            raise ClientError(str(exc)) from exc
 
     def resume(self, job_id: str, question_id: str, answer) -> None:
-        _json(self.http.post(
+        self._request_json(
+            "POST",
             f"/api/agent/jobs/{job_id}/resume",
             json={"question_id": question_id, "answer": answer},
             headers=self._headers(str(uuid.uuid4())),
-        ))
+        )
 
     def cancel(self, job_id: str) -> None:
         try:
-            _json(self.http.post(
+            self._request_json(
+                "POST",
                 f"/api/agent/jobs/{job_id}/cancel",
                 headers=self._headers(str(uuid.uuid4())),
-            ))
+            )
         except ClientError:
             pass

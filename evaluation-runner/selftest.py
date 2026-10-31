@@ -383,6 +383,32 @@ def test_validate_selection_rejects_unknown_values():
             raise AssertionError(f"未知取值应报 ConfigError: {mechanisms} {dims} {ns}")
 
 
+def test_run_once_marks_missing_graph_failed():
+    import tempfile as _tf
+    class FakeClient:
+        def upload_csv(self, path): return 1
+        def new_session(self): return "s"
+        def create_job(self, session_id, message, user_file_id): return "j"
+        def events(self, job_id, last_event_id=0):
+            yield {"id": 1, "type": "final_result",
+                   "payload": {"data": {"document": {"blocks": [], "assets": {}}}}}
+        def cancel(self, job_id): pass
+    with _tf.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        _make_npz(root / "CAM/D010_N00500/rep00.npz",
+                  np.zeros((4, 2)), np.array([[0, 1], [0, 0]], dtype=np.int8))
+        spec = ds.scan(root)[0]
+        run_dir = root / "run"
+        (run_dir / "csv").mkdir(parents=True)
+        (run_dir / "raw").mkdir(parents=True)
+        config = rn.Config(
+            run=rn.RunSettings(base_url="http://x", timeout_minutes=1),
+            auth=rn.AuthSettings(), data=rn.DataSettings(dir=root),
+            output=rn.OutputSettings(dir=run_dir))
+        row = rn._run_once(spec, config, FakeClient(), run_dir, "r1")
+        assert row["status"] == "failed" and row["failure_reason"] == "no_causal_graph"
+
+
 def run_tests() -> int:
     tests = [(name, value) for name, value in sorted(globals().items()) if name.startswith("test_")]
     failures = 0
