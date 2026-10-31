@@ -93,6 +93,34 @@ class ErrorHandlerGraph(FakeGraph):
 
 
 
+class StubCollector:
+    """提供与 UsageCollector 相同的只读快照。"""
+
+    def __init__(self):
+        self.values = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+    def snapshot(self):
+        return dict(self.values)
+
+
+class UsageGraph(FakeGraph):
+    """在图执行中更新用量，并产生两个空 chunk。"""
+
+    def __init__(self, collector):
+        super().__init__([_snapshot(), _snapshot(values={"messages": []})])
+        self.collector = collector
+
+    async def astream(self, input_data, config, **_kwargs):
+        self.inputs.append((input_data, config))
+        self.collector.values = {
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "total_tokens": 12,
+        }
+        yield {"type": "updates", "ns": (), "data": {}}
+        yield {"type": "updates", "ns": (), "data": {}}
+
+
 def _snapshot(*, interrupts=(), public_interrupts=None, values=None):
     """构造 graph_runner 所需的最小 StateSnapshot。"""
     return SimpleNamespace(
@@ -106,7 +134,16 @@ def _snapshot(*, interrupts=(), public_interrupts=None, values=None):
     )
 
 
-async def _collect(graph, text="hello", *, claim_kind="initial", input_record=None, initial_input_record=None, **file_snapshot):
+async def _collect(
+    graph,
+    text="hello",
+    *,
+    claim_kind="initial",
+    input_record=None,
+    initial_input_record=None,
+    usage_collector=None,
+    **file_snapshot,
+):
     """收集一次 Job 执行产生的公开事件；分析上下文读取用替身，单测不访问数据库。"""
     with patch(
         "app.agent.worker.graph_runner.load_active_context",
@@ -132,12 +169,41 @@ async def _collect(graph, text="hello", *, claim_kind="initial", input_record=No
                 claim_kind=claim_kind,
                 input_record=input_record,
                 initial_input_record=initial_input_record,
+                usage_collector=usage_collector,
             )
         ]
 
 
 class GraphRunnerTests(unittest.IsolatedAsyncioTestCase):
     """验证 Job root State 查询、输入边界和 stale recovery。"""
+
+    async def test_usage_collector_is_attached_and_emitted_once(self):
+        """collector 进入图 config；累计值只变化一次就只发一条 usage。"""
+        collector = StubCollector()
+        graph = UsageGraph(collector)
+
+        events = await _collect(graph, usage_collector=collector)
+
+        self.assertIn(collector, graph.inputs[0][1]["callbacks"])
+        usage_events = [event for event in events if event["type"] == "usage"]
+        self.assertEqual(
+            usage_events,
+            [
+                {
+                    "type": "usage",
+                    "attempt": 1,
+                    "input_tokens": 10,
+                    "output_tokens": 2,
+                    "total_tokens": 12,
+                }
+            ],
+        )
+        self.assertEqual(events[-1]["type"], "final_result")
+        self.assertLess(events.index(usage_events[0]), events.index(events[-1]))
+
+    async def test_without_collector_no_usage_events(self):
+        events = await _collect(FakeGraph([_snapshot(), _snapshot()]))
+        self.assertTrue(all(event["type"] != "usage" for event in events))
 
     async def test_job_root_identity_is_not_a_subgraph_namespace(self):
         """普通问答的两次状态查询都必须使用 Job ID 根 identity。"""

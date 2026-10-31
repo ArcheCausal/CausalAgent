@@ -117,6 +117,7 @@ def _graph_config(
     user_id: int,
     session_id: str,
     job_id: str,
+    callbacks: list[Any] | None = None,
 ) -> dict[str, Any]:
     """构造 Job 根图配置；业务 session 只作为 State/metadata 上下文。"""
     thread_id, _ = checkpoint_identity(job_id)
@@ -124,13 +125,16 @@ def _graph_config(
         "thread_id": thread_id,
         "user_id": user_id,
     }
-    return {
+    config: dict[str, Any] = {
         "configurable": configurable,
         "metadata": {
             "job_id": thread_id,
             "session_id": str(session_id),
         },
     }
+    if callbacks:
+        config["callbacks"] = list(callbacks)
+    return config
 
 
 def _snapshot_has_checkpoint(snapshot: Any) -> bool:
@@ -242,6 +246,7 @@ async def ai_call_stream(
     execution_guard: JobExecutionGuard | None = None,
     web_search_enabled: bool = False,
     agent_runtime_context: AgentRunContext | None = None,
+    usage_collector: Any | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """在显式传入的 graph 上执行一次调用并产出公开事件。"""
     if graph is None:
@@ -261,7 +266,25 @@ async def ai_call_stream(
         user_id=user_id,
         session_id=session_id,
         job_id=job_id,
+        callbacks=[usage_collector] if usage_collector is not None else None,
     )
+
+    last_usage: tuple[int, int, int] | None = None
+
+    def flush_usage() -> dict[str, Any] | None:
+        nonlocal last_usage
+        if usage_collector is None:
+            return None
+        current = usage_collector.snapshot()
+        marker = (
+            current.get("input_tokens", 0),
+            current.get("output_tokens", 0),
+            current.get("total_tokens", 0),
+        )
+        if marker == last_usage or not any(marker):
+            return None
+        last_usage = marker
+        return {"type": "usage", "attempt": job_attempt, **current}
 
     state = await graph.aget_state(config)
     if execution_guard is not None:
@@ -346,6 +369,9 @@ async def ai_call_stream(
                 if execution_guard is not None:
                     await execution_guard.check_after_call()
                 yield event_data
+            usage_event = flush_usage()
+            if usage_event is not None:
+                yield usage_event
 
         if execution_guard is not None:
             await execution_guard.ensure_active()
@@ -376,6 +402,9 @@ async def ai_call_stream(
             }
             if interaction is not None:
                 payload["interaction"] = interaction
+            usage_event = flush_usage()
+            if usage_event is not None:
+                yield usage_event
             yield payload
             return
 
@@ -384,6 +413,9 @@ async def ai_call_stream(
         final_result = _build_final_result(state.values, job_attempt=job_attempt)
         if execution_guard is not None:
             await execution_guard.check_after_call()
+        usage_event = flush_usage()
+        if usage_event is not None:
+            yield usage_event
         yield final_result
     except JobExecutionRevoked:
         raise
@@ -400,10 +432,16 @@ async def ai_call_stream(
         if recovered is not None:
             if execution_guard is not None:
                 await execution_guard.check_after_call()
+            usage_event = flush_usage()
+            if usage_event is not None:
+                yield usage_event
             yield recovered
             return
         # 公开事件只保留脱敏文案；真实异常通过下划线前缀的内部字段传给
         # OrderedEventWriter，后者只把 message 落库，诊断只用于 worker 日志。
+        usage_event = flush_usage()
+        if usage_event is not None:
+            yield usage_event
         yield {
             "type": "error",
             "message": sanitize_public_error(exc),
