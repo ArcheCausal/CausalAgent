@@ -1,6 +1,7 @@
 """从报告取因果图并计算严格定向与骨架指标。"""
 from __future__ import annotations
 
+import math
 import re
 
 VARIABLE_PATTERN = re.compile(r"^X(\d+)$")
@@ -63,26 +64,123 @@ def parse_edges(asset: dict, dim: int | None = None) -> tuple[list[tuple[int, in
     return edges, unmapped
 
 
-def score(edges: list[tuple[int, int, str]], gold: set[tuple[int, int]]) -> dict:
-    directed = {(source, target) for source, target, kind in edges if kind == "directed"}
-    undirected_edges = [
-        frozenset((source, target))
-        for source, target, kind in edges
-        if kind in UNDIRECTED_TYPES
-    ]
-    undirected = set(undirected_edges)
+def _partition(edges):
+    """拆出有向边（去镜像对）、无向边列表（保留重复计数）与镜像对。"""
+    directed = {(s, t) for s, t, kind in edges if kind == "directed"}
+    undirected = [frozenset((s, t)) for s, t, kind in edges if kind in UNDIRECTED_TYPES]
     directed_pairs = {frozenset(edge) for edge in directed}
     mirrored = {
         pair for pair in directed_pairs
-        if len(pair) == 2 and all(
-            (a, b) in directed for a, b in ((min(pair), max(pair)), (max(pair), min(pair)))
-        )
+        if len(pair) == 2 and (min(pair), max(pair)) in directed and (max(pair), min(pair)) in directed
     }
     directed -= {
-        (source, target)
-        for pair in mirrored
-        for source, target in ((min(pair), max(pair)), (max(pair), min(pair)))
+        (a, b) for pair in mirrored
+        for a, b in ((min(pair), max(pair)), (max(pair), min(pair)))
     }
+    return directed, undirected, mirrored
+
+
+def f1_score(precision: float, recall: float) -> float:
+    total = precision + recall
+    return 2 * precision * recall / total if total else 0.0
+
+
+def shd(edges, gold) -> int:
+    directed, undirected_list, mirrored = _partition(edges)
+    matched = directed & gold
+    reversed_edges = {(s, t) for s, t in directed - gold if (t, s) in gold}
+    extra = directed - matched - reversed_edges
+    covered = set(matched) | {(t, s) for s, t in reversed_edges}
+    skeleton_pairs = set(undirected_list) | mirrored
+    covered |= {(s, t) for s, t in gold if frozenset((s, t)) in skeleton_pairs}
+    missing = gold - covered
+    return len(reversed_edges) + len(extra) + len(undirected_list) + len(mirrored) + len(missing)
+
+
+def probability_matrix(asset: dict, dim: int) -> list[list[float]] | None:
+    metadata = asset.get("metadata") or {}
+    if metadata.get("score_type") != "probability":
+        return None
+    matrix = metadata.get("edge_score_matrix")
+    nodes = asset.get("nodes") or []
+    if not isinstance(matrix, list) or len(matrix) != dim or len(nodes) != dim:
+        return None
+    positions: list[int] = []
+    for node in nodes:
+        index = variable_index(node.get("variable"))
+        if index is None or not 0 <= index < dim:
+            return None
+        positions.append(index)
+    reordered = [[0.0] * dim for _ in range(dim)]
+    for i, row in enumerate(matrix):
+        if not isinstance(row, list) or len(row) != dim:
+            return None
+        for j, value in enumerate(row):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                return None
+            reordered[positions[i]][positions[j]] = float(value)
+    return reordered
+
+
+def ranking_metrics(matrix, gold) -> dict:
+    size = len(matrix)
+    scores: list[float] = []
+    labels: list[int] = []
+    for i in range(size):
+        for j in range(size):
+            if i == j:
+                continue
+            scores.append(matrix[i][j])
+            labels.append(1 if (i, j) in gold else 0)
+    positives = sum(labels)
+    negatives = len(labels) - positives
+    if positives == 0 or negatives == 0:
+        return {"auroc": None, "auprc": None}
+    ranks = _average_ranks(scores)
+    auroc = (sum(rank for rank, label in zip(ranks, labels) if label) - positives * (positives + 1) / 2) / (positives * negatives)
+    return {"auroc": auroc, "auprc": _average_precision(scores, labels, positives)}
+
+
+def _average_ranks(scores):
+    order = sorted(range(len(scores)), key=lambda index: scores[index])
+    ranks = [0.0] * len(scores)
+    start = 0
+    while start < len(order):
+        end = start
+        while end + 1 < len(order) and scores[order[end + 1]] == scores[order[start]]:
+            end += 1
+        rank = (start + end) / 2 + 1
+        for position in range(start, end + 1):
+            ranks[order[position]] = rank
+        start = end + 1
+    return ranks
+
+
+def _average_precision(scores, labels, positives):
+    order = sorted(range(len(scores)), key=lambda index: -scores[index])
+    true_positive = false_positive = 0
+    previous_recall = 0.0
+    ap = 0.0
+    start = 0
+    while start < len(order):
+        end = start
+        while end + 1 < len(order) and scores[order[end + 1]] == scores[order[start]]:
+            end += 1
+        group = order[start:end + 1]
+        group_positive = sum(labels[index] for index in group)
+        true_positive += group_positive
+        false_positive += len(group) - group_positive
+        recall = true_positive / positives
+        precision = true_positive / (true_positive + false_positive)
+        ap += (recall - previous_recall) * precision
+        previous_recall = recall
+        start = end + 1
+    return ap
+
+
+def score(edges: list[tuple[int, int, str]], gold: set[tuple[int, int]]) -> dict:
+    directed, undirected_edges, mirrored = _partition(edges)
+    undirected = set(undirected_edges)
     n_pred_edges = len(directed)
     n_undirected_edges = len(undirected_edges) + len(mirrored)
     true_positive = len(directed & gold)

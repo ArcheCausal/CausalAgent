@@ -307,6 +307,55 @@ def test_score_each_undirected_edge_counts_as_fp():
     assert metrics["skeleton_recall"] == 1.0
 
 
+def test_f1_score():
+    assert abs(evaluate.f1_score(1.0, 1.0) - 1.0) < 1e-9
+    assert abs(evaluate.f1_score(0.5, 1.0) - 2 / 3) < 1e-9
+    assert evaluate.f1_score(0.0, 0.0) == 0.0
+    assert evaluate.f1_score(1.0, 0.0) == 0.0
+
+
+def test_shd_cases():
+    assert evaluate.shd([(0, 1, "directed")], {(0, 1)}) == 0
+    assert evaluate.shd([(1, 2, "directed")], {(0, 1), (1, 2)}) == 1
+    assert evaluate.shd([(0, 1, "directed"), (2, 3, "directed")], {(0, 1)}) == 1
+    assert evaluate.shd([(1, 0, "directed")], {(0, 1)}) == 1
+    assert evaluate.shd([(0, 1, "undirected")], {(0, 1)}) == 1
+    assert evaluate.shd([(0, 1, "undirected")], {(1, 2)}) == 2
+    assert evaluate.shd([(0, 1, "directed"), (1, 0, "directed")], {(0, 1)}) == 1
+    assert evaluate.shd([(0, 0, "directed")], {(0, 1)}) == 2
+
+
+def test_ranking_metrics():
+    gold = {(0, 1)}
+    perfect = evaluate.ranking_metrics([[0.0, 0.9], [0.1, 0.0]], gold)
+    assert abs(perfect["auroc"] - 1.0) < 1e-9
+    assert abs(perfect["auprc"] - 1.0) < 1e-9
+
+    reversed_order = evaluate.ranking_metrics([[0.0, 0.1], [0.9, 0.0]], gold)
+    assert abs(reversed_order["auroc"] - 0.0) < 1e-9
+    assert abs(reversed_order["auprc"] - 0.5) < 1e-9
+
+    tied = evaluate.ranking_metrics([[0.0, 0.5], [0.5, 0.0]], gold)
+    assert abs(tied["auroc"] - 0.5) < 1e-9
+    assert abs(tied["auprc"] - 0.5) < 1e-9
+
+
+def test_probability_matrix_reorders_nodes():
+    asset = {
+        "metadata": {"score_type": "probability", "edge_score_matrix": [[0.0, 0.9], [0.1, 0.0]]},
+        "nodes": [{"variable": "X1"}, {"variable": "X0"}],
+    }
+    matrix = evaluate.probability_matrix(asset, 2)
+    assert matrix[1][0] == 0.9
+    assert matrix[0][1] == 0.1
+    assert evaluate.probability_matrix({"metadata": {}, "nodes": []}, 2) is None
+    unmapped = {
+        "metadata": {"score_type": "probability", "edge_score_matrix": [[0.0, 0.9], [0.1, 0.0]]},
+        "nodes": [{"variable": "X0"}, {"variable": "Y"}],
+    }
+    assert evaluate.probability_matrix(unmapped, 2) is None
+
+
 def test_final_decision():
     records = [
         {"type": "decision", "payload": {"decision_kind": "algorithm", "summary": "调 PC"}},
