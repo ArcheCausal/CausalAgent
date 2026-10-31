@@ -1,4 +1,4 @@
-"""从报告取因果图并计算严格定向与骨架指标。"""
+"""从报告取因果图并计算严格定向、骨架与概率排序指标（F1/SHD/AUROC/AUPRC）。"""
 from __future__ import annotations
 
 import math
@@ -111,6 +111,8 @@ def probability_matrix(asset: dict, dim: int) -> list[list[float]] | None:
         if index is None or not 0 <= index < dim:
             return None
         positions.append(index)
+    if len(set(positions)) != dim:
+        return None
     reordered = [[0.0] * dim for _ in range(dim)]
     for i, row in enumerate(matrix):
         if not isinstance(row, list) or len(row) != dim:

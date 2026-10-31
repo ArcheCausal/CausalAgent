@@ -356,6 +356,14 @@ def test_probability_matrix_reorders_nodes():
     assert evaluate.probability_matrix(unmapped, 2) is None
 
 
+def test_probability_matrix_rejects_duplicate_nodes():
+    duplicate = {
+        "metadata": {"score_type": "probability", "edge_score_matrix": [[0.0, 0.9], [0.1, 0.0]]},
+        "nodes": [{"variable": "X0"}, {"variable": "X0"}],
+    }
+    assert evaluate.probability_matrix(duplicate, 2) is None
+
+
 def test_final_decision():
     records = [
         {"type": "decision", "payload": {"decision_kind": "algorithm", "summary": "调 PC"}},
