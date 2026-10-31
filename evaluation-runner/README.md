@@ -11,7 +11,7 @@
 - 上传内容来自数据集的 `X` 矩阵，固定提示词不附加领域知识、不引导算法选择；是否触发数据处理交互由被测分支决定。
 - 金标准取自数据集自带的 `adjacency`，不读取服务端中间结果，也不按报告文字人工判分。
 - `local/`、`cdfm_bench_*/`、`config.yaml`、`config.smoke.yaml` 均已 gitignore；进入版本库的只有代码、示例配置与本文档。
-- **真实冒烟尚未执行**：实现完成时被测栈未启动。`selftest.py`、`--dry-run` 与抽样数字已验证，单集端到端流程待人工跑通后按第 10 节更新结论。
+- **真实冒烟已执行（2026-10-31）**：单集 1/1 成功，主结果算法 `causal.cdfm`，F1 0.5455、SHD 9、AUROC 0.9588、AUPRC 0.7302；`selftest.py` 与 `--dry-run` 仍可独立验证。
 
 ## 安装
 
@@ -88,7 +88,7 @@ cp config.example.yaml config.yaml
 5. 订阅 `GET /api/agent/jobs/{job_id}/events`（SSE）。断流或传输错误时带最后事件 id 重连，最多 3 次；仍失败记 `sse_error`。超时先 `cancel` 再记 `timeout`。
 6. `interrupt` 时自动应答：自由文本问题用数据集画像回答（行数、列数、取值范围、唯一值数、缺失情况，并声明目标是从匿名观测恢复因果结构）；方案确认按下面的安全规则批准或拒绝，随后 `POST /api/agent/jobs/{job_id}/resume`。
 7. `final_result` 取报告；`error` / `canceled` 记失败。
-8. 从报告取因果图、映射节点、计算两套指标，追加写 `results.csv`，并保存 CSV 与原始事件证据。
+8. 从报告取因果图、映射节点，计算严格定向/骨架指标与 F1/SHD/AUROC/AUPRC，追加写 `results.csv`，并保存 CSV 与原始事件证据。
 
 固定提示词：
 
@@ -164,13 +164,13 @@ cp config.example.yaml config.yaml
 
 ## 自检与验收
 
-`selftest.py`（无网络）当前 **39 项全过**，覆盖配置校验、路径与产物名、抽样确定性、npz 读取与 CSV、交互答复与方案确认、取图与双口径指标、F1/SHD（含反转与镜像）与 AUROC/AUPRC（含缺失值跳过）、SSE 解析、汇总与报告、续跑去重、损坏数据不中断整轮。
+`selftest.py`（无网络）当前 **40 项全过**，覆盖配置校验、路径与产物名、抽样确定性、npz 读取与 CSV、交互答复与方案确认、取图与双口径指标、F1/SHD（含反转与镜像）与 AUROC/AUPRC（含缺失值跳过）、SSE 解析、汇总与报告、续跑去重、损坏数据不中断整轮。
 
 验收分三层：
 
 1. `--dry-run` 输出 `机制 14 个，格 350 个，共 350 集`，退出码 0。
 2. `selftest.py` 全过，退出码 0。
-3. 真实冒烟（人工，需栈已启动）：单集跑通登录 / 上传 / 交互 / 出图 / `results.csv` + `summary.csv` / `report.md`；确认图变量名能映射为 `X{k}`。**当前状态：待执行。**
+3. 真实冒烟（人工，需栈已启动）：单集跑通登录 / 上传 / 交互 / 出图 / `results.csv` + `summary.csv` / `report.md`；确认图变量名能映射为 `X{k}`。**当前状态：已执行（2026-10-31），1/1 成功，主结果算法 `causal.cdfm`，F1 0.5455、SHD 9、AUROC 0.9588、AUPRC 0.7302。**
 
 单集成功不等于算法质量结论；`selftest.py` 不提供真实系统验收证据。
 
@@ -189,7 +189,7 @@ cp config.example.yaml config.yaml
 | `config.py` | 配置加载与字段校验 |
 | `dataset.py` | npz 扫描、路径解析、分层抽样、CSV 落盘、数据画像、gold |
 | `answer.py` | 交互答复与方案确认安全判断（纯函数） |
-| `evaluate.py` | 取图、节点映射、严格定向与骨架指标 |
+| `evaluate.py` | 取图、节点映射、严格定向/骨架指标与 F1/SHD/AUROC/AUPRC |
 | `client.py` | HTTP 与 SSE 客户端、凭据与错误分类 |
 | `runner.py` | 单集流程、并发编排、续跑、CLI |
 | `report.py` | `summary.csv` 与 `report.md` 生成 |
