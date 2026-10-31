@@ -10,8 +10,9 @@ DESTRUCTIVE_KEYWORDS = (
 
 
 def _destructive(transformations) -> list[str]:
+    items = transformations if isinstance(transformations, (list, tuple)) else (transformations,)
     hits = []
-    for transformation in transformations:
+    for transformation in items:
         lowered = str(transformation).lower()
         if any(keyword in lowered for keyword in DESTRUCTIVE_KEYWORDS):
             hits.append(str(transformation))
@@ -19,8 +20,12 @@ def _destructive(transformations) -> list[str]:
 
 
 def plan_is_safe(interaction: dict, dim: int) -> tuple[bool, str]:
-    plan = interaction.get("plan") or {}
+    plan = interaction.get("plan") if isinstance(interaction, dict) else None
+    if not isinstance(plan, dict):
+        return False, "plan 缺失或格式无效"
     semantics = plan.get("variable_semantics") or {}
+    if not isinstance(semantics, dict):
+        return False, "variable_semantics 格式无效"
     missing = {f"X{index}" for index in range(dim)} - set(semantics)
     if missing:
         return False, "variable_semantics 未覆盖变量 " + ",".join(sorted(missing))
@@ -51,7 +56,9 @@ def question_text(profile: dict) -> str:
 
 
 def answer_for(interrupt: dict, profile: dict) -> tuple[str | dict, str]:
-    interaction = interrupt.get("interaction") or {}
+    interaction = interrupt.get("interaction") if isinstance(interrupt, dict) else None
+    if not isinstance(interaction, dict):
+        interaction = {}
     interaction_type = interaction.get("interaction_type") or ""
     if interaction_type == PLAN_CONFIRMATION:
         safe, reason = plan_is_safe(interaction, profile["n_cols"])

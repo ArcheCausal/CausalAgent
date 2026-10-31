@@ -211,6 +211,24 @@ def test_answer_free_text_uses_profile():
     assert "500" in payload and "X0" in payload and "X2" in payload
 
 
+def test_answer_rejects_scalar_transformation():
+    profile = {"n_rows": 10, "n_cols": 2, "kinds": ["numeric", "numeric"], "missing": False,
+               "ranges": [(0.0, 1.0), (0.0, 1.0)], "uniques": [10, 10]}
+    interaction = _plan_interaction()
+    interaction["plan"]["transformations"] = "drop"
+    payload, kind = answer.answer_for({"interaction": interaction}, profile)
+    assert kind == "reject" and isinstance(payload, str)
+
+
+def test_answer_survives_odd_payloads():
+    profile = {"n_rows": 10, "n_cols": 2, "kinds": ["numeric", "numeric"], "missing": False,
+               "ranges": [(0.0, 1.0), (0.0, 1.0)], "uniques": [10, 10]}
+    for interrupt in (None, {}, {"interaction": "oops"}, {"interaction": ["x"]},
+                      {"interaction": {"interaction_type": "data_processing_plan_confirmation", "plan": []}}):
+        payload, kind = answer.answer_for(interrupt, profile)
+        assert isinstance(payload, (str, dict)) and kind in ("confirm", "reject", "profile")
+
+
 def run_tests() -> int:
     tests = [(name, value) for name, value in sorted(globals().items()) if name.startswith("test_")]
     failures = 0
