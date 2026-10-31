@@ -951,6 +951,36 @@
               },
               "title": "Edges",
               "type": "array"
+            },
+            "edge_score_matrix": {
+              "anyOf": [
+                {
+                  "items": {
+                    "items": {
+                      "type": "number"
+                    },
+                    "type": "array"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Edge Score Matrix"
+            },
+            "score_type": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Score Type"
             }
           },
           "required": [
@@ -3193,6 +3223,36 @@
           },
           "title": "Edges",
           "type": "array"
+        },
+        "edge_score_matrix": {
+          "anyOf": [
+            {
+              "items": {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edge Score Matrix"
+        },
+        "score_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Score Type"
         }
       },
       "required": [
@@ -3437,7 +3497,7 @@
     },
     {
       "capability_id": "causal.cdfm",
-      "spec_digest": "8490f843bd67d09ddca05662689886016db4a3df35780942e1169d029c14220c",
+      "spec_digest": "a193a8f641049ab946846a0011eb23e62eed767da7bb02b30b6964c6ae74b670",
       "tool": {
         "name": "causal_cdfm",
         "description": "用预训练因果发现基础模型 CDFM 在数值表格数据上做零样本图推断，一次调用返回整张候选混合图。同一个 checkpoint 的训练机制包括线性、非线性、异方差、有序或离散观测、测量误差与潜在混杂等多类机制，因此机制未知或明显非线性时，可以作为候选方法，并与 PC、DirectLiNGAM 的结果分别对照。不传 threshold 时由服务端按模型自带校准器自动决定判决边界，传入 0 到 1 的数值可覆盖它。缺失值按 NaN/±Inf 掩码传递给模型；当前接收数值存储列，不接受未编码的非数值分类列。数值准入不证明测量语义连续，也不保证训练机制适用于当前分布。输出只有边及其方向，不包含权重和置信度：方向可能随阈值变化，不可识别场景下方向证据不足；成对的两个 1 解码为一条双箭头边，表示潜在共同原因候选，结果不构成准确率或生产能力证明。\n数据要求：全部输入变量必须是数值列；分类列必须先按确定性顺序编码；缺失值按原生掩码处理；非有限值仍需显式处理；至少 2 行、2 列。\n方法假设：输入采用数值存储；实际测量语义和分布适用性须依据证据评估；零样本识别以预训练机制覆盖当前数据分布为前提；变量名、样本顺序和冻结输入身份由外层准入固定；CDFM checkpoint 可由 causal-mcp 服务端加载。\n目标图：acyclic_directed_mixed_graph；矩阵约定：row_to_column_pair_binary。\n边语义：directed：模型推断的候选因果方向；bidirected：潜在共同原因候选，不代表已经证实存在共同原因。\n适用边界：机制覆盖不保证当前数据上的可识别性或准确率；阈值可改变结构；边不携带效应量或置信度；不继承 LiNGAM 的线性、非高斯和无潜在混杂假设。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
@@ -3494,7 +3554,7 @@
     },
     {
       "capability_id": "causal.direct_lingam",
-      "spec_digest": "6fe17dc33c7f78d005bd14b2b14aaf01dfaf925c406547e34399b122a0f92b58",
+      "spec_digest": "94ebf2f00c889a2e84826499f1d443817ff5bd0700c2025ac597e9254f2d451e",
       "tool": {
         "name": "causal_direct_lingam",
         "description": "在连续数值数据上使用 DirectLiNGAM 估计有向无环因果结构。适用于线性、非高斯、误差独立且没有潜在混杂的场景。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；至少 2 行、2 列。\n方法假设：输入为连续数值变量；因果机制近似线性且噪声非高斯；误差独立并且不存在潜在混杂。\n目标图：dag_target_to_source；矩阵约定：target_to_source。\n边语义：directed：线性结构方程中的候选直接作用；权重是系数而非置信度。\n适用边界：线性、非高斯、误差独立和无潜在混杂须分别检验或保持未检验；图中系数不是已识别的干预效应。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
@@ -3628,7 +3688,7 @@
     },
     {
       "capability_id": "causal.pc",
-      "spec_digest": "a9c74cd28ad8abea8e8fd10d5e1ad0f48699fb39947af8b87a580efb0d438953",
+      "spec_digest": "4d96b624246f6237262dc80967227fb0064f05e1e07b6a886e2534b757d381a2",
       "tool": {
         "name": "causal_pc",
         "description": "在表格数据上使用 PC 方法发现条件独立结构并生成部分有向图。适用于一般观测因果发现；需要数值或可确定性编码的表格数据，不应在明显存在潜在混杂且需要专门处理时作为唯一方法。\n数据要求：分类列必须先按确定性顺序编码；不允许存在缺失值、空列或非有限值；至少 2 行、2 列。\n方法假设：条件独立性检验适用于当前数据；因果马尔可夫性、忠实性和无潜在混杂的因果充分性；数据中的变量名和样本身份已经由外层准入冻结。\n目标图：pdag；矩阵约定：causal_learn_endpoints。\n边语义：directed：候选因果方向；undirected：方向尚未识别的相邻关系。\n适用边界：条件独立性检验和有限样本会影响结构；具体条件按实际 independence_test 判断；Fisher-Z 基于偏相关与高斯条件独立关系，不能因 PC 是通用算法就声称本次检验不受线性或分布条件限制；骨架相近不等于方向得到验证；不直接估计因果效应。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",

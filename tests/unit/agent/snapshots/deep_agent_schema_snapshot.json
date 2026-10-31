@@ -76,7 +76,7 @@
         "status",
         "provenance"
       ],
-      "sha256": "1e3814023382251b3b16b2d1070a0d6f9b2f563b6a44d79893056004d76a8bc8",
+      "sha256": "2a0b794bee0208394a3040140271e736c4933fa41b8cead1be606112841f9080",
       "title": "AlgorithmResult"
     },
     "AlgorithmResultProvenance": {
@@ -475,14 +475,16 @@
     },
     "StandardizedGraph": {
       "properties": [
+        "edge_score_matrix",
         "edges",
         "graph_semantics",
-        "nodes"
+        "nodes",
+        "score_type"
       ],
       "required": [
         "graph_semantics"
       ],
-      "sha256": "dca4ab789e84a85fc28004cde8380e150f0122412979e717d46d92bfcfa10437",
+      "sha256": "ed84c419ece3baf6a6cc1985d6bbeb848f7ef9c537956f90587c5f897628c4e8",
       "title": "StandardizedGraph"
     },
     "WebEvidenceResult": {
@@ -525,13 +527,13 @@
     {
       "capability_id": "causal.cdfm",
       "schema_sha256": "833fc380608aec4179772f57e361693471758572646524839cbd60374db80dc7",
-      "spec_digest": "8490f843bd67d09ddca05662689886016db4a3df35780942e1169d029c14220c",
+      "spec_digest": "a193a8f641049ab946846a0011eb23e62eed767da7bb02b30b6964c6ae74b670",
       "tool_name": "causal_cdfm"
     },
     {
       "capability_id": "causal.direct_lingam",
       "schema_sha256": "97654a33c42ade597f332000a44f260e2db45bc7ea5581c85df01e5f2332d4a7",
-      "spec_digest": "6fe17dc33c7f78d005bd14b2b14aaf01dfaf925c406547e34399b122a0f92b58",
+      "spec_digest": "94ebf2f00c889a2e84826499f1d443817ff5bd0700c2025ac597e9254f2d451e",
       "tool_name": "causal_direct_lingam"
     },
     {
@@ -543,7 +545,7 @@
     {
       "capability_id": "causal.pc",
       "schema_sha256": "3a54f6cda9165744432f7f48b6f90d9cca2f1313401af842422461cc89bc1148",
-      "spec_digest": "a9c74cd28ad8abea8e8fd10d5e1ad0f48699fb39947af8b87a580efb0d438953",
+      "spec_digest": "4d96b624246f6237262dc80967227fb0064f05e1e07b6a886e2534b757d381a2",
       "tool_name": "causal_pc"
     }
   ]
