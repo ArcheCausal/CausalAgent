@@ -78,7 +78,7 @@ output:
 - 数据集标识 `dataset` = 去 `.npz` 的相对路径，如 `CAM/D010_N00500/rep00`；落盘文件名把 `/` 换成 `__`。
 - 路径解析：`mechanism = parts[-3]`；`parts[-2]` 用 `^D(\d+)_N(\d+)$` 得名义 D/N；文件名用 `rep(\d+)` 得 rep。解析不到留空，不阻塞。
 - `dim` / `n_rows` 一律取 `X.shape` 实测值，名义 D/N 仅作筛选。
-- **抽样**：对每个选中的 `机制×D×N` 格，5 个 rep 按 `blake2b(seed|机制|D|N|rep)` 排序取前 `per_cell` 个。确定性、可复现；执行顺序按 `dataset` 字典序。
+- **抽样**：对每个选中的 `机制×D×N` 格，格内所有 rep 按 `blake2b(seed|dataset)` 排序取前 `per_cell` 个。确定性、可复现；执行顺序按 `dataset` 字典序。
 - `TimeLag` 默认排除（`adjacency` 为 lag-1 块，CSV 无法恢复时序）；从 `exclude` 移除后可纳入，`report.md` 口径段以抽样配置中的 `exclude` 为准。
 
 ## 6. 端到端流程（单集）
@@ -211,7 +211,7 @@ failure_reasons
 4. npz → CSV：列名、行数、`%.8g` 格式、整型列
 5. gold 提取：已知小矩阵边集
 6. 指标：node id 映射、五种 `edge_type`、镜像对、反向边、空图、骨架口径
-7. 交互答复：三类 interaction 的确定性输出、破坏性 plan 判拒
+7. 交互答复：两类 interaction 的确定性输出、破坏性 plan 判拒
 8. `report.md` 生成：包含分组表与失败分布
 9. SSE 解析与心跳、`RETRYABLE` 集合、`build_prompt`、`_run_once` 无图记 `failed`
 
