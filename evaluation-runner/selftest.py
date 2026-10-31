@@ -13,6 +13,7 @@ import answer
 import client as cl
 import dataset as ds
 import evaluate
+import report
 from config import ConfigError, load_config
 
 
@@ -325,6 +326,35 @@ def test_parse_sse_events():
 
 def test_parse_sse_ignores_heartbeat_comments():
     assert list(cl.parse_sse([": keep-alive", ""])) == []
+
+
+def _row(dataset_id="CAM/D010_N00500/rep00", recall=1.0, precision=0.5, status="success", reason=""):
+    return {
+        "run_id": "r1", "dataset": dataset_id, "mechanism": dataset_id.split("/")[0],
+        "rep": 0, "n_rows": 500, "n_cols": 10, "dim": 10, "lambda": "",
+        "n_gold_edges": 20, "n_pred_edges": 20, "n_undirected_edges": 0,
+        "recall": recall, "precision": precision, "skeleton_recall": 0.8,
+        "skeleton_precision": 0.7, "final_algorithm": "pc", "finalization_status": "valid",
+        "interactions": 2, "duration_s": 120.0, "tokens": "not_collected",
+        "status": status, "failure_reason": reason,
+    }
+
+
+def test_summarize_counts_and_means():
+    rows = [_row(), _row("Linear/D010_N00500/rep00", recall=0.0, status="failed", reason="timeout")]
+    summary = report.summarize(rows, {"sampling": {"mechanisms": 2, "per_cell": 1, "seed": 1}})
+    assert summary["datasets"] == 2
+    assert summary["succeeded"] == 1
+    assert summary["failed"] == 1
+    assert abs(summary["recall_mean"] - 1.0) < 1e-9
+    assert summary["failure_reasons"] == "timeout:1"
+
+
+def test_report_markdown_contains_tables():
+    markdown = report.report_markdown([_row()], {"run_id": "r1", "git_commit": "abc"})
+    assert "# 评测报告" in markdown
+    assert "按机制" in markdown
+    assert "pc" in markdown
 
 
 def run_tests() -> int:
