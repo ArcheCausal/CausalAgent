@@ -88,6 +88,7 @@ Worker 侧终态 `final_result`、`error`、`interrupt` 由 `OrderedEventWriter`
 ```
 
 - 用于 API 客户端展示最终总量。
+- `error` 事件由 `job_service.fail_job` 写入，调用方（writer 与 execution 的兜底异常路径）把快照作为参数传入，最终进入事件 payload。
 - `canceled` 事件由 API 侧取消接口产生，拿不到 collector，不注入；调用方（runner）依赖此前收到的 `usage` 事件。
 
 ### 公共事件白名单
@@ -95,6 +96,7 @@ Worker 侧终态 `final_result`、`error`、`interrupt` 由 `OrderedEventWriter`
 `app/agent/public_events.py`：
 
 - 新增事件类型 `usage`，允许字段 `attempt`、`input_tokens`、`output_tokens`、`total_tokens`。
+  `attempt` 在这里是对外暴露的刻意例外：它是`usage`的去重与重置边界，不含敏感内容；其他事件仍按现有规则剥离该字段。
 - 给 `final_result`、`error`、`interrupt` 增加 `usage` 字段；`canceled` 同步增加，保持协议一致。
 
 事件在写库后按白名单投影，新增字段不会影响既有事件。
@@ -187,6 +189,7 @@ runner（`evaluation-runner/selftest.py`，不引入测试框架）：
 - 修改 `app/agent/worker/graph_runner.py`
 - 修改 `app/agent/worker/execution.py`
 - 修改 `app/agent/worker/event_writer.py`
+- 修改 `app/agent/job_service.py`（`fail_job` 接受可选 `usage`）
 - 修改 `app/agent/public_events.py`
 - 修改 `evaluation-runner/runner.py`
 - 修改 `evaluation-runner/report.py`
