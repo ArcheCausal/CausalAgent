@@ -580,6 +580,43 @@ def test_run_dataset_corrupt_npz_returns_terminal_error():
         assert row["failure_reason"] == "terminal_error"
 
 
+def test_run_dataset_retry_failure_keeps_usage():
+    calls = []
+
+    def stub_run_once(spec, config, client, run_dir, run_id):
+        calls.append(1)
+        if len(calls) == 1:
+            row = rn._failed_row(spec, run_id, "timeout")
+            row.update({"tokens_input": 10, "tokens_output": 2, "tokens_total": 12})
+            return row
+        raise rn.StepError("upload_error")
+
+    class FakeClient:
+        def login(self, *credentials): pass
+        def close(self): pass
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        _make_npz(root / "CAM/D010_N00500/rep00.npz",
+                  np.zeros((4, 2)), np.array([[0, 1], [0, 0]], dtype=np.int8))
+        spec = ds.scan(root)[0]
+        run_dir = root / "run"
+        config = rn.Config(
+            run=rn.RunSettings(base_url="http://x", timeout_minutes=1),
+            auth=rn.AuthSettings(), data=rn.DataSettings(dir=root),
+            output=rn.OutputSettings(dir=run_dir))
+        original_client, original_run_once = rn.AgentClient, rn._run_once
+        rn.AgentClient = lambda *a, **k: FakeClient()
+        rn._run_once = stub_run_once
+        try:
+            row = rn._run_dataset(spec, config, ("u", "p"), "r1", run_dir)
+        finally:
+            rn.AgentClient, rn._run_once = original_client, original_run_once
+        assert row["failure_reason"] == "upload_error"
+        assert row["status"] == "failed"
+        assert (row["tokens_input"], row["tokens_output"], row["tokens_total"]) == (10, 2, 12)
+
+
 def run_tests() -> int:
     tests = [(name, value) for name, value in sorted(globals().items()) if name.startswith("test_")]
     failures = 0

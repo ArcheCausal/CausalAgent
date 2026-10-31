@@ -114,7 +114,7 @@ def _add_usage(total: dict[str, int], row: dict) -> None:
             total[name] = total.get(name, 0) + int(value)
 
 
-def _failed_row(spec, run_id, reason: str) -> dict:
+def _failed_row(spec, run_id, reason: str, usage: dict | None = None) -> dict:
     row = {name: "" for name in RESULT_HEADER}
     row.update({
         "run_id": run_id, "dataset": spec.dataset_id, "mechanism": spec.mechanism,
@@ -122,6 +122,8 @@ def _failed_row(spec, run_id, reason: str) -> dict:
         "status": "failed", "failure_reason": reason,
         "interactions": 0, "duration_s": 0.0,
     })
+    if usage:
+        row.update(usage)
     return row
 
 
@@ -261,9 +263,9 @@ def _run_dataset(spec, config, credentials, run_id, run_dir) -> dict:
         print(f"[warn] {spec.dataset_id}: {exc}", file=sys.stderr)
         return _failed_row(spec, run_id, "terminal_error")
     client = AgentClient(config.run.base_url)
+    total_usage: dict[str, int] = {}
     try:
         client.login(*credentials)
-        total_usage: dict[str, int] = {}
         row = _run_once(spec, config, client, run_dir, run_id)
         _add_usage(total_usage, row)
         attempts = 0
@@ -275,16 +277,16 @@ def _run_dataset(spec, config, credentials, run_id, run_dir) -> dict:
             row.update(total_usage)
         return row
     except ds.DatasetInvalid:
-        return _failed_row(spec, run_id, "dataset_invalid")
+        return _failed_row(spec, run_id, "dataset_invalid", total_usage)
     except StepError as exc:
-        return _failed_row(spec, run_id, exc.reason)
+        return _failed_row(spec, run_id, exc.reason, total_usage)
     except TransportError:
-        return _failed_row(spec, run_id, "terminal_error")
+        return _failed_row(spec, run_id, "terminal_error", total_usage)
     except ClientError:
-        return _failed_row(spec, run_id, "auth_error")
+        return _failed_row(spec, run_id, "auth_error", total_usage)
     except Exception as exc:
         print(f"[warn] {spec.dataset_id}: {exc}", file=sys.stderr)
-        return _failed_row(spec, run_id, "terminal_error")
+        return _failed_row(spec, run_id, "terminal_error", total_usage)
     finally:
         client.close()
 
