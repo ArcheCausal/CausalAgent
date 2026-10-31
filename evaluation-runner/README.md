@@ -115,6 +115,9 @@ cp config.example.yaml config.yaml
 - 严格定向：`recall = TP / |gold|`；`precision = TP / (有向边数 + 无向类边数 + 镜像对数)`，分母为 0 记 0。
 - 骨架：所有边无向化后取点对集合（重复点对只计一次），与 gold 骨架求交；precision 分母仍按逐边 FP 计（无向类边每条 1 个、镜像对 1 个）。
 - 空图：全部记 0。
+- F1：严格定向 precision / recall 的调和平均，分母为 0 记 0。
+- SHD：缺失 + 多余 + 反转；反转、无向、镜像各计 1，骨架命中的无向边抵消一条 gold。
+- AUROC/AUPRC：仅主图为 CDFM（资产带 `score_type=probability`）时计算；样本空间为全部有序对 `i≠j`；非 CDFM 主结果留空，不与 P/R 混比。
 - **两套口径不可混比**；`report.md` 必须同时声明。`diagnostic` 报告不计入均值；`partial` 计入成功但不代表全部边可读。
 
 ## 产物
@@ -123,9 +126,9 @@ cp config.example.yaml config.yaml
 
 | 路径 | 内容 |
 | --- | --- |
-| `results.csv` | 逐集一行，22 列：`run_id, dataset, mechanism, rep, n_rows, n_cols, dim, lambda, n_gold_edges, n_pred_edges, n_undirected_edges, recall, precision, skeleton_recall, skeleton_precision, final_algorithm, finalization_status, interactions, duration_s, tokens, status, failure_reason` |
-| `summary.csv` | 单行汇总，20 列；`succeeded` 含 `success` 与 `partial`，均值只统计成功行，失败不补零 |
-| `report.md` | 运行信息、总体均值、按机制 / 按实测 D / 按实测 `n_rows` 分组表、失败分布、recall 最低 10 集、口径声明 |
+| `results.csv` | 逐集一行，28 列：`run_id, dataset, mechanism, rep, n_rows, n_cols, dim, lambda, n_gold_edges, n_pred_edges, n_undirected_edges, recall, precision, f1, skeleton_recall, skeleton_precision, shd, auroc, auprc, final_algorithm, final_confidence, final_selection_rationale, finalization_status, interactions, duration_s, tokens, status, failure_reason` |
+| `summary.csv` | 单行汇总，26 列，新增 `f1_mean, shd_mean, auroc_mean, auprc_mean, auroc_n, auprc_n`；`succeeded` 含 `success` 与 `partial`，均值只统计成功行，失败不补零；排名指标按有值行求均值，`auroc_n`/`auprc_n` 为覆盖集数 |
+| `report.md` | 运行信息、总体均值（含 F1/SHD 与 AUROC/AUPRC 及覆盖集数）、按机制 / 按实测 D / 按实测 `n_rows` 分组表（含 F1/SHD 列）、失败分布、recall 最低 10 集、口径声明 |
 | `csv/<dataset 净化>.csv` | 实际上传的 CSV，列 `X0..X{n-1}`，`%.8g` |
 | `raw/<dataset 净化>.jsonl` | 该集全量 SSE 事件 |
 | `raw/<dataset 净化>.json` | 终态 `document` 与交互次数 |
@@ -161,7 +164,7 @@ cp config.example.yaml config.yaml
 
 ## 自检与验收
 
-`selftest.py`（无网络）当前 **33 项全过**，覆盖配置校验、路径与产物名、抽样确定性、npz 读取与 CSV、交互答复与方案确认、取图与双口径指标、SSE 解析、汇总与报告、续跑去重、损坏数据不中断整轮。
+`selftest.py`（无网络）当前 **39 项全过**，覆盖配置校验、路径与产物名、抽样确定性、npz 读取与 CSV、交互答复与方案确认、取图与双口径指标、F1/SHD（含反转与镜像）与 AUROC/AUPRC（含缺失值跳过）、SSE 解析、汇总与报告、续跑去重、损坏数据不中断整轮。
 
 验收分三层：
 
