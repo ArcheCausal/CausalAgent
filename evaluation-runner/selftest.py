@@ -392,8 +392,11 @@ def _row(dataset_id="CAM/D010_N00500/rep00", recall=1.0, precision=0.5, status="
         "run_id": "r1", "dataset": dataset_id, "mechanism": dataset_id.split("/")[0],
         "rep": 0, "n_rows": 500, "n_cols": 10, "dim": 10, "lambda": "",
         "n_gold_edges": 20, "n_pred_edges": 20, "n_undirected_edges": 0,
-        "recall": recall, "precision": precision, "skeleton_recall": 0.8,
-        "skeleton_precision": 0.7, "final_algorithm": "pc", "finalization_status": "valid",
+        "recall": recall, "precision": precision, "f1": 0.6, "shd": 3,
+        "skeleton_recall": 0.8, "skeleton_precision": 0.7,
+        "auroc": 0.75, "auprc": 0.65,
+        "final_algorithm": "pc", "final_confidence": "low",
+        "final_selection_rationale": "示例", "finalization_status": "valid",
         "interactions": 2, "duration_s": 120.0, "tokens": "not_collected",
         "status": status, "failure_reason": reason,
     }
@@ -407,6 +410,20 @@ def test_summarize_counts_and_means():
     assert summary["failed"] == 1
     assert abs(summary["recall_mean"] - 1.0) < 1e-9
     assert summary["failure_reasons"] == "timeout:1"
+    assert abs(summary["f1_mean"] - 0.6) < 1e-9
+    assert abs(summary["shd_mean"] - 3.0) < 1e-9
+    assert abs(summary["auroc_mean"] - 0.75) < 1e-9
+    assert summary["auroc_n"] == 1
+
+
+def test_summary_skips_missing_ranking_metrics():
+    row = _row()
+    row["auroc"] = ""
+    row["auprc"] = ""
+    summary = report.summarize([row], {"sampling": {"mechanisms": 1, "per_cell": 1, "seed": 1}})
+    assert summary["auroc_mean"] == ""
+    assert summary["auroc_n"] == 0
+    assert abs(summary["f1_mean"] - 0.6) < 1e-9
 
 
 def test_report_markdown_contains_tables():
@@ -414,6 +431,9 @@ def test_report_markdown_contains_tables():
     assert "# 评测报告" in markdown
     assert "按机制" in markdown
     assert "pc" in markdown
+    assert "F1" in markdown
+    assert "SHD" in markdown
+    assert "AUROC" in markdown
 
 
 def _resume_rows():

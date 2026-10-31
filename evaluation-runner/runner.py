@@ -57,10 +57,11 @@ def resolve_credentials(config: Config) -> tuple[str, str]:
 
 RESULT_HEADER = [
     "run_id", "dataset", "mechanism", "rep", "n_rows", "n_cols", "dim", "lambda",
-    "n_gold_edges", "n_pred_edges", "n_undirected_edges", "recall", "precision",
-    "skeleton_recall", "skeleton_precision", "final_algorithm", "final_confidence",
-    "final_selection_rationale", "finalization_status",
-    "interactions", "duration_s", "tokens", "status", "failure_reason",
+    "n_gold_edges", "n_pred_edges", "n_undirected_edges", "recall", "precision", "f1",
+    "skeleton_recall", "skeleton_precision", "shd", "auroc", "auprc",
+    "final_algorithm", "final_confidence", "final_selection_rationale",
+    "finalization_status", "interactions", "duration_s", "tokens", "status",
+    "failure_reason",
 ]
 
 
@@ -195,6 +196,12 @@ def _run_once(spec, config: Config, client: AgentClient, run_dir: Path, run_id: 
     edges, unmapped = ev.parse_edges(asset, dim)
     metrics = ev.score(edges, gold)
     row.update(metrics)
+    row["f1"] = ev.f1_score(metrics["precision"], metrics["recall"])
+    row["shd"] = ev.shd(edges, gold)
+    matrix = ev.probability_matrix(asset, dim)
+    ranking = ev.ranking_metrics(matrix, gold) if matrix is not None else {"auroc": None, "auprc": None}
+    for name in ("auroc", "auprc"):
+        row[name] = "" if ranking[name] is None else ranking[name]
     row.update({
         "final_algorithm": (asset.get("metadata") or {}).get("algorithm", ""),
         "finalization_status": document.get("finalization_status", ""),
@@ -327,6 +334,9 @@ def main(argv=None) -> int:
             row[name] = float(row[name] or 0)
         for name in ("recall", "precision", "skeleton_recall", "skeleton_precision", "duration_s"):
             row[name] = float(row[name] or 0)
+        for name in ("f1", "shd", "auroc", "auprc"):
+            value = row.get(name, "")
+            row[name] = float(value) if value not in ("", None) else ""
     meta = {
         "run_id": run_id, "started_at": datetime.now().isoformat(timespec="seconds"),
         "git_commit": _git_commit(), "base_url": config.run.base_url,

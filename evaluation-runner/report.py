@@ -7,12 +7,26 @@ SUMMARY_HEADER = [
     "run_id", "started_at", "git_commit", "base_url", "data_dir", "seed", "per_cell",
     "parallel", "mechanisms", "datasets", "succeeded", "failed", "recall_mean",
     "precision_mean", "skeleton_recall_mean", "skeleton_precision_mean",
+    "f1_mean", "shd_mean", "auroc_mean", "auprc_mean", "auroc_n", "auprc_n",
     "duration_mean_s", "interactions_mean", "algorithm_distribution", "failure_reasons",
 ]
 
 
 def _mean(values):
     return sum(values) / len(values) if values else 0.0
+
+
+def _present(rows, key):
+    return [float(row[key]) for row in rows if row.get(key, "") not in ("", None)]
+
+
+def _mean_present(rows, key):
+    values = _present(rows, key)
+    return sum(values) / len(values) if values else ""
+
+
+def _fmt(value, digits=4):
+    return "-" if value in ("", None) else f"{float(value):.{digits}f}"
 
 
 def _pairs(counter: Counter) -> str:
@@ -51,6 +65,12 @@ def summarize(rows: list[dict], meta: dict) -> dict:
         "precision_mean": _mean([row["precision"] for row in succeeded]),
         "skeleton_recall_mean": _mean([row["skeleton_recall"] for row in succeeded]),
         "skeleton_precision_mean": _mean([row["skeleton_precision"] for row in succeeded]),
+        "f1_mean": _mean_present(succeeded, "f1"),
+        "shd_mean": _mean_present(succeeded, "shd"),
+        "auroc_mean": _mean_present(succeeded, "auroc"),
+        "auprc_mean": _mean_present(succeeded, "auprc"),
+        "auroc_n": len(_present(succeeded, "auroc")),
+        "auprc_n": len(_present(succeeded, "auprc")),
         "duration_mean_s": _mean([row["duration_s"] for row in succeeded]),
         "interactions_mean": _mean([row["interactions"] for row in succeeded]),
         "algorithm_distribution": _pairs(algorithms),
@@ -59,18 +79,23 @@ def summarize(rows: list[dict], meta: dict) -> dict:
 
 
 def _table(title: str, groups: dict[str, list[dict]]) -> list[str]:
-    lines = [f"### {title}", "", "| 分组 | n | recall | precision | 骨架 recall | 骨架 precision |",
-             "|---|---|---|---|---|---|"]
+    lines = [
+        f"### {title}", "",
+        "| 分组 | n | recall | precision | F1 | SHD | 骨架 recall | 骨架 precision |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
     for key in sorted(groups):
         items = [row for row in groups[key] if row["status"] in ("success", "partial")]
         if not items:
-            lines.append(f"| {key} | 0 | - | - | - | - |")
+            lines.append(f"| {key} | 0 | - | - | - | - | - | - |")
             continue
         lines.append(
-            f"| {key} | {len(items)} | {_mean([row['recall'] for row in items]):.4f} "
-            f"| {_mean([row['precision'] for row in items]):.4f} "
-            f"| {_mean([row['skeleton_recall'] for row in items]):.4f} "
-            f"| {_mean([row['skeleton_precision'] for row in items]):.4f} |"
+            f"| {key} | {len(items)} | {_fmt(_mean_present(items, 'recall'))} "
+            f"| {_fmt(_mean_present(items, 'precision'))} "
+            f"| {_fmt(_mean_present(items, 'f1'))} "
+            f"| {_fmt(_mean_present(items, 'shd'), 2)} "
+            f"| {_fmt(_mean_present(items, 'skeleton_recall'))} "
+            f"| {_fmt(_mean_present(items, 'skeleton_precision'))} |"
         )
     return lines + [""]
 
@@ -101,8 +126,12 @@ def report_markdown(rows: list[dict], meta: dict) -> str:
         "",
         "## 总体",
         "",
-        f"- recall {summary['recall_mean']:.4f}，precision {summary['precision_mean']:.4f}",
-        f"- 骨架 recall {summary['skeleton_recall_mean']:.4f}，骨架 precision {summary['skeleton_precision_mean']:.4f}",
+        f"- recall {_fmt(summary['recall_mean'])}，precision {_fmt(summary['precision_mean'])}，"
+        f"F1 {_fmt(summary['f1_mean'])}，SHD {_fmt(summary['shd_mean'], 2)}",
+        f"- 骨架 recall {_fmt(summary['skeleton_recall_mean'])}，"
+        f"骨架 precision {_fmt(summary['skeleton_precision_mean'])}",
+        f"- AUROC {_fmt(summary['auroc_mean'])}，AUPRC {_fmt(summary['auprc_mean'])}"
+        f"（CDFM 主结果 {summary['auroc_n']} 集）",
         f"- 平均耗时 {summary['duration_mean_s']:.1f}s，平均交互 {summary['interactions_mean']:.2f} 次",
         f"- 算法分布: {summary['algorithm_distribution'] or '-'}",
         f"- 失败分布: {summary['failure_reasons'] or '-'}",
