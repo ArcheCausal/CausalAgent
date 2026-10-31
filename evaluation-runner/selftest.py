@@ -446,6 +446,23 @@ def test_run_once_marks_missing_graph_failed():
         assert row["status"] == "failed" and row["failure_reason"] == "no_causal_graph"
 
 
+def test_run_dataset_corrupt_npz_returns_terminal_error():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        path = root / "CAM/D010_N00500/rep00.npz"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"not a real npz file")
+        spec = ds.scan(root)[0]
+        original = rn.AgentClient
+        rn.AgentClient = lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应构造客户端"))
+        try:
+            row = rn._run_dataset(spec, object(), ("u", "p"), "rid", root / "run")
+        finally:
+            rn.AgentClient = original
+        assert row["status"] == "failed"
+        assert row["failure_reason"] == "terminal_error"
+
+
 def run_tests() -> int:
     tests = [(name, value) for name, value in sorted(globals().items()) if name.startswith("test_")]
     failures = 0

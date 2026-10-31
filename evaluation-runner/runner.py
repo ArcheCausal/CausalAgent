@@ -208,6 +208,9 @@ def _run_dataset(spec, config, credentials, run_id, run_dir) -> dict:
             raise ds.DatasetInvalid("gold 为空")
     except ds.DatasetInvalid:
         return _failed_row(spec, run_id, "dataset_invalid")
+    except Exception as exc:
+        print(f"[warn] {spec.dataset_id}: {exc}", file=sys.stderr)
+        return _failed_row(spec, run_id, "terminal_error")
     client = AgentClient(config.run.base_url)
     try:
         client.login(*credentials)
