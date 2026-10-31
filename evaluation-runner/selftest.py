@@ -10,6 +10,7 @@ import numpy as np
 
 import answer
 import dataset as ds
+import evaluate
 from config import ConfigError, load_config
 
 
@@ -227,6 +228,60 @@ def test_answer_survives_odd_payloads():
                       {"interaction": {"interaction_type": "data_processing_plan_confirmation", "plan": []}}):
         payload, kind = answer.answer_for(interrupt, profile)
         assert isinstance(payload, (str, dict)) and kind in ("confirm", "reject", "profile")
+
+
+def _asset(edges, variables=("X0", "X1", "X2")):
+    return {
+        "graph_id": "graph_main",
+        "metadata": {"algorithm": "pc"},
+        "nodes": [
+            {"id": f"n{index}", "variable": variable}
+            for index, variable in enumerate(variables)
+        ],
+        "edges": edges,
+    }
+
+
+def test_find_graph_via_block_and_diagnostic():
+    asset = _asset([])
+    document = {
+        "blocks": [{"type": "section", "children": [{"type": "causal_graph", "asset_key": "graph_main"}]}],
+        "assets": {"graph_main": asset},
+        "report_mode": "analysis",
+    }
+    found, reason = evaluate.find_graph_asset(document)
+    assert found is asset and reason is None
+    found, reason = evaluate.find_graph_asset({**document, "report_mode": "diagnostic"})
+    assert found is None and reason == "diagnostic_report"
+    found, reason = evaluate.find_graph_asset({"blocks": [], "assets": {}})
+    assert found is None and reason == "no_causal_graph"
+
+
+def test_parse_edges_maps_node_ids_and_flags_unmapped():
+    asset = _asset([
+        {"source": "n0", "target": "n1", "edge_type": "directed"},
+        {"source": "n1", "target": "n2", "edge_type": "undirected"},
+        {"source": "n0", "target": "ghost", "edge_type": "directed"},
+    ])
+    edges, unmapped = evaluate.parse_edges(asset)
+    assert edges == [(0, 1, "directed"), (1, 2, "undirected")]
+    assert unmapped is True
+
+
+def test_score_strict_and_skeleton():
+    gold = {(0, 1), (1, 2)}
+    edges = [(0, 1, "directed"), (1, 0, "directed"), (2, 1, "directed"), (2, 0, "undirected")]
+    metrics = evaluate.score(edges, gold)
+    assert metrics["n_pred_edges"] == 1
+    assert metrics["n_undirected_edges"] == 2
+    assert metrics["recall"] == 0.0
+    assert metrics["skeleton_recall"] == 0.5
+
+
+def test_score_empty_graph():
+    metrics = evaluate.score([], {(0, 1)})
+    assert metrics["recall"] == 0.0 and metrics["precision"] == 0.0
+    assert metrics["n_pred_edges"] == 0 and metrics["n_undirected_edges"] == 0
 
 
 def run_tests() -> int:
