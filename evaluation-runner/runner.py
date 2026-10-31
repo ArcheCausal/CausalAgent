@@ -17,7 +17,7 @@ import dataset as ds
 import evaluate as ev
 import report as rp
 from answer import answer_for
-from client import AgentClient, ClientError
+from client import AgentClient, ClientError, TransportError
 from config import (AuthSettings, Config, ConfigError, DataSettings, OutputSettings,
                     RunSettings, load_config)
 
@@ -215,6 +215,8 @@ def _run_dataset(spec, config, credentials, run_id, run_dir) -> dict:
         return _failed_row(spec, run_id, "dataset_invalid")
     except StepError as exc:
         return _failed_row(spec, run_id, exc.reason)
+    except TransportError:
+        return _failed_row(spec, run_id, "terminal_error")
     except ClientError:
         return _failed_row(spec, run_id, "auth_error")
     except Exception as exc:

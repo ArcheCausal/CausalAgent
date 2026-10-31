@@ -12,6 +12,10 @@ class ClientError(RuntimeError):
     """被测服务返回非预期状态。"""
 
 
+class TransportError(ClientError):
+    """请求未能到达服务或连接中断。"""
+
+
 class AuthError(ClientError):
     """登录/注册失败。"""
 
@@ -68,7 +72,7 @@ class AgentClient:
         try:
             return self.http.request(method, url, **kwargs)
         except httpx.HTTPError as exc:
-            raise ClientError(str(exc)) from exc
+            raise TransportError(str(exc)) from exc
 
     def _request_json(self, method: str, url: str, **kwargs) -> dict:
         return _json(self._send(method, url, **kwargs))
@@ -139,7 +143,7 @@ class AgentClient:
                 for event_id, event_type, payload in parse_sse(response.iter_lines()):
                     yield {"id": event_id, "type": event_type, "payload": payload}
         except httpx.HTTPError as exc:
-            raise ClientError(str(exc)) from exc
+            raise TransportError(str(exc)) from exc
 
     def resume(self, job_id: str, question_id: str, answer) -> None:
         self._request_json(
