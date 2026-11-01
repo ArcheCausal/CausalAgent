@@ -8,7 +8,6 @@ import hashlib
 import json
 from collections.abc import Mapping
 from typing import Any
-from uuid import uuid4
 
 from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -80,7 +79,7 @@ class DataProcessingCompletionMiddleware(AgentMiddleware):
             for call in calls
         ]}
 
-    @hook_config(can_jump_to=["model", "tools"])
+    @hook_config(can_jump_to=["model"])
     async def aafter_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
         context = runtime.context
         if not isinstance(context, AgentRunContext) or context.trusted_identity is None:
@@ -89,17 +88,17 @@ class DataProcessingCompletionMiddleware(AgentMiddleware):
         identity = context.trusted_identity
         source_hash = identity.source_input_identity()
         version = confirmed_version(state, job_id=str(identity.job_id), source_hash=source_hash)
-        tool_name = None
-        args: dict[str, Any] = {}
         from Agent.data_processing.agent import _research_ready
         if not _research_ready(state):
             instruction = "请先检查冻结输入的完整列结构，再用 set_research_spec 提交研究参数并处理最新输入。"
         elif state.get("data_processing_plan_parameter_identity") != parameter_identity(state["analysis_parameters"]):
             instruction = "请用 set_data_processing_plan 保存绑定当前研究参数的方案，再继续确认和执行。"
-        elif not state.get("data_processing_metadata") or not state.get("data_processing_draft_script"):
-            instruction = "请先使用 set_data_processing_plan 保存完整处理方案，并保存脚本，再展示方案请求确认。"
+        elif not state.get("data_processing_metadata"):
+            instruction = "请先使用 set_data_processing_plan 保存完整处理方案，再保存脚本并说明准备执行的内容，请求确认。"
+        elif not state.get("data_processing_draft_script"):
+            instruction = "请按当前保存的方案用 write_processing_script 保存完整脚本，不要为补写脚本重建方案，再按当前确认状态继续执行或请求确认。"
         elif version is None:
-            tool_name = "request_data_processing_plan_confirmation"
+            instruction = "请调用 request_data_processing_plan_confirmation 并提供 explanation。首次说明准备执行的内容；方案变化时说明为什么改变及改变了什么，再展示保存的完整方案。不要为补充解释重写方案。"
         else:
             await asyncio.to_thread(
                 require_current_plan_confirmation, context, source_hash=source_hash, plan_version=version,
@@ -107,7 +106,7 @@ class DataProcessingCompletionMiddleware(AgentMiddleware):
             await context.check_after_call()
             candidate_id = state.get("data_processing_candidate_id")
             if not candidate_id:
-                instruction = "当前脚本尚未执行并保存候选。请调用 execute_processing_script，成功后才能结束；不得交付历史候选。"
+                instruction = "当前方案已确认，可以执行，但尚无当前候选。请直接调用 execute_processing_script，成功后才能结束；沿用保存的方案，不得重新制定方案、再次确认或交付历史候选。"
             else:
                 candidate = await asyncio.to_thread(
                     read_candidate, context, dataset_id=candidate_id, source_hash=source_hash,
@@ -123,12 +122,7 @@ class DataProcessingCompletionMiddleware(AgentMiddleware):
         if count >= MAX_COMPLETION_RETRIES:
             raise ParameterContractError("processing completion correction limit exceeded")
         update = {"data_processing_completion_retry_count": count + 1}
-        if tool_name:
-            update.update(jump_to="tools", messages=[AIMessage(content="", tool_calls=[{
-                "id": "processing-completion-" + uuid4().hex, "name": tool_name, "args": args,
-            }])])
-        else:
-            update.update(jump_to="model", messages=[HumanMessage(content=instruction)])
+        update.update(jump_to="model", messages=[HumanMessage(content=instruction)])
         return update
 
 
@@ -148,7 +142,8 @@ def _validation_retry_message(candidate_id: Any, report: Mapping[str, Any]) -> H
         id=f"validation-retry-{candidate_id}",
         content=(
             "独立校验未通过。以下是研究角色、方案角色列映射、本次执行列名、候选 CSV 实际列名和确定性错误。"
-            "研究角色名称与实际列名不同或映射错误时，使用 set_data_processing_plan 修正 role_columns，确认后重新执行；不要改写原始研究角色或让用户重复选择。"
+            "先根据失败事实和已确认要求判断是否需要改变处理要求。同范围修复（含导出精度或遗漏已确认字段）只保存修复脚本，提供 repair_summary 后直接重新执行和校验；读取保存的方案，不调用方案工具重建或润色说明。"
+            "只有已保存的 role_columns 缺失或错误且需要改变映射时，才使用 set_data_processing_plan 修正，并在 explanation 中解释原因和变化后确认、重新执行；若映射正确而脚本遗漏字段，只修脚本。研究角色与实际列名不同本身不要求重建方案，不要改写原始研究角色或让用户重复选择。"
             "请判断是角色列映射缺失或错误、脚本遗漏已确认字段、用户信息不足，还是参数提取与已有明确答复矛盾。"
             "脚本遗漏可在原确认范围内修复；有新的语义歧义才向用户澄清。"
             "参数提取错误不代表校验器强制要求角色，不要要求用户重复作同一个选择，"

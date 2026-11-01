@@ -12,7 +12,10 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
 
-from Agent.data_processing.agent import _plan_tool, _write_script_tool, ExecutionReportInput
+from Agent.data_processing.agent import (
+    _plan_tool, _write_script_tool, _plan_confirmation_tool,
+    ExecutionReportInput, ScriptInput, PlanConfirmationInput,
+)
 from Agent.data_processing.graph import DataProcessingCompletionMiddleware, MAX_COMPLETION_RETRIES
 from Agent.data_processing.parameters import ParameterContractError
 from Agent.deep_agent.context import AgentRunContext, TrustedJobIdentity
@@ -48,7 +51,8 @@ def test_real_tools_preserve_identical_plan_then_invalidate_changed_script_and_p
         assert result["data_processing_execution_report"] == state["data_processing_execution_report"]
         # 重建图对象后读取同一个真实 saver，不能用初始默认值覆盖已有快照。
         result = await compile_tools().ainvoke({"messages": [AIMessage(content="", tool_calls=[{
-            "id": "fix-script", "name": "write_processing_script", "args": {"script": "print('fix')"}}])]}, config)
+            "id": "fix-script", "name": "write_processing_script", "args": {
+                "script": "print('fix')", "repair_summary": "脚本未通过检查，正在修正输出方式；继续使用已确认方案，修复后重新执行。"}}])]}, config, context=runtime().context)
         assert result["data_processing_confirmed_plan_version"] == VERSION
         assert result["data_processing_confirmed_plan"] == PLAN
         assert result["data_processing_candidate_id"] == 0
@@ -62,14 +66,14 @@ def test_real_tools_preserve_identical_plan_then_invalidate_changed_script_and_p
     asyncio.run(scenario())
 
 
-def test_completion_forces_original_confirmation_tool_without_resetting_budgets():
+def test_completion_requests_explanation_from_same_agent_without_resetting_budgets():
     state = current_state()
     state.update(data_processing_confirmed_plan=None, data_processing_confirmed_plan_version=None,
                  data_processing_candidate_id=0, data_processing_candidate_revision=0,
                  data_processing_execution_report=None, model_call_count=9, tool_call_count=11)
     result = asyncio.run(DataProcessingCompletionMiddleware().aafter_agent(state, runtime()))
-    assert result["jump_to"] == "tools"
-    assert result["messages"][0].tool_calls[0]["name"] == "request_data_processing_plan_confirmation"
+    assert result["jump_to"] == "model"
+    assert "explanation" in result["messages"][0].content
     assert result["data_processing_completion_retry_count"] == 2
     assert not {"model_call_count", "tool_call_count", "data_processing_retry_count"}.intersection(result)
     state["data_processing_completion_retry_count"] = MAX_COMPLETION_RETRIES
@@ -98,7 +102,8 @@ def test_execution_report_schema_cannot_accept_model_generated_file_facts():
 
 def test_parent_projection_exposes_report_separately_from_plan_metadata():
     report = current_state()["data_processing_execution_report"]
-    result = to_deep_agent_input({"data_processing_execution_report": report})
+    result = to_deep_agent_input({"data_processing_execution_report": report,
+                                 "analysis_parameters": {"effect_request": None}})
     assert result["data_processing_execution_report"] == report
     assert "data_processing_metadata" not in result
 
@@ -112,7 +117,7 @@ def test_official_agent_compiles_completion_routes_and_retains_call_limits():
     completion = "DataProcessingCompletionMiddleware.after_agent"
     assert completion in topology.nodes
     destinations = {edge.target for edge in topology.edges if edge.source == completion}
-    assert "tools" in destinations and "__end__" in destinations
+    assert "ModelCallLimitMiddleware.before_model" in destinations and "__end__" in destinations
     assert any("ModelCallLimitMiddleware" in name for name in topology.nodes)
     tools = graph.nodes["tools"].bound.tools_by_name
     assert {"set_data_processing_plan", "save_data_processing_execution_report"}.issubset(tools)
@@ -134,3 +139,77 @@ def test_real_plan_tool_refuses_unprocessed_research_input(pending, ready):
         assert result["data_processing_metadata"] == PLAN
         assert "set_research_spec" in result["messages"][-1].content
     asyncio.run(scenario())
+
+
+def test_confirmed_script_change_requires_public_summary_before_saving():
+    async def scenario():
+        builder = StateGraph(ProjectDeepAgentState)
+        builder.add_node("tools", ToolNode([_write_script_tool()], handle_tool_errors=False))
+        builder.add_edge(START, "tools")
+        builder.add_edge("tools", END)
+        state = current_state()
+        state["messages"] = [AIMessage(content="", tool_calls=[{
+            "id": "missing-summary", "name": "write_processing_script", "args": {"script": "print('repair')"}}])]
+        result = await builder.compile().ainvoke(state)
+        assert result["data_processing_draft_script"] == state["data_processing_draft_script"]
+        assert result["data_processing_candidate_id"] == 12
+        assert "repair_summary" in result["messages"][-1].content
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("pending,ready,expected", [
+    (8, True, "set_research_spec"), (None, False, "set_research_spec"),
+    (None, True, "explanation_required"),
+])
+def test_confirmation_preconditions_never_interrupt_or_touch_database(pending, ready, expected):
+    async def scenario():
+        builder = StateGraph(ProjectDeepAgentState, context_schema=AgentRunContext)
+        builder.add_node("tools", ToolNode([_plan_confirmation_tool()], handle_tool_errors=False))
+        builder.add_edge(START, "tools")
+        builder.add_edge("tools", END)
+        state = current_state()
+        state.update(data_processing_confirmed_plan=None, data_processing_confirmed_plan_version=None,
+                     data_processing_pending_input_id=pending, data_processing_research_spec_ready=ready)
+        state["messages"] = [AIMessage(content="", tool_calls=[{
+            "id": "confirm-preconditions", "name": "request_data_processing_plan_confirmation", "args": {}}])]
+        result = await builder.compile(checkpointer=InMemorySaver()).ainvoke(
+            state, {"configurable": {"thread_id": JOB}}, context=runtime().context)
+        assert "__interrupt__" not in result
+        assert expected in result["messages"][-1].content
+        assert result["data_processing_confirmed_plan_version"] is None
+    asyncio.run(scenario())
+
+
+def test_repair_progress_uses_stable_key_without_plan_or_script_payload():
+    async def scenario():
+        builder = StateGraph(ProjectDeepAgentState, context_schema=AgentRunContext)
+        builder.add_node("tools", ToolNode([_write_script_tool()], handle_tool_errors=False))
+        builder.add_edge(START, "tools")
+        builder.add_edge("tools", END)
+        state = current_state()
+        summary = "输出精度检查未通过，正在调整写出方式；沿用已确认方案并重新执行。"
+        state["messages"] = [AIMessage(content="", tool_calls=[{
+            "id": "repair-progress", "name": "write_processing_script",
+            "args": {"script": "print('repair')", "repair_summary": summary}}])]
+        graph = builder.compile(checkpointer=InMemorySaver())
+        events = [event async for event in graph.astream(state, {"configurable": {"thread_id": JOB}},
+            context=runtime().context, stream_mode="custom")]
+        assert events == [{"type": "progress", "node_name": "data_processing", "summary": summary,
+                           "_event_key": f"data-processing-repair:{JOB}:repair-progress"}]
+        saved = (await graph.aget_state({"configurable": {"thread_id": JOB}})).values
+        assert saved["data_processing_metadata"] == saved["data_processing_confirmed_plan"] == PLAN
+        assert saved["data_processing_confirmed_plan_version"] == VERSION
+        assert saved["data_processing_candidate_id"] == 0
+        assert saved["data_processing_execution_report"] is None
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("schema,field", [(ScriptInput, "repair_summary"), (PlanConfirmationInput, "explanation")])
+def test_public_explanation_is_bounded_single_line_redacted_and_separate(schema, field):
+    args = {"script": "print('prepare')"} if schema is ScriptInput else {}
+    value = schema.model_validate({**args, field: "正在修复；password=private-value"})
+    assert "private-value" not in getattr(value, field)
+    for invalid in (" ", "error\nTraceback", "```python print(1)```", "x" * 1201):
+        with pytest.raises(ValueError):
+            schema.model_validate({**args, field: invalid})
+    assert field not in PLAN

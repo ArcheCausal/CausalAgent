@@ -165,6 +165,12 @@ docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p
 
 真实 MySQL/PostgreSQL 入口 `data_processing_recovery.py` 额外覆盖候选保存后调用正式执行说明工具、确认保持有效、说明投影及后续独立校验与绑定。完整模型与 OpenSandbox 入口 `sandbox_upgrade_job.py --scenario execution-report --timeout-seconds 900` 要求真实模型在保存候选后调用说明工具，从子图 checkpoint 检查实际工具顺序，并检查仅确认一次、最终候选与说明一致以及独立校验成功。真实服务不可用时只能报告未执行，不能以离线结果代替。
 
+确认重试的真实数据库入口是 [data_processing_confirmation_retry.py](../../tests/acceptance/data_processing_confirmation_retry.py)，使用同一专用数据库配置及 `DATA_RECOVERY_RUN_ID`，首次只连接空库，后续使用 `--resume` 复用配置。它通过正式确认工具、ToolNode、PostgreSQL 重建连接池和真实 MySQL 输入账本检查确认答复消费、解释恢复、重复确认不再中断、脚本修复保留授权、真实方案变化、过期版本、新输入、旧租约及最新凭据冲突。报告在容器 `/tmp/data-processing-recovery/confirmation-retry-report.json`；该层不调用模型、沙盒或浏览器。
+
+`sandbox_upgrade_job.py --scenario script-repair --timeout-seconds 900` 在相同完整隔离服务上执行真实模型故障恢复：测试输入明确要求首次脚本执行注入的 `RuntimeError`，实际失败后删除故障语句、提供修复说明、重新执行并独立校验。故障语句不是处理方案要求。验收从真实子图 checkpoint 读取工具轨迹，要求确认成功后没有 `set_data_processing_plan`、只有一次确认、存在真实失败与后续成功，以及公开修复进度。缺少任一证据不能声称“模型修复时不重写方案”已通过；该脚本本身仍不包含浏览器验收。
+
+需要人工驱动真实浏览器时可增加 `--browser-confirmation`：入口保留权限为 0600 的测试账号文件，输出文件路径并等待外部提交方案确认，不自动提交该答复；浏览器的展示、刷新和断网重连证据需另行保存，不能仅凭该开关声称浏览器验收通过。`data_processing_confirmation_retry.py --resume --legacy-agent-source <Git 基线导出的 agent.py>` 先用真实旧版工具创建空参数等待调用，再用当前工具与新 PostgreSQL 连接池消费原答复，单独验证兼容性；报告记录旧源码 hash，不改写生产 checkpoint。
+
 数据处理验收必须连接真实 OpenSandbox API、真实沙盒主机和真实数据库，不能使用替代 Provider、模拟 API 响应或伪造外网阻断结果。先从真实沙盒验证 Python 3.11 镜像和固定依赖，再逐项检查创建、原始文件只读、脚本执行、输出回读、超时中断、销毁、MySQL 候选持久化/恢复、PostgreSQL 子图恢复以及真实 IPv4/IPv6 出站被拒绝。公网连接探测的超时本身不能作为防火墙配置证据；验收需同时检查沙盒主机上的 egress sidecar、Docker bridge 和转发规则。
 
 真实沙盒应使用独立 Compose project、网络、数据库和临时密钥文件，按 [沙盒部署说明](../../deploy/opensandbox/README.md) 准备固定镜像与代理路由。控制服务、OpenSandbox 和处理容器属于不同验证边界，必须分别检查实际连接和权限；数据库恢复、健康接口或静态检查不能代替完整沙盒验收。上线前还需在隔离环境执行完整模型、Worker 重启接管、MCP HTTP 和报告链路验收。

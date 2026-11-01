@@ -15,7 +15,9 @@ from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command, interrupt
-from pydantic import Field
+from langgraph._internal._constants import CONFIG_KEY_SCRATCHPAD
+from pydantic import Field, field_validator
+from observability.logging_runtime import _redact_text
 
 from Agent.deep_agent.context import AgentRunContext
 from Agent.deep_agent.graph import (
@@ -59,10 +61,30 @@ class EmptyToolInput(ContractModel):
     """工具无模型参数时使用的空输入契约。"""
 
 
-class ScriptInput(ContractModel):
+class PublicExplanationInput(ContractModel):
+    """公开说明只接受有长度限制的单行文本，并复用凭据脱敏。"""
+
+    @field_validator("*", mode="after")
+    @classmethod
+    def validate_public_text(cls, value: Any, info: Any) -> Any:
+        if info.field_name not in {"repair_summary", "explanation"} or value is None:
+            return value
+        if not value.strip() or any(ord(char) < 32 for char in value) or "```" in value:
+            raise ValueError("public explanation must be non-blank single-line prose")
+        return _redact_text(value.strip())[:1200]
+
+
+class ScriptInput(PublicExplanationInput):
     """完整、可重放的数据处理 Python 脚本。"""
 
     script: str = Field(min_length=1, max_length=16000)
+    repair_summary: str | None = Field(default=None, min_length=1, max_length=1200)
+
+
+class PlanConfirmationInput(PublicExplanationInput):
+    """旧等待调用可以缺省说明；新请求必须提供说明。"""
+
+    explanation: str | None = Field(default=None, min_length=1, max_length=1200)
 
 
 class ProcessingPlanInput(ProcessingPlanSummary):
@@ -130,6 +152,19 @@ def _semantic_identity(context: AgentRunContext, state: Any) -> str:
 def _write_script_tool() -> Any:
     async def call(runtime: Any, **kwargs: Any) -> Any:
         payload = ScriptInput.model_validate(kwargs)
+        state = runtime.state
+        repairing = bool(state.get("data_processing_confirmed_plan_version")
+                         and state.get("data_processing_draft_script") != payload.script)
+        if repairing and payload.repair_summary is None:
+            return _tool_message(runtime, name="write_processing_script",
+                                 content="已确认后修改脚本必须提供 repair_summary，简述真实失败与准备采取的修复，不得提前声称成功；保持已确认方案不变。")
+        if repairing:
+            context = _context(runtime, sandbox_required=False)
+            await context.ensure_active()
+            from Agent.data_processing.graph import _emit_progress
+            _emit_progress(runtime,
+                key=f"data-processing-repair:{context.trusted_identity.job_id}:{runtime.tool_call_id}",
+                summary=payload.repair_summary)
         return Command(
             update={
                 "messages": [
@@ -157,6 +192,8 @@ def _write_script_tool() -> Any:
             "保存完整的 Python 处理脚本到当前 Job 的持久化 checkpoint。"
             "脚本只能读取 /workspace/raw/original.csv，并应写入"
             " /workspace/output/prepared.csv。"
+            "已确认后的脚本修改必须提供独立 repair_summary，简述真实失败和准备采取的修复，禁止脚本、原始错误或文件正文。"
+            "同范围修复只保存脚本再执行，不调用方案工具。脚本变化会清空当前候选和执行说明，保留确认和历史产物。"
         ),
         args_schema=with_tool_runtime_schema(
             ScriptInput,
@@ -209,6 +246,7 @@ def _plan_tool() -> Any:
             "role_columns 将已指定的 target、treatment 映射到处理后 CSV 的实际列名；研究角色名称保持原意，未指定时留空。"
             "effect_execution_context 明确实际 treatment_column/outcome_column、业务 treatment_unit 和 treatment_transform/outcome_transform。处理转换记录原始列、输出列、两侧单位；原值保留可明确 identity，标准化用 affine 的实际 scale/offset，非线性写说明。结果变量原值保留才写 identity；未知转换为 null，禁止猜 identity。"
             "执行后补充说明必须使用 save_data_processing_execution_report，不得改写方案。"
+            "方案只描述稳定要求，例如保留原始数值；CSV 写出参数、解析方法和代码修复过程放在脚本与执行说明中。同范围修复不得重写本方案。"
             "只写你能从用户说明或实际脚本确认的内容；不要推测字段含义。"
         ),
         args_schema=with_tool_runtime_schema(
@@ -405,8 +443,9 @@ def _question_tool() -> Any:
 
 
 def _plan_confirmation_tool() -> Any:
-    async def call(runtime: Any, **_: Any) -> Any:
-        context = _context(runtime)
+    async def call(runtime: Any, **kwargs: Any) -> Any:
+        payload = PlanConfirmationInput.model_validate(kwargs)
+        context = _context(runtime, sandbox_required=False)
         await context.ensure_active()
         identity = context.trusted_identity
         state = getattr(runtime, "state", None)
@@ -415,6 +454,20 @@ def _plan_confirmation_tool() -> Any:
         if not _research_ready(state, require_plan=True):
             return _tool_message(runtime, name="request_data_processing_plan_confirmation",
                                  content="请先用 set_research_spec 处理待处理输入，并用 set_data_processing_plan 保存绑定当前参数的方案。")
+        # 原等待调用重放时必须先消费其 resume，不能被数据库里刚保存的答复短路。
+        scratchpad = runtime.config.get("configurable", {}).get(CONFIG_KEY_SCRATCHPAD)
+        resuming = bool(scratchpad is not None and (
+            scratchpad.resume or scratchpad.get_null_resume(False) is not None))
+        version = confirmed_version(state, job_id=str(identity.job_id), source_hash=identity.source_input_identity())
+        if version is not None and not resuming:
+            await asyncio.to_thread(require_current_plan_confirmation, context,
+                                    source_hash=identity.source_input_identity(), plan_version=version)
+            await context.check_after_call()
+            return _tool_message(runtime, name="request_data_processing_plan_confirmation",
+                                 content=json.dumps({"status": "confirmed", "instruction": "当前方案已确认，可以执行。直接调用 execute_processing_script，不要更新方案或重复确认。"}, ensure_ascii=False))
+        if payload.explanation is None and not resuming:
+            return _tool_message(runtime, name="request_data_processing_plan_confirmation",
+                                 content=json.dumps({"status": "explanation_required", "instruction": "请提供 explanation：首次说明准备执行的内容；方案改变时说明为什么改变及改变了什么，再展示完整方案。不得包含脚本、原始错误或文件正文。"}, ensure_ascii=False))
         script = state.get("data_processing_draft_script")
         metadata = state.get("data_processing_metadata")
         if not isinstance(script, str) or not script.strip() or not isinstance(metadata, dict):
@@ -451,7 +504,7 @@ def _plan_confirmation_tool() -> Any:
         research_summary += "；测量声明：" + ("、".join(kind_labels[kind] + str(count) + "列"
             for kind, count in kinds.items()) or "未指定")
         request = ResearchPlanConfirmationRequest(
-            prompt="请确认当前研究参数与处理方案。研究参数：" + research_summary[:1000] + "。确认后执行；如需修改请说明。",
+            prompt=payload.explanation or "请确认当前研究参数与处理方案。研究参数：" + research_summary[:1000] + "。确认后执行；如需修改请说明。",
             question_id=call_id,
             expires_at=(
                 datetime.now(timezone.utc) + timedelta(seconds=300)
@@ -496,7 +549,13 @@ def _plan_confirmation_tool() -> Any:
                         content=json.dumps(
                             {"status": status, "answer": answer_text,
                              "pending_input_id": parameter_update.get("data_processing_pending_input_id"),
-                             "instruction": "根据真实答复调用 set_research_spec，再制定或更新方案。"},
+                             "instruction": (
+                                 "当前方案已确认，可以执行。直接调用 execute_processing_script，不要更新方案或重复确认。"
+                                 if matches is True else
+                                 "此答复对应过期版本，确认已拒绝，未授予执行资格。保留当前草稿，提供说明并请求当前版本确认。"
+                                 if matches is False else
+                                 "根据用户真实修改答复调用 set_research_spec 处理最新输入，再更新相关方案；在 explanation 中说明变化和原因后重新确认。"
+                             )},
                             ensure_ascii=False,
                         ),
                     )
@@ -516,10 +575,11 @@ def _plan_confirmation_tool() -> Any:
         description=(
             "在脚本和方案说明都已保存后，展示当前方案并等待用户明确确认。"
             "确认版本绑定当前 Job、冻结文件、研究语义和方案说明；用户确认的是方案所表达的处理语义，不是脚本正文。"
+            "explanation 独立于方案，首次说明准备执行的内容，方案变化时说明为什么改变及改变了什么；禁止脚本、原始错误和文件正文。有效确认直接返回可以执行，不产生新卡。"
             "脚本失败或校验未通过时，可在已确认语义范围内修复脚本并复用确认；若需要新的研究语义选择或超出已确认的转换范围，必须先向用户澄清并重新确认。"
         ),
         args_schema=with_tool_runtime_schema(
-            EmptyToolInput,
+            PlanConfirmationInput,
             tool_name="request_data_processing_plan_confirmation",
             tool_runtime_type=ToolRuntime,
         ),
@@ -657,6 +717,7 @@ def _execute_script_tool() -> Any:
                             "status": "script_failed",
                             "exit_code": result.exit_code,
                             "stderr": result.stderr[-6000:],
+                            "instruction": "先判断是否需要改变处理要求。同范围修复只调用 write_processing_script，提供 repair_summary 后重新执行，不调用方案工具；需要改变变量映射、样本、聚合、单位转换或研究参数时才更新相关内容，并说明原因和变化后重新确认。",
                         },
                         ensure_ascii=False,
                     ),
@@ -729,14 +790,15 @@ def data_processing_system_prompt() -> str:
             "先检查受限的数据预览，再结合用户目标和服务端提供的 AlgorithmSpec 输入要求判断数据含义。",
             "当观察单位、时间范围、聚合粒度或变量含义不明确，且该选择会改变研究问题时，使用 ask_data_processing_question 暂停并等待用户答复。不要按某个算法的枚举清洗步骤提问。",
             "脚本必须只读取 /workspace/raw/original.csv，并写入 /workspace/output/prepared.csv。不得访问其他路径、调用网络、安装依赖或尝试访问数据库；原始文件只读。",
-            "调用 set_data_processing_plan 设置处理方案并保存完整脚本后，必须先调用 request_data_processing_plan_confirmation。只有用户确认当前方案版本后，execute_processing_script 才会运行。",
+            "首次保存研究参数、处理方案和脚本后，用 request_data_processing_plan_confirmation 的 explanation 说明准备执行的内容并请求确认。确认成功后直接执行，不再制定或更新方案。有效版本重复请求确认会返回已确认，可以执行。",
             "方案草稿、已确认快照和执行说明分别保存。执行成功后用 save_data_processing_execution_report 补充解释，不得为补写说明而改写方案。行数、列名和 hash 由程序生成，解释不能代替独立校验。",
             "在处理方案的 role_columns 中明确填写用户已指定的 target、treatment 对应的输出列名。研究角色可以是中文名称或业务名称，不能直接当作 CSV 列名；根据字段含义和脚本确定映射，未指定的角色留空。已有明确对应关系时直接记录，存在真实歧义时才向用户提问。",
             "同一轮只调用一个数据处理工具，等待其状态保存后再调用下一工具。修改脚本会清空当前候选，必须重新执行才可结束；方案正文或研究语义变化必须重新展示并等待确认。",
             "确认授权绑定当前 Job、冻结文件、研究语义和方案说明，不绑定脚本正文。用户拒绝或提出新研究语义、改变变量含义或扩大转换范围时，旧方案不得执行；先澄清、更新方案并重新请求确认。",
-            "脚本运行失败或独立校验发现可修正的问题时，根据实际错误在已确认的语义和转换范围内修改脚本，并可复用当前确认后再次运行；不要声称未执行的转换已经成功。修复若需要新的语义选择或超出已确认范围，必须先向用户提问并重新确认。",
+            "执行或独立校验失败后，先根据失败事实和已确认要求判断是否需要改变处理要求。脚本错误、导出精度或遗漏已确认字段，只用 write_processing_script 保存修复脚本并提供 repair_summary，然后直接重新执行和校验；读取保存的方案，不调用 set_data_processing_plan 重建、润色或补写说明。需要改变变量映射、样本范围、聚合、单位转换或研究参数时才更新对应内容，确认工具 explanation 先解释为什么改变、改变了什么，再展示完整确认卡。不要提前声称修复成功。",
+            "方案描述稳定的处理要求，例如保留原始数值；CSV 写出参数、解析方法和修复过程放在脚本与执行说明中。repair_summary 和 explanation 是公开单行简短说明，不包含脚本、原始错误输出、凭据或文件正文，不写入方案 metadata。",
             "独立校验节点会检查实际输出文件。报告中的 research_roles 保留研究角色，role_columns 是方案中的角色列映射，target、treatment 是解析后的执行列名，columns 是候选 CSV 的实际列名；角色为空本身不构成缺失错误。算法输入兼容不代表科学假设已经成立。",
-            "收到校验失败反馈后，先区分角色列映射缺失或错误、脚本遗漏、用户信息不足和参数提取错误。角色名称与实际列名不同，应通过 set_data_processing_plan 修正 role_columns，按现有流程确认并重新执行；不需要改写研究角色或让用户重复选择。脚本遗漏可在原确认范围内修复；只有用户信息确实存在多个合理含义时，才提出具体澄清问题。",
+            "收到校验失败反馈后，先区分已保存角色列映射缺失或错误、脚本遗漏、用户信息不足和参数提取错误。只有已保存的 role_columns 确实需要改变时才用 set_data_processing_plan 修正，解释变化后确认并重新执行；若映射正确而脚本遗漏字段，只修脚本。研究角色与输出列名称不同本身不要求重建方案，也不要求用户重复选择。只有用户信息存在多个合理含义时才澄清。",
             "研究参数只能通过 set_research_spec 提交。首次先提交完整草稿，后续用户修改或明确提取错误使用相同工具。工具返回确定性错误时自行纠正；不要要求用户重复回答明确的问题。只有真实歧义才提问。",
             "effect_request 是唯一可选效应请求。用户只要求结构探索或没有提出效应需求时明确为 null，即使已有 target 和 treatment 也不能推断为要估计。",
             "用户已有估计意图但没有明确干预方式、数值或单位时，先用 ask_data_processing_question 提出具体自然语言方案并允许自由修改，不能暂填 null 后继续，也不能默填 (0,1)。问题已明确时填写 average_total_effect 和 fixed_contrast 的 from/to/unit，或 additive_shift 的 delta/unit，再由现有方案确认工具统一确认。",
