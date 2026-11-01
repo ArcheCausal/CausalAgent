@@ -11,7 +11,6 @@
 - 上传内容来自数据集的 `X` 矩阵，固定提示词不附加领域知识、不引导算法选择；是否触发数据处理交互由被测分支决定。
 - 金标准取自数据集自带的 `adjacency`，不读取服务端中间结果，也不按报告文字人工判分。
 - `local/`、`cdfm_bench_*/`、`config.yaml`、`config.smoke.yaml` 均已 gitignore；进入版本库的只有代码、示例配置与本文档。
-- **真实冒烟已执行（2026-10-31）**：单集 1/1 成功，主结果算法 `causal.cdfm`，F1 0.5455、SHD 9、AUROC 0.9588、AUPRC 0.7302；`selftest.py` 与 `--dry-run` 仍可独立验证。
 
 ## 安装
 
@@ -26,7 +25,7 @@ python -m venv .venv
 ## 常用命令
 
 ~~~
-# 首次：复制配置模板；config.yaml 已被 gitignore
+# 首次：复制配置模板
 cp config.example.yaml config.yaml
 
 # 只看抽样结果，不发请求
@@ -63,7 +62,7 @@ cp config.example.yaml config.yaml
 | `data.dir` | `.npz` 根目录 | 必填，递归扫描 |
 | `data.mechanisms` | 机制筛选 | `all` 或机制名列表；标量会被拒绝 |
 | `data.exclude` | 排除机制 | `[TimeLag]`；必须是列表 |
-| `data.dims` / `data.ns` | 名义 D/N 筛选 | 空列表；必须是列表 |
+| `data.dims` / `data.ns` | 选择测试数据的维度 D/样本数N 筛选 | 空列表；必须是列表 |
 | `data.per_cell` | 每格抽样数 | 1；1..5 |
 | `output.dir` | 运行产物根目录 | `./local/runs` |
 
