@@ -125,14 +125,17 @@ cp config.example.yaml config.yaml
 
 | 路径 | 内容 |
 | --- | --- |
-| `results.csv` | 逐集一行，30 列：`run_id, dataset, mechanism, rep, n_rows, n_cols, dim, lambda, n_gold_edges, n_pred_edges, n_undirected_edges, recall, precision, f1, skeleton_recall, skeleton_precision, shd, auroc, auprc, final_algorithm, final_confidence, final_selection_rationale, finalization_status, interactions, duration_s, tokens_input, tokens_output, tokens_total, status, failure_reason` |
+| `results.csv` | 逐次尝试一行，33 列：`run_id, dataset, attempt, job_id, session_id, mechanism, rep, n_rows, n_cols, dim, lambda, n_gold_edges, n_pred_edges, n_undirected_edges, recall, precision, f1, skeleton_recall, skeleton_precision, shd, auroc, auprc, final_algorithm, final_confidence, final_selection_rationale, finalization_status, interactions, duration_s, tokens_input, tokens_output, tokens_total, status, failure_reason` |
 | `summary.csv` | 单行汇总，30 列，新增 `f1_mean, shd_mean, auroc_mean, auprc_mean, auroc_n, auprc_n, tokens_input_mean, tokens_output_mean, tokens_total_mean, tokens_n`；`succeeded` 含 `success` 与 `partial`，均值只统计成功行，失败不补零；排名指标按有值行求均值，`auroc_n`/`auprc_n` 为覆盖集数 |
 | `report.md` | 运行信息、总体均值（含 F1/SHD 与 AUROC/AUPRC 及覆盖集数）、按机制 / 按实测 D / 按实测 `n_rows` 分组表（含 F1/SHD 列）、失败分布、recall 最低 10 集、口径声明 |
 | `csv/<dataset 净化>.csv` | 实际上传的 CSV，列 `X0..X{n-1}`，`%.8g` |
-| `raw/<dataset 净化>.jsonl` | 该集全量 SSE 事件 |
-| `raw/<dataset 净化>.json` | 终态 `document` 与交互次数 |
+| `raw/<dataset 净化>.attempt<N>.jsonl` | 第 N 次尝试的全量 SSE 事件 |
+| `raw/<dataset 净化>.attempt<N>.json` | 终态 payload 与交互次数；无终态时为失败原因 |
+| `raw/<dataset 净化>.attempt<N>.requests.jsonl` | create / resume / cancel 的请求内容、UUID 与发送结果 |
 
 `summary.csv` 与 `report.md` 在运行结束后从 `results.csv` 重建；同一 dataset 出现多行时取最后一行，因此 `--resume` 重跑不会重复计数。
+
+`results.csv` 每次尝试写一行；`summary.csv` 与 `report.md` 仍按 dataset 取最后一行。最后一行 `tokens_*` 是该数据集所有尝试的合计，其它行只写各自用量。表头变化后旧运行目录不能 `--resume`。
 
 token 用量来自 Job 的 `usage` 事件：按 `(job, attempt)` 取每 attempt 累计最大值，再跨 attempt 与 runner 重试求和；无 LLM 用量的失败行留空。终态事件里的用量快照只服务 API 客户端，不重复计入。`lambda` 列保留但当前数据集不存在该字段，留空。
 
@@ -148,11 +151,14 @@ token 用量来自 Job 的 `usage` 事件：按 `(job, attempt)` 取每 attempt 
 | `sse_error` | 断流后重连 3 次仍失败 | 否 |
 | `terminal_error` | 收到 `error` 事件；或请求传输错误 / 未预期异常 | 1 次（逃出 `_run_once` 的传输错误除外，不予重试） |
 | `canceled` | 收到 `canceled` 事件 | 否 |
+| `resume_rejected` | resume 返回 409 或其它 4xx，无法证明答复已落库 | 否 |
 | `no_causal_graph` | 报告无因果图资产 | 1 次 |
 | `diagnostic_report` | `report_mode == diagnostic` | 否 |
 | `interaction_budget_exceeded` | 超过交互轮数或时长 | 否 |
 
 `edge_variable_unmapped` 不是失败，表示该集为 `partial`。重试会使用新会话、新 Job、新 `Idempotency-Key`；超时先 `cancel` 再记失败；重试结果追加为新行，汇总时同一 dataset 取最后一行。
+
+重试只针对 `timeout / terminal_error / no_causal_graph`，最多 1 次。收到 interrupt 后先保存待发答复，不推进事件游标；resume 传输失败时用原 `Idempotency-Key` 重试，成功后才重放后续事件。建 Job 结果未知时先查活动 Job，再考虑用原键重试。
 
 ## 并发与续跑
 
@@ -163,7 +169,7 @@ token 用量来自 Job 的 `usage` 事件：按 `(job, attempt)` 取每 attempt 
 
 ## 自检与验收
 
-`selftest.py`（无网络）当前 **40 项全过**，覆盖配置校验、路径与产物名、抽样确定性、npz 读取与 CSV、交互答复与方案确认、取图与双口径指标、F1/SHD（含反转与镜像）与 AUROC/AUPRC（含缺失值跳过）、SSE 解析、汇总与报告、续跑去重、损坏数据不中断整轮。
+`selftest.py`（无网络）当前 **57 项全过**，覆盖配置校验、路径与产物名、抽样确定性、npz 读取与 CSV、交互答复与方案确认、取图与双口径指标、F1/SHD（含反转与镜像）与 AUROC/AUPRC（含缺失值跳过）、SSE 解析、汇总与报告、续跑去重、损坏数据不中断整轮。
 
 验收分三层：
 
