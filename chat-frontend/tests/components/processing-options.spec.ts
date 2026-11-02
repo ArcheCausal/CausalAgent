@@ -54,6 +54,19 @@ function planWaiting(overrides: Partial<WaitingInput> = {}): WaitingInput {
 const waitForTick = () => new Promise<void>((resolve) => window.setTimeout(resolve, 1_100))
 
 describe('ProcessingOptions', () => {
+  it('shows ordered analysis columns and the derivation evidence in the existing confirmation card', () => {
+    const current = planWaiting()
+    current.plan!.analysisColumns = ['window_alarm_0', 'window_alarm_1']
+    current.plan!.derivedMeasurementSemantics = [
+      { column: 'window_alarm_0', kind: 'binary', evidence: '窗口内是否出现' },
+      { column: 'window_alarm_1', kind: 'binary', evidence: '窗口内是否出现' },
+    ]
+    const wrapper = mount(ProcessingOptions, { props: { waiting: current, identity } })
+    expect(wrapper.text()).toContain('window_alarm_0、window_alarm_1')
+    expect(wrapper.text()).toContain('window_alarm_0：binary；依据：窗口内是否出现')
+    expect(wrapper.findAll('.processing-plan-confirm')).toHaveLength(1)
+  })
+
   it('shows the exact contrast, population and confirmed transformation', () => {
     const current = planWaiting()
     current.plan!.effectRequest = { effect: 'average_total_effect', intervention: { type: 'fixed_contrast', from: 5, to: 7, unit: 'L/min' }, target_population: '设备 A 的观测' }

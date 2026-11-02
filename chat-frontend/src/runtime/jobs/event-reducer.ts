@@ -11,6 +11,7 @@ import type {
   ThinkingStep,
 } from '../../types/domain'
 import type { DecodedSseEvent } from '../../api/events.schemas'
+import { processingPlanSummarySchema } from '../../api/events.schemas'
 import { effectRequestSchema, effectExecutionContextSchema } from '../../api/effect-request.schemas'
 import { acceptEventId, createEventCursor, markRendered } from './event-cursor'
 import {
@@ -165,7 +166,10 @@ function parseProcessingPlan(value: unknown): ProcessingPlanSummary | null {
   const effect = effectRequestSchema.nullable().optional().safeParse(item.effect_request)
   const context = effectExecutionContextSchema.nullable().optional().safeParse(item.effect_execution_context)
   if (!effect.success || !context.success) return null
+  const planFields = processingPlanSummarySchema.safeParse(item)
+  if (!planFields.success) return null
   return { summary: item.summary, observationUnit: item.observation_unit, transformations, variableSemantics, roleColumns, measurementColumns, limitations,
+    analysisColumns: planFields.data.analysis_columns, derivedMeasurementSemantics: planFields.data.derived_measurement_semantics,
     effectRequest: effect.data, effectExecutionContext: context.data }
 }
 

@@ -176,6 +176,20 @@ function other(): void {
           </dd>
           <dd v-else>未明确，后续估计需先确认结果变量尺度。</dd>
         </template>
+        <template v-if="waiting.plan.analysisColumns?.length">
+          <dt>参与分析的列（按 CSV 顺序）</dt>
+          <dd>{{ waiting.plan.analysisColumns.join('、') }}</dd>
+        </template>
+        <template v-if="waiting.plan.derivedMeasurementSemantics?.length">
+          <dt>派生变量测量类型</dt>
+          <dd>
+            <ul>
+              <li v-for="item in waiting.plan.derivedMeasurementSemantics" :key="item.column">
+                {{ item.column }}：{{ item.kind }}；依据：{{ item.evidence }}
+              </li>
+            </ul>
+          </dd>
+        </template>
         <template v-if="waiting.plan.roleColumns?.target">
           <dt>结果变量对应列</dt>
           <dd>{{ waiting.plan.roleColumns.target }}</dd>

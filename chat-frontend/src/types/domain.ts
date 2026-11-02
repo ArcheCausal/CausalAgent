@@ -175,6 +175,8 @@ export interface ProcessingPlanSummary {
   observationUnit: string
   transformations: string[]
   variableSemantics: Record<string, string>
+  analysisColumns?: string[]
+  derivedMeasurementSemantics?: { column: string; kind: string; evidence: string }[]
   roleColumns?: { target?: string | null; treatment?: string | null }
   measurementColumns?: Record<string, string | null>
   limitations: string[]
