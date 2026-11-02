@@ -115,6 +115,91 @@ def _add_usage(total: dict[str, int], row: dict) -> None:
             total[name] = total.get(name, 0) + int(value)
 
 
+def _log_request(entries: list, kind: str, key: str, request: dict,
+                 outcome: str, **extra) -> None:
+    entries.append({
+        "at": datetime.now().isoformat(timespec="seconds"),
+        "kind": kind, "key": key, "request": request,
+        "outcome": outcome, **extra,
+    })
+
+
+def _cancel(client: AgentClient, job_id: str, requests: list) -> None:
+    key = str(uuid.uuid4())
+    request = {"job_id": job_id}
+    try:
+        client.cancel(job_id, key)
+    except ClientError as exc:
+        _log_request(requests, "cancel", key, request, "error", error=str(exc))
+    else:
+        _log_request(requests, "cancel", key, request, "accepted")
+
+
+def _create_job(client: AgentClient, session_id: str, message: str,
+                user_file_id: int, requests: list) -> str:
+    key = str(uuid.uuid4())
+    request = {
+        "session_id": session_id, "message": message,
+        "input_user_file_id": user_file_id,
+    }
+    for _ in range(3):
+        try:
+            job_id = client.create_job(session_id, message, user_file_id, key)
+        except TransportError as exc:
+            _log_request(requests, "create", key, request,
+                         "transport_error", error=str(exc))
+            try:
+                recovered = client.find_active_job(session_id)
+            except ClientError as lookup_exc:
+                _log_request(requests, "create", key, request,
+                             "lookup_error", error=str(lookup_exc))
+                continue
+            if recovered:
+                _log_request(requests, "create", key, request,
+                             "recovered", job_id=recovered)
+                return recovered
+            continue
+        except ClientError as exc:
+            code = (exc.payload or {}).get("code")
+            if exc.status == 409 and code == "active_job_conflict":
+                active = (exc.payload or {}).get("active_job") or {}
+                if active.get("job_id"):
+                    _log_request(requests, "create", key, request,
+                                 "adopted", job_id=active["job_id"])
+                    return str(active["job_id"])
+            _log_request(requests, "create", key, request, "rejected",
+                         status=exc.status, error=str(exc))
+            raise StepError("job_rejected")
+        _log_request(requests, "create", key, request, "accepted", job_id=job_id)
+        return job_id
+    raise StepError("job_rejected")
+
+
+def _resume_pending(client: AgentClient, job_id: str, pending: dict,
+                    requests: list) -> str:
+    request = {
+        "question_id": pending["question_id"], "answer": pending["answer"],
+    }
+    key = pending["idempotency_key"]
+    try:
+        client.resume(job_id, pending["question_id"], pending["answer"], key)
+    except TransportError as exc:
+        _log_request(requests, "resume", key, request,
+                     "transport_error", error=str(exc))
+        return "retry"
+    except ClientError as exc:
+        if exc.status is not None and (exc.status >= 500 or exc.status == 429):
+            _log_request(requests, "resume", key, request,
+                         "transport_error", status=exc.status, error=str(exc))
+            return "retry"
+        code = (exc.payload or {}).get("code")
+        _log_request(requests, "resume", key, request, "rejected",
+                     status=exc.status, code=code, error=str(exc))
+        return "rejected"
+    _log_request(requests, "resume", key, request, "accepted")
+    return "accepted"
+
+
 def _failed_row(spec, run_id, reason: str, usage: dict | None = None,
                 attempt="", job_id="", session_id="") -> dict:
     row = {name: "" for name in RESULT_HEADER}
@@ -133,7 +218,7 @@ def _failed_row(spec, run_id, reason: str, usage: dict | None = None,
 
 def _write_attempt_evidence(run_dir: Path, artifact: str, attempt: int,
                             records, terminal, failure, job_id, session_id,
-                            interactions) -> None:
+                            interactions, requests) -> None:
     (run_dir / "raw" / f"{artifact}.attempt{attempt}.jsonl").write_text(
         "\n".join(json.dumps(item, ensure_ascii=False) for item in records),
         encoding="utf-8",
@@ -148,6 +233,10 @@ def _write_attempt_evidence(run_dir: Path, artifact: str, attempt: int,
         evidence["failure_reason"] = failure or "terminal_error"
     (run_dir / "raw" / f"{artifact}.attempt{attempt}.json").write_text(
         json.dumps(evidence, ensure_ascii=False), encoding="utf-8"
+    )
+    (run_dir / "raw" / f"{artifact}.attempt{attempt}.requests.jsonl").write_text(
+        "\n".join(json.dumps(item, ensure_ascii=False) for item in requests),
+        encoding="utf-8",
     )
 
 
@@ -164,6 +253,7 @@ def _run_once(spec, config: Config, client: AgentClient, run_dir: Path,
     profile = ds.profile(X)
 
     records = []
+    requests: list[dict] = []
     job_id = ""
     session_id = ""
     interactions = 0
@@ -177,63 +267,109 @@ def _run_once(spec, config: Config, client: AgentClient, run_dir: Path,
             session_id = client.new_session()
         except ClientError:
             raise StepError("upload_error")
-        started = time.monotonic()
-        try:
-            job_id = client.create_job(
-                session_id, build_prompt(dim), user_file_id, str(uuid.uuid4())
-            )
-        except ClientError:
-            raise StepError("job_rejected")
-        deadline = started + config.run.timeout_minutes * 60
 
+        started = time.monotonic()
+        job_id = _create_job(
+            client, session_id, build_prompt(dim), user_file_id, requests
+        )
+        deadline = started + config.run.timeout_minutes * 60
+        interaction_deadline = started + config.run.interaction_seconds
         last_event_id = 0
         reconnects = 0
-        interaction_deadline = started + config.run.interaction_seconds
+        pending = None
+        resume_needed = False
+        resume_retries = 0
 
         while time.monotonic() < deadline:
+            if pending is not None and resume_needed:
+                outcome = _resume_pending(client, job_id, pending, requests)
+                if outcome == "accepted":
+                    last_event_id = pending["event_id"]
+                    pending = None
+                    resume_needed = False
+                    resume_retries = 0
+                    reconnects = 0
+                    continue
+                if outcome == "retry":
+                    resume_retries += 1
+                    if resume_retries > 3:
+                        failure = "sse_error"
+                        _cancel(client, job_id, requests)
+                        break
+                    resume_needed = False
+                    continue
+                failure = "resume_rejected"
+                _cancel(client, job_id, requests)
+                break
+
             try:
-                event_iter = client.events(job_id, last_event_id)
+                saw_event = False
+                saw_interrupt = False
                 terminal = False
-                answered = False
-                for event in event_iter:
+                for event in client.events(job_id, last_event_id):
+                    saw_event = True
                     if time.monotonic() > deadline:
                         failure = "timeout"
-                        client.cancel(job_id, str(uuid.uuid4()))
+                        _cancel(client, job_id, requests)
                         terminal = True
                         break
-                    if event["id"] is not None:
-                        last_event_id = event["id"]
-                    records.append({"id": event["id"], "type": event["type"], "payload": event["payload"]})
-                    if event["type"] == "interrupt":
-                        if interactions >= config.run.max_interactions or time.monotonic() > interaction_deadline:
+                    records.append({
+                        "id": event["id"], "type": event["type"],
+                        "payload": event["payload"],
+                    })
+                    kind = event["type"]
+                    if kind == "interrupt":
+                        question_id = (event["payload"] or {}).get("question_id")
+                        if event["id"] is None:
+                            failure = "sse_error"
+                            _cancel(client, job_id, requests)
+                            terminal = True
+                            break
+                        if pending is not None:
+                            if pending["question_id"] == question_id:
+                                resume_needed = True
+                                saw_interrupt = True
+                                break
+                            failure = "sse_error"
+                            _cancel(client, job_id, requests)
+                            terminal = True
+                            break
+                        if (interactions >= config.run.max_interactions
+                                or time.monotonic() > interaction_deadline):
                             failure = "interaction_budget_exceeded"
-                            client.cancel(job_id, str(uuid.uuid4()))
+                            _cancel(client, job_id, requests)
                             terminal = True
                             break
                         answer, _ = answer_for(event["payload"], profile)
-                        client.resume(
-                            job_id,
-                            event["payload"].get("question_id"),
-                            answer,
-                            str(uuid.uuid4()),
-                        )
+                        pending = {
+                            "question_id": question_id,
+                            "answer": answer,
+                            "idempotency_key": str(uuid.uuid4()),
+                            "event_id": event["id"],
+                        }
+                        resume_needed = True
                         interactions += 1
-                        answered = True
+                        saw_interrupt = True
                         break
-                    if event["type"] in ("final_result", "error", "canceled"):
+                    if event["id"] is not None:
+                        last_event_id = event["id"]
+                    if kind in ("final_result", "error", "canceled"):
                         final_payload = event["payload"]
-                        failure = {"error": "terminal_error", "canceled": "canceled"}.get(event["type"])
+                        failure = {
+                            "error": "terminal_error", "canceled": "canceled",
+                        }.get(kind)
                         terminal = True
                         break
-                if answered:
-                    continue
+                if saw_event:
+                    reconnects = 0
                 if terminal:
                     break
+                if saw_interrupt:
+                    continue
                 reconnects += 1
                 if reconnects > 3:
                     failure = "sse_error"
                     break
-                continue
             except ClientError:
                 reconnects += 1
                 if reconnects > 3:
@@ -242,7 +378,8 @@ def _run_once(spec, config: Config, client: AgentClient, run_dir: Path,
 
         if failure is None and final_payload is None:
             failure = "timeout"
-            client.cancel(job_id, str(uuid.uuid4()))
+            _cancel(client, job_id, requests)
+
         duration = round(time.monotonic() - started, 1)
 
         row = _failed_row(
@@ -299,7 +436,7 @@ def _run_once(spec, config: Config, client: AgentClient, run_dir: Path,
     finally:
         _write_attempt_evidence(
             run_dir, artifact, attempt, records, final_payload, failure,
-            job_id, session_id, interactions,
+            job_id, session_id, interactions, requests,
         )
 
 

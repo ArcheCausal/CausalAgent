@@ -682,6 +682,180 @@ def test_run_once_writes_attempt_suffixed_evidence():
         assert Path(str(base) + ".json").exists()
 
 
+def _graph_payload(dim=2):
+    nodes = [{"id": f"n{i}", "variable": f"X{i}"} for i in range(dim)]
+    return {
+        "data": {"document": {
+            "report_mode": "analysis",
+            "blocks": [{"type": "causal_graph", "asset_key": "g"}],
+            "assets": {"g": {
+                "graph_id": "g", "nodes": nodes,
+                "edges": [{"source": "n0", "target": "n1",
+                           "edge_type": "directed"}],
+            }},
+        }}
+    }
+
+
+def _state_config(root, run_dir):
+    return rn.Config(
+        run=rn.RunSettings(base_url="http://x", timeout_minutes=1),
+        auth=rn.AuthSettings(), data=rn.DataSettings(dir=root),
+        output=rn.OutputSettings(dir=run_dir))
+
+
+def _state_spec_and_dirs(tmp):
+    root = Path(tmp)
+    _make_npz(root / "CAM/D010_N00500/rep00.npz",
+              np.zeros((4, 2)), np.array([[0, 1], [0, 0]], dtype=np.int8))
+    spec = ds.scan(root)[0]
+    run_dir = root / "run"
+    (run_dir / "csv").mkdir(parents=True)
+    (run_dir / "raw").mkdir(parents=True)
+    return spec, _state_config(root, run_dir), run_dir
+
+
+def test_resume_retries_same_key_and_does_not_duplicate_answer():
+    class FakeClient:
+        def __init__(self):
+            self.resume_calls = []
+            self.event_calls = 0
+        def upload_csv(self, path): return 1
+        def new_session(self): return "s"
+        def create_job(self, session_id, message, user_file_id, idempotency_key): return "j"
+        def find_active_job(self, session_id): return None
+        def cancel(self, job_id, idempotency_key): pass
+        def resume(self, job_id, question_id, answer, idempotency_key):
+            self.resume_calls.append((question_id, idempotency_key, answer))
+            if len(self.resume_calls) == 1:
+                raise cl.TransportError("boom")
+        def events(self, job_id, last_event_id=0):
+            self.event_calls += 1
+            if self.event_calls in (1, 2):
+                yield {"id": 1, "type": "interrupt", "payload": {
+                    "question_id": "q1",
+                    "interaction": {"interaction_type": "data_processing_question",
+                                    "message": "数据是什么"},
+                }}
+            else:
+                yield {"id": 2, "type": "final_result", "payload": _graph_payload()}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        spec, config, run_dir = _state_spec_and_dirs(tmp)
+        client = FakeClient()
+        row = rn._run_once(spec, config, client, run_dir, "r1")
+        assert row["status"] == "success"
+        assert row["interactions"] == 1
+        assert len(client.resume_calls) == 2
+        assert client.resume_calls[0][0] == client.resume_calls[1][0] == "q1"
+        assert client.resume_calls[0][1] == client.resume_calls[1][1]
+        assert client.resume_calls[0][2] == client.resume_calls[1][2]
+        requests_path = run_dir / "raw" / "CAM__D010_N00500__rep00.attempt1.requests.jsonl"
+        entries = [json.loads(line) for line in requests_path.read_text(encoding="utf-8").splitlines()]
+        resumes = [entry for entry in entries if entry["kind"] == "resume"]
+        assert [entry["outcome"] for entry in resumes] == ["transport_error", "accepted"]
+        assert resumes[0]["key"] == resumes[1]["key"]
+
+
+def test_resume_conflict_fails_fast():
+    class FakeClient:
+        def __init__(self):
+            self.cancelled = False
+        def upload_csv(self, path): return 1
+        def new_session(self): return "s"
+        def create_job(self, session_id, message, user_file_id, idempotency_key): return "j"
+        def find_active_job(self, session_id): return None
+        def cancel(self, job_id, idempotency_key): self.cancelled = True
+        def resume(self, job_id, question_id, answer, idempotency_key):
+            raise cl.ClientError("conflict", 409, {
+                "code": "job_state_conflict", "status": "failed"})
+        def events(self, job_id, last_event_id=0):
+            yield {"id": 1, "type": "interrupt", "payload": {
+                "question_id": "q1",
+                "interaction": {"interaction_type": "data_processing_question",
+                                "message": "?"},
+            }}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        spec, config, run_dir = _state_spec_and_dirs(tmp)
+        client = FakeClient()
+        row = rn._run_once(spec, config, client, run_dir, "r1")
+        assert row["failure_reason"] == "resume_rejected"
+        assert client.cancelled is True
+
+
+def test_interrupt_without_id_is_protocol_error():
+    class FakeClient:
+        def __init__(self):
+            self.cancelled = False
+        def upload_csv(self, path): return 1
+        def new_session(self): return "s"
+        def create_job(self, session_id, message, user_file_id, idempotency_key): return "j"
+        def find_active_job(self, session_id): return None
+        def cancel(self, job_id, idempotency_key): self.cancelled = True
+        def resume(self, job_id, question_id, answer, idempotency_key): pass
+        def events(self, job_id, last_event_id=0):
+            yield {"id": None, "type": "interrupt", "payload": {
+                "question_id": "q1", "interaction": {"interaction_type": "x"}}}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        spec, config, run_dir = _state_spec_and_dirs(tmp)
+        client = FakeClient()
+        row = rn._run_once(spec, config, client, run_dir, "r1")
+        assert row["failure_reason"] == "sse_error"
+        assert client.cancelled is True
+
+
+def test_create_transport_error_recovers_active_job():
+    class FakeClient:
+        def __init__(self):
+            self.create_calls = 0
+        def upload_csv(self, path): return 1
+        def new_session(self): return "s"
+        def create_job(self, session_id, message, user_file_id, idempotency_key):
+            self.create_calls += 1
+            raise cl.TransportError("lost response")
+        def find_active_job(self, session_id): return "j-recovered"
+        def cancel(self, job_id, idempotency_key): pass
+        def resume(self, job_id, question_id, answer, idempotency_key): pass
+        def events(self, job_id, last_event_id=0):
+            yield {"id": 1, "type": "final_result", "payload": _graph_payload()}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        spec, config, run_dir = _state_spec_and_dirs(tmp)
+        client = FakeClient()
+        row = rn._run_once(spec, config, client, run_dir, "r1")
+        assert row["status"] == "success"
+        assert row["job_id"] == "j-recovered"
+        assert client.create_calls == 1
+
+
+def test_create_retries_with_same_key():
+    class FakeClient:
+        def __init__(self):
+            self.keys = []
+        def upload_csv(self, path): return 1
+        def new_session(self): return "s"
+        def create_job(self, session_id, message, user_file_id, idempotency_key):
+            self.keys.append(idempotency_key)
+            if len(self.keys) < 3:
+                raise cl.TransportError("boom")
+            return "j3"
+        def find_active_job(self, session_id): return None
+        def cancel(self, job_id, idempotency_key): pass
+        def resume(self, job_id, question_id, answer, idempotency_key): pass
+        def events(self, job_id, last_event_id=0):
+            yield {"id": 1, "type": "final_result", "payload": _graph_payload()}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        spec, config, run_dir = _state_spec_and_dirs(tmp)
+        client = FakeClient()
+        row = rn._run_once(spec, config, client, run_dir, "r1")
+        assert row["status"] == "success"
+        assert len(client.keys) == 3
+        assert len(set(client.keys)) == 1
+
+
 def test_run_once_marks_missing_graph_failed():
     import tempfile as _tf
     class FakeClient:
