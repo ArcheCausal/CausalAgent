@@ -642,6 +642,46 @@ def test_add_usage_accumulates_jobs_and_skips_blank_rows():
     assert total == {"tokens_input": 15, "tokens_output": 3, "tokens_total": 18}
 
 
+def test_result_header_has_attempt_columns():
+    assert rn.RESULT_HEADER[:6] == [
+        "run_id", "dataset", "attempt", "job_id", "session_id", "mechanism",
+    ]
+    assert len(rn.RESULT_HEADER) == 33
+
+
+def test_run_once_writes_attempt_suffixed_evidence():
+    class FakeClient:
+        def upload_csv(self, path): return 1
+        def new_session(self): return "s"
+        def create_job(self, session_id, message, user_file_id, idempotency_key): return "j"
+        def resume(self, job_id, question_id, answer, idempotency_key): pass
+        def find_active_job(self, session_id): return None
+        def cancel(self, job_id, idempotency_key): pass
+        def events(self, job_id, last_event_id=0):
+            yield {"id": 1, "type": "final_result",
+                   "payload": {"data": {"document": {"blocks": [], "assets": {}}}}}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        _make_npz(root / "CAM/D010_N00500/rep00.npz",
+                  np.zeros((4, 2)), np.array([[0, 1], [0, 0]], dtype=np.int8))
+        spec = ds.scan(root)[0]
+        run_dir = root / "run"
+        (run_dir / "csv").mkdir(parents=True)
+        (run_dir / "raw").mkdir(parents=True)
+        config = rn.Config(
+            run=rn.RunSettings(base_url="http://x", timeout_minutes=1),
+            auth=rn.AuthSettings(), data=rn.DataSettings(dir=root),
+            output=rn.OutputSettings(dir=run_dir))
+        row = rn._run_once(spec, config, FakeClient(), run_dir, "r1", attempt=2)
+        base = run_dir / "raw" / "CAM__D010_N00500__rep00.attempt2"
+        assert row["attempt"] == 2
+        assert row["job_id"] == "j"
+        assert row["session_id"] == "s"
+        assert Path(str(base) + ".jsonl").exists()
+        assert Path(str(base) + ".json").exists()
+
+
 def test_run_once_marks_missing_graph_failed():
     import tempfile as _tf
     class FakeClient:

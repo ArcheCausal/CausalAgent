@@ -59,7 +59,8 @@ USAGE_FIELDS = ("tokens_input", "tokens_output", "tokens_total")
 _EVENT_USAGE_FIELDS = ("input_tokens", "output_tokens", "total_tokens")
 
 RESULT_HEADER = [
-    "run_id", "dataset", "mechanism", "rep", "n_rows", "n_cols", "dim", "lambda",
+    "run_id", "dataset", "attempt", "job_id", "session_id", "mechanism", "rep",
+    "n_rows", "n_cols", "dim", "lambda",
     "n_gold_edges", "n_pred_edges", "n_undirected_edges", "recall", "precision", "f1",
     "skeleton_recall", "skeleton_precision", "shd", "auroc", "auprc",
     "final_algorithm", "final_confidence", "final_selection_rationale",
@@ -114,10 +115,13 @@ def _add_usage(total: dict[str, int], row: dict) -> None:
             total[name] = total.get(name, 0) + int(value)
 
 
-def _failed_row(spec, run_id, reason: str, usage: dict | None = None) -> dict:
+def _failed_row(spec, run_id, reason: str, usage: dict | None = None,
+                attempt="", job_id="", session_id="") -> dict:
     row = {name: "" for name in RESULT_HEADER}
     row.update({
-        "run_id": run_id, "dataset": spec.dataset_id, "mechanism": spec.mechanism,
+        "run_id": run_id, "dataset": spec.dataset_id,
+        "attempt": attempt, "job_id": job_id, "session_id": session_id,
+        "mechanism": spec.mechanism,
         "rep": spec.rep if spec.rep is not None else "", "dim": spec.dim_nominal or "",
         "status": "failed", "failure_reason": reason,
         "interactions": 0, "duration_s": 0.0,
@@ -127,136 +131,176 @@ def _failed_row(spec, run_id, reason: str, usage: dict | None = None) -> dict:
     return row
 
 
-def _run_once(spec, config: Config, client: AgentClient, run_dir: Path, run_id: str) -> dict:
+def _write_attempt_evidence(run_dir: Path, artifact: str, attempt: int,
+                            records, terminal, failure, job_id, session_id,
+                            interactions) -> None:
+    (run_dir / "raw" / f"{artifact}.attempt{attempt}.jsonl").write_text(
+        "\n".join(json.dumps(item, ensure_ascii=False) for item in records),
+        encoding="utf-8",
+    )
+    evidence = {
+        "attempt": attempt, "job_id": job_id, "session_id": session_id,
+        "interactions": interactions,
+    }
+    if terminal is not None:
+        evidence["terminal"] = terminal
+    else:
+        evidence["failure_reason"] = failure or "terminal_error"
+    (run_dir / "raw" / f"{artifact}.attempt{attempt}.json").write_text(
+        json.dumps(evidence, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _run_once(spec, config: Config, client: AgentClient, run_dir: Path,
+              run_id: str, attempt: int = 1) -> dict:
     X, adjacency = ds.load(spec)
     gold = ds.gold_edges(adjacency)
     if not gold:
         raise ds.DatasetInvalid("gold 为空")
     dim = X.shape[1]
-    upload_path = run_dir / "csv" / f"{ds.artifact_name(spec.dataset_id)}.csv"
+    artifact = ds.artifact_name(spec.dataset_id)
+    upload_path = run_dir / "csv" / f"{artifact}.csv"
     ds.write_csv(X, upload_path)
     profile = ds.profile(X)
 
-    try:
-        user_file_id = client.upload_csv(upload_path)
-        session_id = client.new_session()
-    except ClientError:
-        raise StepError("upload_error")
-    started = time.monotonic()
-    try:
-        job_id = client.create_job(
-            session_id, build_prompt(dim), user_file_id, str(uuid.uuid4())
-        )
-    except ClientError:
-        raise StepError("job_rejected")
-    deadline = started + config.run.timeout_minutes * 60
-
-    last_event_id = 0
-    reconnects = 0
+    records = []
+    job_id = ""
+    session_id = ""
     interactions = 0
-    interaction_deadline = started + config.run.interaction_seconds
     final_payload = None
     failure = None
-    records = []
+    started = time.monotonic()
 
-    while time.monotonic() < deadline:
+    try:
         try:
-            event_iter = client.events(job_id, last_event_id)
-            terminal = False
-            answered = False
-            for event in event_iter:
-                if time.monotonic() > deadline:
-                    failure = "timeout"
-                    client.cancel(job_id, str(uuid.uuid4()))
-                    terminal = True
-                    break
-                if event["id"] is not None:
-                    last_event_id = event["id"]
-                records.append({"id": event["id"], "type": event["type"], "payload": event["payload"]})
-                if event["type"] == "interrupt":
-                    if interactions >= config.run.max_interactions or time.monotonic() > interaction_deadline:
-                        failure = "interaction_budget_exceeded"
+            user_file_id = client.upload_csv(upload_path)
+            session_id = client.new_session()
+        except ClientError:
+            raise StepError("upload_error")
+        started = time.monotonic()
+        try:
+            job_id = client.create_job(
+                session_id, build_prompt(dim), user_file_id, str(uuid.uuid4())
+            )
+        except ClientError:
+            raise StepError("job_rejected")
+        deadline = started + config.run.timeout_minutes * 60
+
+        last_event_id = 0
+        reconnects = 0
+        interaction_deadline = started + config.run.interaction_seconds
+
+        while time.monotonic() < deadline:
+            try:
+                event_iter = client.events(job_id, last_event_id)
+                terminal = False
+                answered = False
+                for event in event_iter:
+                    if time.monotonic() > deadline:
+                        failure = "timeout"
                         client.cancel(job_id, str(uuid.uuid4()))
                         terminal = True
                         break
-                    answer, _ = answer_for(event["payload"], profile)
-                    client.resume(
-                        job_id,
-                        event["payload"].get("question_id"),
-                        answer,
-                        str(uuid.uuid4()),
-                    )
-                    interactions += 1
-                    answered = True
+                    if event["id"] is not None:
+                        last_event_id = event["id"]
+                    records.append({"id": event["id"], "type": event["type"], "payload": event["payload"]})
+                    if event["type"] == "interrupt":
+                        if interactions >= config.run.max_interactions or time.monotonic() > interaction_deadline:
+                            failure = "interaction_budget_exceeded"
+                            client.cancel(job_id, str(uuid.uuid4()))
+                            terminal = True
+                            break
+                        answer, _ = answer_for(event["payload"], profile)
+                        client.resume(
+                            job_id,
+                            event["payload"].get("question_id"),
+                            answer,
+                            str(uuid.uuid4()),
+                        )
+                        interactions += 1
+                        answered = True
+                        break
+                    if event["type"] in ("final_result", "error", "canceled"):
+                        final_payload = event["payload"]
+                        failure = {"error": "terminal_error", "canceled": "canceled"}.get(event["type"])
+                        terminal = True
+                        break
+                if answered:
+                    continue
+                if terminal:
                     break
-                if event["type"] in ("final_result", "error", "canceled"):
-                    final_payload = event["payload"]
-                    failure = {"error": "terminal_error", "canceled": "canceled"}.get(event["type"])
-                    terminal = True
+                reconnects += 1
+                if reconnects > 3:
+                    failure = "sse_error"
                     break
-            if answered:
                 continue
-            if terminal:
-                break
-            reconnects += 1
-            if reconnects > 3:
-                failure = "sse_error"
-                break
-            continue
-        except ClientError:
-            reconnects += 1
-            if reconnects > 3:
-                failure = "sse_error"
-                break
+            except ClientError:
+                reconnects += 1
+                if reconnects > 3:
+                    failure = "sse_error"
+                    break
 
-    if failure is None and final_payload is None:
-        failure = "timeout"
-        client.cancel(job_id, str(uuid.uuid4()))
-    duration = round(time.monotonic() - started, 1)
-    (run_dir / "raw" / f"{ds.artifact_name(spec.dataset_id)}.jsonl").write_text(
-        "\n".join(json.dumps(record, ensure_ascii=False) for record in records),
-        encoding="utf-8",
-    )
+        if failure is None and final_payload is None:
+            failure = "timeout"
+            client.cancel(job_id, str(uuid.uuid4()))
+        duration = round(time.monotonic() - started, 1)
 
-    row = _failed_row(spec, run_id, failure or "")
-    row.update({"n_rows": int(X.shape[0]), "n_cols": dim, "dim": dim,
-                "n_gold_edges": len(gold), "interactions": interactions,
-                "duration_s": duration, "status": "failed" if failure else "success"})
-    usage = usage_totals(records)
-    if usage:
-        row.update(usage)
-    if failure:
+        row = _failed_row(
+            spec, run_id, failure or "", attempt=attempt,
+            job_id=job_id, session_id=session_id,
+        )
+        row.update({"n_rows": int(X.shape[0]), "n_cols": dim, "dim": dim,
+                    "n_gold_edges": len(gold), "interactions": interactions,
+                    "duration_s": duration, "status": "failed" if failure else "success"})
+        usage = usage_totals(records)
+        if usage:
+            row.update(usage)
+        if failure:
+            return row
+
+        document = ((final_payload or {}).get("data") or {}).get("document") or {}
+        rationale, confidence = ev.final_decision(records)
+        row.update({"final_selection_rationale": rationale, "final_confidence": confidence})
+        asset, reason = ev.find_graph_asset(document)
+        if asset is None:
+            row["status"] = "failed"
+            row["failure_reason"] = reason
+            return row
+
+        edges, unmapped = ev.parse_edges(asset, dim)
+        metrics = ev.score(edges, gold)
+        row.update(metrics)
+        row["f1"] = ev.f1_score(metrics["precision"], metrics["recall"])
+        row["shd"] = ev.shd(edges, gold)
+        matrix = ev.probability_matrix(asset, dim)
+        ranking = ev.ranking_metrics(matrix, gold) if matrix is not None else {"auroc": None, "auprc": None}
+        for name in ("auroc", "auprc"):
+            row[name] = "" if ranking[name] is None else ranking[name]
+        row.update({
+            "final_algorithm": (asset.get("metadata") or {}).get("algorithm", ""),
+            "finalization_status": document.get("finalization_status", ""),
+            "status": "partial" if unmapped else "success",
+            "failure_reason": "edge_variable_unmapped" if unmapped else "",
+        })
         return row
-
-    document = ((final_payload or {}).get("data") or {}).get("document") or {}
-    rationale, confidence = ev.final_decision(records)
-    row.update({"final_selection_rationale": rationale, "final_confidence": confidence})
-    asset, reason = ev.find_graph_asset(document)
-    (run_dir / "raw" / f"{ds.artifact_name(spec.dataset_id)}.json").write_text(
-        json.dumps({"document": document, "interactions": interactions}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    if asset is None:
-        row["status"] = "failed"
-        row["failure_reason"] = reason
+    except StepError as exc:
+        failure = exc.reason
+        duration = round(time.monotonic() - started, 1)
+        row = _failed_row(
+            spec, run_id, failure, attempt=attempt,
+            job_id=job_id, session_id=session_id,
+        )
+        row.update({
+            "n_rows": int(X.shape[0]), "n_cols": dim, "dim": dim,
+            "n_gold_edges": len(gold), "interactions": interactions,
+            "duration_s": duration,
+        })
         return row
-
-    edges, unmapped = ev.parse_edges(asset, dim)
-    metrics = ev.score(edges, gold)
-    row.update(metrics)
-    row["f1"] = ev.f1_score(metrics["precision"], metrics["recall"])
-    row["shd"] = ev.shd(edges, gold)
-    matrix = ev.probability_matrix(asset, dim)
-    ranking = ev.ranking_metrics(matrix, gold) if matrix is not None else {"auroc": None, "auprc": None}
-    for name in ("auroc", "auprc"):
-        row[name] = "" if ranking[name] is None else ranking[name]
-    row.update({
-        "final_algorithm": (asset.get("metadata") or {}).get("algorithm", ""),
-        "finalization_status": document.get("finalization_status", ""),
-        "status": "partial" if unmapped else "success",
-        "failure_reason": "edge_variable_unmapped" if unmapped else "",
-    })
-    return row
+    finally:
+        _write_attempt_evidence(
+            run_dir, artifact, attempt, records, final_payload, failure,
+            job_id, session_id, interactions,
+        )
 
 
 def _run_dataset(spec, config, credentials, run_id, run_dir) -> dict:
