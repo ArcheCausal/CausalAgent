@@ -6,6 +6,7 @@ import re
 
 VARIABLE_PATTERN = re.compile(r"^X(\d+)$")
 UNDIRECTED_TYPES = {"undirected", "bidirected", "partially_directed", "partially_oriented"}
+METRICS_VERSION = 1
 
 
 def final_decision(records) -> tuple[str, str]:

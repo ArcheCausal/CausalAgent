@@ -14,6 +14,7 @@ import answer
 import client as cl
 import dataset as ds
 import evaluate
+import manifest
 import report
 import runner as rn
 from config import ConfigError, load_config
@@ -984,6 +985,58 @@ def test_run_dataset_writes_one_row_per_attempt():
         assert rows[0]["attempt"] == 1
         assert rows[1]["attempt"] == 2
         assert rows[1]["tokens_total"] == 18
+
+
+def _manifest_fixture(tmp):
+    root = Path(tmp)
+    _make_npz(root / "CAM/D010_N00500/rep00.npz",
+              np.zeros((4, 2)), np.array([[0, 1], [0, 0]], dtype=np.int8))
+    specs = ds.scan(root)
+    config = load_config(_write_yaml(BASE_YAML))
+    return root, specs, config
+
+
+def test_manifest_roundtrip_and_mismatches():
+    with tempfile.TemporaryDirectory() as tmp:
+        root, specs, config = _manifest_fixture(tmp)
+        data = manifest.build(config, specs, "r1", "abc")
+        path = root / "manifest.json"
+        manifest.write(path, data)
+        loaded = manifest.read(path)
+        assert loaded is not None
+        assert manifest.verify(loaded, config, specs, "abc") == []
+        assert manifest.check(loaded, config, specs, "abc") == []
+        assert manifest.read(root / "missing.json") is None
+        (root / "broken.json").write_text('{"run_id": ', encoding="utf-8")
+        assert manifest.read(root / "broken.json") is None
+
+        bad = dict(loaded)
+        bad["datasets"] = [dict(loaded["datasets"][0], sha256="bad")]
+        problems = manifest.check(bad, config, specs, "abc", force=True)
+        assert any("sha256" in item for item in problems)
+        try:
+            manifest.check(bad, config, specs, "abc")
+        except manifest.ManifestError:
+            pass
+        else:
+            raise AssertionError("不一致且未 force 时应抛 ManifestError")
+
+
+def test_manifest_detects_config_commit_and_version_changes():
+    with tempfile.TemporaryDirectory() as tmp:
+        root, specs, config = _manifest_fixture(tmp)
+        data = manifest.build(config, specs, "r1", "abc")
+        assert any("git_commit" in item
+                   for item in manifest.verify(data, config, specs, "def"))
+        changed = manifest.build(
+            load_config(_write_yaml(BASE_YAML.replace(
+                "base_url: http://localhost:5001", "base_url: http://other:5001"))),
+            specs, "r1", "abc")
+        assert any("base_url" in item
+                   for item in manifest.verify(changed, config, specs, "abc"))
+        data["metrics_version"] = -1
+        assert any("metrics_version" in item
+                   for item in manifest.verify(data, config, specs, "abc"))
 
 
 def run_tests() -> int:

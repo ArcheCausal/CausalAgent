@@ -19,6 +19,7 @@ class RunSettings:
     max_interactions: int = 6
     interaction_seconds: int = 300
     seed: int = 0
+    backend_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ def load_config(path: str | Path) -> Config:
             run_raw.get("interaction_seconds", 300), "run.interaction_seconds"
         ),
         seed=int(run_raw.get("seed", 0)),
+        backend_version=str(run_raw.get("backend_version") or "").strip(),
     )
 
     auth_raw = raw.get("auth") or {}
