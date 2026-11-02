@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from .models import ContractModel
 from .runtime_updates import with_tool_runtime_schema
@@ -49,6 +49,19 @@ class DataProcessingQuestionRequest(ContractModel):
         }
 
 
+class DerivedMeasurementSemantic(ContractModel):
+    column: str = Field(min_length=1, max_length=255)
+    kind: Literal["count", "ordinal", "category", "continuous", "binary", "unknown"]
+    evidence: str = Field(min_length=1, max_length=600)
+
+    @field_validator("column", "evidence")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        if not value.strip() or value != value.strip():
+            raise ValueError("derived measurement text must be non-blank and trimmed")
+        return value
+
+
 class DataProcessingPlanSummary(ContractModel):
     """展示给用户确认的处理语义，不包含数据行或脚本正文。"""
 
@@ -56,6 +69,14 @@ class DataProcessingPlanSummary(ContractModel):
     observation_unit: str = Field(min_length=1, max_length=500)
     transformations: tuple[str, ...] = Field(min_length=1, max_length=12)
     variable_semantics: dict[str, str] = Field(min_length=1, max_length=128)
+    analysis_columns: tuple[str, ...] = Field(
+        min_length=1, max_length=128,
+        description="最终分析 CSV 的完整列名及顺序；每列均参与建图，禁止写出辅助字段。",
+    )
+    derived_measurement_semantics: tuple[DerivedMeasurementSemantic, ...] = Field(
+        default_factory=tuple, max_length=128,
+        description="派生输出列的测量类型和转换依据；窗口内是否出现应声明 binary。",
+    )
     role_columns: dict[Literal["target", "treatment"], str | None] = Field(
         default_factory=dict, max_length=2,
         description="用户已指定的 target、treatment 对应的处理后 CSV 列名；未指定的角色留空，不创造角色。",
@@ -69,6 +90,25 @@ class DataProcessingPlanSummary(ContractModel):
         ),
     )
     limitations: tuple[str, ...] = Field(default_factory=tuple, max_length=12)
+
+    @field_validator("analysis_columns")
+    @classmethod
+    def validate_analysis_columns(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(value) != len(set(value)) or any(
+            not name.strip() or name != name.strip() or len(name) > 255 for name in value
+        ):
+            raise ValueError("analysis_columns must contain unique bounded trimmed names")
+        return value
+
+    @model_validator(mode="after")
+    def validate_output_references(self):
+        derived = [item.column for item in self.derived_measurement_semantics]
+        if len(derived) != len(set(derived)) or set(derived) - set(self.analysis_columns):
+            raise ValueError("derived measurements must uniquely reference analysis_columns")
+        outputs = {value for value in self.measurement_columns.values() if value is not None}
+        if outputs - set(self.analysis_columns) or outputs & set(derived):
+            raise ValueError("inherited and derived measurements must refer to distinct analysis columns")
+        return self
 
     @field_validator("measurement_columns")
     @classmethod

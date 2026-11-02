@@ -21,10 +21,10 @@ from app.agent.worker.event_adapter import LangGraphEventAdapter
     ({"treatment": None}, {"target": "收入", "treatment": None}),
 ])
 def test_absent_roles_and_explicit_null_use_existing_revision_contract(patch, expected):
-    before = research_parameters({"target": "收入", "treatment": "培训", "measurement_semantics": []})
+    before = research_parameters({"effect_request": None, "target": "收入", "treatment": "培训", "measurement_semantics": []})
     actual, changes = commit(before, [], patch=patch,
         job_id="00000000-0000-0000-0000-000000000963", source_input_id=1)
-    assert actual == research_parameters({**expected, "measurement_semantics": []})
+    assert actual == research_parameters({**expected, "effect_request": None, "measurement_semantics": []})
     assert len(changes) == bool(patch)
     assert before["target"] == "收入" and before["treatment"] == "培训"
 
@@ -35,8 +35,9 @@ def test_validation_feedback_uses_report_roles_and_actual_csv_columns():
         for column in range(5)) for row in range(120)) + "\n").encode()
     report = validate_candidate(data_bytes=data, script_bytes=b"print('prepared')\n",
         metadata={"summary": "保留原始测量", "observation_unit": "一次独立测量",
+            "analysis_columns": ["0", "1", "2", "3", "4"],
             "transformations": ["保留全部列"], "variable_semantics": {}},
-        analysis_parameters={"target": role, "treatment": None},
+        analysis_parameters={"effect_request": None, "target": role, "treatment": None},
         specifications=[PC_SPEC], max_bytes=100_000)
     before = deepcopy(report)
     assert not report["accepted"]
@@ -54,8 +55,9 @@ def test_validation_feedback_uses_report_roles_and_actual_csv_columns():
 
     without_roles = validate_candidate(data_bytes=data, script_bytes=b"print('prepared')\n",
         metadata={"summary": "保留原始测量", "observation_unit": "一次独立测量",
+            "analysis_columns": ["0", "1", "2", "3", "4"],
             "transformations": ["保留全部列"], "variable_semantics": {}},
-        analysis_parameters={"target": None, "treatment": None},
+        analysis_parameters={"effect_request": None, "target": None, "treatment": None},
         specifications=[PC_SPEC], max_bytes=100_000)
     assert without_roles["accepted"]
     assert without_roles["errors"] == []
@@ -95,7 +97,7 @@ def test_output_csv_mapping_keeps_renamed_measurements_without_inheriting_derive
     frame = pd.read_csv(BytesIO(source))
     output = frame.rename(columns={"x": "feature"}).drop(columns=["y"])
     output["total"] = frame["x"] + frame["y"]
-    parameters = {"target": None, "treatment": None, "measurement_semantics": [
+    parameters = {"effect_request": None, "target": None, "treatment": None, "measurement_semantics": [
         {"column": column, "kind": "continuous", "evidence": "全部原始输入列是连续测量"}
         for column in frame.columns]}
     mapping = {"x": "feature"}
@@ -104,6 +106,7 @@ def test_output_csv_mapping_keeps_renamed_measurements_without_inheriting_derive
     report = validate_candidate(data_bytes=output.to_csv(index=False).encode(),
         script_bytes=b"# This check validates CSV bytes, not script execution.\n",
         metadata={"summary": "重命名 x、删除 y，并计算 total", "observation_unit": "一次测量",
+            "analysis_columns": list(output.columns),
             "transformations": ["重命名", "删列", "计算"], "measurement_columns": mapping,
             "variable_semantics": {"feature": "原 x 测量", "z": "原 z 测量", "total": "计算结果"}},
         analysis_parameters=parameters, specifications=[PC_SPEC], max_bytes=100_000)
@@ -112,5 +115,5 @@ def test_output_csv_mapping_keeps_renamed_measurements_without_inheriting_derive
         assert report["semantic_kinds"] == {"feature": "continuous", "z": "continuous"}
         assert "total" not in report["semantic_kinds"]
     else:
-        assert "measurement_semantics_invalid" in {item["code"] for item in report["errors"]}
+        assert "measurement_columns_invalid" in {item["code"] for item in report["errors"]}
     assert [item["column"] for item in parameters["measurement_semantics"]] == ["x", "y", "z"]

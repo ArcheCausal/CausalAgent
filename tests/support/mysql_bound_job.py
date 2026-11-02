@@ -36,6 +36,7 @@ def create_bound_job(database):
     question = "检查本地观测数据的候选因果结构。"
     parameters = {"analysis_question": question}
     metadata = {
+        "analysis_columns": ["x", "y"],
         "summary": "规范化 CSV 换行符，保留观测数据",
         "observation_unit": "CSV 中的一条观测记录",
         "transformations": ["在 CRLF 和 LF 之间转换换行符，保留原始行列和值"],

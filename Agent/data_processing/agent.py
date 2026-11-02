@@ -216,6 +216,10 @@ def _plan_tool() -> Any:
         input_columns = runtime.state.get("data_processing_input_columns") or []
         if set(metadata.get("measurement_columns", {})) - set(input_columns):
             return _tool_message(runtime, name="set_data_processing_plan", content="measurement_columns 只能引用冻结输入的实际列名。")
+        mapping = metadata["measurement_columns"]
+        if any(mapping.get(column, column) not in (None, *metadata["analysis_columns"])
+               for column in input_columns):
+            return _tool_message(runtime, name="set_data_processing_plan", content="被排除的原始列必须在 measurement_columns 中显式标记为 null。")
         transformation = payload.effect_execution_context.treatment_transform if payload.effect_execution_context else None
         if transformation is not None and transformation.source_column not in input_columns:
             return _tool_message(runtime, name="set_data_processing_plan", content="effect_execution_context.treatment_transform.source_column 必须是冻结输入的实际列名。")
@@ -813,7 +817,8 @@ def data_processing_system_prompt() -> str:
             "已有有效值和用户已接受的具体提议应直接保留其表达，不为了换一种说法重写观察单位、时间范围或角色名。用户接受‘每个设备一行观测’和‘每天一个时间窗口’时，可以分别保存 observation_unit=每个设备一行观测、time_window=每天；只接受前者不能同时修改时间窗口。",
             "用户自由文本答复只表示待处理输入，不是授权。先 set_research_spec 消费该输入，即使参数无变化也提交完整草稿，再更新方案并确认。",
             "存在 pending_input_id 时，source_input_id 必须使用该待处理输入的 ID，不能引用较早输入来提交本次答复的变更；工具拒绝错误引用后按返回的待处理 ID 纠正。处理完最新输入后才可引用原输入进行纠错。",
-            "measurement_columns 明确原始列到输出列的保留/重命名映射，删除或不再继承填 null；派生列不得自动继承原始类型。",
+            "analysis_columns 列出最终 CSV 参与建图的全部列并固定顺序，CSV 只写出这些列。辅助字段仅从冻结原始文件读取。",
+            "measurement_columns 明确原始列到输出列的保留/重命名映射，排除或不再继承的原始列必须填 null。derived_measurement_semantics 为每个派生列声明 column、kind、evidence，不按原始类型或整数 dtype 继承；窗口内是否出现为 binary。",
             "候选数据集提交后，简短说明提交事实，不要输出文件正文或具体记录值。",
         ]
     )

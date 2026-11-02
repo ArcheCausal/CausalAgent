@@ -93,7 +93,11 @@ def execution_measurement_semantics(parameters: Mapping[str, Any], metadata: Map
         raise ParameterContractError("measurement column mapping must be one-to-one")
     output = []
     seen = set()
+    sources = set()
     for item in declarations:
+        if item["column"] in sources:
+            continue
+        sources.add(item["column"])
         column = mapping.get(item["column"], item["column"])
         if column is None:
             continue
@@ -101,6 +105,27 @@ def execution_measurement_semantics(parameters: Mapping[str, Any], metadata: Map
             raise ParameterContractError("measurement columns have conflicting output references")
         seen.add(column)
         output.append({**item, "column": column})
+    analysis_columns = metadata.get("analysis_columns")
+    if analysis_columns is not None and (
+        not isinstance(analysis_columns, (list, tuple))
+        or any(not isinstance(column, str) for column in analysis_columns)
+    ):
+        raise ParameterContractError("analysis_columns must be an ordered list of column names")
+    derived = metadata.get("derived_measurement_semantics", [])
+    if not isinstance(derived, (list, tuple)):
+        raise ParameterContractError("derived_measurement_semantics must be a list")
+    for item in derived:
+        if (not isinstance(item, Mapping) or set(item) != {"column", "kind", "evidence"}
+                or not isinstance(item.get("evidence"), str) or not item["evidence"].strip()):
+            raise ParameterContractError("derived measurements require column, kind and evidence")
+        column = item["column"]
+        normalize_measurement_semantics([item])
+        if column in seen:
+            raise ParameterContractError("derived measurement conflicts with an inherited declaration")
+        seen.add(column)
+        output.append(dict(item))
+    if analysis_columns is not None and set(seen) - set(analysis_columns):
+        raise ParameterContractError("excluded input measurements must map to null")
     return output
 
 def execution_parameters(parameters: Mapping[str, Any], metadata: Mapping[str, Any]) -> dict[str, Any]:
