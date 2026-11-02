@@ -11,6 +11,7 @@
 - 上传内容来自数据集的 `X` 矩阵，固定提示词不附加领域知识、不引导算法选择；是否触发数据处理交互由被测分支决定。
 - 金标准取自数据集自带的 `adjacency`，不读取服务端中间结果，也不按报告文字人工判分。
 - `local/`、`cdfm_bench_*/`、`config.yaml`、`config.smoke.yaml` 均已 gitignore；进入版本库的只有代码、示例配置与本文档。
+- 根 `.dockerignore` 已排除 `evaluation-runner/`；应用镜像不包含本地评测工具。评测工具需要独立运行环境，不进入 `causalagent_app` 镜像。
 
 ## 安装
 
@@ -58,6 +59,7 @@ cp config.example.yaml config.yaml
 | `run.max_interactions` | 单集最多交互轮数 | 6；正整数 |
 | `run.interaction_seconds` | 建 Job 起算的交互窗口上限 | 300；正整数 |
 | `run.seed` | 抽样种子 | 0；整数 |
+| `run.backend_version` | 被测后端的已知版本（git sha / 镜像 tag） | 空字符串；写入清单并参与续跑校验 |
 | `auth.username` / `auth.password` | 测试账号 | 留空时读 `local/accounts.local.json`；不存在则自动注册并存盘 |
 | `data.dir` | `.npz` 根目录 | 必填，递归扫描 |
 | `data.mechanisms` | 机制筛选 | `all` 或机制名列表；标量会被拒绝 |
@@ -132,6 +134,7 @@ cp config.example.yaml config.yaml
 | `raw/<dataset 净化>.attempt<N>.jsonl` | 第 N 次尝试的全量 SSE 事件 |
 | `raw/<dataset 净化>.attempt<N>.json` | 终态 payload 与交互次数；无终态时为失败原因 |
 | `raw/<dataset 净化>.attempt<N>.requests.jsonl` | create / resume / cancel 的请求内容、UUID 与发送结果 |
+| `manifest.json` | 运行身份清单：选中案例、数据 sha256、配置快照、客户端/指标/后端版本，供 `--resume` 校验 |
 
 `summary.csv` 与 `report.md` 在运行结束后从 `results.csv` 重建；同一 dataset 出现多行时取最后一行，因此 `--resume` 重跑不会重复计数。
 
@@ -164,12 +167,15 @@ token 用量来自 Job 的 `usage` 事件：按 `(job, attempt)` 取每 attempt 
 
 - `parallel` 决定 `ThreadPoolExecutor` 的线程数。每集使用独立 `httpx.Client` 并单独登录一次，不共享 Cookie。
 - 每完成一集（`as_completed`，按完成顺序）立即追加写入 `results.csv` 并 flush；进程中断不丢已完成的集。
-- `--resume <run_dir>` 跳过 `status == success` 的集，其余重跑；`partial` 会重跑。续跑须使用与首轮相同的配置，否则选中的集会对不上。结束后重建 `summary.csv` 与 `report.md`；已成功的旧行保留，失败旧行与新行按 dataset 取最后一行。
+- `--resume <run_dir>` 跳过 `status == success` 的集，其余重跑；`partial` 会重跑。结束后重建 `summary.csv` 与 `report.md`；已成功的旧行保留，失败旧行与新行按 dataset 取最后一行。
+- 首次运行会在 `run_dir/manifest.json` 记录六项身份：选中案例、每个 npz 的 sha256、配置快照、客户端版本、`run.backend_version`、指标版本；另存 `git_commit`。
+- `--resume` 默认硬校验这些身份；清单缺失或任一不一致时打印差异并以 1 退出，不写新行。
+- `--force-resume` 只能与 `--resume` 同用；它绕过身份校验，并把差异写进 `report.md` 的“续跑身份差异”一节。表头不兼容仍然拒绝。
 - WSL 默认 6 GB 内存、服务端 `JOB_WORKERS=2`：`parallel > 2` 只会排队并可能 OOM，回归默认用 1。
 
 ## 自检与验收
 
-`selftest.py`（无网络）当前 **57 项全过**，覆盖配置校验、路径与产物名、抽样确定性、npz 读取与 CSV、交互答复与方案确认、取图与双口径指标、F1/SHD（含反转与镜像）与 AUROC/AUPRC（含缺失值跳过）、SSE 解析、汇总与报告、续跑去重、损坏数据不中断整轮。
+`selftest.py`（无网络）当前 **61 项全过**，覆盖配置校验、路径与产物名、抽样确定性、npz 读取与 CSV、交互答复与方案确认、取图与双口径指标、F1/SHD（含反转与镜像）与 AUROC/AUPRC（含缺失值跳过）、SSE 解析、幂等键与错误分类、活动 Job 查询、建 Job 恢复与 interrupt/resume 状态机、逐尝试证据与 33 列结果行、运行清单身份校验与报告差异、汇总与报告、续跑去重、损坏数据不中断整轮。
 
 验收分三层：
 
@@ -196,6 +202,7 @@ token 用量来自 Job 的 `usage` 事件：按 `(job, attempt)` 取每 attempt 
 | `answer.py` | 交互答复与方案确认安全判断（纯函数） |
 | `evaluate.py` | 取图、节点映射、严格定向/骨架指标与 F1/SHD/AUROC/AUPRC |
 | `client.py` | HTTP 与 SSE 客户端、凭据与错误分类 |
+| `manifest.py` | 运行身份清单的构建、写入与续跑校验 |
 | `runner.py` | 单集流程、并发编排、续跑、CLI |
 | `report.py` | `summary.csv` 与 `report.md` 生成 |
 | `selftest.py` | 无网络自检，不作为真实系统验收证据 |

@@ -117,6 +117,7 @@ app/rag_eval/frontend_dist/
 杂项/
 项目规划/
 Document/
+evaluation-runner/
 
 # 知识库相关（特殊处理）
 # 但Agent/knowledge_base/db（向量数据库）应该通过卷挂载
