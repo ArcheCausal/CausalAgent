@@ -7,6 +7,7 @@ import tempfile
 import traceback
 from pathlib import Path
 
+import httpx
 import numpy as np
 
 import answer
@@ -395,6 +396,95 @@ def test_parse_sse_ignores_heartbeat_comments():
     assert list(cl.parse_sse([": keep-alive", ""])) == []
 
 
+def _mock_http(handler):
+    test_client = cl.AgentClient("http://test")
+    test_client.http = httpx.Client(
+        base_url="http://test", transport=httpx.MockTransport(handler)
+    )
+    return test_client
+
+
+def test_client_uses_caller_idempotency_key():
+    seen = {}
+    key = "11111111-1111-4111-8111-111111111111"
+
+    def handler(request):
+        seen["key"] = request.headers.get("Idempotency-Key")
+        return httpx.Response(
+            202,
+            json={"success": True, "job_id": "j1", "status": "queued", "existing": False},
+        )
+
+    test_client = _mock_http(handler)
+    try:
+        assert test_client.create_job("s1", "msg", 7, key) == "j1"
+    finally:
+        test_client.close()
+    assert seen["key"] == key
+
+
+def test_client_resume_uses_caller_key():
+    seen = {}
+    key = "22222222-2222-4222-8222-222222222222"
+
+    def handler(request):
+        seen["key"] = request.headers.get("Idempotency-Key")
+        return httpx.Response(
+            202,
+            json={"success": True, "job_id": "j1", "status": "queued", "existing": False},
+        )
+
+    test_client = _mock_http(handler)
+    try:
+        test_client.resume("j1", "q1", {"action": "confirm"}, key)
+    finally:
+        test_client.close()
+    assert seen["key"] == key
+
+
+def test_client_error_carries_status_and_payload():
+    def handler(request):
+        return httpx.Response(
+            409,
+            json={
+                "success": False,
+                "error": "conflict",
+                "code": "active_job_conflict",
+                "active_job": {"job_id": "j9"},
+            },
+        )
+
+    test_client = _mock_http(handler)
+    try:
+        try:
+            test_client.create_job(
+                "s", "m", 1, "33333333-3333-4333-8333-333333333333"
+            )
+        except cl.ClientError as exc:
+            assert exc.status == 409
+            assert exc.payload["code"] == "active_job_conflict"
+        else:
+            raise AssertionError("409 应抛 ClientError")
+    finally:
+        test_client.close()
+
+
+def test_client_find_active_job():
+    def handler(request):
+        assert request.url.path == "/api/agent/jobs/active"
+        assert request.url.params["session_id"] == "s1"
+        return httpx.Response(
+            200,
+            json={"success": True, "jobs": [{"job_id": "j2", "status": "running"}]},
+        )
+
+    test_client = _mock_http(handler)
+    try:
+        assert test_client.find_active_job("s1") == "j2"
+    finally:
+        test_client.close()
+
+
 def _row(dataset_id="CAM/D010_N00500/rep00", recall=1.0, precision=0.5, status="success", reason=""):
     return {
         "run_id": "r1", "dataset": dataset_id, "mechanism": dataset_id.split("/")[0],
@@ -557,14 +647,16 @@ def test_run_once_marks_missing_graph_failed():
     class FakeClient:
         def upload_csv(self, path): return 1
         def new_session(self): return "s"
-        def create_job(self, session_id, message, user_file_id): return "j"
+        def create_job(self, session_id, message, user_file_id, idempotency_key): return "j"
+        def resume(self, job_id, question_id, answer, idempotency_key): pass
+        def find_active_job(self, session_id): return None
         def events(self, job_id, last_event_id=0):
             yield {"id": 1, "type": "usage",
                    "payload": {"attempt": 1, "input_tokens": 10,
                                "output_tokens": 2, "total_tokens": 12}}
             yield {"id": 2, "type": "final_result",
                    "payload": {"data": {"document": {"blocks": [], "assets": {}}}}}
-        def cancel(self, job_id): pass
+        def cancel(self, job_id, idempotency_key): pass
     with _tf.TemporaryDirectory() as tmp:
         root = Path(tmp)
         _make_npz(root / "CAM/D010_N00500/rep00.npz",

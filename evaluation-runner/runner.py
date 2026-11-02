@@ -144,7 +144,9 @@ def _run_once(spec, config: Config, client: AgentClient, run_dir: Path, run_id: 
         raise StepError("upload_error")
     started = time.monotonic()
     try:
-        job_id = client.create_job(session_id, build_prompt(dim), user_file_id)
+        job_id = client.create_job(
+            session_id, build_prompt(dim), user_file_id, str(uuid.uuid4())
+        )
     except ClientError:
         raise StepError("job_rejected")
     deadline = started + config.run.timeout_minutes * 60
@@ -165,7 +167,7 @@ def _run_once(spec, config: Config, client: AgentClient, run_dir: Path, run_id: 
             for event in event_iter:
                 if time.monotonic() > deadline:
                     failure = "timeout"
-                    client.cancel(job_id)
+                    client.cancel(job_id, str(uuid.uuid4()))
                     terminal = True
                     break
                 if event["id"] is not None:
@@ -174,11 +176,16 @@ def _run_once(spec, config: Config, client: AgentClient, run_dir: Path, run_id: 
                 if event["type"] == "interrupt":
                     if interactions >= config.run.max_interactions or time.monotonic() > interaction_deadline:
                         failure = "interaction_budget_exceeded"
-                        client.cancel(job_id)
+                        client.cancel(job_id, str(uuid.uuid4()))
                         terminal = True
                         break
                     answer, _ = answer_for(event["payload"], profile)
-                    client.resume(job_id, event["payload"].get("question_id"), answer)
+                    client.resume(
+                        job_id,
+                        event["payload"].get("question_id"),
+                        answer,
+                        str(uuid.uuid4()),
+                    )
                     interactions += 1
                     answered = True
                     break
@@ -204,7 +211,7 @@ def _run_once(spec, config: Config, client: AgentClient, run_dir: Path, run_id: 
 
     if failure is None and final_payload is None:
         failure = "timeout"
-        client.cancel(job_id)
+        client.cancel(job_id, str(uuid.uuid4()))
     duration = round(time.monotonic() - started, 1)
     (run_dir / "raw" / f"{ds.artifact_name(spec.dataset_id)}.jsonl").write_text(
         "\n".join(json.dumps(record, ensure_ascii=False) for record in records),

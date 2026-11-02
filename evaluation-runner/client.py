@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 from pathlib import Path
 
 import httpx
@@ -10,6 +9,11 @@ import httpx
 
 class ClientError(RuntimeError):
     """被测服务返回非预期状态。"""
+
+    def __init__(self, message: str, status: int | None = None, payload: dict | None = None):
+        super().__init__(message)
+        self.status = status
+        self.payload = payload or {}
 
 
 class TransportError(ClientError):
@@ -46,9 +50,15 @@ def _json(response: httpx.Response) -> dict:
     try:
         payload = response.json()
     except ValueError as exc:
-        raise ClientError(f"响应不是 JSON: {response.status_code}") from exc
+        raise ClientError(
+            f"响应不是 JSON: {response.status_code}", response.status_code, {}
+        ) from exc
     if response.status_code >= 400 or payload.get("success") is False:
-        raise ClientError(str(payload.get("error") or response.status_code))
+        raise ClientError(
+            str(payload.get("error") or response.status_code),
+            response.status_code,
+            payload,
+        )
     return payload
 
 
@@ -116,7 +126,8 @@ class AgentClient:
             "POST", "/api/new_chat", headers=self._headers()
         )["new_session_id"])
 
-    def create_job(self, session_id: str, message: str, user_file_id: int) -> str:
+    def create_job(self, session_id: str, message: str, user_file_id: int,
+                   idempotency_key: str) -> str:
         payload = self._request_json(
             "POST",
             "/api/agent/jobs",
@@ -126,9 +137,19 @@ class AgentClient:
                 "input_user_file_id": user_file_id,
                 "web_search_enabled": False,
             },
-            headers=self._headers(str(uuid.uuid4())),
+            headers=self._headers(idempotency_key),
         )
         return str(payload["job_id"])
+
+    def find_active_job(self, session_id: str) -> str | None:
+        payload = self._request_json(
+            "GET",
+            "/api/agent/jobs/active",
+            params={"session_id": session_id},
+            headers=self._headers(),
+        )
+        jobs = payload.get("jobs") or []
+        return str(jobs[0]["job_id"]) if jobs else None
 
     def events(self, job_id: str, last_event_id: int = 0):
         try:
@@ -145,20 +166,17 @@ class AgentClient:
         except httpx.HTTPError as exc:
             raise TransportError(str(exc)) from exc
 
-    def resume(self, job_id: str, question_id: str, answer) -> None:
+    def resume(self, job_id: str, question_id: str, answer, idempotency_key: str) -> None:
         self._request_json(
             "POST",
             f"/api/agent/jobs/{job_id}/resume",
             json={"question_id": question_id, "answer": answer},
-            headers=self._headers(str(uuid.uuid4())),
+            headers=self._headers(idempotency_key),
         )
 
-    def cancel(self, job_id: str) -> None:
-        try:
-            self._request_json(
-                "POST",
-                f"/api/agent/jobs/{job_id}/cancel",
-                headers=self._headers(str(uuid.uuid4())),
-            )
-        except ClientError:
-            pass
+    def cancel(self, job_id: str, idempotency_key: str) -> None:
+        self._request_json(
+            "POST",
+            f"/api/agent/jobs/{job_id}/cancel",
+            headers=self._headers(idempotency_key),
+        )
