@@ -62,6 +62,8 @@ docker compose -f docker-compose.prod.yml config --quiet
 
 ## Docker 单元测试环境（推荐）
 
+分析列与派生类型的纯规则测试位于 `unit/agent/test_pc_test_semantics.py`；真实 Alarm/Sachs、MCP HTTP、causal-learn 和完整 CDFM 的人工入口为 `acceptance/pc_measurement_semantics_real.py`。权限与生产 Job 验收的区别、命令及依赖见 [数据处理验证](../Document/development/testing.md#opensandbox-数据处理验证)。
+
 统一研究参数的完整提交、集合声明与测量列映射分别由 `unit/agent/test_research_parameter_revisions.py`、`test_parameter_extraction_feedback.py`、`test_measurement_column_mapping.py` 检查；`integration/agent/test_processing_checkpoint_version.py` 使用真实图与 saver 检查旧版本拒绝，缺少冻结输入时不访问数据库或模型。
 
 研究参数的真实模型及数据库恢复入口、思考模式工具续接和连接池重建说明见 [数据处理验收](../Document/development/testing.md)。独立脚本 `acceptance/real_model_parameter_extraction.py` 比较完整参数语义，`acceptance/real_model_reasoning_recovery.py` 检查真实思考历史、参数工具、因果 Agent 文件工具及 PostgreSQL 重连；二者均不属于默认 pytest 范围。

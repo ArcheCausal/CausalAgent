@@ -155,6 +155,16 @@ docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p
 
 ### OpenSandbox 数据处理验证
 
+分析列、派生测量语义与 PC 检验选择的纯规则入口是 [test_pc_test_semantics.py](../../tests/unit/agent/test_pc_test_semantics.py)，涵盖输出多列、漏列、顺序变化、非法二值值、继承冲突和方案版本。真实算法入口是 [pc_measurement_semantics_real.py](../../tests/acceptance/pc_measurement_semantics_real.py)：
+
+```bash
+python tests/acceptance/pc_measurement_semantics_real.py --output /tmp/pc-semantics-new --cdfm
+```
+
+该人工入口从真实 Alarm 原始数据重建 38,830×11 的窗口变量，经正式独立校验生成语义快照，使用真实 Streamable HTTP MCP、签名校验和进程池运行 PC；同时检查 Sachs 连续测量、将 Sachs 首列按中位数二值化后的混合类型、未知类型及显式不相容检验。`--cdfm` 通过正式 CDFM runner 全量运行同一冻结 CSV，不抽样，不改变生产 MCP 的超时。输出目录必须不存在；需要安装 MCP、causal-learn、CDFM、PyTorch 及本地权重，完整 CPU CDFM 可能需数十分钟。
+
+本地验收权限来自新建的文件清单，不连接 MySQL，也不证明生产 Job 归属、lease、OpenSandbox 或真实模型生成处理脚本的完整链路。PC 图若含有向环，应如实保留 `execution_failed` 和图校验原因，不能删边或改成成功。验收分别检查输入、检验执行与图契约；图恢复评分另行报告，不以 F1 必须提高作为修复条件。
+
 方案、确认快照与执行说明的纯规则测试在 [test_data_processing_lifecycle.py](../../tests/unit/agent/test_data_processing_lifecycle.py)，真实 ToolNode、StateGraph 和 InMemorySaver 的状态传递检查在 [test_data_processing_plan_state.py](../../tests/integration/agent/test_data_processing_plan_state.py)。它们检查相同方案保留确认、方案变化清空绑定、脚本变化要求重新执行、执行说明事实绑定及结束纠正预算，不使用模型或外部服务替身，也不证明 MySQL、PostgreSQL 或 OpenSandbox 已验证。
 
 [test_role_column_mapping.py](../../tests/integration/agent/test_role_column_mapping.py) 是中文研究角色到英文输出列的映射入口，涉及缺失列、角色冲突、未指定角色及研究参数身份保留。效应检查只适用于明确提交 `effect_request` 的研究，不能因存在 target/treatment 就要求估计。第 4 版请求、确认和恢复的纯函数验证使用下述 [效应定义与真实计算入口](#因果效应估计与函数形式检查)；映射测试本身不证明模型、数据库或 OpenSandbox 已验证。
