@@ -7,6 +7,7 @@ import importlib.util
 import io
 
 from Agent.deep_agent_tools.algorithm_specs import PC_SPEC, DIRECT_LINGAM_SPEC
+from Agent.pc_test import resolve_pc_test
 
 _CDMIR_AVAILABLE = importlib.util.find_spec("cdmir") is not None
 
@@ -372,6 +373,7 @@ def run_pc_analysis(
     csv_data_string: str,
     alpha: float = 0.05,
     test: str = "auto",
+    semantic_kinds: dict[str, str] | None = None,
 ) -> dict:
     """
     对CSV格式的字符串数据运行PC因果发现算法。
@@ -381,7 +383,6 @@ def run_pc_analysis(
         用于在前端动态生成图表。
     """
     try:
-        pc, fisherz, chisq = _load_pc_dependencies()
         string_io = io.StringIO(csv_data_string)
         df = pd.read_csv(string_io)
         
@@ -391,34 +392,23 @@ def run_pc_analysis(
 
         if test not in {"auto", "fisherz", "chisq"}:
             return {"success": False, "message": "错误：不支持的独立性检验方式。"}
-        if test == "fisherz":
-            indep_test = fisherz
-        elif test == "chisq":
-            indep_test = chisq
-        else:
-            # 全部列为数值时使用 Fisher-Z；出现非数值列时按确定性顺序编码后
-            # 使用卡方检验。编码映射只用于该检验，不改变变量身份。
-            has_categorical = any(
-                not pd.api.types.is_numeric_dtype(df[column]) for column in df.columns
-            )
-            if has_categorical:
-                for column in df.columns:
-                    if pd.api.types.is_numeric_dtype(df[column]):
-                        continue
-                    categories = sorted(
-                        {str(value) for value in df[column].dropna().unique()}
-                    )
-                    mapping = {value: index for index, value in enumerate(categories)}
-                    df[column] = df[column].map(
-                        lambda value: mapping.get(str(value)) if pd.notna(value) else value
-                    )
-                indep_test = chisq
-            else:
-                indep_test = fisherz
+        resolution = resolve_pc_test(
+            columns=df.columns.tolist(), semantic_kinds=semantic_kinds, test=test,
+            count_cardinalities={column: int(df[column].nunique()) for column in df.columns},
+        )
+        if resolution.independence_test is None:
+            return {"success": False, "algorithm": "pc", "error_type": "NotApplicable",
+                    "message": resolution.selection_reason, "diagnostics": resolution.diagnostics()}
+        pc, fisherz, chisq = _load_pc_dependencies()
+        indep_test = chisq if resolution.independence_test == "chisq" else fisherz
+        if resolution.independence_test == "chisq":
+            # 每列按类别确定性编码，仅供离散检验使用，变量名和观测不变。
+            for column in df.columns:
+                df[column] = pd.factorize(df[column], sort=True)[0]
         data = df.to_numpy()
         node_names = df.columns.tolist()
 
-        cg = pc(data=data, alpha=alpha, indep_test=indep_test, node_names=node_names)
+        cg = pc(data=data, alpha=alpha, indep_test=indep_test, node_names=node_names, show_progress=False)
 
         # 提取结果
         edges = cg.G.get_graph_edges()
@@ -430,12 +420,12 @@ def run_pc_analysis(
         return {
             "success": True,
             "algorithm": "pc",
-            "runner_version": "causalachieve-v2",
+            "runner_version": "causalachieve-v3",
             "method": PC_SPEC.method_definition().model_dump(mode="json"),
             "implementation": {"package": "causal-learn", "version": importlib.metadata.version("causal-learn")},
             "matrix_convention": PC_SPEC.matrix_convention,
             "diagnostics": {"n_samples": int(data.shape[0]), "n_features": int(data.shape[1]),
-                            "alpha": alpha, "independence_test": "chisq" if indep_test is chisq else "fisherz"},
+                            "alpha": alpha, **resolution.diagnostics()},
             "message": "因果分析成功完成。",
             "data": {
                 "nodes": nodes_for_vis,

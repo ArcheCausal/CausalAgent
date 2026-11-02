@@ -40,6 +40,7 @@ from Agent.deep_agent_tools.models import (
     McpInvocationContext,
     StandardizedGraph,
     canonical_json_bytes,
+    build_diagnostics_from_runner_payload,
 )
 from Agent.deep_agent_tools.graph_validation import validate_graph_structure
 from Agent.deep_agent_tools.preprocessing import build_data_profile_from_csv
@@ -685,6 +686,8 @@ class CausalMcpService:
             semantic_kinds = normalize_semantic_kinds(
                 trusted_input.semantic_kinds, columns=processed_profile.column_names,
             )
+            if command.capability_id == "causal.pc":
+                artifacts["semantic_kinds"] = semantic_kinds
             if spec.kind == "causal_estimation":
                 graph_check = check_ate_graph(
                     graph=graph,
@@ -1033,6 +1036,11 @@ class CausalMcpService:
                 capability_version=entry.version,
                 ate_check=ate_check,
             )
+            if command.capability_id == "causal.pc" and error_type == "NotApplicable":
+                diagnostics = build_diagnostics_from_runner_payload(raw_result)
+                diagnostics.safe_error_code = code
+                diagnostics.summary = diagnostics.metrics.get("selection_reason")
+                result.diagnostics = diagnostics
             if error_type == "NotApplicable" and support_reason in EFFECT_REASONS:
                 support = raw_result["support"]
                 result.diagnostics = Diagnostics(
