@@ -440,41 +440,60 @@ def _run_once(spec, config: Config, client: AgentClient, run_dir: Path,
         )
 
 
-def _run_dataset(spec, config, credentials, run_id, run_dir) -> dict:
+def _run_dataset(spec, config, credentials, run_id, run_dir) -> list[dict]:
     try:
         _, adjacency = ds.load(spec)
         if not ds.gold_edges(adjacency):
             raise ds.DatasetInvalid("gold 为空")
     except ds.DatasetInvalid:
-        return _failed_row(spec, run_id, "dataset_invalid")
+        return [_failed_row(spec, run_id, "dataset_invalid")]
     except Exception as exc:
         print(f"[warn] {spec.dataset_id}: {exc}", file=sys.stderr)
-        return _failed_row(spec, run_id, "terminal_error")
+        return [_failed_row(spec, run_id, "terminal_error")]
+
     client = AgentClient(config.run.base_url)
+    rows: list[dict] = []
     total_usage: dict[str, int] = {}
+    attempt = 0
     try:
         client.login(*credentials)
-        row = _run_once(spec, config, client, run_dir, run_id)
+        attempt = 1
+        row = _run_once(spec, config, client, run_dir, run_id, attempt)
+        rows.append(row)
         _add_usage(total_usage, row)
-        attempts = 0
-        while row["status"] == "failed" and row["failure_reason"] in RETRYABLE and attempts < 1:
-            attempts += 1
-            row = _run_once(spec, config, client, run_dir, run_id)
+        retries = 0
+        while (row["status"] == "failed"
+               and row["failure_reason"] in RETRYABLE
+               and retries < 1):
+            retries += 1
+            attempt += 1
+            row = _run_once(spec, config, client, run_dir, run_id, attempt)
+            rows.append(row)
             _add_usage(total_usage, row)
         if total_usage:
             row.update(total_usage)
-        return row
+        return rows
     except ds.DatasetInvalid:
-        return _failed_row(spec, run_id, "dataset_invalid", total_usage)
+        rows.append(_failed_row(spec, run_id, "dataset_invalid",
+                                total_usage, attempt=attempt or ""))
+        return rows
     except StepError as exc:
-        return _failed_row(spec, run_id, exc.reason, total_usage)
+        rows.append(_failed_row(spec, run_id, exc.reason,
+                                total_usage, attempt=attempt or ""))
+        return rows
     except TransportError:
-        return _failed_row(spec, run_id, "terminal_error", total_usage)
+        rows.append(_failed_row(spec, run_id, "terminal_error",
+                                total_usage, attempt=attempt or ""))
+        return rows
     except ClientError:
-        return _failed_row(spec, run_id, "auth_error", total_usage)
+        rows.append(_failed_row(spec, run_id, "auth_error",
+                                total_usage, attempt=attempt or ""))
+        return rows
     except Exception as exc:
         print(f"[warn] {spec.dataset_id}: {exc}", file=sys.stderr)
-        return _failed_row(spec, run_id, "terminal_error", total_usage)
+        rows.append(_failed_row(spec, run_id, "terminal_error",
+                                total_usage, attempt=attempt or ""))
+        return rows
     finally:
         client.close()
 
@@ -555,11 +574,13 @@ def main(argv=None) -> int:
                 for spec in pending
             ]
             for future in as_completed(futures):
-                row = future.result()
+                rows = future.result()
                 with lock:
-                    writer.writerow(row)
+                    writer.writerows(rows)
                     results.flush()
-                print(f"{row['status']:7s} {row['dataset']} {row['failure_reason']}")
+                for row in rows:
+                    print(f"{row['status']:7s} attempt={row['attempt']} "
+                          f"{row['dataset']} {row['failure_reason']}")
 
     rows = list(csv.DictReader(results_path.open(encoding="utf-8-sig", newline="")))
     for row in rows:
