@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -21,6 +22,7 @@ for key, value in TEST_ENV.items():
 
 from app.agent.job_service import (  # noqa: E402
     IdempotencyConflictError,
+    _payload_matches,
     _request_fingerprint,
     create_job,
 )
@@ -275,6 +277,29 @@ class JobIdempotencyTests(unittest.TestCase):
         disabled = _request_fingerprint("session-1", "hello", None, False)
         enabled = _request_fingerprint("session-1", "hello", None, True)
         self.assertNotEqual(disabled, enabled)
+
+    def test_payload_matches_ignores_top_level_usage(self):
+        """同一终态事件重放只忽略用量差异，其他字段仍须完全一致。"""
+        existing = json.dumps(
+            {
+                "type": "error",
+                "message": "boom",
+                "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+            }
+        )
+        replayed = {
+            "type": "error",
+            "message": "boom",
+            "usage": {"input_tokens": 4, "output_tokens": 5, "total_tokens": 9},
+        }
+        self.assertTrue(_payload_matches(existing, replayed))
+        self.assertTrue(
+            _payload_matches(
+                json.dumps({"type": "error", "message": "boom"}),
+                replayed,
+            )
+        )
+        self.assertFalse(_payload_matches(existing, {**replayed, "message": "other"}))
 
     def test_create_job_rejects_non_bool_web_search_enabled(self):
         """create_job 不再宽松转换，非布尔值直接抛 ValueError。"""

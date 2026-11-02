@@ -77,7 +77,7 @@
         "status",
         "provenance"
       ],
-      "sha256": "e5ed28d99ce6e49c2d96588a8110d868fa765480b4b201f846695a16b4ea90d7",
+      "sha256": "456ade97ff96bf28b9837f1cd53b255696c3709ab18551917ddc76bccd136bdd",
       "title": "AlgorithmResult"
     },
     "AlgorithmResultProvenance": {
@@ -294,6 +294,7 @@
     "GraphEdge": {
       "properties": [
         "edge_type",
+        "prediction",
         "source",
         "target",
         "weight"
@@ -302,7 +303,7 @@
         "source",
         "target"
       ],
-      "sha256": "31cb634ae48fad84dc221be40fcff438ddcba9b6b893ee55e2d5dc9abf6f3ae6",
+      "sha256": "bc3159b0e2dc3134b6410ae618c0402e27d7e2a3a31c4fcc178a7e5163b19c22",
       "title": "GraphEdge"
     },
     "GraphValidation": {
@@ -505,14 +506,16 @@
     },
     "StandardizedGraph": {
       "properties": [
+        "edge_score_matrix",
         "edges",
         "graph_semantics",
-        "nodes"
+        "nodes",
+        "score_type"
       ],
       "required": [
         "graph_semantics"
       ],
-      "sha256": "dca4ab789e84a85fc28004cde8380e150f0122412979e717d46d92bfcfa10437",
+      "sha256": "a3eb17feecaccac1b8bab5edbb68e5c8136743867c71d190a20d41537d49180f",
       "title": "StandardizedGraph"
     },
     "WebEvidenceResult": {
@@ -554,14 +557,14 @@
     },
     {
       "capability_id": "causal.cdfm",
-      "schema_sha256": "833fc380608aec4179772f57e361693471758572646524839cbd60374db80dc7",
-      "spec_digest": "8490f843bd67d09ddca05662689886016db4a3df35780942e1169d029c14220c",
+      "schema_sha256": "385c538df8c00298de501b5fc06ef4eff28b8e365f83f8811c492353f5fd829c",
+      "spec_digest": "0d28f5d6eda546df490f48541da9200582b924a308d44277939468ce0e0362cd",
       "tool_name": "causal_cdfm"
     },
     {
       "capability_id": "causal.direct_lingam",
       "schema_sha256": "97654a33c42ade597f332000a44f260e2db45bc7ea5581c85df01e5f2332d4a7",
-      "spec_digest": "6fe17dc33c7f78d005bd14b2b14aaf01dfaf925c406547e34399b122a0f92b58",
+      "spec_digest": "d4081c00e524ba4819c5f1980d4506d8112ac381f6ae5fc997a5f080802d23b2",
       "tool_name": "causal_direct_lingam"
     },
     {
@@ -573,7 +576,7 @@
     {
       "capability_id": "causal.pc",
       "schema_sha256": "3a54f6cda9165744432f7f48b6f90d9cca2f1313401af842422461cc89bc1148",
-      "spec_digest": "a9c74cd28ad8abea8e8fd10d5e1ad0f48699fb39947af8b87a580efb0d438953",
+      "spec_digest": "13ce4b31c5ffe4e09bdd26c00d2329f50ef24c9122fe8b2f382e8e5eb2e8156d",
       "tool_name": "causal_pc"
     }
   ]

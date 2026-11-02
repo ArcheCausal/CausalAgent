@@ -162,6 +162,37 @@ def test_final_analysis_decision_rejects_multiple_primary_graphs() -> None:
         )
 
 
+def test_standardized_graph_validates_probability_scores() -> None:
+    graph = StandardizedGraph(
+        graph_semantics="acyclic_directed_mixed_graph",
+        nodes=["X0", "X1"],
+        edge_score_matrix=[[0.0, 0.9], [0.1, 0.0]],
+        score_type="probability",
+    )
+    assert graph.edge_score_matrix == [[0.0, 0.9], [0.1, 0.0]]
+    assert graph.score_type == "probability"
+
+    with pytest.raises(ValidationError):
+        StandardizedGraph(graph_semantics="x", nodes=["X0"], edge_score_matrix=[[0.5]])
+    with pytest.raises(ValidationError):
+        StandardizedGraph(graph_semantics="x", nodes=["X0"], score_type="probability")
+    with pytest.raises(ValidationError):
+        StandardizedGraph(
+            graph_semantics="x", nodes=["X0", "X1"],
+            edge_score_matrix=[[1.2, 0.0], [0.0, 0.0]], score_type="probability",
+        )
+    with pytest.raises(ValidationError):
+        StandardizedGraph(
+            graph_semantics="x", nodes=["X0", "X1"],
+            edge_score_matrix=[[0.0, 0.0]], score_type="probability",
+        )
+    with pytest.raises(ValidationError):
+        StandardizedGraph(
+            graph_semantics="x", nodes=["X0"],
+            edge_score_matrix=[[0.5]], score_type="coefficient",
+        )
+
+
 def _decision_payload():
     return {"outcome": "algorithm_supported", "primary_graph_result_ref": "graph:0",
             "primary_effect_result_ref": "effect:0", "effect_status": "adopted",

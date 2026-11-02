@@ -284,6 +284,46 @@ class OrderedEventWriterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(diagnostic.reason_code, "connection_unavailable")
         self.assertIs(diagnostic.exc_info[1], error)
 
+    async def test_complete_terminal_payload_carries_usage_snapshot(self):
+        """final_result / interrupt 落库前附加累计用量。"""
+        class Collector:
+            def snapshot(self):
+                return {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
+
+        for event_type in ("final_result", "interrupt"):
+            with self.subTest(event_type=event_type):
+                writer = OrderedEventWriter(
+                    build_job(), "worker-a", usage_collector=Collector()
+                )
+                complete = AsyncMock(return_value=True)
+                with patch(
+                    "app.agent.worker.event_writer._complete_terminal_event",
+                    new=complete,
+                ):
+                    await writer.submit({"type": event_type, "data": {}})
+                    await writer.close()
+                payload = complete.call_args.args[2]
+                self.assertEqual(
+                    payload["usage"],
+                    {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+                )
+
+    async def test_error_terminal_passes_usage_to_fail_job(self):
+        """error 事件由 fail_job 写入，用量必须作为参数传进去。"""
+        class Collector:
+            def snapshot(self):
+                return {"input_tokens": 4, "output_tokens": 1, "total_tokens": 5}
+
+        writer = OrderedEventWriter(build_job(), "worker-a", usage_collector=Collector())
+        fail_job = Mock(return_value=FailJobResult.APPLIED)
+        with patch("app.agent.job_service.fail_job", fail_job):
+            await writer.submit({"type": "error", "message": "safe"})
+            await writer.close()
+        self.assertEqual(
+            fail_job.call_args.kwargs["usage"],
+            {"input_tokens": 4, "output_tokens": 1, "total_tokens": 5},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
