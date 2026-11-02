@@ -15,6 +15,7 @@ from pathlib import Path
 
 import dataset as ds
 import evaluate as ev
+import manifest
 import report as rp
 from answer import answer_for
 from client import AgentClient, ClientError, TransportError
@@ -80,6 +81,14 @@ def _git_commit() -> str:
         ).strip()
     except Exception:
         return "unknown"
+
+
+def _manifest_gate(run_dir: Path, config: Config, specs,
+                   git_commit: str, force: bool) -> list[str]:
+    existing = manifest.read(run_dir / "manifest.json")
+    if existing is None:
+        raise manifest.ManifestError("运行清单缺失，旧目录不可续跑")
+    return manifest.check(existing, config, specs, git_commit, force)
 
 
 def usage_totals(records) -> dict[str, int]:
@@ -511,7 +520,12 @@ def main(argv=None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--force-resume", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.force_resume and not args.resume:
+        print("--force-resume 只能与 --resume 一起使用", file=sys.stderr)
+        return 1
 
     config = load_config(args.config)
     specs_all = ds.scan(config.data.dir)
@@ -559,6 +573,25 @@ def main(argv=None) -> int:
             if next(csv.reader(handle), []) != RESULT_HEADER:
                 print("results.csv 表头与当前版本不一致，请换新目录运行", file=sys.stderr)
                 return 1
+    if args.resume:
+        try:
+            identity_mismatches = _manifest_gate(
+                run_dir, config, specs, _git_commit(), args.force_resume
+            )
+        except manifest.ManifestError as exc:
+            print("续跑身份不一致：", file=sys.stderr)
+            print(str(exc), file=sys.stderr)
+            return 1
+        if identity_mismatches:
+            print("警告：续跑身份不一致（--force-resume）")
+            for item in identity_mismatches:
+                print(f"  - {item}")
+    else:
+        manifest.write(
+            run_dir / "manifest.json",
+            manifest.build(config, specs, run_id, _git_commit()),
+        )
+        identity_mismatches = []
     done = _load_done(results_path) if args.resume else set()
     pending = [spec for spec in specs if spec.dataset_id not in done]
 
@@ -601,6 +634,7 @@ def main(argv=None) -> int:
         "data_dir": str(config.data.dir), "parallel": config.run.parallel,
         "sampling": {"mechanisms": len({spec.mechanism for spec in specs}),
                      "per_cell": config.data.per_cell, "seed": config.run.seed},
+        "identity_mismatches": identity_mismatches,
     }
     summary = rp.summarize(rows, meta)
     with (run_dir / "summary.csv").open("w", encoding="utf-8-sig", newline="") as handle:

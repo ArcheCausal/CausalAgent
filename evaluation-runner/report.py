@@ -161,6 +161,14 @@ def report_markdown(rows: list[dict], meta: dict) -> str:
         f"- 失败分布: {summary['failure_reasons'] or '-'}",
         "",
     ]
+    mismatches = meta.get("identity_mismatches") or []
+    if mismatches:
+        lines += ["## 续跑身份差异", ""]
+        lines += [f"- {item}" for item in mismatches]
+        lines += [
+            "- 本次使用 --force-resume 继续，前后行可能不可比。",
+            "",
+        ]
     lines += _table("按机制", by_mechanism)
     lines += _table("按 D", by_dim)
     lines += _table("按 N", by_n)

@@ -1039,6 +1039,41 @@ def test_manifest_detects_config_commit_and_version_changes():
                    for item in manifest.verify(data, config, specs, "abc"))
 
 
+def test_manifest_gate_blocks_and_allows_force():
+    with tempfile.TemporaryDirectory() as tmp:
+        root, specs, config = _manifest_fixture(tmp)
+        run_dir = root / "run"
+        run_dir.mkdir()
+        try:
+            rn._manifest_gate(run_dir, config, specs, "abc", False)
+        except manifest.ManifestError:
+            pass
+        else:
+            raise AssertionError("缺少清单应抛 ManifestError")
+
+        data = manifest.build(config, specs, "r1", "abc")
+        data["datasets"][0]["sha256"] = "bad"
+        manifest.write(run_dir / "manifest.json", data)
+        try:
+            rn._manifest_gate(run_dir, config, specs, "abc", False)
+        except manifest.ManifestError:
+            pass
+        else:
+            raise AssertionError("不一致且未 force 应抛 ManifestError")
+        problems = rn._manifest_gate(run_dir, config, specs, "abc", True)
+        assert any("sha256" in item for item in problems)
+
+
+def test_report_renders_identity_mismatches():
+    markdown = report.report_markdown(
+        [_row()],
+        {"run_id": "r1", "git_commit": "abc",
+         "identity_mismatches": ["git_commit: 'a' -> 'b'"]},
+    )
+    assert "续跑身份差异" in markdown
+    assert "git_commit: 'a' -> 'b'" in markdown
+
+
 def run_tests() -> int:
     tests = [(name, value) for name, value in sorted(globals().items()) if name.startswith("test_")]
     failures = 0
