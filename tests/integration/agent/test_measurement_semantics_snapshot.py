@@ -25,13 +25,24 @@ from tests.support.local_algorithm_execution import LocalAlgorithmExecutor, PC_C
 
 
 def _report(declarations: object) -> dict:
+    csv_data = PC_CSV
+    if isinstance(declarations, (list, tuple)) and any(
+        isinstance(item, dict) and item.get("kind") == "binary" for item in declarations
+    ):
+        from io import StringIO
+        import pandas as pd
+
+        frame = pd.read_csv(StringIO(csv_data))
+        frame["x"] = (frame["x"] > 0).astype(int)
+        csv_data = frame.to_csv(index=False)
     return validate_candidate(
-        data_bytes=PC_CSV.encode(), script_bytes=b"import pandas as pd\n",
+        data_bytes=csv_data.encode(), script_bytes=b"import pandas as pd\n",
         metadata={
+            "analysis_columns": ["x", "y"],
             "summary": "保留观测", "observation_unit": "每行一条观测",
             "transformations": ["保留行列"], "variable_semantics": {},
         },
-        analysis_parameters={"measurement_semantics": declarations},
+        analysis_parameters={"effect_request": None, "measurement_semantics": declarations},
         specifications=DEFAULT_ALGORITHM_SPECS, max_bytes=100_000,
     )
 
@@ -63,7 +74,10 @@ def test_validation_persists_normalized_semantics(kind: str) -> None:
 def test_validation_rejects_invalid_or_conflicting_declarations(declarations: object) -> None:
     report = _report(declarations)
     assert report["accepted"] is False
-    assert any(issue["code"] == "measurement_semantics_invalid" for issue in report["errors"])
+    code = "measurement_columns_invalid" if declarations == [
+        {"column": "absent", "kind": "continuous", "evidence": "x"}
+    ] else "measurement_semantics_invalid"
+    assert any(issue["code"] == code for issue in report["errors"])
     with pytest.raises(ValueError):
         semantic_kinds_from_validation_report(report)
 
@@ -161,7 +175,7 @@ def test_missing_snapshot_is_rejected_instead_of_assuming_continuous() -> None:
 
 
 @pytest.mark.parametrize("spec,kind,expected", [
-    (PC_SPEC, "category", "valid"),
+    (PC_SPEC, "category", "not_applicable"),
     (DIRECT_LINGAM_SPEC, "category", "not_applicable"),
     (DIRECT_LINGAM_SPEC, "continuous", "valid"),
 ])

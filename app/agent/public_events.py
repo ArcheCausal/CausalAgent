@@ -148,6 +148,27 @@ def _public_processing_plan(value: Any) -> dict[str, Any] | None:
             if isinstance(source, str) and 0 < len(source) <= 255
             and (output is None or isinstance(output, str) and 0 < len(output) <= 255)
         }
+    if "analysis_columns" in value:
+        columns = value["analysis_columns"]
+        if (not isinstance(columns, (list, tuple)) or not 0 < len(columns) <= 128
+                or any(not isinstance(name, str) or not name.strip()
+                       or name != name.strip() or len(name) > 255 for name in columns)
+                or len(set(columns)) != len(columns)):
+            return None
+        public["analysis_columns"] = list(columns)
+    if "derived_measurement_semantics" in value:
+        from Agent.deep_agent_tools.interaction import DerivedMeasurementSemantic
+
+        declarations = value["derived_measurement_semantics"]
+        if not isinstance(declarations, (list, tuple)) or len(declarations) > 128:
+            return None
+        try:
+            public["derived_measurement_semantics"] = [
+                DerivedMeasurementSemantic.model_validate(item).model_dump(mode="json")
+                for item in declarations
+            ]
+        except ValueError:
+            return None
     # 效应定义不能截断、部分过滤或把校验失败改为 null。缺字段继续表示未记录。
     if "effect_request" in value:
         try:

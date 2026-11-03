@@ -32,7 +32,7 @@ class RunnerSpec:
 
 
 def _pc(
-    csv_data: str, parameters: Mapping[str, Any], _artifacts: Mapping[str, Any]
+    csv_data: str, parameters: Mapping[str, Any], artifacts: Mapping[str, Any]
 ) -> dict[str, Any]:
     from Agent.causal.causalachieve import run_pc_analysis
 
@@ -40,6 +40,7 @@ def _pc(
         csv_data,
         alpha=float(parameters.get("alpha", 0.05)),
         test=str(parameters.get("test") or "auto"),
+        semantic_kinds=artifacts.get("semantic_kinds"),
     )
 
 

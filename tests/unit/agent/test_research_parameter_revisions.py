@@ -133,6 +133,7 @@ def test_null_roles_and_one_compatible_algorithm_still_allow_analysis():
     metadata = {PARAMETER_BINDING_KEY: parameter_binding(parameters, [], job_id=JOB),
                 "summary": "保留原始观察行", "observation_unit": "每行一个观察",
                 "transformations": ["保留原始字段"],
+                "analysis_columns": ["category", "value"],
                 "variable_semantics": {"category": "类别标签", "value": "测量值"}}
     report = validate_candidate(
         data_bytes=b"category,value\na,1\nb,2\na,3\n", script_bytes=b"pass",

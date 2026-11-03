@@ -102,6 +102,14 @@ def validate_candidate(
     if not isinstance(metadata, Mapping):
         metadata = {}
         errors.append(_issue("metadata_invalid", "缺少处理语义说明"))
+    analysis_columns = metadata.get("analysis_columns")
+    if (not isinstance(analysis_columns, (list, tuple)) or not analysis_columns
+            or any(not isinstance(name, str) or not name.strip() or name != name.strip()
+                   or len(name) > 255 for name in analysis_columns)
+            or len(set(analysis_columns)) != len(analysis_columns)):
+        errors.append(_issue("analysis_columns_invalid", "处理方案必须声明唯一且有序的分析列"))
+    elif tuple(analysis_columns) != columns:
+        errors.append(_issue("analysis_columns_mismatch", "实际 CSV 列名及顺序必须与 analysis_columns 完全一致；请修正脚本"))
     summary = metadata.get("summary")
     observation_unit = metadata.get("observation_unit")
     transformations = metadata.get("transformations")
@@ -138,13 +146,18 @@ def validate_candidate(
     except ValueError:
         semantic_kinds = {}
         errors.append(_issue("measurement_semantics_invalid", "测量语义包含非法类型、字段或冲突声明"))
+    for column, kind in semantic_kinds.items():
+        if kind == "binary" and not frame[column].dropna().isin([0, 1]).all():
+            errors.append(_issue("binary_values_invalid", "声明为 binary 的输出列非缺失值只能为 0 或 1"))
     role_columns = {}
     try:
         resolved = execution_parameters(parameters, metadata)
         role_columns = dict(metadata.get("role_columns", {}))
-    except ParameterContractError:
+    except ValueError:
         resolved = parameters
-        errors.append(_issue("role_columns_invalid", "角色列映射必须为已指定研究角色对应的非空列名"))
+        if not any(issue["code"] in {"measurement_columns_invalid", "measurement_semantics_invalid"}
+                   for issue in errors):
+            errors.append(_issue("role_columns_invalid", "角色列映射必须为已指定研究角色对应的非空列名"))
     target = _optional_column_name(resolved.get("target"))
     treatment = _optional_column_name(resolved.get("treatment"))
     if target and treatment and target == treatment:

@@ -447,7 +447,8 @@ PC_SPEC = AlgorithmSpec(
     public_name="PC 因果发现",
     description=(
         "在表格数据上使用 PC 方法发现条件独立结构并生成部分有向图。"
-        "适用于一般观测因果发现；需要数值或可确定性编码的表格数据，"
+        "auto 根据已校验测量语义选择检验：全连续用 Fisher-Z，全离散用卡方；混合、未知类型或高基数计数不适用。"
+        "需要数值或可确定性编码的表格数据，"
         "不应在明显存在潜在混杂且需要专门处理时作为唯一方法。"
     ),
     model_input_schema=CausalPcInput,

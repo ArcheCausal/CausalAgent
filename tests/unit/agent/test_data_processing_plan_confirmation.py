@@ -17,6 +17,7 @@ JOB_ID = "00000000-0000-0000-0000-000000000901"
 SOURCE_HASH = "a" * 64
 SEMANTIC_IDENTITY = "b" * 64
 METADATA = {
+    "analysis_columns": ["alarm_count"], "derived_measurement_semantics": [],
     "summary": "按设备和日期统计告警数。",
     "observation_unit": "设备-日期",
     "transformations": ["按设备和日期分组并计数"],

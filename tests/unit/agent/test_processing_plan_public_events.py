@@ -17,6 +17,7 @@ PLAN_VERSION = "0123456789abcdef" * 4
 
 def _plan() -> dict:
     return {
+        "analysis_columns": ["alarm_count"], "derived_measurement_semantics": [],
         "summary": "按设备和日期统计告警数。",
         "observation_unit": "设备-日期",
         "transformations": ["按设备和日期分组并计数"],
@@ -39,6 +40,20 @@ def _interaction(**overrides: object) -> dict:
         "plan": _plan(),
         **overrides,
     }
+
+
+def test_analysis_columns_and_derived_measurements_survive_public_replay():
+    plan = {**_plan(), "derived_measurement_semantics": [
+        {"column": "alarm_count", "kind": "count", "evidence": "按设备日期统计次数"}]}
+    public = public_event_payload("interrupt", {"interaction": _interaction(plan=plan)})
+    assert public["interaction"]["plan"] == plan
+    assert json.loads(json.dumps(public))["interaction"]["plan"]["analysis_columns"] == ["alarm_count"]
+
+
+@pytest.mark.parametrize("columns", [[], ["a", "a"], [" a"], [""], list(map(str, range(129)))])
+def test_invalid_analysis_column_list_is_not_partially_published(columns):
+    public = public_event_payload("interrupt", {"interaction": _interaction(plan={**_plan(), "analysis_columns": columns})})
+    assert "plan" not in public.get("interaction", {})
 
 
 def test_confirmation_request_survives_public_event_projection() -> None:
@@ -208,6 +223,7 @@ def test_absent_optional_limitations_use_the_contract_default() -> None:
 @pytest.mark.parametrize("extra_length", [0, 1, 1000])
 def test_plan_text_and_collection_limits(extra_length: int) -> None:
     plan = {
+        "analysis_columns": ["column_0"], "derived_measurement_semantics": [],
         "summary": "概" * (1200 + extra_length),
         "observation_unit": "观" * (500 + extra_length),
         "transformations": ["转" * (600 + extra_length)] * (12 + extra_length),
@@ -224,6 +240,7 @@ def test_plan_text_and_collection_limits(extra_length: int) -> None:
 
     expected = {
         "summary": "概" * 1200,
+        "analysis_columns": ["column_0"], "derived_measurement_semantics": [],
         "observation_unit": "观" * 500,
         "transformations": ["转" * 600] * 12,
         "variable_semantics": {f"column_{index}": "义" * 600 for index in range(128)},

@@ -62,7 +62,8 @@ class LocalAlgorithmExecutor:
         self.executor_pool = executor_pool
         self.data_profile = build_data_profile_from_csv(csv_data)
         kinds = normalize_semantic_kinds(
-            {} if semantic_kinds is None else semantic_kinds,
+            {"x": "continuous", "y": "continuous"}
+            if semantic_kinds is None and csv_data == PC_CSV else (semantic_kinds or {}),
             columns=self.data_profile.column_names,
         )
         self.analysis_parameters = (
@@ -74,6 +75,7 @@ class LocalAlgorithmExecutor:
                 for column, kind in kinds.items()
             ])
         self.metadata = {
+            "analysis_columns": list(self.data_profile.column_names),
             "summary": "本地算法输入，不执行转换",
             "observation_unit": "CSV 中的一条观测记录",
             "transformations": ["保留原始行列和值"],

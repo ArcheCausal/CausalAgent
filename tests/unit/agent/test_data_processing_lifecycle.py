@@ -16,6 +16,7 @@ JOB = "00000000-0000-0000-0000-000000000978"
 SOURCE = "a" * 64
 SEMANTIC = "b" * 64
 PLAN = {"summary": "保留观测值", "observation_unit": "一次观测",
+        "analysis_columns": ["x", "y"], "derived_measurement_semantics": [],
         "transformations": ["保留字段"], "variable_semantics": {"x": "测量值"}, "role_columns": {}, "measurement_columns": {}, "limitations": [],
         "effect_execution_context": None}
 SCRIPT = "print('prepare')"

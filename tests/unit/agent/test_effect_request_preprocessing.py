@@ -35,6 +35,7 @@ CONTEXT = {"treatment_column": "flow", "outcome_column": "yield", "treatment_uni
 PLAN = {"summary": "保留原始观测", "observation_unit": "一次实验", "transformations": ["保留原始值"],
         "variable_semantics": {"flow": "流量", "yield": "产量"},
         "role_columns": {"target": "yield", "treatment": "flow"},
+        "analysis_columns": ["flow", "yield"], "derived_measurement_semantics": [],
         "measurement_columns": {}, "limitations": [], "effect_execution_context": CONTEXT}
 
 
