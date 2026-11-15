@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from pathlib import Path
+
+from . import runner
 
 SCORED = ("success", "timeout_partial")
 METRICS = ("precision", "recall", "f1", "shd", "skeleton_precision", "skeleton_recall")
@@ -44,6 +47,7 @@ def _load_cases(run_dir):
 
 def _flat(case) -> dict:
     metrics = case.get("metrics") or {}
+    usage = case.get("usage") or {}
     return {
         "dataset": case.get("dataset", ""),
         "mechanism": case.get("mechanism", ""),
@@ -51,8 +55,23 @@ def _flat(case) -> dict:
         "n": case.get("n"),
         "status": case.get("status", ""),
         "reason": case.get("reason", ""),
+        "duration_s": case.get("duration_s"),
+        "final_algorithm": case.get("final_algorithm") or "",
+        "tokens_input": usage.get("tokens_input"),
+        "tokens_output": usage.get("tokens_output"),
+        "total_cost_usd": usage.get("total_cost_usd"),
         **{key: metrics.get(key) for key in METRICS},
     }
+
+
+def _canonical(text) -> list[str]:
+    lowered = str(text or "").lower()
+    return [
+        name
+        for name, keys in runner.ALGORITHM_PATTERNS.items()
+        if any(key in lowered for key in keys)
+        or re.search(rf"\b{re.escape(name.lower())}\b", lowered)
+    ]
 
 
 def _baseline(path) -> dict:
@@ -74,6 +93,7 @@ def build(run_dir, baseline_path=None) -> Path:
     scored = [row for row in rows if row["status"] in SCORED]
     baseline = _baseline(baseline_path)
     matched = [baseline[row["dataset"]] for row in rows if row["dataset"] in baseline]
+    matched_scored = [row for row in scored if row["dataset"] in baseline]
 
     summary = [
         {
@@ -139,6 +159,13 @@ def build(run_dir, baseline_path=None) -> Path:
         "## 总体指标（仅计分集）",
         "",
         f"计分集：{len(scored)} / {len(rows)}",
+    ]
+    if baseline and len(matched_scored) < len(scored):
+        lines.append(
+            f"> 样本不一致：agent 计分 {len(scored)} 集 / "
+            f"基线匹配 {len(matched_scored)} 集（按 dataset 匹配）。"
+        )
+    lines += [
         "",
         "| 指标 | Agent | 基线 |",
         "| --- | --- | --- |",
@@ -188,12 +215,63 @@ def build(run_dir, baseline_path=None) -> Path:
             f"| {_fmt(base_f1)} | {_fmt(delta)} | {_fmt(_mean(group_scored, 'shd'))} |"
         )
 
+    algorithms: dict[str, int] = {}
+    for row in rows:
+        for name in _canonical(row["final_algorithm"]) or ["（未识别）"]:
+            algorithms[name] = algorithms.get(name, 0) + 1
+    lines += ["", "## 算法选择", "", "| 算法 | 集数 |", "| --- | --- |"]
+    for name in sorted(algorithms, key=lambda item: (-algorithms[item], item)):
+        lines.append(f"| {name} | {algorithms[name]} |")
+
+    by_mechanism: dict[str, dict[str, int]] = {}
+    for row in rows:
+        families = _canonical(row["final_algorithm"])
+        if not families:
+            continue
+        counts = by_mechanism.setdefault(row["mechanism"], {})
+        for name in families:
+            counts[name] = counts.get(name, 0) + 1
+    lines += ["", "按机制众数：", "", "| 机制 | 众数 | 集数 |", "| --- | --- | --- |"]
+    if by_mechanism:
+        for mechanism in sorted(by_mechanism):
+            counts = by_mechanism[mechanism]
+            mode = max(counts, key=lambda item: (counts[item], item))
+            lines.append(f"| {mechanism} | {mode} | {counts[mode]} |")
+    else:
+        lines.append("| - | - | - |")
+
+    def _sum(group, key):
+        values = [_num(row.get(key)) for row in group]
+        values = [value for value in values if value is not None]
+        return sum(values) if values else None
+
+    durations = [value for value in (_num(row.get("duration_s")) for row in scored) if value is not None]
+    avg_duration = f"{sum(durations) / len(durations):.1f}" if durations else "-"
+    tokens_in = _sum(scored, "tokens_input")
+    tokens_out = _sum(scored, "tokens_output")
+    lines += [
+        "",
+        "## 成本与耗时",
+        "",
+        f"- 计分集：平均耗时 {avg_duration}s，"
+        f"token 输入 {int(tokens_in) if tokens_in is not None else '-'} / "
+        f"输出 {int(tokens_out) if tokens_out is not None else '-'}，"
+        f"成本 ${_fmt(_sum(scored, 'total_cost_usd'))}",
+        f"- 全部 case 成本合计（含未计分）：${_fmt(_sum(rows, 'total_cost_usd'))}",
+    ]
+
     failed = [row for row in rows if row["status"] not in SCORED]
     lines += ["", "## 未计分集", ""]
     if failed:
-        lines += ["| dataset | 状态 | 原因 |", "| --- | --- | --- |"]
+        lines += [
+            "| dataset | 状态 | 原因 | 耗时(s) | 算法 |",
+            "| --- | --- | --- | --- | --- |",
+        ]
         for row in failed:
-            lines.append(f"| {row['dataset']} | {row['status']} | {row.get('reason', '')} |")
+            lines.append(
+                f"| {row['dataset']} | {row['status']} | {row.get('reason', '')} "
+                f"| {_fmt(row.get('duration_s'))} | {row.get('final_algorithm') or '-'} |"
+            )
     else:
         lines.append("无。")
 
