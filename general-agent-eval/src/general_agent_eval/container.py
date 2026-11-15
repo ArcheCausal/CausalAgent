@@ -30,6 +30,11 @@ def image_digest(image: str) -> str:
     return _run(["inspect", "--format", "{{.Id}}", image]).stdout.strip()
 
 
+def docker_version() -> str | None:
+    proc = _run(["version", "--format", "{{.Server.Version}}"], check=False)
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
 def host_user_args(config) -> list[str]:
     # 让容器内写的文件归宿主当前用户，否则下一集 rmtree 会失败
     if not config["docker"].get("host_user") or not hasattr(os, "getuid"):

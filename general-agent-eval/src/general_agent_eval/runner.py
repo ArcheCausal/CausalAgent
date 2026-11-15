@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import shutil
+import signal
 import sys
 import time
 from datetime import datetime, timezone
@@ -260,15 +262,29 @@ def _row(run_id: str, payload: dict) -> dict:
 
 
 def _host_info() -> dict:
+    import platform
+
+    info = {"os": os.name, "python": platform.python_version()}
     try:
         uname = os.uname()
-        return {
-            "platform": f"{uname.sysname} {uname.release}",
-            "machine": uname.machine,
-            "uid": getattr(os, "getuid", lambda: None)(),
-        }
+        info.update(
+            platform=f"{uname.sysname} {uname.release}",
+            machine=uname.machine,
+            uid=os.getuid(),
+        )
     except AttributeError:
-        return {"platform": os.name}
+        info["platform"] = platform.platform()
+    return info
+
+
+def _lock_sha256() -> str | None:
+    path = data.toolbox_lock_path()
+    return data.sha256_file(path) if path.is_file() else None
+
+
+def _baseline_sha(config) -> str | None:
+    path = config.get("baseline_results")
+    return data.sha256_file(path) if path and Path(path).is_file() else None
 
 
 def _load_done(run_dir: Path) -> dict[str, str]:
@@ -335,25 +351,44 @@ def execute(config, specs, selection, resume_run=None) -> Path:
         meta = {
             "run_id": run_id,
             "started_at": datetime.now(timezone.utc).isoformat(),
-            "runtime": "docker",
-            "image": config["agent"]["image"],
-            "image_digest": container.image_digest(config["agent"]["image"]),
-            "model": config["agent"]["model"],
-            "base_url": config["agent"]["base_url"],
-            "timeout_s": config["agent"]["timeout_s"],
-            "selection": selection,
+            "runtime": {
+                "mode": "docker",
+                "image": config["agent"]["image"],
+                "image_id": container.image_digest(config["agent"]["image"]),
+                "docker_version": container.docker_version(),
+            },
+            "agent": {
+                "model": config["agent"]["model"],
+                "base_url": config["agent"]["base_url"],
+                "claude_version": None,
+            },
+            "toolbox": {"lock_sha256": _lock_sha256(), "pre_freeze_sha256": None},
             "data": {
                 "name": config["data"]["name"],
                 "local_dir": str(config["data"].get("local_dir") or ""),
-                "fingerprint": data.fingerprint(root),
+                "dataset_sha256": data.dataset_sha256(root),
+                "baseline_sha256": _baseline_sha(config),
             },
             "host": _host_info(),
+            "selection": selection,
+            "timeout_s": config["agent"]["timeout_s"],
+            "env_drift_cases": [],
         }
         _atomic_json(run_dir / "run.json", meta)
         done = {}
 
+    # 清理上次中断留下的同 run 容器
+    container.kill_run(run_id, "KILL")
+
     results_path = run_dir / "results.csv"
     new_file = not results_path.exists()
+    previous = {}
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous[sig] = signal.getsignal(sig)
+            signal.signal(sig, _raise_interrupt)
+        except (ValueError, OSError):
+            pass
     with results_path.open("a", newline="", encoding="utf-8-sig" if new_file else "utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=RESULT_HEADER)
         if new_file:

@@ -28,13 +28,19 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def fingerprint(root: Path) -> str:
-    """目录指纹：相对路径 + 文件大小，足够判断两次运行是否同一批数据。"""
-    digest = hashlib.blake2b(digest_size=16)
+def dataset_sha256(root: Path) -> str:
+    """对相对路径排序后聚合文件内容 sha256，替代只按大小的指纹。"""
+    digest = hashlib.sha256()
     for path in sorted(Path(root).rglob("*.npz")):
-        rel = path.relative_to(root).as_posix()
-        digest.update(f"{rel}:{path.stat().st_size}\n".encode())
+        digest.update(path.relative_to(root).as_posix().encode())
+        digest.update(b"\n")
+        digest.update(sha256_file(path).encode())
+        digest.update(b"\n")
     return digest.hexdigest()
+
+
+def toolbox_lock_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "docker" / "toolbox.lock"
 
 
 def ensure_data(config) -> Path:
