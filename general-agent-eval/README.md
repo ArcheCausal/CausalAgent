@@ -28,6 +28,9 @@ general-agent-eval --config config.yaml setup --build
 general-agent-eval --config config.yaml run \
   --mechanisms Linear --dims 10 --ns 500 --limit 1
 
+# 交互选择（不传三参）
+general-agent-eval --config config.yaml run
+
 # 生成报告
 general-agent-eval --config config.yaml report --run ~/general-agent-eval-runs/runs/<run_id>
 ```
@@ -39,7 +42,7 @@ general-agent-eval --config config.yaml report --run ~/general-agent-eval-runs/r
 | `setup` | 检查 Docker/镜像/baseline，打印可选机制/D/N；`--build` 显式构建镜像 |
 | `selftest` | 离线自检，不联网不调 Docker |
 | `doctor` | 十项环境检查，任何 FAIL 都别开跑 |
-| `run` | 必须显式 `--mechanisms --dims --ns`；`--dry-run` 只选集 |
+| `run` | 缺参时 TTY 交互多选；`all` 全选；`--yes` 跳过确认；`--dry-run` 只选集 |
 | `resume --run <dir>` | 按 `case.json` 状态跳过已完成集 |
 | `report --run <dir>` | 只读 `case.json` 重建 `summary.csv` / `report.md` |
 | `smoke --yes` | 端到端跑一集，必须确认 |
@@ -66,6 +69,10 @@ general-agent-eval --config config.yaml report --run ~/general-agent-eval-runs/r
 `run.json` 记录镜像 digest、Docker 版本、CLI 版本、toolbox.lock 哈希、
 数据集/baseline 哈希与 `env_drift_cases`；`report.md` 会列出 pre/post 缺失的 case
 和运行期依赖漂移。
+
+报告新增算法选择分布、按机制众数、token/成本/耗时汇总；未计分集带耗时与算法；
+基线按 dataset 匹配不足时标注样本不一致。`results.csv` 新增 `algorithms` 列记录本集
+试过的全部算法，`final_algorithm` 保持原始文本。
 
 ## 本机构建备注
 
