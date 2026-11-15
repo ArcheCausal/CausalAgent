@@ -39,3 +39,31 @@ def test_env_drift_detects_freeze_change(tmp_path: Path):
     assert runner.env_drift(
         [("case-01", same), ("case-02", changed), ("case-03", missing)]
     ) == ["case-02"]
+
+
+def test_finish_enriches_run_json(tmp_path: Path):
+    run_dir = tmp_path / "runs" / "r"
+    case_dir = run_dir / "cases" / "case-01"
+    (case_dir / ".harness").mkdir(parents=True)
+    (run_dir / "run.json").write_text(json.dumps({
+        "run_id": "r",
+        "agent": {"claude_version": None},
+        "toolbox": {"pre_freeze_sha256": None},
+        "env_drift_cases": [],
+    }), encoding="utf-8")
+    (case_dir / "case.json").write_text(json.dumps({
+        "dataset": "M/D010_N100/rep00",
+        "case": "case-01",
+        "status": "success",
+    }), encoding="utf-8")
+    _write_harness(
+        case_dir, "pre", ["pandas==2", "numpy==1"], claude="2.1.322 (Claude Code)"
+    )
+    _write_harness(case_dir, "post", ["numpy==1", "pandas==2"])
+
+    runner._finish(run_dir)
+    meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert meta["agent"]["claude_version"] == "2.1.322 (Claude Code)"
+    assert meta["toolbox"]["pre_freeze_sha256"]
+    assert meta["env_drift_cases"] == []
+    assert meta["status_counts"] == {"success": 1}

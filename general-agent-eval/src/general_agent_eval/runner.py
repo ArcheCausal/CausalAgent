@@ -342,21 +342,28 @@ def _finish(run_dir: Path) -> None:
     meta = json.loads(path.read_text(encoding="utf-8"))
     meta["finished_at"] = datetime.now(timezone.utc).isoformat()
 
-    versions, statuses = set(), {}
+    statuses: dict[str, int] = {}
+    cases: list[tuple[str, Path]] = []
+    first_pre = None
     for case in sorted((run_dir / "cases").glob("*/case.json")):
         try:
             payload = json.loads(case.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        statuses[payload.get("status", "unknown")] = statuses.get(payload.get("status", "unknown"), 0) + 1
-        pre = case.parent / ".harness" / "pre.json"
-        if pre.exists():
-            try:
-                versions.add(json.loads(pre.read_text(encoding="utf-8")).get("claude", ""))
-            except (OSError, json.JSONDecodeError):
-                pass
-    meta["claude_versions"] = sorted(v for v in versions if v)
+        status = payload.get("status", "unknown")
+        statuses[status] = statuses.get(status, 0) + 1
+        cases.append((payload.get("case") or case.parent.name, case.parent))
+        if first_pre is None:
+            first_pre = _harness(case.parent, "pre")
+
     meta["status_counts"] = statuses
+    meta["env_drift_cases"] = env_drift(cases)
+    if first_pre:
+        meta.setdefault("agent", {})["claude_version"] = first_pre.get("claude")
+        freeze = _freeze(first_pre)
+        meta.setdefault("toolbox", {})["pre_freeze_sha256"] = (
+            hashlib.sha256("\n".join(freeze).encode()).hexdigest() if freeze else None
+        )
     _atomic_json(path, meta)
 
 
