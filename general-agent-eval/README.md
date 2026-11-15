@@ -18,8 +18,11 @@ pytest -q
 # 环境检查（Docker / 镜像 / 密钥 / 挂载）
 general-agent-eval --config config.yaml doctor
 
-# 看有什么数据集
+# 环境齐备检查（Docker / 镜像 / 数据 / baseline）
 general-agent-eval --config config.yaml setup
+
+# 镜像缺失时显式构建（耗时，需网络）
+general-agent-eval --config config.yaml setup --build
 
 # 跑一集（付费）
 general-agent-eval --config config.yaml run \
@@ -33,7 +36,7 @@ general-agent-eval --config config.yaml report --run ~/general-agent-eval-runs/r
 
 | 命令 | 说明 |
 | --- | --- |
-| `setup` | 扫描数据集目录，打印可选机制/D/N |
+| `setup` | 检查 Docker/镜像/baseline，打印可选机制/D/N；`--build` 显式构建镜像 |
 | `selftest` | 离线自检，不联网不调 Docker |
 | `doctor` | 十项环境检查，任何 FAIL 都别开跑 |
 | `run` | 必须显式 `--mechanisms --dims --ns`；`--dry-run` 只选集 |
@@ -60,8 +63,12 @@ general-agent-eval --config config.yaml report --run ~/general-agent-eval-runs/r
     └── .harness/     # pre.json / post.json / home/
 ```
 
+`run.json` 记录镜像 digest、Docker 版本、CLI 版本、toolbox.lock 哈希、
+数据集/baseline 哈希与 `env_drift_cases`；`report.md` 会列出 pre/post 缺失的 case
+和运行期依赖漂移。
+
 ## 本机构建备注
 
 - 手册基线是 `python:3.11-slim-bookworm`；本机 Docker 代理（127.0.0.1:7897）不可达、镜像源 403，改用本地已存在的 `python:3.11-slim`（Debian 13/trixie）。换机器能拉 bookworm 时建议改回。
-- `CLAUDE_VERSION` 默认 `latest`；正式跑之前用 `--build-arg CLAUDE_VERSION=<版本>` 重建并在报告里记录。
+- `CLAUDE_VERSION` 固定为已验证的 `2.1.322`；升级需重建镜像，`run.json` 记录容器内实际版本。
 - 容器联网仅做了"不挂敏感目录"的隔离，Bash 仍可 curl；严格网络隔离需后续 `--network none` / 白名单。

@@ -1,6 +1,7 @@
 FROM python:3.11-slim
 
-ARG CLAUDE_VERSION=latest
+# 当前已验证版本；升级需重建镜像并更新报告记录
+ARG CLAUDE_VERSION=2.1.322
 
 # 国内 apt 源；bookworm 的源文件是 debian.sources，不是 sources.list
 RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
