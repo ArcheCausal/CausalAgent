@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -32,13 +33,51 @@ def _chosen(config, selection, limit=0):
     return chosen[:limit] if limit else chosen
 
 
-def _selection(config, args) -> dict:
+def _parse_picks(raw: str, size: int) -> list[int]:
+    parts = [item for item in re.split(r"[,\s]+", raw.strip()) if item]
+    if not parts:
+        raise ValueError("空输入")
+    picks: list[int] = []
+    for item in parts:
+        if not item.isdigit():
+            raise ValueError(f"非法编号：{item}")
+        index = int(item) - 1
+        if index < 0 or index >= size:
+            raise ValueError(f"编号超出范围：{item}")
+        if index in picks:
+            raise ValueError(f"重复编号：{item}")
+        picks.append(index)
+    return picks
+
+
+def _expand_list(items, values) -> list:
+    if any(str(item).lower() == "all" for item in items):
+        return list(values)
+    return list(items)
+
+
+def _expand_csv(text, values) -> list:
+    items = [item.strip() for item in str(text or "").split(",") if item.strip()]
+    return _expand_list(items, values)
+
+
+def estimate_text(count: int, config) -> str:
+    est = config.get("estimate") or {}
+    seconds = float(est.get("seconds_per_case", 600))
+    cost = float(est.get("cost_usd_per_case", 0.6))
+    return (
+        f"预计耗时约 {seconds * count / 60:.1f} 分钟，成本约 ${cost * count:.2f}"
+        f"（{count} 集 × 单集 {seconds:.0f}s / ${cost:.2f}）"
+    )
+
+
+def _selection(config, args, available) -> dict:
     return {
-        "mechanisms": [item for item in args.mechanisms.split(",") if item],
-        "dims": list(args.dims),
-        "ns": list(args.ns),
+        "mechanisms": _expand_csv(args.mechanisms, available["mechanisms"]),
+        "dims": _expand_list(args.dims or [], available["dims"]),
+        "ns": _expand_list(args.ns or [], available["ns"]),
         "per_cell": args.per_cell or int(config["selection"]["per_cell"]),
-        "seed": int(config["selection"]["seed"]),
+        "seed": args.seed if args.seed is not None else int(config["selection"]["seed"]),
     }
 
 
@@ -86,21 +125,60 @@ def cmd_setup(config, args) -> int:
     return 0 if ok else 1
 
 
+def _ask_axis(label: str, values: list) -> list:
+    print(f"{label}：")
+    for index, value in enumerate(values, 1):
+        print(f"  {index}) {value}")
+    while True:
+        raw = input("选择编号（逗号分隔，a=全选，回车中止）：").strip()
+        if not raw:
+            raise SystemExit(0)
+        if raw.lower() == "a":
+            return list(values)
+        try:
+            return [values[index] for index in _parse_picks(raw, len(values))]
+        except ValueError as exc:
+            print(f"输入无效：{exc}")
+
+
+def _resolve_selection(config, args, specs):
+    available = selector.available(specs)
+    if not (args.mechanisms and args.dims and args.ns):
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return None
+        if not args.mechanisms:
+            picked = _ask_axis("机制", available["mechanisms"])
+            args.mechanisms = ",".join(str(item) for item in picked)
+        if not args.dims:
+            args.dims = _ask_axis("维度 D", available["dims"])
+        if not args.ns:
+            args.ns = _ask_axis("样本量 N", available["ns"])
+    return _selection(config, args, available)
+
+
 def cmd_run(config, args) -> int:
     root = data.ensure_data(config)
     specs = selector.scan(root)
-    if not (args.mechanisms and args.dims and args.ns):
+    selection = _resolve_selection(config, args, specs)
+    if selection is None:
         print("必须显式指定 --mechanisms / --dims / --ns。可选值：", file=sys.stderr)
         print(json.dumps(selector.available(specs), ensure_ascii=False, indent=2), file=sys.stderr)
         return 2
 
-    selection = _selection(config, args)
     chosen = _chosen(config, selection, args.limit)
+    if not chosen:
+        print("没有匹配的数据集，请检查选择条件", file=sys.stderr)
+        return 2
     print(f"共 {len(chosen)} 集")
     for spec in chosen:
         print(" ", spec.dataset_id)
     if args.dry_run:
         return 0
+    if not args.yes and sys.stdin.isatty() and sys.stdout.isatty():
+        print(estimate_text(len(chosen), config))
+        if input("确认开跑？[y/N] ").strip().lower() not in ("y", "yes"):
+            print("已取消")
+            return 0
 
     _require_secret(config)
     runner.execute(config, chosen, selection)
@@ -179,6 +257,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--per-cell", type=int, default=0)
     run_parser.add_argument("--limit", type=int, default=0)
     run_parser.add_argument("--dry-run", action="store_true")
+    run_parser.add_argument("--seed", type=int, default=None)
+    run_parser.add_argument("--yes", action="store_true")
     run_parser.set_defaults(func=cmd_run)
 
     resume_parser = sub.add_parser("resume", help="续跑一次运行")
