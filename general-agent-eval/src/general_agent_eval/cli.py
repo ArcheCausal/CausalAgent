@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import data, runner, selector
+from . import container, data, runner, selector
 from .config import load_config
 
 
@@ -42,13 +42,48 @@ def _selection(config, args) -> dict:
     }
 
 
+def _report_check(name, fn):
+    try:
+        detail = fn()
+    except Exception as exc:
+        print(f"FAIL {name}  {str(exc)[:200]}")
+        return False
+    print(f"OK   {name}  {detail or ''}".rstrip())
+    return True
+
+
 def cmd_setup(config, args) -> int:
+    image = config["agent"]["image"]
+    ok = _report_check("docker", lambda: container.docker(
+        ["version", "--format", "{{.Server.Version}}"]
+    ).stdout.strip())
+
     root = data.ensure_data(config)
+    ok = _report_check("data", lambda: str(root)) and ok
+    image_ok = _report_check("image", lambda: container.image_digest(image))
+    ok = image_ok and ok
+    if not image_ok:
+        repo = data.toolbox_lock_path().parent.parent
+        print(f"镜像缺失。构建命令：docker build -t {image} -f docker/Dockerfile .（在 {repo} 下）")
+        if not args.build:
+            return 1
+        container.build_image(image, repo)
+        ok = _report_check("image", lambda: container.image_digest(image)) and ok
+
+    def baseline():
+        path = config.get("baseline_results")
+        if not path:
+            return "未配置"
+        if not Path(path).is_file():
+            raise RuntimeError(f"文件不存在：{path}")
+        return str(path)
+
+    ok = _report_check("baseline", baseline) and ok
+
     specs = selector.scan(root)
-    print(f"数据目录：{root}")
     print(f"数据集：{len(specs)}")
     print(json.dumps(selector.available(specs), ensure_ascii=False, indent=2))
-    return 0
+    return 0 if ok else 1
 
 
 def cmd_run(config, args) -> int:
@@ -131,7 +166,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="config.yaml")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("setup", help="准备/检查数据集").set_defaults(func=cmd_setup)
+    setup_parser = sub.add_parser("setup", help="检查环境与数据集")
+    setup_parser.add_argument("--build", action="store_true")
+    setup_parser.set_defaults(func=cmd_setup)
     sub.add_parser("selftest", help="离线自检").set_defaults(func=None)
     sub.add_parser("doctor", help="检查 Docker 与镜像").set_defaults(func=cmd_doctor)
 

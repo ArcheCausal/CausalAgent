@@ -159,5 +159,63 @@ def kill_run(run_id: str, sig: str = "TERM") -> None:
         subprocess.run(["docker", "kill", "-s", sig, *names], capture_output=True, text=True)
 
 
+_SIZE = {"k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}
+
+
+def parse_size(value) -> int:
+    text = str(value).strip().lower()
+    if text.isdigit():
+        return int(text)
+    if text[-1:] in _SIZE:
+        return int(float(text[:-1]) * _SIZE[text[-1]])
+    raise ValueError(f"无法解析大小：{value}")
+
+
+def check_resources(config) -> str:
+    docker_cfg = config["docker"]
+    name = f"gae-doctor-{os.getpid()}"
+    remove_container(name)
+    try:
+        _run([
+            "create", "--name", name,
+            "--cpus", str(docker_cfg["cpus"]),
+            "--memory", str(docker_cfg["memory"]),
+            "--pids-limit", str(docker_cfg["pids_limit"]),
+            "--shm-size", str(docker_cfg["shm_size"]),
+            "--entrypoint", "sh",
+            config["agent"]["image"], "-c", "true",
+        ])
+        info = inspect_container(name)
+    finally:
+        remove_container(name)
+
+    host = info.get("HostConfig") or {}
+    actual = {
+        "cpus": host.get("NanoCpus"),
+        "memory": host.get("Memory"),
+        "pids_limit": host.get("PidsLimit"),
+        "shm_size": host.get("ShmSize"),
+    }
+    expected = {
+        "cpus": int(float(docker_cfg["cpus"]) * 1e9),
+        "memory": parse_size(docker_cfg["memory"]),
+        "pids_limit": int(docker_cfg["pids_limit"]),
+        "shm_size": parse_size(docker_cfg["shm_size"]),
+    }
+    wrong = [key for key in expected if actual[key] != expected[key]]
+    if wrong:
+        raise DockerError(f"资源配置未生效：{wrong}，期望 {expected}，实际 {actual}")
+    return f"cpus={docker_cfg['cpus']} memory={docker_cfg['memory']}"
+
+
+def build_image(image: str, repo, timeout: int = 1800) -> None:
+    proc = subprocess.run(
+        ["docker", "build", "-t", image, "-f", "docker/Dockerfile", "."],
+        cwd=str(repo), capture_output=True, text=True, timeout=timeout,
+    )
+    if proc.returncode != 0:
+        raise DockerError(f"docker build 失败：{proc.stderr.strip()[:500]}")
+
+
 # preflight 只读检查也走这里，避免第二处拼 docker 命令
 docker = _run
