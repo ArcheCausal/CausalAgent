@@ -45,6 +45,10 @@ DEFAULTS: dict = {
         "keep_container_on_failure": True,
         "network": "bridge",
     },
+    "estimate": {
+        "seconds_per_case": 600,
+        "cost_usd_per_case": 0.6,
+    },
     "judge": {"enabled": False},
     "baseline_results": "",
 }
