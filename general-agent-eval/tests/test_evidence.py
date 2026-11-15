@@ -103,6 +103,23 @@ def test_docker_oom_is_not_final():
     assert "docker_oom" not in runner.FINAL
 
 
+def test_algorithms_detects_all_and_final_prefers_answer(tmp_path: Path):
+    events = [{"message": {"content": [
+        {"type": "tool_use", "input": {"code": "from causallearn.search.ConstraintBased.PC import pc"}},
+        {"type": "tool_use", "input": {"code": "directlingam"}},
+    ]}}]
+    assert runner._algorithms(events) == "DirectLiNGAM;PC"
+
+    case_dir = tmp_path / "case"
+    (case_dir / "answer").mkdir(parents=True)
+    assert runner._final_algorithm(case_dir, "DirectLiNGAM;PC") == "DirectLiNGAM;PC"
+
+    (case_dir / "answer" / "algorithm.txt").write_text(
+        "GES (BDeu) + DirectLiNGAM orientation\n", encoding="utf-8"
+    )
+    assert runner._final_algorithm(case_dir, "DirectLiNGAM;PC") == "GES (BDeu) + DirectLiNGAM orientation"
+
+
 def test_interrupt_carries_signal_number():
     try:
         runner._raise_interrupt(signal.SIGTERM, None)

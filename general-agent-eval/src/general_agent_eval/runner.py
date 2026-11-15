@@ -17,7 +17,7 @@ from . import audit, container, data, metrics, parse, trace
 RESULT_HEADER = [
     "run_id", "dataset", "mechanism", "dim", "n_rows", "n_gold_edges", "n_pred_edges",
     "precision", "recall", "f1", "shd", "skeleton_precision", "skeleton_recall",
-    "final_algorithm", "status", "reason", "duration_s",
+    "algorithms", "final_algorithm", "status", "reason", "duration_s",
     "tokens_input", "tokens_output", "num_turns", "total_cost_usd",
     "attempt", "exit_code", "oom_killed", "container",
 ]
@@ -122,12 +122,7 @@ def _usage(events) -> dict:
     }
 
 
-def _final_algorithm(case_dir: Path, events) -> str:
-    choice = case_dir / "answer" / "algorithm.txt"
-    if choice.exists():
-        lines = choice.read_text(encoding="utf-8", errors="replace").strip().splitlines()
-        if lines:
-            return lines[0].strip()[:50]
+def _algorithms(events) -> str:
     text = "\n".join(
         json.dumps(block.get("input") or {}, ensure_ascii=False)
         for event in events
@@ -136,6 +131,15 @@ def _final_algorithm(case_dir: Path, events) -> str:
     ).lower()
     found = sorted(name for name, keys in ALGORITHM_PATTERNS.items() if any(k in text for k in keys))
     return ";".join(found)
+
+
+def _final_algorithm(case_dir: Path, algorithms: str) -> str:
+    choice = case_dir / "answer" / "algorithm.txt"
+    if choice.exists():
+        lines = choice.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+        if lines:
+            return lines[0].strip()[:50]
+    return algorithms
 
 
 def _classify(result, matrix, hits, parse_error, oom) -> tuple[str, str]:
@@ -220,6 +224,7 @@ def _execute_case(config, spec, case_dir: Path, run_dir: Path, run_id: str, case
             "skeleton_recall": raw["skeleton_recall"],
         }
 
+    algorithms = _algorithms(events)
     payload = {
         "dataset": spec.dataset_id,
         "mechanism": spec.mechanism,
@@ -242,7 +247,8 @@ def _execute_case(config, spec, case_dir: Path, run_dir: Path, run_id: str, case
             "pre": (case_dir / ".harness" / "pre.json").exists(),
             "post": (case_dir / ".harness" / "post.json").exists(),
         },
-        "final_algorithm": _final_algorithm(case_dir, events),
+        "algorithms": algorithms,
+        "final_algorithm": _final_algorithm(case_dir, algorithms),
         "metrics": values,
         "usage": _usage(events),
         "dataset_path": str(spec.path),
@@ -279,6 +285,7 @@ def _row(run_id: str, payload: dict) -> dict:
         "shd": m.get("shd", ""),
         "skeleton_precision": m.get("skeleton_precision", ""),
         "skeleton_recall": m.get("skeleton_recall", ""),
+        "algorithms": payload.get("algorithms", ""),
         "final_algorithm": payload.get("final_algorithm", ""),
         "status": payload["status"],
         "reason": payload.get("reason", ""),
