@@ -56,6 +56,30 @@ def prompt_for(dim: int) -> str:
     )
 
 
+def _harness(case_dir: Path, name: str) -> dict | None:
+    path = Path(case_dir) / ".harness" / f"{name}.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _freeze(payload: dict | None) -> list[str]:
+    return sorted(str(item) for item in (payload or {}).get("pip_freeze") or [])
+
+
+def env_drift(cases: list[tuple[str, Path]]) -> list[str]:
+    """pre/post 都存在且 pip_freeze 不同，才算漂移。"""
+    drifted = []
+    for name, case_dir in cases:
+        pre, post = _harness(case_dir, "pre"), _harness(case_dir, "post")
+        if pre is None or post is None:
+            continue
+        if _freeze(pre) != _freeze(post):
+            drifted.append(name)
+    return drifted
+
+
 def _atomic_json(path: Path, payload) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
