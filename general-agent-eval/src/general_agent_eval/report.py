@@ -77,8 +77,17 @@ def _canonical(text) -> list[str]:
 def _baseline(path) -> dict:
     if not path or not Path(path).exists():
         return {}
+    rows: dict[str, dict] = {}
     with Path(path).open(encoding="utf-8-sig", newline="") as handle:
-        return {row["dataset"]: row for row in csv.DictReader(handle)}
+        for row in csv.DictReader(handle):
+            dataset = row.get("dataset")
+            if not dataset:
+                continue
+            status = row.get("status")
+            # 同一 dataset 多行时，计分行覆盖失败行；多个计分行取最后一行
+            if (status is None or status in SCORED) and _num(row.get("f1")) is not None:
+                rows[dataset] = row
+    return rows
 
 
 def build(run_dir, baseline_path=None) -> Path:
@@ -92,8 +101,7 @@ def build(run_dir, baseline_path=None) -> Path:
     dataset = _dict(run.get("data"))
     scored = [row for row in rows if row["status"] in SCORED]
     baseline = _baseline(baseline_path)
-    matched = [baseline[row["dataset"]] for row in rows if row["dataset"] in baseline]
-    matched_scored = [row for row in scored if row["dataset"] in baseline]
+    matched = [baseline[row["dataset"]] for row in scored if row["dataset"] in baseline]
 
     summary = [
         {
@@ -160,18 +168,31 @@ def build(run_dir, baseline_path=None) -> Path:
         "",
         f"计分集：{len(scored)} / {len(rows)}",
     ]
-    if baseline and len(matched_scored) < len(scored):
+    if baseline and len(matched) < len(scored):
         lines.append(
             f"> 样本不一致：agent 计分 {len(scored)} 集 / "
-            f"基线匹配 {len(matched_scored)} 集（按 dataset 匹配）。"
+            f"基线匹配 {len(matched)} 集（按 dataset 匹配）。"
         )
-    lines += [
-        "",
-        "| 指标 | Agent | 基线 |",
-        "| --- | --- | --- |",
-    ]
-    for item in summary:
-        lines.append(f"| {item['metric']} | {_fmt(item['agent'])} | {_fmt(item['baseline'])} |")
+    if baseline:
+        lines += [
+            "",
+            "| 指标 | Agent | 基线 |",
+            "| --- | --- | --- |",
+        ]
+        for item in summary:
+            lines.append(
+                f"| {item['metric']} | {_fmt(item['agent'])} | {_fmt(item['baseline'])} |"
+            )
+    else:
+        lines += [
+            "",
+            "未配置基线，跳过基线列。",
+            "",
+            "| 指标 | Agent |",
+            "| --- | --- |",
+        ]
+        for item in summary:
+            lines.append(f"| {item['metric']} | {_fmt(item['agent'])} |")
 
     lines += [
         "",
@@ -193,27 +214,37 @@ def build(run_dir, baseline_path=None) -> Path:
             f"| {_fmt(_mean(group_scored, 'skeleton_recall'))} |"
         )
 
-    lines += [
-        "",
-        "## 分机制",
-        "",
-        "| 机制 | 集数 | 计分 | F1 | 基线 F1 | ΔF1 | SHD |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
-    ]
+    lines += ["", "## 分机制", ""]
+    if baseline:
+        lines += [
+            "| 机制 | 集数 | 计分 | F1 | 基线 F1 | ΔF1 | SHD |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    else:
+        lines += [
+            "| 机制 | 集数 | 计分 | F1 | SHD |",
+            "| --- | --- | --- | --- | --- |",
+        ]
     mechanisms: dict = {}
     for row in rows:
         mechanisms.setdefault(row["mechanism"], []).append(row)
     for mechanism in sorted(mechanisms):
         group = mechanisms[mechanism]
         group_scored = [row for row in group if row["status"] in SCORED]
-        base_rows = [baseline[row["dataset"]] for row in group if row["dataset"] in baseline]
         agent_f1 = _mean(group_scored, "f1")
-        base_f1 = _mean(base_rows, "f1") if base_rows else None
-        delta = agent_f1 - base_f1 if agent_f1 is not None and base_f1 is not None else None
-        lines.append(
-            f"| {mechanism} | {len(group)} | {len(group_scored)} | {_fmt(agent_f1)} "
-            f"| {_fmt(base_f1)} | {_fmt(delta)} | {_fmt(_mean(group_scored, 'shd'))} |"
-        )
+        agent_shd = _fmt(_mean(group_scored, "shd"))
+        if baseline:
+            base_rows = [baseline[row["dataset"]] for row in group_scored if row["dataset"] in baseline]
+            base_f1 = _mean(base_rows, "f1") if base_rows else None
+            delta = agent_f1 - base_f1 if agent_f1 is not None and base_f1 is not None else None
+            lines.append(
+                f"| {mechanism} | {len(group)} | {len(group_scored)} | {_fmt(agent_f1)} "
+                f"| {_fmt(base_f1)} | {_fmt(delta)} | {agent_shd} |"
+            )
+        else:
+            lines.append(
+                f"| {mechanism} | {len(group)} | {len(group_scored)} | {_fmt(agent_f1)} | {agent_shd} |"
+            )
 
     algorithms: dict[str, int] = {}
     for row in rows:

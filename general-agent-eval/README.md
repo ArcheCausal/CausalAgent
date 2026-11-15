@@ -2,12 +2,10 @@
 
 通用 Agent 因果发现评测：每集一个 Docker 容器，容器内是固定 Python 工具箱 + Linux 版 Claude Code CLI；模型自己读 `data.csv`、选算法、写 `answer/adjacency.csv`，宿主侧解析评分。
 
-设计口径见 `../Document/planning/general-agent-eval-design.md`，实现手册见 `impl-00` ~ `impl-04`。
-
 ## 快速开始（WSL Ubuntu）
 
 ```bash
-cd ~/CausalAgent3/general-agent-eval
+##进入当前目录后
 source .venv/bin/activate
 export DEEPSEEK_API_KEY=...
 
@@ -71,11 +69,6 @@ general-agent-eval --config config.yaml report --run ~/general-agent-eval-runs/r
 和运行期依赖漂移。
 
 报告新增算法选择分布、按机制众数、token/成本/耗时汇总；未计分集带耗时与算法；
-基线按 dataset 匹配不足时标注样本不一致。`results.csv` 新增 `algorithms` 列记录本集
-试过的全部算法，`final_algorithm` 保持原始文本。
+基线按 dataset 匹配不足时标注样本不一致；未配置基线时跳过基线列。`results.csv`
+新增 `algorithms` 列记录本集试过的全部算法，`final_algorithm` 保持原始文本。
 
-## 本机构建备注
-
-- 手册基线是 `python:3.11-slim-bookworm`；本机 Docker 代理（127.0.0.1:7897）不可达、镜像源 403，改用本地已存在的 `python:3.11-slim`（Debian 13/trixie）。换机器能拉 bookworm 时建议改回。
-- `CLAUDE_VERSION` 固定为已验证的 `2.1.322`；升级需重建镜像，`run.json` 记录容器内实际版本。
-- 容器联网仅做了"不挂敏感目录"的隔离，Bash 仍可 curl；严格网络隔离需后续 `--network none` / 白名单。

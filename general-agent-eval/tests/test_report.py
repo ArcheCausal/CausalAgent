@@ -77,3 +77,20 @@ def test_report_tolerates_missing_fields(tmp_path: Path):
     assert "计分集：1 / 1" in text
     assert "平均耗时 -s" in text
     assert "成本 $-" in text
+    assert "未配置基线，跳过基线列。" in text
+    assert "| 指标 | Agent | 基线 |" not in text
+    assert "| 机制 | 集数 | 计分 | F1 | 基线 F1 | ΔF1 | SHD |" not in text
+
+
+def test_baseline_prefers_scored_rows(tmp_path: Path):
+    path = tmp_path / "baseline.csv"
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["dataset", "status", "f1"])
+        writer.writerow(["X", "claude_error", ""])
+        writer.writerow(["X", "success", "0.8"])
+        writer.writerow(["Y", "claude_error", ""])
+
+    rows = report._baseline(path)
+    assert rows["X"]["status"] == "success"
+    assert "Y" not in rows

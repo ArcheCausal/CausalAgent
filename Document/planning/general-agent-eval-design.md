@@ -217,6 +217,7 @@ docker run --name gae-<run_id>-<nn>
 ### 8.3 报告
 
 - 总体：有向 F1、SHD、有向 P/R、骨架 P/R，与基线按 dataset 匹配后并排；样本不一致时标注。未配置基线时跳过基线列并明确说明。
+- 基线口径：只对 agent 的计分集求基线均值；同一 dataset 多行时，优先 `success`/`timeout_partial` 且有 `f1` 的行，仍有重复取最后一行，失败行不参与匹配。
 - 分格表：D×N 的 F1/SHD/骨架指标、计分集数、状态分布。
 - 分机制表：Agent vs 基线，ΔF1。
 - 失败清单：状态、原因、耗时、算法。
@@ -267,8 +268,8 @@ judge:
   model: deepseek-chat
   url: https://api.deepseek.com/chat/completions
 
-report:
-  baseline_results: ""     # 下载后的本地路径
+# 基线 CSV 本地路径（绝对路径或 ~ 开头）；空 = 不启用
+baseline_results: ""
 ```
 
 - key 只从环境变量读取；支持 `--env-file`，但仓库内不保存。
