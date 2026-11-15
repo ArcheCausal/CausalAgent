@@ -65,11 +65,21 @@ def doctor(config) -> int:
     check("data", lambda: str(data.ensure_data(config)))
     check("toolbox", lambda: _image_entry(
         config, "python3", "-c",
-        "import numpy,pandas,sklearn,lingam;"
-        "from causallearn.utils.DAG2CPDAG import dag2cpdag;print('ok')",
+        "import sys,numpy,pandas,sklearn,lingam;"
+        "from causallearn.utils.DAG2CPDAG import dag2cpdag;"
+        "print(sys.version.split()[0])",
     ))
     check("claude", lambda: _image_entry(config, "claude", "--version"))
     check("mount", mount)
+
+    def lock():
+        path = data.toolbox_lock_path()
+        if not path.is_file():
+            raise RuntimeError("toolbox.lock 不存在")
+        return data.sha256_file(path)[:12]
+
+    check("lock", lock)
+    check("resources", lambda: container.check_resources(config))
     check("disk", lambda: _disk(Path(config["output_dir"])))
 
     width = max(len(name) for name, _, _ in checks)
