@@ -35,8 +35,17 @@ ALGORITHM_PATTERNS = {
 }
 
 SCORED = ("success", "timeout_partial")
-# 有结论的状态：resume 时跳过
-FINAL = {"success", "timeout_partial", "invalid_leak", "invalid_answer", "docker_oom"}
+# 有结论的状态：resume 时跳过；docker_oom 是资源问题，重跑才有意义
+FINAL = {"success", "timeout_partial", "invalid_leak", "invalid_answer"}
+
+
+class _Interrupted(Exception):
+    def __init__(self, signum: int):
+        self.signum = signum
+
+
+def _raise_interrupt(signum, frame):
+    raise _Interrupted(signum)
 
 
 def prompt_for(dim: int) -> str:
@@ -439,12 +448,18 @@ def execute(config, specs, selection, resume_run=None) -> Path:
                     f"{payload['status']:15s} {spec.dataset_id} "
                     f"f1={m.get('f1', '-')} shd={m.get('shd', '-')} {payload.get('reason', '')}"
                 )
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, _Interrupted) as exc:
+            signum = getattr(exc, "signum", signal.SIGINT)
             print("\n中断：按标签清理本次运行的容器…", file=sys.stderr)
             container.kill_run(run_id, "TERM")
             time.sleep(3)
             container.kill_run(run_id, "KILL")
-            raise SystemExit(130)
+            _rebuild_results(run_dir, run_id)
+            _finish(run_dir)
+            raise SystemExit(128 + signum)
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
 
     _rebuild_results(run_dir, run_id)
     _finish(run_dir)

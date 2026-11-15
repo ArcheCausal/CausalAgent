@@ -1,4 +1,5 @@
 import json
+import signal
 from pathlib import Path
 
 from general_agent_eval import data, report, runner
@@ -96,3 +97,16 @@ def test_report_shows_missing_evidence_and_unknown_fields(tmp_path: Path):
     assert "case-01" in text
     assert "case-02" in text
     assert "未知" in text
+
+
+def test_docker_oom_is_not_final():
+    assert "docker_oom" not in runner.FINAL
+
+
+def test_interrupt_carries_signal_number():
+    try:
+        runner._raise_interrupt(signal.SIGTERM, None)
+    except runner._Interrupted as exc:
+        assert exc.signum == signal.SIGTERM
+    else:
+        raise AssertionError("应抛出 _Interrupted")
