@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from general_agent_eval import data, runner
+from general_agent_eval import data, report, runner
 
 
 def _write_harness(case_dir: Path, name: str, packages: list[str], **extra):
@@ -67,3 +67,32 @@ def test_finish_enriches_run_json(tmp_path: Path):
     assert meta["toolbox"]["pre_freeze_sha256"]
     assert meta["env_drift_cases"] == []
     assert meta["status_counts"] == {"success": 1}
+
+
+def test_report_shows_missing_evidence_and_unknown_fields(tmp_path: Path):
+    run_dir = tmp_path / "r"
+    case_dir = run_dir / "cases" / "case-01"
+    case_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(json.dumps({
+        "run_id": "r",
+        "runtime": {"mode": "docker"},
+        "timeout_s": 600,
+        "env_drift_cases": ["case-02"],
+    }), encoding="utf-8")
+    (case_dir / "case.json").write_text(json.dumps({
+        "dataset": "M/D010_N100/rep00",
+        "mechanism": "M",
+        "dim": 10,
+        "n": 100,
+        "case": "case-01",
+        "status": "success",
+        "evidence": {"pre": True, "post": False},
+        "metrics": {},
+    }), encoding="utf-8")
+
+    path = report.build(run_dir)
+    text = path.read_text(encoding="utf-8")
+    assert "环境证据" in text
+    assert "case-01" in text
+    assert "case-02" in text
+    assert "未知" in text

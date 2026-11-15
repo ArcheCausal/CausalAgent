@@ -28,6 +28,10 @@ def _fmt(value):
     return f"{value:.4f}" if isinstance(value, float) else str(value)
 
 
+def _dict(value):
+    return value if isinstance(value, dict) else {}
+
+
 def _load_cases(run_dir):
     cases = []
     for path in sorted((Path(run_dir) / "cases").glob("*/case.json")):
@@ -61,7 +65,12 @@ def _baseline(path) -> dict:
 def build(run_dir, baseline_path=None) -> Path:
     run_dir = Path(run_dir)
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-    rows = [_flat(case) for case in _load_cases(run_dir)]
+    cases = _load_cases(run_dir)
+    rows = [_flat(case) for case in cases]
+    runtime = _dict(run.get("runtime"))
+    agent = _dict(run.get("agent"))
+    toolbox = _dict(run.get("toolbox"))
+    dataset = _dict(run.get("data"))
     scored = [row for row in rows if row["status"] in SCORED]
     baseline = _baseline(baseline_path)
     matched = [baseline[row["dataset"]] for row in rows if row["dataset"] in baseline]
@@ -87,12 +96,14 @@ def build(run_dir, baseline_path=None) -> Path:
         "# 通用 Agent 因果发现评测报告",
         "",
         f"- 运行：`{run.get('run_id')}`",
-        f"- 运行时：{run.get('runtime')}",
-        f"- 镜像：`{run.get('image')}`",
-        f"- 镜像指纹：`{run.get('image_digest')}`",
-        f"- 模型：`{run.get('model')}`",
-        f"- Claude CLI：{', '.join(run.get('claude_versions') or ['未知'])}",
-        f"- 数据指纹：`{(run.get('data') or {}).get('fingerprint')}`",
+        f"- 运行时：{runtime.get('mode') or 'docker'}",
+        f"- 镜像：`{runtime.get('image') or '未知'}`",
+        f"- 镜像指纹：`{runtime.get('image_id') or '未知'}`",
+        f"- Docker：{runtime.get('docker_version') or '未知'}",
+        f"- 模型：`{agent.get('model') or '未知'}`",
+        f"- Claude CLI：{agent.get('claude_version') or '未知'}",
+        f"- 数据指纹：`{dataset.get('dataset_sha256') or '未知'}`",
+        f"- 工具箱 lock：`{str(toolbox.get('lock_sha256') or '未知')[:12]}`",
         f"- 超时：{run.get('timeout_s')}s",
         "",
         "> **不可比声明**：本结果由容器化运行时产生。与旧 Windows 原生 harness 的结果"
@@ -105,6 +116,23 @@ def build(run_dir, baseline_path=None) -> Path:
     ]
     for status in sorted(status_counts):
         lines.append(f"| {status} | {status_counts[status]} |")
+
+    missing = [
+        case.get("case") or "?"
+        for case in cases
+        if not (case.get("evidence") or {}).get("pre")
+        or not (case.get("evidence") or {}).get("post")
+    ]
+    drift = run.get("env_drift_cases") or []
+    lines += ["", "## 环境证据", ""]
+    if missing:
+        lines.append(f"- 证据不完整：{len(missing)} 例（缺 pre 或 post）：{', '.join(missing)}")
+    else:
+        lines.append("- 全部 case 的 pre/post 证据完整。")
+    if drift:
+        lines.append(f"- 环境漂移（运行期依赖变化）：{', '.join(drift)}")
+    else:
+        lines.append("- 未检测到环境漂移。")
 
     lines += [
         "",
