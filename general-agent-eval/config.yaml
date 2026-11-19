@@ -1,0 +1,47 @@
+cache_dir: ~/.general-agent-eval/cache
+output_dir: ~/general-agent-eval-runs
+workspace_dir: ~/.general-agent-eval/work
+
+data:
+  name: cdfm_bench_rep00
+  # 已有数据时填这里，跳过下载
+  local_dir: /home/yuki/CausalAgent3/evaluation-runner/cdfm_bench_rep00
+  url: ""
+  sha256: ""
+  exclude: [TimeLag]
+
+selection:
+  mechanisms: []
+  dims: []
+  ns: []
+  per_cell: 1
+  seed: 20261030
+
+agent:
+  image: general-agent-eval/agent:py311-toolbox-v1
+  base_url: https://api.deepseek.com/anthropic
+  model: deepseek-chat
+  auth_env: DEEPSEEK_API_KEY
+  timeout_s: 600
+  grace_s: 30
+  retries: 1
+  disallowed_tools: WebSearch,WebFetch
+  pip_index_url: https://mirrors.aliyun.com/pypi/simple/
+
+docker:
+  cpus: "2"
+  memory: 4g
+  pids_limit: 512
+  shm_size: 512m
+  host_user: true
+  keep_container_on_failure: true
+  network: bridge
+
+estimate:
+  seconds_per_case: 600
+  cost_usd_per_case: 0.6
+
+judge:
+  enabled: false
+
+baseline_results: ""
