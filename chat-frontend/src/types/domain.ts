@@ -1,4 +1,5 @@
 import type { EffectRequest, EffectExecutionContext } from '../api/effect-request.schemas'
+import type { ProcessingTimeSeries } from '../api/events.schemas'
 
 export type Locale = 'zh' | 'en'
 
@@ -182,6 +183,7 @@ export interface ProcessingPlanSummary {
   limitations: string[]
   effectRequest?: EffectRequest | null
   effectExecutionContext?: EffectExecutionContext | null
+  timeSeries?: ProcessingTimeSeries
 }
 
 export interface WaitingInput {

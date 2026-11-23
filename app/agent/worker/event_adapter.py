@@ -67,12 +67,14 @@ _ALGORITHM_TOOL_NAMES = {
     "causal.olc": "causal_olc",
     "causal.direct_lingam": "causal_direct_lingam",
     "causal.cdfm": "causal_cdfm",
+    "causal.pcmci_plus": "causal_pcmci_plus",
 }
 _DECISION_TOOL_KINDS = {
     "causal_pc": "algorithm",
     "causal_olc": "algorithm",
     "causal_direct_lingam": "algorithm",
     "causal_cdfm": "algorithm",
+    "causal_pcmci_plus": "algorithm",
     "request_data_processing": "interaction",
     "rag_evidence_search": "evidence",
     "web_evidence_search": "evidence",

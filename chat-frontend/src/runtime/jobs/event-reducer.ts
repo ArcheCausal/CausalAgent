@@ -170,7 +170,7 @@ function parseProcessingPlan(value: unknown): ProcessingPlanSummary | null {
   if (!planFields.success) return null
   return { summary: item.summary, observationUnit: item.observation_unit, transformations, variableSemantics, roleColumns, measurementColumns, limitations,
     analysisColumns: planFields.data.analysis_columns, derivedMeasurementSemantics: planFields.data.derived_measurement_semantics,
-    effectRequest: effect.data, effectExecutionContext: context.data }
+    effectRequest: effect.data, effectExecutionContext: context.data, timeSeries: planFields.data.time_series }
 }
 
 export function waitingInputFromInteraction(

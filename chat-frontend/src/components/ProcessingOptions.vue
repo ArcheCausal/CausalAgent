@@ -137,6 +137,16 @@ function other(): void {
       <dl>
         <dt>观察单位</dt>
         <dd>{{ waiting.plan.observationUnit }}</dd>
+        <template v-if="waiting.plan.timeSeries">
+          <dt>研究目标</dt>
+          <dd>发现时间先后与滞后关系。</dd>
+          <dt>确认分析片段</dt>
+          <dd>
+            <p>时间列：{{ waiting.plan.timeSeries.time_column }}（不参与建图）。</p>
+            <p>{{ waiting.plan.timeSeries.start_time }} 至 {{ waiting.plan.timeSeries.end_time }}（含起止）。</p>
+            <p>原始 CSV 第 {{ waiting.plan.timeSeries.start_row }} 至 {{ waiting.plan.timeSeries.end_row }} 条数据记录，不含标题；共 {{ waiting.plan.timeSeries.row_count }} 条，每 {{ waiting.plan.timeSeries.sampling_period_seconds }} 秒一条。</p>
+          </dd>
+        </template>
         <dt>效应估计</dt>
         <dd v-if="waiting.plan.effectRequest === undefined">未记录效应请求，请重新发起任务。</dd>
         <dd v-else-if="waiting.plan.effectRequest === null">未请求，仅进行结构探索。</dd>

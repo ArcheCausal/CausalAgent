@@ -97,6 +97,21 @@ export const processingOptionSchema = z.object({
   risks: z.array(z.string()).optional(),
 }).passthrough()
 
+const processingTimestampSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})?$/)
+
+const processingTimeSeriesSchema = z.object({
+  time_column: z.string().min(1).max(255),
+  start_row: z.number().int().min(1).max(100_000),
+  end_row: z.number().int().min(2).max(100_000),
+  start_time: processingTimestampSchema,
+  end_time: processingTimestampSchema,
+  row_count: z.number().int().min(2).max(100_000),
+  sampling_period_seconds: z.number().positive(),
+  selection_rule: z.literal('source_row_range'),
+}).refine((window) => window.end_row - window.start_row + 1 === window.row_count)
+
+export type ProcessingTimeSeries = z.infer<typeof processingTimeSeriesSchema>
+
 export const processingPlanSummarySchema = z.object({
   summary: z.string().min(1),
   observation_unit: z.string().min(1),
@@ -116,7 +131,9 @@ export const processingPlanSummarySchema = z.object({
   limitations: z.array(z.string()).optional(),
   effect_request: effectRequestSchema.nullable().optional(),
   effect_execution_context: effectExecutionContextSchema.nullable().optional(),
-}).passthrough()
+  discovery_goal: z.literal('time_series').optional(),
+  time_series: processingTimeSeriesSchema.optional(),
+}).passthrough().refine((plan) => (plan.discovery_goal === 'time_series') === (plan.time_series !== undefined))
 
 export const interactionPayloadSchema = z.object({
   type: z.literal('interaction'),
