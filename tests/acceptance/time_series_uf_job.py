@@ -63,6 +63,10 @@ def verified_findings(job, state):
     if hasattr(independent, "model_dump"):
         independent = independent.model_dump(mode="json")
     require(independent == document, "stored_report_differs_from_checkpoint")
+    summary = document.get("execution_summary") or {}
+    require(document.get("report_mode") == "analysis"
+            and summary.get("report_completeness") == "complete"
+            and not summary.get("degradation_code"), "full_time_series_report_missing")
     blocks = [block for block in document.get("blocks", [])
               if block.get("id", "").startswith("time_series_findings")
               and "PCMCI+ 使用 ParCorr" in block.get("content", "")]

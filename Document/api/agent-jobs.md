@@ -195,7 +195,7 @@ FinalizationGate 对模型可修正的决策拒绝额外发布 `progress` 阶段
 }
 ```
 
-报告文档只使用四种块类型：`section` 包含子块，`markdown` 保存自然语言文本，`chart` 和 `causal_graph` 通过 `asset_key` 引用 `assets` 中的资源。`markdown.content` 是新报告中唯一允许出现 Markdown 的字段，列表、标题、表格、引用、代码块和链接继续复用普通聊天的 Markdown 解析器；模型不生成 HTML、CSS、Base64 图片、图片标签或图表占位符。图表资源第一阶段只支持 `histogram`、`bar` 和 `heatmap`，数据是经过校验的原始数值，前端使用 SVG 与 CSS 绘制。因果图资源是业务模型，前端通过投影函数转换为 vis-network 载荷，`graph_semantics` 等 Agent 内部字段不出现在公开结果中。
+报告文档只使用四种块类型：`section` 包含子块，`markdown` 保存自然语言文本，`chart` 和 `causal_graph` 通过 `asset_key` 引用 `assets` 中的资源。同一报告可含主结果图与若干补充因果图，各因果图块分别引用不同资源。`markdown.content` 是新报告中唯一允许出现 Markdown 的字段，列表、标题、表格、引用、代码块和链接继续复用普通聊天的 Markdown 解析器；模型不生成 HTML、CSS、Base64 图片、图片标签或图表占位符。图表资源第一阶段只支持 `histogram`、`bar` 和 `heatmap`，数据是经过校验的原始数值，前端使用 SVG 与 CSS 绘制。因果图资源是业务模型，前端通过投影函数转换为 vis-network 载荷，`graph_semantics` 等 Agent 内部字段不出现在公开结果中。
 
 因果图的节点 ID 由变量名生成（例如 `node_age`），边 ID 由端点变量名生成（例如 `edge_age_income`），端点重复时追加序号后缀；节点和边 ID 只用于渲染与选择事件。`sources` 的 `source_id` 和 `evidence_refs` 的 `evidence_id` 使用前缀加随机 UUID，不在其中编码标题、文件名或数组位置。
 

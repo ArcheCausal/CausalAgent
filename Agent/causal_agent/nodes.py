@@ -22,7 +22,11 @@ from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 from Agent.llm_structured_output import StructuredOutputError, ainvoke_structured
 from Agent.data_processing.parameters import execution_parameters, parameter_identity
-from Agent.Report.time_series import build_time_series_overview, with_time_series_report_block
+from Agent.Report.time_series import (
+    TIME_SERIES_OVERVIEW_KEY,
+    build_time_series_overview,
+    with_time_series_report_block,
+)
 from .fault_tolerance import (
     RAG_DEGRADATION_SUMMARY,
     build_rag_degradation_result,
@@ -780,14 +784,15 @@ from Agent.Report.assets import (
     describe_chart_asset,
 )
 from Agent.Report.document import (
+    CausalGraphModel,
     ChartAsset,
     MarkdownBlock,
     ReportDraft,
-    ReportSchemaError,
     ReportDocument,
     build_report_document,
     iter_report_blocks,
     report_document_summary,
+    resolve_report_graph_blocks,
 )
 
 
@@ -1730,27 +1735,85 @@ def _report_revision_instruction(regeneration: bool) -> str:
     )
 
 
-def _report_graph_asset(state: CausalAgentState):
-    """仅展示本次（或对应保存快照）经门禁选择的唯一主图。"""
-    primary = report_primary_result(build_report_analysis_context(state))
-    if primary is None or not primary.get("graph"):
+def _static_report_graph(
+    result: Mapping[str, Any] | None, *, key: str, graph_source: str,
+) -> CausalGraphModel | None:
+    if result is None or not result.get("graph"):
         return None
-    selected_graph = dict(
-        primary["graph"], graph_semantics=primary.get("graph_semantics"),
-        diagnostics=primary.get("diagnostics"),
+    graph = dict(
+        result["graph"], graph_semantics=result.get("graph_semantics"),
+        diagnostics=result.get("diagnostics"),
     )
     return build_causal_graph_model(
-        selected_graph,
-        graph_id=REPORT_GRAPH_ASSET_KEY,
-        algorithm=str(primary.get("algorithm") or ""),
-        graph_source="analysis_context" if state.get("report_revision_mode") == "full_regeneration_from_context" else "original",
+        graph, graph_id=key, algorithm=str(result.get("algorithm") or ""), graph_source=graph_source,
     )
 
 
-def _prompt_analysis_facts(facts: Dict[str, Any]) -> Dict[str, Any]:
+def _report_graph_asset(
+    state: CausalAgentState, *, facts: Mapping[str, Any] | None = None,
+) -> CausalGraphModel | None:
+    """从门禁接受的主结果构建静态主图。"""
+    if facts is None:
+        facts = build_report_analysis_context(state)
+    source = "analysis_context" if state.get("report_revision_mode") == "full_regeneration_from_context" else "original"
+    return _static_report_graph(report_primary_result(facts), key=REPORT_GRAPH_ASSET_KEY, graph_source=source)
+
+
+def _report_graph_assets(
+    state: CausalAgentState, facts: Mapping[str, Any],
+) -> tuple[dict[str, CausalGraphModel], dict[str, str]]:
+    """构建可供草稿选择的真实图资源及仅用于提示词的结果映射。"""
+    primary = report_primary_result(facts)
+    main = (
+        build_time_series_overview(primary)
+        if facts.get("discovery_goal") == "time_series"
+        else _report_graph_asset(state, facts=facts)
+    )
+    assets = {main.graph_id: main} if main is not None else {}
+    keys = {primary["result_ref"]: main.graph_id} if primary is not None and main is not None else {}
+    if facts.get("finalization_status") != "valid" or not facts.get("decision"):
+        return assets, keys
+
+    source = "analysis_context" if state.get("report_revision_mode") == "full_regeneration_from_context" else "original"
+    supporting_results = [
+        result for result in facts.get("results", [])
+        if result.get("status") == "valid"
+        and result.get("disposition") == "supporting"
+        and result.get("causal_effect") is None
+        and result.get("ate_check") is None
+    ]
+    supporting_results.sort(key=lambda result: result["result_ref"])
+    for index, result in enumerate(supporting_results, start=1):
+        key = f"graph_supporting_{index}"
+        time_series = result.get("time_series")
+        graph = (
+            build_time_series_overview(result, graph_id=key)
+            if time_series is not None else _static_report_graph(result, key=key, graph_source=source)
+        )
+        if graph is None:
+            continue
+        method = (result.get("method") or {}).get("public_name") or result["algorithm"]
+        graph.metadata["report_role"] = "supporting"
+        if time_series is None:
+            graph.metadata["report_title"] = f"补充因果结构（{method}）"
+        else:
+            graph.metadata["report_title"] = (
+                f"补充时序总览（{method}，滞后 {time_series['tau_min']} 至 {time_series['tau_max']} 步）"
+            )
+        assets[key] = graph
+        keys[result["result_ref"]] = key
+    return assets, keys
+
+
+def _prompt_analysis_facts(
+    facts: Dict[str, Any], *, graph_keys: Mapping[str, str] | None = None,
+) -> Dict[str, Any]:
     """剥离内部原始产物引用、来源摘要和报告模型无需读取的图分数。"""
     projected = copy.deepcopy(facts)
     for result in projected.get("results", []):
+        key = (graph_keys or {}).get(result.get("result_ref"))
+        if key is not None:
+            result["report_graph_asset_key"] = key
         result.pop("raw_result", None)
         if result.get("time_series") is not None:
             result["time_series"]["time_axis"].pop("source_sha256", None)
@@ -1795,12 +1858,14 @@ def _report_asset_manifest(assets: dict[str, Any]) -> list[dict[str, str]]:
             )
             continue
         algorithm = asset.metadata.get("algorithm") or "未知算法"
-        graph_source = asset.metadata.get("graph_source") or "original"
+        graph_source = asset.metadata.get("graph_source")
+        title = asset.metadata.get("report_title") or "主因果图"
+        method = f"算法 {algorithm}，来源 {graph_source}" if graph_source else f"算法 {algorithm}"
         manifest.append(
             {
                 "asset_key": asset_key,
                 "block_type": "causal_graph",
-                "description": f"因果图（算法 {algorithm}，来源 {graph_source}）",
+                "description": f"{title}（{method}）",
             }
         )
     return manifest
@@ -1960,16 +2025,17 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
     """报告模块：生成结构化报告文档。
 
     模型只产出 ReportDraft（报告标题、块结构、Markdown 文本和资源/证据引用）；
-    图表资源、因果图模型、来源和证据全部由后端注入并校验。资源引用、块 ID 或
-    证据引用非法时抛出 ReportSchemaError，进入图节点受控错误路径，不保存部分报告。
+    后端提供实际资源，取用的因果图必须来自本次清单。组装前移除无效或重复的因果图引用，
+    再校验其余资源和证据引用；校验失败进入图节点的受控错误路径。
     """
     facts = build_report_analysis_context(state)
     decision = facts.get("decision") or {}
     chart_assets = coerce_chart_assets(state.get("chart_assets"))
-    assets: dict[str, Any] = dict(chart_assets)
-    graph_asset = _report_graph_asset(state)
-    if graph_asset is not None:
-        assets[graph_asset.graph_id] = graph_asset
+    graph_assets, graph_keys = _report_graph_assets(state, facts)
+    assets = {**chart_assets, **graph_assets}
+    required_graph_key = (
+        TIME_SERIES_OVERVIEW_KEY if facts.get("discovery_goal") == "time_series" else REPORT_GRAPH_ASSET_KEY
+    )
 
     regeneration = state.get("report_revision_mode") == "full_regeneration_from_context"
     context = _current_context(state)
@@ -2050,7 +2116,10 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         - markdown 块的 evidence_refs 只能引用下面“可用证据”列出的证据 ID；没有可用证据时请留空数组。
         - 块 id 在整篇报告中必须唯一，使用稳定的英文或拼音短名。
         - 不要重新计算或编造数据，图表数据由系统根据真实数据注入。
-        - 有 graph_main 资源时必须且只能使用一次 causal_graph 块；没有该资源时不得生成因果图块。
+        - 有 graph_main 或 time_series_overview 时，必须在合适的章节引用该资源一次。
+        - 可按问题选用清单中的补充因果图，每个资源最多引用一次。分析事实中的 report_graph_asset_key 对应实际结果。
+        - 解释补充图与主结果的关系，保留不同方法和执行配置之间的区别，不把补充图当作主图。
+        - 没有可用因果图资源时，报告只使用正文和实际可用的普通图表。
 
         ## 可用资源
         {asset_manifest}
@@ -2100,7 +2169,7 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
             "messages": [message for message in state.get("messages", []) if isinstance(message, HumanMessage)][-1:],
             "preprocess_meta_data": _prompt_json(facts.get("data_metadata", {})),
             "preprocess_summary": "见数据概览和统计检查。",
-            "causal_analysis_result": _prompt_json(_prompt_analysis_facts(facts)),
+            "causal_analysis_result": _prompt_json(_prompt_analysis_facts(facts, graph_keys=graph_keys)),
             "knowledge_base_result": knowledge_summary,
             "web_search_result": web_summary,
             "postprocess_result": "主图来自通过门禁的原始算法结果；修订建议不替换图。",
@@ -2121,12 +2190,9 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         node_name="report",
     )
     draft = _with_dataset_preparation_block(draft, facts)
-    primary = report_primary_result(facts)
-    overview = build_time_series_overview(primary)
-    if overview is not None:
-        assets[overview.graph_id] = overview
+    blocks = resolve_report_graph_blocks(draft.blocks, graph_assets)
     draft = draft.model_copy(update={"blocks": with_time_series_report_block(
-        draft.blocks, discovery_goal=facts.get("discovery_goal"), primary=primary, overview=overview,
+        blocks, discovery_goal=facts.get("discovery_goal"), primary=report_primary_result(facts),
     )})
 
     document = build_report_document(
@@ -2134,6 +2200,7 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         assets=assets,
         sources=resources.sources,
         evidence_refs=resources.evidence_refs,
+        required_graph_asset_key=required_graph_key,
         analysis_outcome=decision.get("outcome"),
         finalization_status=facts.get("finalization_status"),
         report_mode=(
@@ -2143,9 +2210,6 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         ),
         execution_summary=_report_execution_summary(state),
     )
-    if graph_asset is not None and not any(block.type == "causal_graph" for block in iter_report_blocks(document.blocks)):
-        raise ReportSchemaError("已选主结果的报告必须展示主图")
-
     return {
         "report_document": document,
         "messages": [

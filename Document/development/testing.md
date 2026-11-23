@@ -398,7 +398,7 @@ python tests/acceptance/pcmci_plus_uf.py --source /path/to/DatasetUF.csv --outpu
 python tests/acceptance/time_series_uf_job.py --uf-csv /path/to/DatasetUF.csv --confirm-isolated --timeout-seconds 900
 ```
 
-脚本通过 Flask 路由上传、创建 Job、答复交互和确认；模型自行诊断并提出时间范围。它检查沙盒执行、已绑定数据及时间轴、算法采用结果、原始矩阵和报告持久化；另启 Job 检查重生成是否沿用原事实。本入口不使用浏览器，私有运行日志不能当作公开产物共享。
+脚本通过 Flask 路由上传、创建 Job、答复交互和确认；模型自行诊断并提出时间范围。它检查沙盒执行、已绑定数据及时间轴、算法采用结果、原始矩阵和报告持久化。首次报告和另启 Job 重生成的报告均须为完整报告，重生成须沿用原事实。本入口不使用浏览器，私有运行日志不能当作公开产物共享。
 
 ## 因果效应估计与函数形式检查
 

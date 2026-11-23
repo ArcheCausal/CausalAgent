@@ -14,6 +14,10 @@ from Agent.Report.document import (
 )
 
 
+TIME_SERIES_OVERVIEW_KEY = "time_series_overview"
+TIME_SERIES_OVERVIEW_TITLE = "指标关系总览（仅供展示）"
+
+
 _MARKDOWN_ENTITIES = str.maketrans({char: f"&#{ord(char)};" for char in "\\*_[]|" + chr(96)})
 
 
@@ -21,7 +25,9 @@ def _cell(value: Any) -> str:
     return escape(" ".join(str(value).split()), quote=False).translate(_MARKDOWN_ENTITIES)
 
 
-def build_time_series_overview(primary: Mapping[str, Any] | None) -> CausalGraphModel | None:
+def build_time_series_overview(
+    primary: Mapping[str, Any] | None, *, graph_id: str = TIME_SERIES_OVERVIEW_KEY,
+) -> CausalGraphModel | None:
     """Collapse repeated lags for display only; never publish a StandardizedGraph."""
     if primary is None or primary.get("time_series") is None:
         return None
@@ -44,9 +50,13 @@ def build_time_series_overview(primary: Mapping[str, Any] | None) -> CausalGraph
         metadata={"mark": mark},
     ) for i, ((source, target), mark) in enumerate(sorted(uncertain.items())))
     return CausalGraphModel(
-        graph_id="time_series_overview", edges=edges,
+        graph_id=graph_id, edges=edges,
         nodes=[CausalGraphNode(id=name, variable=name, label=name) for name in series.columns],
-        metadata={"algorithm": "causal.pcmci_plus", "purpose": "time_series_display_only"},
+        metadata={
+            "algorithm": "causal.pcmci_plus",
+            "purpose": "time_series_display_only",
+            "report_title": TIME_SERIES_OVERVIEW_TITLE,
+        },
     )
 
 
@@ -101,4 +111,4 @@ def with_time_series_report_block(
     overview_id = "time_series_indicator_graph"
     while overview_id in occupied:
         overview_id += "_"
-    return [CausalGraphBlock(id=overview_id, asset_key=overview.graph_id, title="指标关系总览（仅供展示）"), findings, *blocks]
+    return [CausalGraphBlock(id=overview_id, asset_key=overview.graph_id, title=TIME_SERIES_OVERVIEW_TITLE), findings, *blocks]

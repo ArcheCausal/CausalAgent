@@ -14,13 +14,17 @@ from langgraph.errors import NodeError
 from pydantic import ValidationError
 
 from Agent.CausalAgentMCP.runner_registry import build_default_registry
-from Agent.Report.document import ReportDraft, build_report_document, parse_report_document
-from Agent.Report.time_series import build_time_series_overview, with_time_series_report_block
+from Agent.Report.document import (
+    ReportDraft, build_report_document, parse_report_document, resolve_report_graph_blocks,
+)
+from Agent.Report.time_series import TIME_SERIES_OVERVIEW_KEY, with_time_series_report_block
 from Agent.causal_agent.analysis_context import (
     build_context_commit, build_report_analysis_context, context_graph, report_primary_result,
 )
 from Agent.causal_agent.fault_tolerance import recover_report
-from Agent.causal_agent.nodes import _prompt_analysis_facts, _report_graph_asset, _report_execution_summary
+from Agent.causal_agent.nodes import (
+    _prompt_analysis_facts, _report_asset_manifest, _report_execution_summary, _report_graph_asset, _report_graph_assets,
+)
 from Agent.data_processing.parameters import parameter_identity
 from Agent.deep_agent.context import AnalysisInputRef, AgentRunContext, TrustedJobIdentity
 from Agent.deep_agent.finalization import FinalizationGate, StructuredResponseError
@@ -140,16 +144,19 @@ def _accept(params, identity, executions, *, primary=None, exhausted=False):
             "deep_agent_accepted_decision": accepted, "finalization_status": "valid", "deep_agent_budget_exhausted": exhausted}
 
 
-def _render(state):
+def _render(state, draft=None):
     facts = build_report_analysis_context(state)
-    primary = report_primary_result(facts)
-    overview = build_time_series_overview(primary)
+    assets, _keys = _report_graph_assets(state, facts)
+    draft = draft or ReportDraft(title="时序报告")
     blocks = with_time_series_report_block(
-        [], discovery_goal=facts.get("discovery_goal"), primary=primary, overview=overview,
+        resolve_report_graph_blocks(draft.blocks, assets),
+        discovery_goal=facts.get("discovery_goal"), primary=report_primary_result(facts),
     )
-    document = build_report_document(ReportDraft(title="时序报告", blocks=blocks),
-                                     assets={overview.graph_id: overview} if overview else None,
-                                     execution_summary=_report_execution_summary(state))
+    document = build_report_document(
+        draft.model_copy(update={"blocks": blocks}),
+        assets=assets, required_graph_asset_key=TIME_SERIES_OVERVIEW_KEY,
+        execution_summary=_report_execution_summary(state),
+    )
     payload = process_final_result({"report_document": document})
     return parse_report_document(json.loads(json.dumps(payload["document"])))
 
@@ -207,6 +214,49 @@ def test_run_preserves_distinct_lags_and_self_links_through_report_regeneration(
     assert recovered["finalization_status"] == "valid"
     assert _findings(recovered["report_document"].model_dump(mode="json")) == block
     assert recovered["report_document"].assets["time_series_overview"].model_dump(mode="json") == overview
+
+
+def test_report_selects_real_supporting_graph_and_recovers_from_unknown_reference(calculation):
+    csv, axis = calculation
+    params, identity = _identity(csv, axis)
+    pcmci = _execute(identity, "causal.pcmci_plus", csv, TIME_SERIES_PARAMS, {"time_series": axis})
+    pc = _execute(identity, "causal.pc", csv, {"test": "fisherz"}, {
+        "semantic_kinds": {column: "continuous" for column in pcmci[0].time_series.columns},
+    })
+    primary_ref = pcmci[0].result_ref
+    state = _accept(params, identity, [pcmci, pc], primary=primary_ref)
+    facts = build_report_analysis_context(state)
+    assets, keys = _report_graph_assets(state, facts)
+    supporting = keys[pc[0].result_ref]
+    assert keys[primary_ref] == TIME_SERIES_OVERVIEW_KEY
+    assert {item["asset_key"] for item in _report_asset_manifest(assets)} == {TIME_SERIES_OVERVIEW_KEY, supporting}
+    assert {item["result_ref"]: item["report_graph_asset_key"]
+            for item in _prompt_analysis_facts(facts, graph_keys=keys)["results"]} == keys
+    assert assets[supporting].metadata["report_role"] == "supporting"
+    assert set(_render(state)["assets"]) == {TIME_SERIES_OVERVIEW_KEY}
+
+    draft = ReportDraft.model_validate({"title": "时序报告", "blocks": [
+        {"id": "comparison", "type": "section", "title": "方法比较", "children": [
+            {"id": "wrong_graph", "type": "causal_graph", "asset_key": "graph_main"},
+            {"id": "support", "type": "causal_graph", "asset_key": supporting, "title": "主图"},
+            {"id": "duplicate", "type": "causal_graph", "asset_key": supporting},
+            {"id": "explanation", "type": "markdown", "content": "比较静态与时序方法。"},
+        ]},
+    ]})
+    initial, regenerated = (_render(inputs, draft) for inputs in (state, _regeneration(state)))
+    for report in (initial, regenerated):
+        assert report["execution_summary"]["report_completeness"] == "complete"
+        assert set(report["assets"]) == {TIME_SERIES_OVERVIEW_KEY, supporting}
+        assert set(report["assets"]) == {value["graph_id"] for value in report["assets"].values()}
+        assert report["blocks"][1]["children"] == [
+            {"id": "support", "type": "causal_graph", "asset_key": supporting,
+             "title": assets[supporting].metadata["report_title"]},
+            {"id": "explanation", "type": "markdown", "content": "比较静态与时序方法。", "evidence_refs": []},
+        ]
+        assert report["blocks"][-1]["asset_key"] == TIME_SERIES_OVERVIEW_KEY
+    assert _findings(initial) == _findings(regenerated)
+    assert initial["assets"][supporting]["edges"] == regenerated["assets"][supporting]["edges"]
+    assert report_primary_result(build_report_analysis_context(_regeneration(state)))["result_ref"] == primary_ref
 
 
 def test_gate_accepts_a_real_empty_pcmci_result():
