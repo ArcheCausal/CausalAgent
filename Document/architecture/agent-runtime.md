@@ -49,6 +49,8 @@ agent → data_processing → validate_dataset → bind_dataset → preprocess �
 
 测量声明区分 `columns` 与 `all_input_columns`。后者的列列表必须为空，由程序依据冻结 CSV 的完整列集合展开；“全部11列”不能保存为列名。完整草稿整体替换有效测量声明，纠正错误条目时不会保留旧条目。`target`、`treatment` 保存研究角色名称，可以与原始或输出列名不同；参与范围、算法和观察单位不属于角色。用户未修改的字段应保留在完整草稿中，明确取消使用 null；程序不使用自然语言关键词代替模型理解。
 
+时序研究由 Agent 提交 `discovery_goal=time_series`，并将其纳入参数身份；未选择该目标的静态研究保持原有身份。Agent 调用 `inspect_frozen_time_axis` 完整扫描候选时间列，获得时间间隔和连续片段的分页诊断，再请用户确认时间列、采样周期和一段连续的原始记录。程序从冻结文件计算确认卡上的起止时间与行数，并生成只提取已确认记录和指标的脚本，交给现有 OpenSandbox 执行。独立校验器从同一冻结文件重建选段，逐行核对映射、顺序和数值；跨采样间隔、替换记录、插值和数值更改均不能通过。时间列不进入分析指标。时间轴写入现有校验报告 JSON，绑定和恢复均从该报告读取。
+
 明确的新研究意图可以同时更新 `analysis_question` 和 `aggregation_scope`；未改变的角色、观察单位及时间范围保持当前值。草稿方案中的提议只有在用户实际接受后才能成为参数；只接受 A 时不能同时写入未接受的 B。处理完成及已绑定产物恢复时，父图的研究问题同步为最终参数中的问题，后续分析读取同一份含义。
 
 工具接收期望修订号、真实输入引用和变更原因（首次提交、用户修改、解释纠正），不接受输入正文或其他 State 写入。输入引用必须已经由程序交给 Agent，并由 MySQL 账本再次核验 Job 归属；澄清答复仍通过持久化 interrupt 关联外层中断与工具调用。程序计算实际差异，只有变化才追加修订，允许同一真实输入支持后续纠正。当前版本的相同提交不增加记录；紧邻提交的相同快照可重放，过期或冲突草稿拒绝。修订链与候选参数绑定使用 `PROCESSING_STATE_VERSION=4`；完整效应定义参与参数指纹、修订和恢复校验，画像不参与研究参数身份。
@@ -129,7 +131,7 @@ PC 的 `auto` 和显式 `test` 共用 [`resolve_pc_test()`](../../Agent/pc_test.
 
 `Agent.deep_agent_tools` 包入口只导出错误码、数据模型、算法规格、执行协议、身份函数和 Registry 等轻量契约。MCP 与 Agent 运行时共用这些契约；依赖调度器、算法工具、RAG/Web 工具和测试执行器由调用者从对应子模块显式导入。MCP 导入契约不会加载 LangGraph、LangChain 或 `Agent.deep_agent`；`dependency_planner.py` 仍直接依赖 LangGraph 的 `Command` 并检查算法调用终态。
 
-模型看到的是由本地 `AlgorithmSpec` 生成的 LangChain function tools。当前默认 allowlist 包含 PC、DirectLiNGAM、CDFM 和后门 OLS 估计 `causal.ate`；OLC 的 Spec、Adapter、runner 和算法代码仍保留，但不进入 worker Registry、MCP runner registry 或旧兼容 MCP 工具面。运行时不会调用远端 `list_tools()` 来动态扩展模型工具。CDFM 工具只公开可选 `threshold`，模型路径、CPU device、标准化和缺失值处理策略由 causal-mcp 固定。
+模型看到的是由本地 `AlgorithmSpec` 生成的 LangChain function tools。当前默认 allowlist 包含 PC、DirectLiNGAM、CDFM、PCMCI+、后门 OLS 和 g-formula；OLC 的 Spec、Adapter、runner 和算法代码仍保留，但不进入 worker Registry、MCP runner registry 或旧兼容 MCP 工具面。运行时不会调用远端 `list_tools()` 来动态扩展模型工具。CDFM 工具只公开可选 `threshold`，模型路径、CPU device、标准化和缺失值处理策略由 causal-mcp 固定。
 
 绑定经过独立校验的数据集后，分析准备阶段在 `analysis_parameters.data_profile` 保存该数据集的完整画像。`to_deep_agent_input()` 优先校验该字段，只有字段不存在时才读取父 State 顶层 `data_profile`；选中的画像存在但非法时明确失败，不使用其他来源掩盖错误。转换复制全部行列、列顺序、数值列、分类列、缺失、非有限值、空列、常数列和质量问题，不按 `column_profiles.inferred_type` 重新判断存储类型。两处完整画像都不存在时，历史 `column_profiles`、分析参数和 `file_summary` 只恢复可确认的行列事实，数值与分类类型保持未知。数值参与条件来自实际 dtype 和有限值分布，不再由旧 inferred_type 标签决定。文件摘要继续记录文件身份与基础事实。
 
@@ -156,6 +158,8 @@ Adapter 负责模型参数和数据集输入契约检查、标准结果、raw re
 算法调用不携带预处理方案或批准凭证。独立校验报告保存规范化 `semantic_kinds` 快照，拒绝非法类型、缺失字段及冲突声明。Adapter 从可信运行时的数据集引用读取该快照，MCP 则从 MySQL primary strong read 的同一已绑定候选读取报告；两端都把测量语义传给 `AlgorithmSpec.assess_applicability()`，缺失或无效报告不能回退为空语义。二值、分类或有序变量不会仅因 CSV 中存成数字而被当作连续变量。MCP 同时核对 Job、lease、原始输入 hash、`prepared_dataset_id`、候选状态、数据对象归属和内容 hash，排队后和执行完成后再次核对输入及语义；它不按算法参数改写 CSV。效应调用还从候选的 `analysis_parameter_identity` 与 `processing_plan_identity` 恢复已确认定义和执行 context，并核对 `research_identity`；调用附带的定义或 context 不能替代权威快照。命令、Action Ledger 与结果 provenance 传递研究身份，结果同时记录分析数据身份和原始来源身份。
 
 未声明测量语义时，缺席字段、`null` 或空序列生成空快照；显式提供的空对象、布尔值、数字及字符串仍属非法声明，独立校验必须拒绝，不能用真假值判断把它们转换为空序列。
+
+`causal.pcmci_plus` 只接受经独立校验的等间隔单段序列和连续数值指标；适用性检查使用实际请求的最大滞后和有效样本量。模型可提交 `tau_min`、`tau_max` 与 `pc_alpha`。MCP 从已绑定数据的校验报告读取时间轴，核对来源、文件内容与已确认研究身份，拒绝命令附带的时间轴。runner 使用固定 Tigramite 版本和 ParCorr 解析显著性检验，保存图标记、p 值和统计量矩阵、列顺序及实际配置。每条结果按源指标、目标指标、滞后步数和原始标记保留，滞后秒数等于步数乘采样周期。UF 验收的 3 步即 15 分钟，不能作为其他数据集的业务滞后上限。
 
 `causal-mcp` 是私网 Streamable HTTP/HTTP/1.1 服务。服务端以 MySQL primary strong read 校验 Job、attempt、lease 和 worker 身份，再使用有界队列及独立算法子进程运行 capability。MCP session 不保存 Job、checkpoint 或 Action Ledger。
 
@@ -248,6 +252,10 @@ CDFM 的输入准入检查确认数值存储和可计算性，不将整数列或
 报告节点接收完整父 State，再由 [build_report_analysis_context()](../../Agent/causal_agent/analysis_context.py) 唯一投影为 `analysis-facts-v3`。只有 `finalization_status=valid` 且存在 `deep_agent_accepted_decision` 时才投影最终选择，不从原始 `structured_response` 或 `deep_agent_decision` 回填。事实包含各结果的标准图、状态、方法与实现、输入视图、必要诊断、逐结果身份，以及接受决策中的 `result_assessments`、`selection_rationale`、`conflicts`、`confidence_basis`、独立主图和主效应。`edge_counts` 从标准图计算总边数及各边型数量，双箭头只计一条边。比较输入视图时同时检查行数、列顺序、处理操作、处理摘要及被删行、插补和编码列；runner 内部标准化和缺失策略另列。原始 CSV、原始大数组、完整 Action Ledger、文件身份和运行控制字段不进入该报告上下文。
 
 主图只来自 accepted 决策的 `primary_graph_result_ref`，主效应单独来自 `primary_effect_result_ref`；不能按兼容 `primary_result_ref`、结果数量或引用排序猜测。后处理修订建议不替换算法原图，无合格主图时说明原因，不从旧上下文填补失败。报告最多一个因果图块，有主图资源时必须展示一次。新分析将完整事实嵌入 `latest_algorithm_summary.analysis_facts` JSON；无主图时也保存空选择和本次事实，避免旧图残留。重新生成只读取对应的 `analysis-facts-v3` 快照及既有证据，不重新挑选结果；无法安全复用的快照要求重新分析，历史记录保留。缺少效应请求的历史事实标记 `not_recorded`，不能解释为未请求。
+
+确认 `discovery_goal=time_series` 后，`primary_graph_result_ref` 指向时序发现结果。父图从已绑定数据版本恢复经独立校验的时间轴；门禁在核对当前 Job、数据版本、研究身份和终态账本后，还核对算法是否支持目标以及结果时间轴是否一致。有效空关系仍可作为主结果。静态结果可以作为补充；若尚未尝试时序方法且执行预算允许，可在同一子图补跑一次修正流程；尝试失败或预算耗尽时可生成时序目标未完成的报告。时序结果不发布静态主图，也不作为静态效应诊断或估计的源图。
+
+时序分析事实保存时间轴、搜索滞后范围、原始关系及受保护的原始结果引用。快照中的时序浮点数使用可精确读回的十进制文本，避免数据库 JSON 往返改变报告数值。公开报告由后端直接生成逐关系表，保留同指标的跨时刻关系、多个滞后、同期未定向和方向冲突。存在候选关系时同时生成仅供展示的指标汇总图，合并同方向的多阶滞后，无法确定同期方向的边不加箭头；逐关系表仍是滞后和方向状态的完整展示。偏相关统计量不表示干预效应。重生成和降级报告都用同一事实和渲染规则，报告模型出错不撤销已接受的分析决策。原始结果引用和来源文件摘要不进入公开结果。
 
 `graph_comparisons` 由有效标准图逐变量对计算，区分同一边型与方向、方向相反、边型不同、仅左侧存在和仅右侧存在，保留各侧实际端点。`left_algorithm`、`right_algorithm` 固定左右身份，`relation_counts` 直接计算各类关系数量，避免模型重新计数或按主辅身份猜测左右。它只记录本次候选图差异，不合并结果、不裁定真实方向。`decision.conflicts` 与取舍理由保留为模型评估文本；其中的自然语言若与实际边表冲突，报告以计算比较为准，指出不能由边表支持的表述，不能将另一侧缺边写成方向相反。
 

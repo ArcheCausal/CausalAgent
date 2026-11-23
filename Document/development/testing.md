@@ -380,6 +380,26 @@ passed/skipped/failed；历史通过数量不能代替当前工作树证据。`t
 检查缺少 Docker CLI 时跳过并保留未执行结论。日志序列化兜底事件本身也不能作为生产观测
 链路已验收的证据。
 
+## 时序因果发现
+
+安装 `requirements-test.txt` 后，使用真实 Tigramite runner 检查多滞后、自滞后、有效空结果、门禁和报告重生成。UF 作者数据存放在本地，不纳入 Git；需要在 `杂项/dataset/industrial/sources/cipcad/<版本>/UltraProcessed_Food/` 提供 `DatasetUF.csv`。数据缺席时，与 UF 文件相关的测试会跳过。
+
+```bash
+python -m pytest tests/integration/agent/test_time_series_report_real.py
+python -m pytest -m smoke tests/integration/agent/test_preprocessing_time_series_uf.py
+python tests/acceptance/pcmci_plus_uf.py --source /path/to/DatasetUF.csv --output /path/to/new-evidence-directory
+```
+
+[UF 基线](../../tests/acceptance/pcmci_plus_uf.py) 固定 5 分钟分段、最长并列时取最早一段，使用 `tau_min=0`、`tau_max=3` 和 `pc_alpha=0.05`。它保存实际配置和三张原始矩阵。若 CSV 旁有两份作者参考矩阵，则分别计算指标层骨架和方向评分；评分折叠滞后并排除自环，不验证真实滞后。在隔离 MySQL（主机 `pcmci-mysql`、库 `pcmci_acceptance`）中追加 `--mcp` 可以核对带签名的真实 HTTP MCP 结果。此项使用正式校验和绑定路径，不要求模型或远端沙盒，也不替代完整 Job。
+
+[完整 UF Job](../../tests/acceptance/time_series_uf_job.py) 需先准备隔离 MySQL、PostgreSQL、真实模型、MCP、控制服务及 OpenSandbox。在可访问这些服务的 Worker 环境执行：
+
+```bash
+python tests/acceptance/time_series_uf_job.py --uf-csv /path/to/DatasetUF.csv --confirm-isolated --timeout-seconds 900
+```
+
+脚本通过 Flask 路由上传、创建 Job、答复交互和确认；模型自行诊断并提出时间范围。它检查沙盒执行、已绑定数据及时间轴、算法采用结果、原始矩阵和报告持久化；另启 Job 检查重生成是否沿用原事实。本入口不使用浏览器，私有运行日志不能当作公开产物共享。
+
 ## 因果效应估计与函数形式检查
 
 本节入口分为预处理纯函数 unit 和真实计算组件 integration。当前契约为两个效应 MCP 能力 `3.0`、处理状态第 4 版、确认方案 schema `causalagent-data-processing-plan-v2` 和报告事实 `analysis-facts-v3`；行为定义见 [Agent 运行时](../architecture/agent-runtime.md#因果效应估计与最终门禁)。

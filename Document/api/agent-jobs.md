@@ -66,6 +66,8 @@ Last-Event-ID: 42
 
 方案确认中的 `measurement_columns` 是原始测量列到输出列的公开映射；null 表示不传递原始测量类型，缺席表示同名保留。`effect_request` 由程序从当前研究参数投影：null 表示本次未请求效应，对象表示明确请求，历史载荷缺字段表示未记录，前端不能将其显示成未请求或允许直接确认。请求严格接受 `effect=average_total_effect`，干预为 `fixed_contrast` 的 `from/to/unit` 或 `additive_shift` 的 `delta/unit`。可选 `target_population` 仅表示额外子群限制，全样本时省略或为 null，不代表分析列范围；当前估计器不能验证指定子群成员资格时返回不适用，不能以全样本替代。
 
+时序确认方案另含 `discovery_goal=time_series` 和 `time_series`。后者公开 `time_column`、`start_row`、`end_row`、`start_time`、`end_time`、`row_count`、`sampling_period_seconds` 和 `selection_rule=source_row_range`。记录号从 1 开始，不包含标题，两个端点都包含。公开载荷不包含源文件 hash。前端显示后，仍通过原有 `resume` 提交确认时的 `plan_version`；无需回传时间轴。静态方案不带这两个字段。
+
 确认工具的 `explanation` 写入同一次交互的 `message`（内部 `prompt`），完整方案仍写入 `plan`。首次说明准备执行的内容；真实方案变化时先说明原因及变化，再显示完整方案卡。前端继续使用现有“说明 → 方案卡”的顺序，刷新、历史和 SSE 重连从同一交互恢复，不增加展示区域。确认有效时重复请求直接返回已确认，不产生新的公开确认事件。新用户输入、过期版本或租约/凭据冲突均不能复用执行资格。
 
 同范围脚本修复的 `repair_summary` 使用既有 `progress.summary`，最多 1200 字符；内部事件键绑定 Job 与工具调用 ID，同一调用重放保持稳定。说明只表达真实失败与准备采取的修复，不提前声明成功，后续实际执行和独立校验决定结果。`repair_summary` 和 `explanation` 是单行公开文本并经过凭据脱敏，不包含脚本、原始错误输出或文件正文，不进入方案 metadata 或版本计算。修改方案原有文字仍会使确认失效；仅修复脚本时不新增确认卡。
