@@ -313,7 +313,8 @@ def build(run_dir, baseline_path=None) -> Path:
         "- 计分状态：`success`、`timeout_partial`；其余状态不计入均值。",
         "- 指标：严格定向 P/R/F1、骨架 P/R、CPDAG 口径 SHD。",
         "- 输出为 0/1 矩阵，不计算 AUROC / AUPRC。",
-        "- `timeout_partial` 表示超时但已落盘矩阵，质量通常低于 `success`，需单独看。",
+        "- `timeout_partial` 表示超时且已留下可计分的矩阵，比较时单独标记。",
+        "- 基线按案例标识匹配。比较前还需核对输入内容、指标定义和计分状态。",
         "",
     ]
 

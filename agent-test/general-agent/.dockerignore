@@ -3,3 +3,7 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 runs/
+tests/
+local/
+config*.yaml
+.env*

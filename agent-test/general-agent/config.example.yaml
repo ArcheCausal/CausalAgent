@@ -3,17 +3,14 @@ output_dir: ~/general-agent-eval-runs
 workspace_dir: ~/.general-agent-eval/work
 
 data:
-  name: cdfm_bench_rep00
-  # 已有数据时填这里，跳过下载
-  local_dir: /home/yuki/CausalAgent3/evaluation-runner/cdfm_bench_rep00
+  name: cdfm_bench_D10_30_fixed_r5
+  # 相对路径从运行命令的目录解析，也可以填写已有数据的绝对路径
+  local_dir: ../datasets/cdfm_bench_D10_30_fixed_r5
   url: ""
   sha256: ""
   exclude: [TimeLag]
 
 selection:
-  mechanisms: []
-  dims: []
-  ns: []
   per_cell: 1
   seed: 20261030
 
@@ -40,8 +37,5 @@ docker:
 estimate:
   seconds_per_case: 600
   cost_usd_per_case: 0.6
-
-judge:
-  enabled: false
 
 baseline_results: ""

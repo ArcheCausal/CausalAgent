@@ -1,4 +1,4 @@
-"""严格定向 + 骨架 + CPDAG-SHD 评分，口径与 evaluation-runner 一致。"""
+"""按有向预测边计算 P/R/F1，并计算骨架 P/R 和 CPDAG-SHD。"""
 from __future__ import annotations
 
 from functools import lru_cache

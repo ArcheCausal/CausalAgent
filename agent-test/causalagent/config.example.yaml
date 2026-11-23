@@ -10,7 +10,7 @@ auth:
   username: ""
   password: ""
 data:
-  dir: ./cdfm_bench_D10_30_fixed_r5
+  dir: ../datasets/cdfm_bench_D10_30_fixed_r5
   mechanisms: all
   exclude: [TimeLag]
   dims: []
