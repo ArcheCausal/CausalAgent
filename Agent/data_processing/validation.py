@@ -16,6 +16,7 @@ from Agent.data_processing.parameters import (
     PARAMETER_BINDING_KEY, ParameterContractError, execution_measurement_semantics,
     execution_parameters, parameter_identity,
 )
+from Agent.data_processing.time_axis import TimeAxisError, verify_time_series_candidate
 
 
 class DatasetValidationError(ValueError):
@@ -41,6 +42,8 @@ def validate_candidate(
     max_columns: int = 1_000,
     max_cells: int = MAX_DATASET_CELLS,
     expected_parameter_identity: str | None = None,
+    source_bytes: bytes | None = None,
+    source_hash: str | None = None,
 ) -> dict[str, Any]:
     """校验 MySQL 中候选产物本身，并报告各算法对实际输入的兼容性。
 
@@ -129,6 +132,20 @@ def validate_candidate(
         errors.append(_issue("unknown_semantic_columns", "字段语义引用了输出中不存在的字段"))
 
     parameters = analysis_parameters if isinstance(analysis_parameters, Mapping) else {}
+    discovery_goal = parameters.get("discovery_goal")
+    time_series = None
+    if discovery_goal == "time_series":
+        if source_bytes is None or source_hash is None:
+            errors.append(_issue("time_series_source_missing", "时序候选必须与 Job 的冻结原始 CSV 核对"))
+        else:
+            try:
+                time_series = verify_time_series_candidate(
+                    source=source_bytes, source_hash=source_hash, candidate=data_bytes, metadata=metadata,
+                )
+            except TimeAxisError as exc:
+                errors.append(_issue("time_series_mismatch", str(exc)))
+    elif "time_series" in metadata:
+        errors.append(_issue("unexpected_time_series", "静态目标不能使用时序选段"))
     declared_semantics = parameters.get("measurement_semantics")
     if declared_semantics is None:
         declared_semantics = []
@@ -191,10 +208,18 @@ def validate_candidate(
                 }
             )
             continue
+        if not spec.supports_discovery_goal(discovery_goal):
+            algorithm_compatibility.append({
+                "capability_id": spec.capability_id,
+                "status": "incompatible",
+                "reason": "算法不支持已确认的研究目标",
+            })
+            continue
         applicability, reason = spec.assess_applicability(
             profile=profile,
             execution_columns=profile.column_names,
             semantic_kinds=semantic_kinds,
+            time_series=time_series,
         )
         status = "compatible" if applicability == "ready" else "incompatible"
         compatible_count += int(applicability == "ready")
@@ -227,6 +252,8 @@ def validate_candidate(
         "compatible_algorithm_count": compatible_count,
         "scope_note": "输入兼容检查不证明算法科学假设成立，也不证明因果结论正确。",
     }
+    if time_series is not None:
+        report["time_series"] = time_series
     return report
 
 

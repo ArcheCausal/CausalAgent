@@ -34,6 +34,7 @@ from Agent.deep_agent_tools.interaction import (
 from Agent.deep_agent_tools.models import ContractModel
 from Agent.data_processing.persistence import (
     read_candidate,
+    read_frozen_source,
     read_parameter_answer, read_research_inputs,
     require_current_plan_confirmation,
     save_candidate,
@@ -54,7 +55,10 @@ from Agent.data_processing.plans import (
     extend_data_processing_semantic_identity,
     plan_confirmation_matches,
 )
-from Database.agent_connect import require_frozen_file_for_job
+from Agent.data_processing.time_axis import (
+    TimeAxisError, TimeSeriesSelection, TimeSeriesWindow, build_time_series_script,
+    inspect_time_axis, prepare_time_series_plan,
+)
 
 
 class EmptyToolInput(ContractModel):
@@ -89,6 +93,16 @@ class PlanConfirmationInput(PublicExplanationInput):
 
 class ProcessingPlanInput(ProcessingPlanSummary):
     """供用户确认的处理方案；不接收执行后说明。"""
+    time_series_selection: TimeSeriesSelection | None = Field(
+        default=None, description="时序目标必填：用完整扫描得到的原始时间列、记录范围及采样周期。",
+    )
+
+
+class TimeAxisInput(ContractModel):
+    time_column: str = Field(min_length=1, max_length=255)
+    sampling_period_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    segment_offset: int = Field(default=0, ge=0)
+    interval_offset: int = Field(default=0, ge=0)
 
 
 class ExecutionReportInput(ContractModel):
@@ -111,24 +125,7 @@ def _tool_message(runtime: Any, *, name: str, content: str) -> ToolMessage:
 
 
 async def _source_bytes(context: AgentRunContext) -> tuple[bytes, str]:
-    identity = context.trusted_identity
-    if identity is None or identity.frozen_input is None:
-        raise RuntimeError("a trusted frozen CSV input is required")
-    frozen = identity.frozen_input
-    if frozen.user_file_id is None or frozen.object_id is None:
-        raise RuntimeError("the Job has no frozen CSV file reference")
-    row = await asyncio.to_thread(
-        require_frozen_file_for_job,
-        identity.user_id,
-        str(identity.job_id),
-        frozen.user_file_id,
-        frozen.object_id,
-    )
-    content = bytes(row["file_content"])
-    source_hash = str(row["file_hash"])
-    if not content or source_hash != identity.source_input_identity():
-        raise RuntimeError("the frozen source file does not match the trusted Job identity")
-    return content, source_hash
+    return await asyncio.to_thread(read_frozen_source, context.trusted_identity)
 
 
 def _context(runtime: Any, *, sandbox_required: bool = True) -> AgentRunContext:
@@ -153,6 +150,9 @@ def _write_script_tool() -> Any:
     async def call(runtime: Any, **kwargs: Any) -> Any:
         payload = ScriptInput.model_validate(kwargs)
         state = runtime.state
+        if (state.get("analysis_parameters") or {}).get("discovery_goal") == "time_series":
+            return _tool_message(runtime, name="write_processing_script",
+                                 content="时序脚本由选段和列映射自动生成；无需手写或修复脚本。")
         repairing = bool(state.get("data_processing_confirmed_plan_version")
                          and state.get("data_processing_draft_script") != payload.script)
         if repairing and payload.repair_summary is None:
@@ -206,7 +206,7 @@ def _write_script_tool() -> Any:
 def _plan_tool() -> Any:
     async def call(runtime: Any, **kwargs: Any) -> Any:
         payload = ProcessingPlanInput.model_validate(kwargs)
-        metadata = payload.model_dump(mode="json")
+        metadata = payload.model_dump(mode="json", exclude={"time_series_selection"})
         if payload.effect_execution_context is not None:
             metadata["effect_execution_context"] = payload.effect_execution_context.model_dump(mode="json", exclude_none=True)
             for key in ("treatment_transform", "outcome_transform"):
@@ -227,6 +227,31 @@ def _plan_tool() -> Any:
             execution_parameters(runtime.state["analysis_parameters"], metadata)
         except ParameterContractError as exc:
             return _tool_message(runtime, name="set_data_processing_plan", content=str(exc))
+        is_time_series = runtime.state["analysis_parameters"].get("discovery_goal") == "time_series"
+        if is_time_series != (payload.time_series_selection is not None):
+            return _tool_message(runtime, name="set_data_processing_plan",
+                                 content="时序目标必须提供 time_series_selection；静态目标不接受时序选段。")
+        script_update = {}
+        if payload.time_series_selection is not None:
+            context = _context(runtime, sandbox_required=False)
+            await context.ensure_active()
+            source, _ = await _source_bytes(context)
+            try:
+                window = await asyncio.to_thread(
+                    prepare_time_series_plan, source, selection=payload.time_series_selection, metadata=metadata,
+                )
+            except TimeAxisError as exc:
+                await context.check_after_call()
+                return _tool_message(runtime, name="set_data_processing_plan", content=str(exc))
+            await context.check_after_call()
+            metadata["time_series"] = window.model_dump(mode="json")
+            script_update = update_script(runtime.state, build_time_series_script(window, metadata))
+        elif (runtime.state.get("data_processing_metadata") or {}).get("time_series") is not None:
+            # A time-series script cannot be reused after the user changes the goal to static.
+            previous = runtime.state["data_processing_metadata"]
+            window = TimeSeriesWindow.model_validate(previous["time_series"])
+            if runtime.state.get("data_processing_draft_script") == build_time_series_script(window, previous):
+                script_update = update_script(runtime.state, "")
         return Command(
             update={
                 "messages": [
@@ -237,6 +262,7 @@ def _plan_tool() -> Any:
                     )
                 ],
                 **update_plan(runtime.state, metadata),
+                **script_update,
                 "data_processing_plan_parameter_identity": parameter_identity(runtime.state["analysis_parameters"]),
             }
         )
@@ -252,6 +278,7 @@ def _plan_tool() -> Any:
             "执行后补充说明必须使用 save_data_processing_execution_report，不得改写方案。"
             "方案只描述稳定要求，例如保留原始数值；CSV 写出参数、解析方法和代码修复过程放在脚本与执行说明中。同范围修复不得重写本方案。"
             "只写你能从用户说明或实际脚本确认的内容；不要推测字段含义。"
+            "时序目标必须提交 time_series_selection；程序重新核验整份时间轴，并自动保存仅选段和原值列映射的脚本。"
         ),
         args_schema=with_tool_runtime_schema(
             ProcessingPlanInput,
@@ -514,7 +541,10 @@ def _plan_confirmation_tool() -> Any:
                 datetime.now(timezone.utc) + timedelta(seconds=300)
             ).isoformat().replace("+00:00", "Z"),
             plan_version=plan_version,
-            plan=ResearchPlanSummary.model_validate({**metadata, "effect_request": parameters["effect_request"]}),
+            plan=ResearchPlanSummary.model_validate({
+                **metadata, "effect_request": parameters["effect_request"],
+                "discovery_goal": "time_series" if parameters.get("discovery_goal") == "time_series" else None,
+            }),
         )
         answer = interrupt(request.public_payload())
         await context.check_after_call()
@@ -635,6 +665,33 @@ def _inspect_input_tool() -> Any:
     )
 
 
+def _inspect_time_axis_tool() -> Any:
+    async def call(runtime: Any, **kwargs: Any) -> Any:
+        payload = TimeAxisInput.model_validate(kwargs)
+        context = _context(runtime, sandbox_required=False)
+        await context.ensure_active()
+        source, _ = await _source_bytes(context)
+        try:
+            diagnosis = await asyncio.to_thread(inspect_time_axis, source, **payload.model_dump())
+        except TimeAxisError as exc:
+            content = {"status": "invalid_time_axis", "message": str(exc)}
+        else:
+            content = {"status": "inspected", **diagnosis}
+        await context.check_after_call()
+        return _tool_message(runtime, name="inspect_frozen_time_axis",
+                             content=json.dumps(content, ensure_ascii=False))
+
+    call.__annotations__["runtime"] = ToolRuntime
+    return StructuredTool.from_function(
+        coroutine=call, name="inspect_frozen_time_axis",
+        description=("确认前只读扫描冻结 CSV 的完整时间列。支持 ISO 日期时间（不含日期之外的区域格式或数字纪元）。"
+                     "不排序。返回解析失败、重复、逆序、正间隔分布、断点和完整等间隔片段。"
+                     "不传周期时仅推荐出现最多的正间隔；片段和间隔列表可用返回的 offset 继续查询。"),
+        args_schema=with_tool_runtime_schema(TimeAxisInput, tool_name="inspect_frozen_time_axis",
+                                             tool_runtime_type=ToolRuntime),
+    )
+
+
 def _execute_script_tool() -> Any:
     async def call(runtime: Any, **_: Any) -> Any:
         context = _context(runtime)
@@ -667,6 +724,11 @@ def _execute_script_tool() -> Any:
                     ensure_ascii=False,
                 ),
             )
+        if state["analysis_parameters"].get("discovery_goal") == "time_series":
+            window = TimeSeriesWindow.model_validate(metadata.get("time_series"))
+            if script != build_time_series_script(window, metadata):
+                return _tool_message(runtime, name="execute_processing_script",
+                                     content="时序脚本与已保存选段不一致；请重新保存时序方案。")
         source, source_hash = await _source_bytes(context)
         semantic_identity = _semantic_identity(context, state)
         plan_version = build_processing_plan_version(
@@ -792,6 +854,9 @@ def data_processing_system_prompt() -> str:
         [
             "你是数据处理 Agent。你的工作只是在隔离沙盒中生成一份可复现的分析数据集。",
             "先检查受限的数据预览，再结合用户目标和服务端提供的 AlgorithmSpec 输入要求判断数据含义。",
+            "用户明确关注领先、滞后或时间先后关系时，设置 discovery_goal=time_series；单纯指定某个时间范围不代表时序目标。静态目标可省略该字段。后续修订若未改变时序目标，仍须提交 discovery_goal=time_series。同期或滞后的选择会改变处理且用户意图不清楚时，先问一个具体问题。",
+            "时序目标必须用 inspect_frozen_time_axis 扫描完整原始时间列，不能根据预览假定无中断。可用该工具分页查找其他片段。根据用户范围提出一段连续等间隔的原始记录，尊重用户选择；没有指定片段时可建议最长片段并说明理由。",
+            "时序方案用 time_series_selection 指定原始记录号和采样周期。只允许保留或重命名连续数值测量列，排除时间列和辅助列，不得补行、插值、排序、合并或改写值；连续类型根据真实业务含义声明。variable_semantics 只描述 analysis_columns 内的指标。时序脚本由方案工具生成，不调用 write_processing_script。确认卡会显示实际时间与记录范围，用户确认后直接执行。",
             "当观察单位、时间范围、聚合粒度或变量含义不明确，且该选择会改变研究问题时，使用 ask_data_processing_question 暂停并等待用户答复。不要按某个算法的枚举清洗步骤提问。",
             "脚本必须只读取 /workspace/raw/original.csv，并写入 /workspace/output/prepared.csv。不得访问其他路径、调用网络、安装依赖或尝试访问数据库；原始文件只读。",
             "首次保存研究参数、处理方案和脚本后，用 request_data_processing_plan_confirmation 的 explanation 说明准备执行的内容并请求确认。确认成功后直接执行，不再制定或更新方案。有效版本重复请求确认会返回已确认，可以执行。",
@@ -799,7 +864,7 @@ def data_processing_system_prompt() -> str:
             "在处理方案的 role_columns 中明确填写用户已指定的 target、treatment 对应的输出列名。研究角色可以是中文名称或业务名称，不能直接当作 CSV 列名；根据字段含义和脚本确定映射，未指定的角色留空。已有明确对应关系时直接记录，存在真实歧义时才向用户提问。",
             "同一轮只调用一个数据处理工具，等待其状态保存后再调用下一工具。修改脚本会清空当前候选，必须重新执行才可结束；方案正文或研究语义变化必须重新展示并等待确认。",
             "确认授权绑定当前 Job、冻结文件、研究语义和方案说明，不绑定脚本正文。用户拒绝或提出新研究语义、改变变量含义或扩大转换范围时，旧方案不得执行；先澄清、更新方案并重新请求确认。",
-            "执行或独立校验失败后，先根据失败事实和已确认要求判断是否需要改变处理要求。脚本错误、导出精度或遗漏已确认字段，只用 write_processing_script 保存修复脚本并提供 repair_summary，然后直接重新执行和校验；读取保存的方案，不调用 set_data_processing_plan 重建、润色或补写说明。需要改变变量映射、样本范围、聚合、单位转换或研究参数时才更新对应内容，确认工具 explanation 先解释为什么改变、改变了什么，再展示完整确认卡。不要提前声称修复成功。",
+            "执行或独立校验失败后，先根据失败事实和已确认要求判断是否需要改变处理要求。静态任务的同范围脚本错误、导出精度或字段遗漏，只用 write_processing_script 保存修复脚本并提供 repair_summary，然后重新执行和校验。时序任务不手改脚本。只有改变变量映射、样本范围、聚合、单位转换或研究参数时才更新方案，确认工具 explanation 先解释原因和变化，再展示完整确认卡。不要提前声称修复成功。",
             "方案描述稳定的处理要求，例如保留原始数值；CSV 写出参数、解析方法和修复过程放在脚本与执行说明中。repair_summary 和 explanation 是公开单行简短说明，不包含脚本、原始错误输出、凭据或文件正文，不写入方案 metadata。",
             "独立校验节点会检查实际输出文件。报告中的 research_roles 保留研究角色，role_columns 是方案中的角色列映射，target、treatment 是解析后的执行列名，columns 是候选 CSV 的实际列名；角色为空本身不构成缺失错误。算法输入兼容不代表科学假设已经成立。",
             "收到校验失败反馈后，先区分已保存角色列映射缺失或错误、脚本遗漏、用户信息不足和参数提取错误。只有已保存的 role_columns 确实需要改变时才用 set_data_processing_plan 修正，解释变化后确认并重新执行；若映射正确而脚本遗漏字段，只修脚本。研究角色与输出列名称不同本身不要求重建方案，也不要求用户重复选择。只有用户信息存在多个合理含义时才澄清。",
@@ -840,6 +905,7 @@ def build_data_processing_agent(
         model=model,
         tools=[
             _inspect_input_tool(),
+            _inspect_time_axis_tool(),
             _research_spec_tool(),
             _write_script_tool(),
             _plan_tool(),

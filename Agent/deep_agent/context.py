@@ -16,6 +16,7 @@ from types import MappingProxyType
 from uuid import UUID
 
 from Agent.deep_agent_tools.models import McpInvocationContext
+from Agent.deep_agent_tools.time_series import VerifiedTimeAxis
 from Agent.measurement_semantics import normalize_semantic_kinds
 
 
@@ -86,6 +87,7 @@ class AnalysisInputRef:
     content_hash: str | None = None
     filename: str | None = None
     research_identity: str | None = None
+    time_series: VerifiedTimeAxis | None = None
     _semantic_kinds: tuple[tuple[str, str], ...] | None = field(
         default=None, init=False, repr=False,
     )
@@ -96,10 +98,26 @@ class AnalysisInputRef:
             return None
         return MappingProxyType(dict(self._semantic_kinds))
 
+    @classmethod
+    def create(
+        cls, *, dataset_id: int, object_id: int, content_hash: str, filename: str,
+        semantic_kinds: Mapping[str, str] | None = None,
+        research_identity: str | None = None,
+        time_series: VerifiedTimeAxis | Mapping[str, Any] | None = None,
+    ) -> AnalysisInputRef:
+        ref = cls()
+        ref.bind(
+            dataset_id=dataset_id, object_id=object_id, content_hash=content_hash,
+            filename=filename, semantic_kinds=semantic_kinds,
+            research_identity=research_identity, time_series=time_series,
+        )
+        return ref
+
     def bind(
         self, *, dataset_id: int, object_id: int, content_hash: str, filename: str,
         semantic_kinds: Mapping[str, str] | None = None,
         research_identity: str | None = None,
+        time_series: VerifiedTimeAxis | Mapping[str, Any] | None = None,
     ) -> None:
         if dataset_id <= 0 or object_id <= 0:
             raise ValueError("prepared dataset and object IDs must be positive")
@@ -111,11 +129,15 @@ class AnalysisInputRef:
             tuple(normalize_semantic_kinds(semantic_kinds).items())
             if semantic_kinds is not None else None
         )
+        verified_axis = (
+            VerifiedTimeAxis.model_validate(time_series) if time_series is not None else None
+        )
         self.dataset_id = dataset_id
         self.object_id = object_id
         self.content_hash = content_hash
         self.filename = filename
         self.research_identity = research_identity
+        self.time_series = verified_axis
         self._semantic_kinds = snapshot
 
 

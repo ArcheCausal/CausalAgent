@@ -1,2 +1,3 @@
 pytest>=8,<9
 PyYAML>=6,<7
+tigramite==5.2.9.4

@@ -428,7 +428,7 @@ def build_report_document(
         if graph_block_count:
             lines.append("本报告展示的是候选因果结构；图的来源和结构通过校验，不表示因果方向或科学假设已经得到确认。")
             for block in iter_report_blocks(normalized_blocks):
-                if isinstance(block, CausalGraphBlock):
+                if isinstance(block, CausalGraphBlock) and block.asset_key == "graph_main":
                     block.title = "候选因果结构"
         if summary.get("budget_exhausted"):
             lines.append("分析执行预算已耗尽，后续工具未执行；报告仅整理已有结果。预算跳过不代表检查通过或算法执行失败。")

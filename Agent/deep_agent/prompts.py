@@ -87,6 +87,20 @@ MANDATORY_ALGORITHM_INSTRUCTION = (
     "由你根据方法假设、诊断和稳定性选择主效应并说明理由，程序不按方法名强制采用结果。"
 )
 
+MANDATORY_TIME_SERIES_INSTRUCTION = (
+    "本次确认的 discovery_goal=time_series。按已绑定的连续等间隔片段调用支持该目标的时序算法"
+    "（首版工具 causal_pcmci_plus，能力 causal.pcmci_plus）。"
+    "根据采样周期、实际序列长度和问题选择 tau_min/tau_max，说明最大滞后对应的实际时长。"
+    "不得修改采样间隔、顺序、片段或改用静态图完成时序目标。"
+    "成功的时序结果用其 result_ref 填 primary_graph_result_ref，即使 relations 为空；"
+    "primary_graph 在此指时序发现结果，不要求提供静态因果图。"
+    "区分跨时刻的同指标关系、同一指标对的多个滞后、同期已定向、同期未定向和方向冲突。"
+    "不要重定向、合并或补写关系，不把 ParCorr 偏相关统计量解释为干预效应。"
+    "没有合格时序结果时，提交 no_valid_algorithm，主结果留空，说明时序目标未完成及真实原因；"
+    "静态结果仅可作为补充。预算允许且尚未尝试时序算法时，先完成真实调用，再提交最终决策。"
+    "不对时序结果调用静态图效应诊断或估计工具，primary_effect_result_ref 留空。"
+)
+
 
 def build_deep_agent_system_prompt(extra_instructions: str | None = None) -> str:
     """追加受控部署级说明，不接受模型或用户提供的身份/权限指令。"""

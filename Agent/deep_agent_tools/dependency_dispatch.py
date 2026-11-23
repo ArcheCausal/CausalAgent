@@ -99,7 +99,7 @@ def _initial_artifacts(
                 continue
             if (
                 result.status == "valid"
-                and result.standardized_graph is not None
+                and (result.standardized_graph is not None or result.time_series is not None)
                 and provenance_matches_identity(result.provenance, trusted_identity)
             ):
                 artifacts |= set(

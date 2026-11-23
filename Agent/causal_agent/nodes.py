@@ -22,6 +22,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 from Agent.llm_structured_output import StructuredOutputError, ainvoke_structured
 from Agent.data_processing.parameters import execution_parameters, parameter_identity
+from Agent.Report.time_series import build_time_series_overview, with_time_series_report_block
 from .fault_tolerance import (
     RAG_DEGRADATION_SUMMARY,
     build_rag_degradation_result,
@@ -830,6 +831,7 @@ async def preprocess_node(
         filename=str(bound_identity["filename"]),
         semantic_kinds=bound_identity["semantic_kinds"],
         research_identity=parameter_identity(bound_identity["analysis_parameters"]),
+        time_series=bound_identity.get("time_series"),
     )
     bound_data = await asyncio.to_thread(
         read_bound_dataset,
@@ -1746,9 +1748,12 @@ def _report_graph_asset(state: CausalAgentState):
 
 
 def _prompt_analysis_facts(facts: Dict[str, Any]) -> Dict[str, Any]:
-    """报告提示词不使用图分数；剥离后与既有提示词保持一致。"""
+    """剥离内部原始产物引用、来源摘要和报告模型无需读取的图分数。"""
     projected = copy.deepcopy(facts)
     for result in projected.get("results", []):
+        result.pop("raw_result", None)
+        if result.get("time_series") is not None:
+            result["time_series"]["time_axis"].pop("source_sha256", None)
         graph = result.get("graph")
         if isinstance(graph, dict):
             graph.pop("edge_score_matrix", None)
@@ -1906,6 +1911,9 @@ def _report_execution_summary(state: CausalAgentState) -> dict[str, Any]:
         "data_views_differ": (facts.get("data_view_comparison") or {}).get("data_views_differ"),
         "analysis_limitations": facts.get("analysis_limitations", []),
         "budget_exhausted": facts.get("budget_exhausted", False),
+        **({"discovery_goal": "time_series", "discovery_goal_status": (
+            "completed" if report_primary_result(facts) is not None else "incomplete"
+        )} if facts.get("discovery_goal") == "time_series" else {}),
         "preliminary_ols": bool(
             (facts.get("analysis_limitations") or facts.get("budget_exhausted"))
             and (primary_effect or {}).get("algorithm") == "causal.backdoor_ols"
@@ -2002,7 +2010,9 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         - 以统一分析事实中的方法快照、执行状态、输入视图和已通过门禁的选择为准。不得根据名称猜测方法，不得把一种方法的假设套用到另一种方法。
         - 明确说明主结果是谁、selection_rationale、辅助与舍弃结果及其理由、conflicts 和 confidence_basis；没有主结果时说明 no_primary_reason，不能声称不存在因果关系。
         - 所有图边都是本次方法约束下的候选结构。双箭头表示潜在共同原因候选，未证实共同原因；无向边的方向尚未识别。
-        - 边数只读取各结果的 edge_counts，不自行计数；directed、undirected、bidirected 分别计数，双箭头只算一条边。文字中的边数与逐边清单必须一致。
+        - 静态图边数只读取各结果的 edge_counts；directed、undirected、bidirected 分别计数，双箭头只算一条边。文字中的边数与逐边清单必须一致。
+        - discovery_goal=time_series 时，primary_graph_result_ref 指向时序结果。根据 time_series 的时间轴、实际时延及原始标记解释发现：同指标跨时刻关系有效，同指标对的多个滞后彼此不同；o-o 是同期未定向，x-x 是同期方向冲突。零滞后不表示即时干预效应；ParCorr 统计量也不是效应。
+        - 时序结果的完整关系表由后端插入，不在草稿重复整张表。只概括与问题相关的关系，保留原始方向与时延。有效空结果表示在本次片段、搜索范围和方法条件下未检出；没有合格时序主结果才表示目标未完成，此时静态结果只可作补充。
         - 按 data_view_comparison 说明实际行数、列和处理差异；骨架接近不等于因果方向得到验证，算法结果没有自动合并。
         - 逐边比较以 graph_comparisons 的实际端点、边型和 relation 为准。opposite_direction 才是方向相反；left_only/right_only 是仅一方存在，不能写成反向。
         - 比较中的左右身份固定由 left_algorithm/right_algorithm 指定，不能自行将主结果叫作左侧。各类关系数量只读取 relation_counts，不自行重数清单。
@@ -2111,6 +2121,13 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         node_name="report",
     )
     draft = _with_dataset_preparation_block(draft, facts)
+    primary = report_primary_result(facts)
+    overview = build_time_series_overview(primary)
+    if overview is not None:
+        assets[overview.graph_id] = overview
+    draft = draft.model_copy(update={"blocks": with_time_series_report_block(
+        draft.blocks, discovery_goal=facts.get("discovery_goal"), primary=primary, overview=overview,
+    )})
 
     document = build_report_document(
         draft,

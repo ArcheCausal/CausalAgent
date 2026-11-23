@@ -30,6 +30,7 @@ def test_default_specs_only_enable_reviewed_runtime_capabilities() -> None:
         "causal.pc",
         "causal.direct_lingam",
         "causal.cdfm",
+        "causal.pcmci_plus",
         "causal.backdoor_ols",
         "causal.g_formula",
     ]
@@ -75,6 +76,7 @@ def test_tool_snapshot_contains_capability_and_spec_identity() -> None:
         "causal.direct_lingam",
         "causal.g_formula",
         "causal.pc",
+        "causal.pcmci_plus",
     ]
     assert all(len(item["spec_digest"]) == 64 for item in snapshot)
 

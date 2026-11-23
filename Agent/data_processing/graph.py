@@ -21,7 +21,7 @@ from langgraph._internal._constants import (
 )
 from langgraph.errors import GraphBubbleUp, GraphInterrupt
 
-from Agent.deep_agent.context import AgentRunContext, AnalysisInputRef
+from Agent.deep_agent.context import AgentRunContext
 from Agent.causal_agent.analysis_context import rebuild_context_index
 from Agent.deep_agent_tools.identity import build_data_processing_run_id
 from Agent.deep_agent_tools.interaction import (
@@ -35,7 +35,7 @@ from Agent.data_processing.persistence import (
     require_candidate_parameters,
     bind_candidate,
     read_bound_dataset_identity,
-    read_candidate, read_research_inputs,
+    read_candidate, read_frozen_source, read_research_inputs,
     record_validation,
 )
 from Agent.data_processing.lifecycle import confirmed_version, require_candidate_binding
@@ -141,6 +141,7 @@ def _validation_retry_message(candidate_id: Any, report: Mapping[str, Any]) -> H
     return HumanMessage(
         id=f"validation-retry-{candidate_id}",
         content=(
+            "时序目标使用程序生成的脚本，不得手改脚本或改为静态目标来绕过失败。只有经确认的选段或列映射确实需要改变时才重新提议并确认；对于脚本或输入校验未能解决的问题，如实说明。"
             "独立校验未通过。以下是研究角色、方案角色列映射、本次执行列名、候选 CSV 实际列名和确定性错误。"
             "先根据失败事实和已确认要求判断是否需要改变处理要求。同范围修复（含导出精度或遗漏已确认字段）只保存修复脚本，提供 repair_summary 后直接重新执行和校验；读取保存的方案，不调用方案工具重建或润色说明。"
             "只有已保存的 role_columns 缺失或错误且需要改变映射时，才使用 set_data_processing_plan 修正，并在 explanation 中解释原因和变化后确认、重新执行；若映射正确而脚本遗漏字段，只修脚本。研究角色与实际列名不同本身不要求重建方案，不要改写原始研究角色或让用户重复选择。"
@@ -212,6 +213,7 @@ def _specification_briefs(registry: Any) -> list[dict[str, Any]]:
             "name": spec.public_name,
             "available": bool(spec.enabled and spec.availability == "available"),
             "data_requirements": list(spec.data_requirements),
+            "supports_time_series_discovery": spec.supports_discovery_goal("time_series"),
             "requires_numeric_columns": spec.requires_numeric_columns,
             "requires_complete_cases": spec.requires_complete_cases,
             "native_missing_handling": spec.native_missing_handling,
@@ -407,6 +409,7 @@ async def data_processing_parent_node(
             "data_processing_candidate_id": int(bound["dataset_id"]),
             "data_processing_execution_report": execution_report,
             "dataset_validation_status": "accepted",
+            "dataset_validation_report": bound["validation_report"],
             "data_processing_run_id": run_id,
         }
 
@@ -583,7 +586,7 @@ async def validate_dataset_node(
         await context.check_after_call()
         return {
             "dataset_validation_status": "accepted",
-            "dataset_validation_report": state.get("dataset_validation_report") or {},
+            "dataset_validation_report": bound["validation_report"],
         }
     dataset_id = state.get("data_processing_candidate_id")
     if isinstance(dataset_id, bool) or not isinstance(dataset_id, int) or dataset_id <= 0:
@@ -614,15 +617,27 @@ async def validate_dataset_node(
     provider_settings = getattr(context.sandbox_provider, "settings", None)
     max_bytes = int(getattr(provider_settings, "max_output_file_bytes", 64 * 1024 * 1024))
     specifications = registry.specs if registry is not None else ()
-    report = validate_candidate(
-        data_bytes=candidate["data_bytes"],
-        script_bytes=candidate["script_bytes"],
-        metadata=candidate["metadata"],
-        analysis_parameters=state.get("analysis_parameters") or {},
-        specifications=specifications,
-        max_bytes=max_bytes,
-        expected_parameter_identity=parameter_identity(state["analysis_parameters"]),
-    )
+    if candidate["status"] == "pending_validation":
+        parameters = state["analysis_parameters"]
+        source_bytes = source_hash = None
+        if parameters.get("discovery_goal") == "time_series":
+            source_bytes, source_hash = await asyncio.to_thread(read_frozen_source, identity)
+            await context.check_after_call()
+        report = await asyncio.to_thread(
+            validate_candidate,
+            data_bytes=candidate["data_bytes"],
+            script_bytes=candidate["script_bytes"],
+            metadata=candidate["metadata"],
+            analysis_parameters=parameters,
+            specifications=specifications,
+            max_bytes=max_bytes,
+            expected_parameter_identity=parameter_identity(parameters),
+            source_bytes=source_bytes,
+            source_hash=source_hash,
+        )
+    else:
+        # Reuse the immutable report if the worker stopped after persisting it but before checkpointing.
+        report = candidate["validation_report"]
     await context.check_after_call()
     await asyncio.to_thread(
         record_validation,
@@ -692,11 +707,13 @@ async def bind_dataset_node(
         content_hash=str(rebound["data_hash"]),
         filename=str(rebound["filename"]),
         semantic_kinds=rebound["semantic_kinds"],
+        time_series=rebound["time_series"],
     )
     return {
         "prepared_dataset_id": int(rebound["dataset_id"]),
         "prepared_dataset_hash": str(rebound["data_hash"]),
         "dataset_validation_status": "accepted",
+        "dataset_validation_report": rebound["validation_report"],
         "prepared_dataset_metadata": bound["metadata"],
     }
 

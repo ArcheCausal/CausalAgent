@@ -1,4 +1,4 @@
-"""把现有三个 runner 的返回值转换为统一 StandardizedGraph。"""
+"""把 runner 的返回值转换为可信的算法结果。"""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from .models import (
     StandardizedGraph,
     build_diagnostics_from_runner_payload,
 )
+from .time_series import decode_pcmci_result
 
 
 class RunnerContractError(ValueError):
@@ -242,9 +243,15 @@ def result_from_runner_payload(
             ),
         )
 
+    graph = time_series = None
     try:
-        graph = standardize_runner_graph(payload, capability_id=command.capability_id)
-    except RunnerContractError:
+        if command.capability_id == "causal.pcmci_plus":
+            time_series = decode_pcmci_result(payload)
+            if any(getattr(time_series, key) != command.parameters.get(key) for key in ("tau_min", "tau_max", "pc_alpha")):
+                raise RunnerContractError("PCMCI+ output does not match the execution parameters")
+        else:
+            graph = standardize_runner_graph(payload, capability_id=command.capability_id)
+    except (ValueError, TypeError, KeyError):
         return AlgorithmResult(
             result_ref=f"{command.invocation_id}:{command.result_index}",
             invocation_id=command.invocation_id,
@@ -272,9 +279,13 @@ def result_from_runner_payload(
             ),
         )
 
-    validation = validate_graph_structure(graph, graph_semantics=get_algorithm_spec(command.capability_id).graph_semantics)
+    validation = (
+        validate_graph_structure(graph, graph_semantics=get_algorithm_spec(command.capability_id).graph_semantics)
+        if graph is not None else None
+    )
+    valid = validation is None or validation.valid
     diagnostics = build_diagnostics_from_runner_payload(payload)
-    if not validation.valid:
+    if not valid:
         diagnostics.safe_error_code = SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID
     return AlgorithmResult(
         result_ref=f"{command.invocation_id}:{command.result_index}",
@@ -282,9 +293,10 @@ def result_from_runner_payload(
         provider_call_id=command.provider_call_id,
         capability_id=command.capability_id,
         capability_version=capability_version,
-        status="valid" if validation.valid else "execution_failed",
+        status="valid" if valid else "execution_failed",
         **runner_method_metadata(payload, command.capability_id),
         standardized_graph=graph,
+        time_series=time_series,
         diagnostics=diagnostics,
         graph_validation=validation,
         provenance=AlgorithmResultProvenance(

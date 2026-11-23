@@ -500,6 +500,7 @@ def _legacy_analysis_result(
     action_ledger: Mapping[str, Any],
     finalization_status: str,
     finalization_error: str | None = None,
+    discovery_goal: str | None = None,
 ) -> dict[str, Any]:
     """为现有 report/presenter 提供兼容视图；权威仍是 Deep Agent 投影字段。"""
 
@@ -549,10 +550,11 @@ def _legacy_analysis_result(
         and getattr(decision, "outcome", None) == "algorithm_supported"
         and primary is not None
         and primary.status == "valid"
-        and primary.standardized_graph is not None
+        and (primary.standardized_graph is not None or primary.time_series is not None)
     ):
         payload["success"] = True
-        payload["data"] = primary.standardized_graph.model_dump(mode="json")
+        if primary.standardized_graph is not None:
+            payload["data"] = primary.standardized_graph.model_dump(mode="json")
         payload["primary_result_ref"] = decision.primary_result_ref
         payload["primary_graph_result_ref"] = primary.result_ref
         payload["primary_effect_result_ref"] = decision.primary_effect_result_ref
@@ -564,7 +566,11 @@ def _legacy_analysis_result(
         payload["message"] = "本次分析未采用算法结果，仅返回证据型信息。"
     elif finalization_status == "valid" and getattr(decision, "outcome", None) == "no_valid_algorithm":
         payload["error_type"] = "NoValidAlgorithmResult"
-        payload["message"] = "算法调用未产生有效结果，不能据此断言不存在因果关系。"
+        payload["message"] = (
+            "本次时序目标未完成；静态结果不能回答时序问题。"
+            if discovery_goal == "time_series"
+            else "算法调用未产生有效结果，不能据此断言不存在因果关系。"
+        )
     return payload
 
 
@@ -723,6 +729,7 @@ async def _deep_agent_parent_node(
         filename=str(bound_dataset["filename"]),
         semantic_kinds=bound_dataset["semantic_kinds"],
         research_identity=parameter_identity(bound_dataset["analysis_parameters"]),
+        time_series=bound_dataset.get("time_series"),
     )
     await _ensure_official_memory_files(
         store=store,
@@ -816,6 +823,7 @@ async def _deep_agent_parent_node(
                 "web_search_enabled": getattr(context, "web_search_enabled", None),
             },
             reset_execution_artifacts=True,
+            verified_time_axis=analysis_input.time_series,
         )
     # 子图暂停时，父图必须以同一公开载荷暂停，而不是把子图当成完成。
     # 恢复时再次进入本节点，interrupt() 返回用户答复，再把它传给子图原位置。
@@ -1013,6 +1021,8 @@ async def _finalization_gate_node(
     if identity is None:
         raise RuntimeError("trusted runtime identity is required for finalization")
     limitations = []
+    parameters = state.get("analysis_parameters") or {}
+    discovery_goal = parameters.get("discovery_goal")
     try:
         decision = gate.validate(
             decision=state.get("deep_agent_structured_response"),
@@ -1024,10 +1034,11 @@ async def _finalization_gate_node(
             route_decision=state.get("route_decision"),
             web_search_enabled=getattr(context, "web_search_enabled", None),
             analysis_parameters=execution_parameters(
-                state.get("analysis_parameters") or {}, state.get("prepared_dataset_metadata") or {},
+                parameters, state.get("prepared_dataset_metadata") or {},
             ),
             analysis_question=nodes._latest_human_text(state),
             scientific_limitations=limitations,
+            analysis_budget_exhausted=bool(state.get("deep_agent_budget_exhausted")),
         )
     except StructuredResponseError as exc:
         if exc.rule is None:
@@ -1089,6 +1100,7 @@ async def _finalization_gate_node(
             algorithm_results=state.get("deep_agent_algorithm_results") or {},
             action_ledger=state.get("deep_agent_action_ledger") or {},
             finalization_status="valid",
+            discovery_goal=discovery_goal,
         ),
     }
 

@@ -21,6 +21,7 @@ from ..ate_applicability import ATE_REASON_SUMMARIES, check_ate_graph, check_ate
 from ..error_codes import SafeErrorCode
 from ..identity import build_invocation_id, build_result_ref
 from ..runtime_updates import publish_ate_check
+from ..time_series import VerifiedTimeAxis, decode_pcmci_result
 from .normalization import result_from_runner_payload
 from ..models import (
     AlgorithmExecutionCommand,
@@ -59,6 +60,7 @@ class AdapterInput:
     dataset_authority_available: bool = False
     execution_columns: tuple[str, ...] | None = None
     semantic_kinds: Mapping[str, str] | None = None
+    time_series: VerifiedTimeAxis | None = None
     artifacts: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -387,6 +389,8 @@ class BaseAlgorithmAdapter(ABC):
                 profile=adapter_input.data_profile,
                 execution_columns=adapter_input.execution_columns,
                 semantic_kinds=adapter_input.semantic_kinds,
+                time_series=adapter_input.time_series,
+                parameters=parsed_parameters.model_dump(mode="json"),
             )
         if applicability == "not_applicable":
             invocation_id = build_invocation_id(
@@ -495,6 +499,15 @@ class BaseAlgorithmAdapter(ABC):
                 command=command,
                 trusted_context=context,
             )
+            if result.time_series is not None and (
+                result.time_series.time_axis != adapter_input.time_series
+                or result.time_series.columns != adapter_input.data_profile.column_names
+                or any(getattr(result.time_series, key) != command.parameters.get(key)
+                       for key in ("tau_min", "tau_max", "pc_alpha"))
+                or raw_executor_payload is None
+                or decode_pcmci_result(raw_executor_payload) != result.time_series
+            ):
+                raise RawResultIntegrityError("PCMCI+ output does not match the verified input or raw matrices")
             result = result.model_copy(
                 deep=True,
                 update={
