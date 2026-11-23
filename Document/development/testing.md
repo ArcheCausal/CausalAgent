@@ -36,6 +36,21 @@
 
 真实 MySQL 报告附件保存读取、浏览器 canvas 及完整新会话须分别验收，不能把本地 JSON 往返或组件 SSR 作为替代。完整新会话可使用现有 `tests/acceptance/p2_mcp/profile_dispatch_job_acceptance.py` 创建隔离环境；模型调用超时或数据处理等待确认时必须报告实际阻塞，不能自动批准或预设算法结果。
 
+## Agent 评测
+
+独立的因果发现评测工具位于 `agent-test/`，通过各自的命令运行。
+
+| 被测对象 | 入口 | 运行证据 |
+| --- | --- | --- |
+| 已部署的 CausalAgent | [causalagent/README.md](../../agent-test/causalagent/README.md) | 公共 HTTP/SSE、因果图指标、运行清单与逐次尝试记录 |
+| Docker 中的通用 Agent | [general-agent/README.md](../../agent-test/general-agent/README.md) | Claude Code 输出、邻接矩阵、图指标、工具轨迹与容器环境记录 |
+
+两份配置模板共用本地数据目录 `agent-test/datasets/`，也可直接引用仓库外的数据。评测脚本采集证据并计算图指标，由评审模型按 [Agent 评测规则](../../agent-test/AGENTS.md) 阅读产物并判断任务质量。两条入口有各自的指标实现和计分状态，跨入口比较前须核对案例内容和口径。
+
+已有运行产物可以在原位置读取。在新目录复用旧配置时，检查相对数据和输出路径。续跑时传入实际运行目录，并按各入口的要求核对运行身份和样本。
+
+评测工具由使用者单独安装和运行，属于独立入口。应用镜像的构建上下文排除 `agent-test/`。离线自检、样本预选和真实 Job 或模型运行各自提供不同的验证证据。
+
 ## GitHub Actions CI
 
 `lightweight-ci.yml` 的验证门禁由面向 `main`、`develop` 的 Pull Request 触发，并按改动路径决定执行范围。`push` 到 `main` 或 `develop` 保留镜像缓存预热，手动触发沿用同一缓存预热语义；预热任务不产生检查结果，合入 Pull Request 后自动写入缓存，供后续 Pull Request 只读恢复。
