@@ -1091,6 +1091,171 @@
           ],
           "title": "StandardizedGraph",
           "type": "object"
+        },
+        "TimeSeriesRelation": {
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "minLength": 1,
+              "title": "Source",
+              "type": "string"
+            },
+            "target": {
+              "minLength": 1,
+              "title": "Target",
+              "type": "string"
+            },
+            "lag_steps": {
+              "minimum": 0,
+              "title": "Lag Steps",
+              "type": "integer"
+            },
+            "lag_seconds": {
+              "minimum": 0,
+              "title": "Lag Seconds",
+              "type": "number"
+            },
+            "mark": {
+              "enum": [
+                "-->",
+                "o-o",
+                "x-x"
+              ],
+              "title": "Mark",
+              "type": "string"
+            },
+            "p_value": {
+              "maximum": 1,
+              "minimum": 0,
+              "title": "P Value",
+              "type": "number"
+            },
+            "value": {
+              "maximum": 1,
+              "minimum": -1,
+              "title": "Value",
+              "type": "number"
+            }
+          },
+          "required": [
+            "source",
+            "target",
+            "lag_steps",
+            "lag_seconds",
+            "mark",
+            "p_value",
+            "value"
+          ],
+          "title": "TimeSeriesRelation",
+          "type": "object"
+        },
+        "TimeSeriesResult": {
+          "additionalProperties": false,
+          "properties": {
+            "time_axis": {
+              "$ref": "#/$defs/VerifiedTimeAxis"
+            },
+            "columns": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 2,
+              "title": "Columns",
+              "type": "array"
+            },
+            "tau_min": {
+              "maximum": 1,
+              "minimum": 0,
+              "title": "Tau Min",
+              "type": "integer"
+            },
+            "tau_max": {
+              "maximum": 20,
+              "minimum": 1,
+              "title": "Tau Max",
+              "type": "integer"
+            },
+            "pc_alpha": {
+              "exclusiveMaximum": 1,
+              "exclusiveMinimum": 0,
+              "title": "Pc Alpha",
+              "type": "number"
+            },
+            "conditional_independence_test": {
+              "const": "parcorr",
+              "default": "parcorr",
+              "title": "Conditional Independence Test",
+              "type": "string"
+            },
+            "relations": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/TimeSeriesRelation"
+              },
+              "title": "Relations",
+              "type": "array"
+            }
+          },
+          "required": [
+            "time_axis",
+            "columns",
+            "tau_min",
+            "tau_max",
+            "pc_alpha"
+          ],
+          "title": "TimeSeriesResult",
+          "type": "object"
+        },
+        "VerifiedTimeAxis": {
+          "additionalProperties": false,
+          "properties": {
+            "time_column": {
+              "minLength": 1,
+              "title": "Time Column",
+              "type": "string"
+            },
+            "start_time": {
+              "format": "date-time",
+              "title": "Start Time",
+              "type": "string"
+            },
+            "end_time": {
+              "format": "date-time",
+              "title": "End Time",
+              "type": "string"
+            },
+            "sampling_period_seconds": {
+              "exclusiveMinimum": 0,
+              "title": "Sampling Period Seconds",
+              "type": "number"
+            },
+            "row_count": {
+              "minimum": 2,
+              "title": "Row Count",
+              "type": "integer"
+            },
+            "source_sha256": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Source Sha256",
+              "type": "string"
+            },
+            "selection_rule": {
+              "minLength": 1,
+              "title": "Selection Rule",
+              "type": "string"
+            }
+          },
+          "required": [
+            "time_column",
+            "start_time",
+            "end_time",
+            "sampling_period_seconds",
+            "row_count",
+            "source_sha256",
+            "selection_rule"
+          ],
+          "title": "VerifiedTimeAxis",
+          "type": "object"
         }
       },
       "additionalProperties": false,
@@ -1272,6 +1437,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/GraphValidation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "time_series": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimeSeriesResult"
             },
             {
               "type": "null"
@@ -4241,10 +4417,10 @@
     },
     {
       "capability_id": "causal.pc",
-      "spec_digest": "13ce4b31c5ffe4e09bdd26c00d2329f50ef24c9122fe8b2f382e8e5eb2e8156d",
+      "spec_digest": "1256514113ba013d70666f917ed13a2d05d67bbf3094195ce50f8b785c10aad4",
       "tool": {
         "name": "causal_pc",
-        "description": "在表格数据上使用 PC 方法发现条件独立结构并生成部分有向图。适用于一般观测因果发现；需要数值或可确定性编码的表格数据，不应在明显存在潜在混杂且需要专门处理时作为唯一方法。\n数据要求：分类列必须先按确定性顺序编码；不允许存在缺失值、空列或非有限值；至少 2 行、2 列。\n方法假设：条件独立性检验适用于当前数据；因果马尔可夫性、忠实性和无潜在混杂的因果充分性；数据中的变量名和样本身份已经由外层准入冻结。\n目标图：pdag；矩阵约定：causal_learn_endpoints。\n边语义：directed：候选因果方向；undirected：方向尚未识别的相邻关系。\n适用边界：条件独立性检验和有限样本会影响结构；具体条件按实际 independence_test 判断；Fisher-Z 基于偏相关与高斯条件独立关系，不能因 PC 是通用算法就声称本次检验不受线性或分布条件限制；骨架相近不等于方向得到验证；不直接估计因果效应。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
+        "description": "在表格数据上使用 PC 方法发现条件独立结构并生成部分有向图。auto 根据已校验测量语义选择检验：全连续用 Fisher-Z，全离散用卡方；混合、未知类型或高基数计数不适用。需要数值或可确定性编码的表格数据，不应在明显存在潜在混杂且需要专门处理时作为唯一方法。\n数据要求：分类列必须先按确定性顺序编码；不允许存在缺失值、空列或非有限值；至少 2 行、2 列。\n方法假设：条件独立性检验适用于当前数据；因果马尔可夫性、忠实性和无潜在混杂的因果充分性；数据中的变量名和样本身份已经由外层准入冻结。\n目标图：pdag；矩阵约定：causal_learn_endpoints。\n边语义：directed：候选因果方向；undirected：方向尚未识别的相邻关系。\n适用边界：条件独立性检验和有限样本会影响结构；具体条件按实际 independence_test 判断；Fisher-Z 基于偏相关与高斯条件独立关系，不能因 PC 是通用算法就声称本次检验不受线性或分布条件限制；骨架相近不等于方向得到验证；不直接估计因果效应。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
         "parameters": {
           "additionalProperties": false,
           "properties": {
@@ -4295,6 +4471,74 @@
             }
           },
           "title": "CausalPcInputToolInput",
+          "type": "object"
+        }
+      }
+    },
+    {
+      "capability_id": "causal.pcmci_plus",
+      "spec_digest": "e46bb03abdc1bb31f24ab89a7962a7051ba8fb2d9cd7c409975c79cca564d6f4",
+      "tool": {
+        "name": "causal_pcmci_plus",
+        "description": "在一段已验证的连续等间隔序列上，用 PCMCI+ 和 ParCorr 搜索滞后及同期关系。\n数据要求：全部输入变量必须是数值列；不允许存在缺失值、空列或非有限值；至少 2 行、2 列。\n方法假设：因果平稳性、因果马尔可夫性和忠实性；假定无潜在共同原因，且观测频率与研究问题相称；ParCorr 使用线性偏相关及解析检验，相关科学假设未由输入校验证实。\n目标图：time_series；矩阵约定：source_target_lag。\n边语义：-->：候选方向；o-o：同期方向未定；x-x：同期定向规则发生冲突。\n适用边界：偏相关统计量和 p 值不能解释为干预效应；汇总指标图只用于展示，不能作为静态效应估计图；未检出边不证明没有关系。所有数据整理工作在分析开始前完成；本工具不会修改输入数据。",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "tau_min": {
+              "default": 0,
+              "description": "0 包含同期关系，1 只搜索滞后关系。",
+              "enum": [
+                0,
+                1
+              ],
+              "title": "Tau Min",
+              "type": "integer"
+            },
+            "tau_max": {
+              "default": 3,
+              "description": "最大滞后步数，以已验证的采样周期为单位。",
+              "maximum": 20,
+              "minimum": 1,
+              "title": "Tau Max",
+              "type": "integer"
+            },
+            "pc_alpha": {
+              "default": 0.05,
+              "description": "ParCorr 条件独立性检验的显著性阈值。",
+              "exclusiveMaximum": 1,
+              "exclusiveMinimum": 0,
+              "title": "Pc Alpha",
+              "type": "number"
+            },
+            "public_decision": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "description": "模型在 Tool Call 中显式生成、可直接展示的简短决策说明。",
+                  "properties": {
+                    "summary": {
+                      "maxLength": 400,
+                      "minLength": 1,
+                      "title": "Summary",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "summary"
+                  ],
+                  "title": "PublicDecision",
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "面向当前用户公开的工具选择依据；应在同一次 Tool Call 中提供。该字段不属于算法科学参数或检索参数。",
+              "title": "Public Decision"
+            }
+          },
+          "title": "CausalPcmciPlusInputToolInput",
           "type": "object"
         }
       }

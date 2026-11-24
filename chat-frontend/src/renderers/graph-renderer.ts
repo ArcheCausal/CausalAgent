@@ -81,6 +81,9 @@ function graphThreshold(model: CausalGraphModel): number | null {
 }
 
 export function causalGraphCaption(model: CausalGraphModel): string | null {
+  if (model.metadata?.purpose === 'time_series_display_only') {
+    return '此图合并了同方向的多阶滞后。无箭头的边表示同期未定向或方向冲突；具体滞后和方向状态见关系表。'
+  }
   if (model.metadata?.algorithm !== 'causal.cdfm') return null
   const notes: string[] = []
   if (model.edges.some((edge) => predictionLabel(model, edge) !== null)) {
@@ -99,6 +102,9 @@ export function causalGraphCaption(model: CausalGraphModel): string | null {
 export function describeCausalGraphEdge(model: CausalGraphModel, edgeId: string): string | null {
   const edge = model.edges.find((candidate) => candidate.id === edgeId)
   if (!edge) return null
+  if (model.metadata?.purpose === 'time_series_display_only' && edge.edge_type === 'undirected') {
+    return `边：${edge.source} — ${edge.target}（同期未定向或方向冲突，见关系表）`
+  }
   const label = predictionLabel(model, edge)
   if (label !== null && edge.prediction) {
     const nodeLabel = (id: string): string => {

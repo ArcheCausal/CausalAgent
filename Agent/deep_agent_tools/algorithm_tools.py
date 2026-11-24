@@ -232,6 +232,7 @@ class AlgorithmTool:
             missing_values_present=bool(state.get("missing_values_present")),
             dataset_authority_available=True,
             semantic_kinds=self._trusted_semantic_kinds(identity, profile),
+            time_series=getattr(identity.analysis_input, "time_series", None),
         )
 
     def _record(
@@ -346,6 +347,7 @@ class AlgorithmTool:
             semantic_kinds=self._trusted_semantic_kinds(
                 active_context.trusted_identity, active_input.data_profile,
             ),
+            time_series=getattr(active_context.trusted_identity.analysis_input, "time_series", None),
         )
         invocation_id = build_invocation_id(
             job_id=active_context.trusted_identity.job_id,

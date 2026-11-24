@@ -33,6 +33,7 @@ from Agent.deep_agent_tools.functional_form import (
     compare_effect_results,
 )
 from Agent.deep_agent_tools.graph_validation import validate_graph_structure
+from Agent.deep_agent_tools.time_series import TimeSeriesResult
 
 
 MAX_ALGORITHM_SUMMARY_CHARS = 800
@@ -543,6 +544,15 @@ def _report_result(result: AlgorithmResult, parameters: Any) -> dict[str, Any]:
         }
     else:
         summary["edge_counts"] = None
+    if result.time_series is not None:
+        summary["time_series"] = result.time_series.report_snapshot()
+        if result.raw_result_ref is not None:
+            summary["raw_result"] = {
+                "ref": result.raw_result_ref,
+                "sha256": result.raw_result_sha256,
+                "size_bytes": result.raw_result_size_bytes,
+                "serialization_version": result.raw_result_serialization_version,
+            }
     for key in ("input_identity", "provenance"):
         summary.pop(key, None)
     summary["diagnostics"]["metrics"] = {
@@ -737,21 +747,20 @@ def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
         assessment = assessments.get(result["result_ref"])
         result["disposition"] = assessment["disposition"] if assessment else ("discarded" if result["status"] != "valid" else "unassessed")
         result["assessment_rationale"] = assessment["rationale"] if assessment else "最终决策没有采纳该结果，或尚未提供取舍说明。"
+    discovery_goal = raw_params.get("discovery_goal")
     primary_ref = decision["primary_graph_result_ref"] if decision else None
-    primary = next((result for result in results if result["result_ref"] == primary_ref and result["status"] == "valid"), None)
-    if primary is not None:
-        graph = primary.get("graph")
-        method = primary.get("method")
-        if not isinstance(graph, Mapping) or not isinstance(method, Mapping):
-            primary = None
+    primary = _select_primary_result(results, primary_ref, discovery_goal)
+    no_primary_reason = None
+    if primary is None:
+        if discovery_goal == "time_series":
+            no_primary_reason = "本次时序目标未完成；没有通过门禁并被采纳的时序结果。静态分析结果仅可作为补充。"
+        elif primary_ref:
+            no_primary_reason = "所选结果缺少本次方法定义或未满足图约束，不能用于主图。"
         else:
-            validated = validate_graph_structure(StandardizedGraph(
-                graph_semantics=primary["graph_semantics"], **graph),
-                graph_semantics=_primary_graph_semantics(primary))
-            if not validated.valid:
-                primary = None
+            no_primary_reason = decision["selection_rationale"] if decision else "本次没有通过门禁的主结果选择，不能展示任意结果或复用旧图。"
     return {
         "schema_version": ANALYSIS_FACTS_VERSION, "finalization_status": state.get("finalization_status") or "not_recorded",
+        **({"discovery_goal": discovery_goal} if discovery_goal is not None else {}),
         "primary_result_ref": decision["primary_result_ref"] if decision and primary is not None else None,
         "primary_graph_result_ref": decision["primary_graph_result_ref"] if decision else None,
         "primary_effect_result_ref": decision["primary_effect_result_ref"] if decision else None,
@@ -760,9 +769,7 @@ def build_report_analysis_context(state: Mapping[str, Any]) -> dict[str, Any]:
         "effect_status": decision["effect_status"] if decision else "not_recorded",
         "effect_reason": decision["effect_reason"] if decision else "没有通过门禁的效应决策。",
         "effect_comparisons": compare_effect_results(parsed_results) if decision else [],
-        "no_primary_reason": None if primary is not None else (
-            "所选结果缺少本次方法定义或未满足图约束，不能用于主图。" if primary_ref else
-            decision["selection_rationale"] if decision else "本次没有通过门禁的主结果选择，不能展示任意结果或复用旧图。"),
+        "no_primary_reason": no_primary_reason,
         "decision": decision, "results": results,
         "graph_comparisons": _graph_comparisons(results),
         "data_view_comparison": _data_view_comparison(results),
@@ -788,14 +795,30 @@ def _unrecorded_analysis_facts() -> dict[str, Any]:
 
 
 def report_primary_result(facts: Mapping[str, Any]) -> dict[str, Any] | None:
-    primary = facts.get("primary_graph_result_ref")
-    if not primary or facts.get("finalization_status") != "valid":
+    if facts.get("finalization_status") != "valid":
         return None
-    selected = next((result for result in facts.get("results", [])
+    return _select_primary_result(
+        facts.get("results", []), facts.get("primary_graph_result_ref"), facts.get("discovery_goal"),
+    )
+
+
+def _select_primary_result(
+    results: Sequence[dict[str, Any]], primary: str | None, discovery_goal: str | None,
+) -> dict[str, Any] | None:
+    if not primary:
+        return None
+    selected = next((result for result in results
                      if result.get("result_ref") == primary and result.get("status") == "valid"), None)
-    if selected is None or not selected.get("method") or not selected.get("graph"):
+    if selected is None or not selected.get("method"):
         return None
     try:
+        if discovery_goal == "time_series":
+            if selected.get("graph") is not None:
+                return None
+            TimeSeriesResult.model_validate(selected.get("time_series"))
+            return selected
+        if not selected.get("graph"):
+            return None
         graph = StandardizedGraph(graph_semantics=selected["graph_semantics"], **selected["graph"])
         validation = validate_graph_structure(graph, graph_semantics=_primary_graph_semantics(selected))
     except (KeyError, TypeError, ValueError):
@@ -832,6 +855,9 @@ def build_context_commit(state: Mapping[str, Any]) -> dict[str, Any] | None:
         algorithm_summary = copy.deepcopy(primary) if primary else {
             "status": "no_primary", "graph": None, "summary": facts["no_primary_reason"],
         }
+        # 完整时序明细和受保护原始结果引用只在统一快照中保存一份。
+        algorithm_summary.pop("time_series", None)
+        algorithm_summary.pop("raw_result", None)
         algorithm_summary["analysis_facts"] = facts
     rag_evidence = normalize_evidence_items(state.get("deep_agent_rag_evidence"))
     web_evidence = normalize_evidence_items(state.get("deep_agent_web_evidence"))

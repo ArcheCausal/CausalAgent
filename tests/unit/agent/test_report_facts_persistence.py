@@ -30,18 +30,18 @@ def result(spec, invocation, *, rows=100, operations=()):
 def state_with_selection():
     first = result(PC_SPEC, "pc")
     second = result(CDFM_SPEC, "cdfm", rows=90, operations=("drop_rows",))
-    decision = FinalAnalysisDecision(outcome="algorithm_supported", primary_result_ref=first.result_ref,
-        result_assessments=[{"result_ref": first.result_ref, "disposition": "primary", "rationale": "本次检验与问题相符"},
+    decision = FinalAnalysisDecision(outcome="algorithm_supported", primary_graph_result_ref=first.result_ref,
+        result_assessments=[{"result_ref": first.result_ref, "disposition": "primary_graph", "rationale": "本次检验与问题相符"},
                             {"result_ref": second.result_ref, "disposition": "supporting", "rationale": "仅作结构比较"}],
         selection_rationale="以PC为主，CDFM作为辅助；没有合并图。", confidence="low",
         confidence_basis=["尚未验证方向"], conflict_status="unresolved",
         conflicts=[{"conflict_id": "view-difference", "result_refs": [first.result_ref, second.result_ref], "summary": "输入行数不同"}])
     return {"analysis_context": {"analysis_context_id": "ctx"},
-        "analysis_parameters": {"columns": ["A", "B"], "n_rows": 100, "n_cols": 2,
+        "analysis_parameters": {"columns": ["A", "B"], "n_rows": 100, "n_cols": 2, "effect_request": None,
             "column_profiles": {"A": {"storage_type": "int64", "value_counts": {"CSV-must-be-excluded": 1},
                 "measurement_semantics": {"kind": "unknown", "source": "csv_inference", "status": "uncertain"}}}},
         "deep_agent_algorithm_results": {first.result_ref: first, second.result_ref: second},
-        "deep_agent_decision": decision, "finalization_status": "valid",
+        "deep_agent_accepted_decision": decision, "finalization_status": "valid",
         "deep_agent_action_ledger": {"must-be-excluded": "ledger"}, "dataset_csv": "CSV-must-be-excluded",
         "runtime": "must-be-excluded"}
 
@@ -66,7 +66,7 @@ def test_first_generation_and_json_restoration_keep_same_selection_and_methods()
 
 def test_missing_selection_never_chooses_the_only_valid_result_or_an_old_graph():
     state = state_with_selection()
-    state.pop("deep_agent_decision")
+    state.pop("deep_agent_accepted_decision")
     state["deep_agent_algorithm_results"].pop("cdfm:0")
     state["analysis_context"]["latest_algorithm_summary"] = {"graph": {"nodes": ["old"], "edges": []}}
     facts = build_report_analysis_context(state)
@@ -131,6 +131,8 @@ def test_graph_comparison_distinguishes_absent_reversed_and_mixed_edges(edges, e
 
 def test_estimation_primary_uses_source_graph_semantics_for_report():
     source = result(DIRECT_LINGAM_SPEC, "lingam")
+    request = {"effect": "average_total_effect",
+               "intervention": {"type": "fixed_contrast", "from": 0.0, "to": 1.0, "unit": "无量纲"}}
     spec = CAUSAL_BACKDOOR_OLS_SPEC
     estimate = AlgorithmResult(
         result_ref="ate:0", invocation_id="ate", provider_call_id="ate",
@@ -139,33 +141,33 @@ def test_estimation_primary_uses_source_graph_semantics_for_report():
         standardized_graph=StandardizedGraph(graph_semantics="dag_target_to_source", nodes=["A", "B"],
             edges=[GraphEdge(source="A", target="B")]),
         causal_effect=CausalEffect(estimand="ATE", graph_result_ref=source.result_ref,
-            treatment="A", outcome="B", estimate=1.0, estimator="backdoor_ols", n_rows=100),
+            treatment="A", outcome="B", estimate=1.0, estimator="backdoor_ols", n_rows=100, effect_request=request),
         diagnostics=Diagnostics(),
         provenance=AlgorithmResultProvenance(job_id="job", attempt_count=1, lease_epoch=1,
             input_identity="private-input", spec_digest=spec.spec_digest),
     )
-    decision = FinalAnalysisDecision(outcome="algorithm_supported", primary_result_ref=estimate.result_ref,
-        result_assessments=[{"result_ref": estimate.result_ref, "disposition": "primary", "rationale": "效应估计"},
-                            {"result_ref": source.result_ref, "disposition": "supporting", "rationale": "输入图"}],
+    decision = FinalAnalysisDecision(outcome="algorithm_supported",
+        primary_graph_result_ref=source.result_ref, primary_effect_result_ref=estimate.result_ref,
+        effect_status="adopted",
+        result_assessments=[{"result_ref": estimate.result_ref, "disposition": "primary_effect", "rationale": "效应估计"},
+                            {"result_ref": source.result_ref, "disposition": "primary_graph", "rationale": "输入图"}],
         selection_rationale="由效应估计回答用户问题。", confidence="low",
         confidence_basis=["方向未定"], conflict_status="none")
-    state = {"analysis_parameters": {"columns": ["A", "B"], "n_rows": 100, "n_cols": 2},
+    state = {"analysis_parameters": {"columns": ["A", "B"], "n_rows": 100, "n_cols": 2,
+        "target": "B", "treatment": "A", "effect_request": request},
         "deep_agent_algorithm_results": {source.result_ref: source, estimate.result_ref: estimate},
-        "deep_agent_decision": decision, "finalization_status": "valid"}
+        "deep_agent_accepted_decision": decision, "finalization_status": "valid"}
 
     facts = build_report_analysis_context(state)
 
     assert facts["primary_result_ref"] == estimate.result_ref
     assert facts["no_primary_reason"] is None
     primary = report_primary_result(facts)
-    assert primary["result_ref"] == estimate.result_ref
-    assert primary["causal_effect"] == {
-        "estimand": "ATE", "graph_result_ref": source.result_ref,
-        "treatment": "A", "outcome": "B", "adjustment_set": [],
-        "estimate": 1.0, "standard_error": None, "ci95": None,
-        "estimator": "backdoor_ols", "n_rows": 100,
-        "contrast": None, "outcome_model": None, "bootstrap_n": None,
-    }
+    assert primary["result_ref"] == source.result_ref
+    effect = next(item for item in facts["results"] if item["result_ref"] == facts["primary_effect_result_ref"])
+    assert effect["result_ref"] == estimate.result_ref
+    assert effect["causal_effect"] == estimate.causal_effect.model_dump(mode="json")
+    assert effect["causal_effect"]["graph_result_ref"] == primary["result_ref"]
     asset = _report_graph_asset(state)
     assert asset is not None
     assert asset.metadata["graph_semantics"] == "dag_target_to_source"
@@ -176,7 +178,8 @@ def test_estimation_primary_uses_source_graph_semantics_for_report():
         "analysis_context": {"latest_algorithm_summary": commit["algorithm_summary"]},
     })
     assert restored == facts
-    assert report_primary_result(restored)["causal_effect"]["estimate"] == 1.0
+    assert report_primary_result(restored)["result_ref"] == source.result_ref
+    assert restored["primary_effect_result_ref"] == effect["result_ref"]
 
 
 def test_graph_comparison_keeps_single_method_edges_distinct_from_opposite_directions():

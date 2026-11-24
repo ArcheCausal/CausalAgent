@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from typing import Any, Callable, Literal
 
 from langchain_core.messages import AIMessage
@@ -16,7 +17,9 @@ from langgraph.errors import NodeError
 from langgraph.types import Command, RetryPolicy, TimeoutPolicy, default_retry_on
 
 from Agent.Report.document import build_degraded_report_document
+from Agent.Report.time_series import build_time_series_overview, with_time_series_report_block
 from Agent.deep_agent_tools.models import DataProfile
+from .analysis_context import build_report_analysis_context, context_algorithm_summary, report_primary_result
 from .state import CausalAgentState, RagSubgraphState
 from app.agent.worker.execution_guard import (
     JobExecutionRevoked,
@@ -349,13 +352,39 @@ def recover_terminal_message(state: CausalAgentState, error: NodeError) -> dict:
 def recover_report(state: CausalAgentState, error: NodeError) -> dict:
     """报告节点失败后的恢复：生成降级报告文档，让 worker 能走 final_result。"""
     message = f"报告生成失败：{_error_message(error)}"
+    document = build_degraded_report_document(
+        message, degradation_code=_report_degradation_code(error),
+    )
+    if state.get("report_revision_mode") == "full_regeneration_from_context":
+        stored = context_algorithm_summary(state.get("analysis_context")) or {}
+        goal_source = stored.get("analysis_facts")
+    else:
+        goal_source = state.get("analysis_parameters")
+    finalization_status = "degraded"
+    if isinstance(goal_source, Mapping) and goal_source.get("discovery_goal") == "time_series":
+        facts = build_report_analysis_context(state)
+        # 报告模型失败不撤销已经通过门禁的时序事实；重生成仍用同一快照。
+        finalization_status = facts["finalization_status"]
+        primary = report_primary_result(facts)
+        overview = build_time_series_overview(primary)
+        document = document.model_copy(update={
+            "analysis_outcome": (facts.get("decision") or {}).get("outcome"),
+            "finalization_status": finalization_status,
+            "execution_summary": {
+                **document.execution_summary,
+                "report_completeness": "degraded",
+                "discovery_goal": "time_series",
+                "discovery_goal_status": "completed" if primary is not None else "incomplete",
+            },
+            "blocks": with_time_series_report_block(
+                document.blocks, discovery_goal="time_series", primary=primary, overview=overview,
+            ),
+            "assets": {overview.graph_id: overview} if overview is not None else {},
+        })
     return {
         "messages": [AIMessage(content="决策：因果分析报告生成失败。", name=error.node)],
-        "report_document": build_degraded_report_document(
-            message,
-            degradation_code=_report_degradation_code(error),
-        ),
-        "finalization_status": "degraded",
+        "report_document": document,
+        "finalization_status": finalization_status,
     }
 
 

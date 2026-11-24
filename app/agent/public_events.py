@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from Agent.effect_request import EffectExecutionContext, normalize_effect_request
+from Agent.data_processing.time_axis import TimeSeriesWindow
 
 
 _COMMON_FIELDS = {"type", "step_id", "node_name", "title"}
@@ -187,4 +188,13 @@ def _public_processing_plan(value: Any) -> dict[str, Any] | None:
             execution_context.setdefault("treatment_transform", None)
             execution_context.setdefault("outcome_transform", None)
         public["effect_execution_context"] = execution_context
+    if "discovery_goal" in value or "time_series" in value:
+        if value.get("discovery_goal") != "time_series":
+            return None
+        try:
+            window = TimeSeriesWindow.model_validate(value.get("time_series"))
+        except ValueError:
+            return None
+        public["discovery_goal"] = "time_series"
+        public["time_series"] = window.model_dump(mode="json")
     return public

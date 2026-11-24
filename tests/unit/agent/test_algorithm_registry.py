@@ -9,6 +9,7 @@ from Agent.deep_agent_tools import (
     CDFM_SPEC,
     DIRECT_LINGAM_SPEC,
     PC_SPEC,
+    PCMCI_PLUS_SPEC,
     RegistryConflictError,
     UnknownCapabilityError,
     build_default_registry,
@@ -80,6 +81,7 @@ def test_default_registry_does_not_expose_disabled_olc() -> None:
             "causal.pc": object(),
             "causal.direct_lingam": object(),
             "causal.cdfm": object(),
+            "causal.pcmci_plus": object(),
             "causal.backdoor_ols": object(),
             "causal.g_formula": object(),
         }
@@ -91,6 +93,7 @@ def test_default_registry_does_not_expose_disabled_olc() -> None:
         DIRECT_LINGAM_SPEC,
         CAUSAL_G_FORMULA_SPEC,
         PC_SPEC,
+        PCMCI_PLUS_SPEC,
     ]
     with pytest.raises(UnknownCapabilityError, match="causal.olc"):
         registry.get("causal.olc")

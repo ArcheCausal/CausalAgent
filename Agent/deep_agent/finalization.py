@@ -11,6 +11,7 @@ from Agent.deep_agent_tools.algorithm_specs import get_algorithm_spec
 from Agent.deep_agent_tools.functional_form import estimation_pair
 from Agent.deep_agent_tools.graph_validation import validate_graph_structure
 from Agent.deep_agent_tools.runtime_updates import normalize_tool_status
+from Agent.deep_agent_tools.time_series import TimeSeriesResult, VerifiedTimeAxis
 from Agent.deep_agent_tools.models import (
     AlgorithmResult,
     FinalAnalysisDecision,
@@ -494,6 +495,7 @@ class FinalizationGate:
         analysis_parameters: Mapping[str, Any] | None = None,
         analysis_question: str | None = None,
         scientific_limitations: list[dict[str, str]] | None = None,
+        analysis_budget_exhausted: bool = False,
     ) -> FinalAnalysisDecision:
         """校验并返回可安全交给 report 的 decision 副本。"""
 
@@ -572,11 +574,23 @@ class FinalizationGate:
             evidence_refs=evidence_refs,
         )
 
+        discovery_goal = (analysis_parameters or {}).get("discovery_goal")
+        requires_time_series = discovery_goal == "time_series"
+        verified_axis = getattr(trusted_identity.analysis_input, "time_series", None)
+        time_series_attempt_refs: set[str] = set()
+        time_series_valid_refs: set[str] = set()
         valid_refs: set[str] = set()
         for result in eligible.values():
+            spec = get_algorithm_spec(result.capability_id)
+            is_time_series_method = spec.supports_discovery_goal("time_series")
+            if is_time_series_method:
+                time_series_attempt_refs.add(result.result_ref)
+                if _valid_time_series_result(result, verified_axis, current_source):
+                    time_series_valid_refs.add(result.result_ref)
+                    valid_refs.add(result.result_ref)
+                continue
             if result.status != "valid" or result.standardized_graph is None:
                 continue
-            spec = get_algorithm_spec(result.capability_id)
             # 估计结果携带的是入参源图，图语义属于源算法，只能按图自身语义校验；
             # 估计 capability 的 graph_semantics 描述的是输入要求，不是输出契约。
             semantics = (
@@ -608,7 +622,11 @@ class FinalizationGate:
         for assessment in normalized_decision.result_assessments:
             result = eligible[assessment.result_ref]
             if result.status == "valid" and result.result_ref not in valid_refs and assessment.disposition != "discarded":
-                raise StructuredResponseError("graph structure violates the method contract", rule="primary_graph_invalid")
+                rule = (
+                    "time_series_result_invalid" if result.result_ref in time_series_attempt_refs
+                    else "primary_graph_invalid"
+                )
+                raise StructuredResponseError("result violates the method contract", rule=rule)
             if (
                 result.status not in {"valid", "not_applicable", "skipped"}
                 and assessment.disposition != "discarded"
@@ -626,6 +644,13 @@ class FinalizationGate:
                     rule="primary_result_not_valid",
                 )
 
+        goal_valid_refs = time_series_valid_refs if requires_time_series else valid_refs
+        if requires_time_series and not time_series_attempt_refs and not analysis_budget_exhausted:
+            raise StructuredResponseError(
+                "confirmed time-series goal requires a compatible algorithm invocation",
+                rule="time_series_method_not_attempted",
+            )
+
         if normalized_decision.outcome == "algorithm_supported":
             primary = normalized_decision.primary_result_ref
             if primary not in valid_refs:
@@ -633,22 +658,30 @@ class FinalizationGate:
                     "primary result must be an eligible valid result",
                     rule="primary_result_not_valid",
                 )
+            if requires_time_series and normalized_decision.primary_graph_result_ref not in goal_valid_refs:
+                raise StructuredResponseError(
+                    "the primary result does not satisfy the confirmed time-series goal",
+                    rule="time_series_primary_required",
+                )
         elif normalized_decision.outcome == "evidence_only":
             if any(
                 assessment_by_ref[ref].disposition != "discarded"
-                for ref in valid_refs
+                for ref in goal_valid_refs
             ):
                 raise StructuredResponseError(
                     "evidence_only must discard every eligible valid result",
                     rule="evidence_only_with_valid_result",
                 )
         elif normalized_decision.outcome == "no_valid_algorithm":
-            if valid_refs:
+            if goal_valid_refs:
                 raise StructuredResponseError(
                     "no_valid_algorithm has an eligible valid result",
-                    rule="no_valid_algorithm_with_valid_result",
+                    rule=("no_valid_algorithm_with_valid_time_series" if requires_time_series
+                          else "no_valid_algorithm_with_valid_result"),
                 )
-            if not current_ledger and not non_viable_refs:
+            if not current_ledger and not non_viable_refs and not (
+                requires_time_series and analysis_budget_exhausted
+            ):
                 raise StructuredResponseError(
                     "no_valid_algorithm requires a real algorithm invocation",
                     rule="no_valid_algorithm_without_invocation",
@@ -658,6 +691,7 @@ class FinalizationGate:
         # 也不是用户要的结果。算法真的返回未就绪或失败时会留下算法结果，不受影响。
         if (
             route_decision == ANALYSIS_ROUTE
+            and not (requires_time_series and analysis_budget_exhausted)
             and not results
             and not non_viable_refs
             and normalized_decision.outcome
@@ -693,6 +727,7 @@ class FinalizationGate:
         }
         effect_question = (
             route_decision == ANALYSIS_ROUTE
+            and not requires_time_series
             and bool(valid_refs)
             and _requires_effect_estimation(analysis_parameters)
         )
@@ -733,10 +768,16 @@ class FinalizationGate:
         effect_ref = normalized_decision.primary_effect_result_ref
         if graph_ref is not None:
             graph_result = eligible[graph_ref]
-            if graph_ref not in valid_refs or get_algorithm_spec(graph_result.capability_id).kind != "causal_discovery":
+            graph_spec = get_algorithm_spec(graph_result.capability_id)
+            if graph_ref not in valid_refs or not graph_spec.supports_discovery_goal(discovery_goal):
                 raise StructuredResponseError("primary graph must be a valid discovery result", rule="primary_graph_invalid")
         requested = isinstance(analysis_parameters, Mapping) and isinstance(analysis_parameters.get("effect_request"), Mapping)
         if effect_ref is not None:
+            if requires_time_series:
+                raise StructuredResponseError(
+                    "time-series discovery cannot be the source for static effects",
+                    rule="time_series_effect_unsupported",
+                )
             if not requested:
                 raise StructuredResponseError("effect estimation was not requested", rule="effect_not_requested")
             if effect_ref not in estimation_refs:
@@ -768,6 +809,8 @@ class FinalizationGate:
             if not requested:
                 status = "not_requested" if isinstance(analysis_parameters, Mapping) and "effect_request" in analysis_parameters else "not_recorded"
                 reason = "本次未请求效应估计。" if status == "not_requested" else "历史记录没有保存效应请求，不能推断估计意图。"
+            elif requires_time_series:
+                status, reason = "incomplete", "首版时序发现不提供效应估计；滞后关系和偏相关统计量不能解释为效应。"
             else:
                 status, reason = normalized_decision.effect_status, normalized_decision.effect_reason
                 if status in {"not_requested", "not_recorded", "adopted"} or not reason:
@@ -809,6 +852,30 @@ class FinalizationGate:
             )
 
         return normalized_decision
+
+
+def _valid_time_series_result(
+    result: AlgorithmResult, verified_axis: VerifiedTimeAxis | None, source_identity: str,
+) -> bool:
+    series = result.time_series
+    eligible = (
+        result.status == "valid"
+        and result.method is not None
+        and result.standardized_graph is None
+        and result.causal_effect is None
+        and isinstance(series, TimeSeriesResult)
+        and verified_axis is not None
+        and series.time_axis == verified_axis
+        and series.time_axis.source_sha256 == source_identity
+    )
+    if not eligible:
+        return False
+    # 检查实际关系内容；已有 Pydantic 实例也可能由 checkpoint 或内部投影取得。
+    try:
+        TimeSeriesResult.model_validate(series.model_dump(mode="json"))
+    except ValueError:
+        return False
+    return True
 
 
 @dataclass
@@ -877,6 +944,11 @@ def _requires_effect_estimation(parameters: Mapping[str, Any] | None) -> bool:
 # 不携带内部标识、结果内容或异常正文，因此可以同时用于模型重试指令和
 # 普通用户可见的公开事件。
 FINALIZATION_RETRY_HINTS: dict[str, str] = {
+    "time_series_result_invalid": "时序结果不符合当前已校验时间轴或结果契约，只能舍弃，不得自行修补关系。",
+    "time_series_method_not_attempted": "本次确认了时序发现；预算允许时请调用 causal_pcmci_plus，并根据真实返回提交决策。静态结果只能作为补充。",
+    "time_series_primary_required": "时序发现的主结果必须是本次有效时序结果；没有合格结果时主结果留空，说明时序目标未完成。",
+    "no_valid_algorithm_with_valid_time_series": "已有有效时序结果。没有检出关系也是有效结果；请采用该结果或说明为何舍弃，不得称算法未产生有效结果。",
+    "time_series_effect_unsupported": "时序主结果不能作为静态效应估计的源图，请清空主效应。",
     "primary_graph_invalid": "图结构违反方法约束的结果只能舍弃；不得自动删边或将双箭头拆成普通有向边。",
     "decision_missing": "必须提交结构化 FinalAnalysisDecision，不能只给文字结论。",
     "decision_schema_invalid": (

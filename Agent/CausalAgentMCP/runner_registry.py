@@ -71,6 +71,14 @@ def _cdfm(
     return run_cdfm_analysis(csv_data, threshold=parameters.get("threshold"))
 
 
+def _pcmci_plus(
+    csv_data: str, parameters: Mapping[str, Any], artifacts: Mapping[str, Any],
+) -> dict[str, Any]:
+    from .pcmci_plus import run_pcmci_plus
+
+    return run_pcmci_plus(csv_data, parameters, artifacts)
+
+
 BACKDOOR_OLS_RUNNER_VERSION = "backdoor-ols-runner-v4"
 
 
@@ -219,6 +227,7 @@ def build_default_registry() -> RunnerRegistry:
         "causal.olc": _olc,
         "causal.direct_lingam": _direct_lingam,
         "causal.cdfm": _cdfm,
+        "causal.pcmci_plus": _pcmci_plus,
         "causal.backdoor_ols": _backdoor_ols,
         "causal.g_formula": _g_formula,
     }

@@ -1,4 +1,4 @@
-"""PC、OLC、DirectLiNGAM、CDFM、后门 OLS 的应用侧 Adapter。"""
+"""因果算法的应用侧 Adapter。"""
 
 from Agent.deep_agent_tools.algorithm_specs import DEFAULT_ALGORITHM_SPECS
 
@@ -9,6 +9,7 @@ from .direct_lingam import DirectLiNGAMAdapter
 from .g_formula import GFormulaAdapter
 from .olc import OlcAdapter
 from .pc import PcAdapter
+from .pcmci_plus import PcmciPlusAdapter
 
 
 def build_default_adapters(*, executor, raw_backend=None) -> dict[str, BaseAlgorithmAdapter]:
@@ -19,6 +20,7 @@ def build_default_adapters(*, executor, raw_backend=None) -> dict[str, BaseAlgor
         "causal.olc": OlcAdapter,
         "causal.direct_lingam": DirectLiNGAMAdapter,
         "causal.cdfm": CDFMAdapter,
+        "causal.pcmci_plus": PcmciPlusAdapter,
         "causal.backdoor_ols": BackdoorOlsAdapter,
         "causal.g_formula": GFormulaAdapter,
     }
@@ -41,4 +43,5 @@ __all__ = [
     "GFormulaAdapter",
     "OlcAdapter",
     "PcAdapter",
+    "PcmciPlusAdapter",
 ]

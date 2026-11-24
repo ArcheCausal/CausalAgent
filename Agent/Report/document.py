@@ -350,12 +350,40 @@ def _bind_textual_evidence_refs(
     return [bind(block) for block in blocks]
 
 
+def resolve_report_graph_blocks(
+    blocks: list[ReportBlock], assets: Mapping[str, Any],
+) -> list[ReportBlock]:
+    """只保留本次资源清单中的因果图引用，重复引用保留第一次出现的位置。"""
+    seen: set[str] = set()
+
+    def resolve(items: list[ReportBlock]) -> list[ReportBlock]:
+        resolved: list[ReportBlock] = []
+        for block in items:
+            if isinstance(block, SectionBlock):
+                children = resolve(block.children)
+                if children != block.children:
+                    block = block.model_copy(update={"children": children})
+            elif isinstance(block, CausalGraphBlock):
+                asset = assets.get(block.asset_key)
+                if not isinstance(asset, CausalGraphModel) or block.asset_key in seen:
+                    continue
+                seen.add(block.asset_key)
+                public_title = asset.metadata.get("report_title")
+                if public_title:
+                    block = block.model_copy(update={"title": public_title})
+            resolved.append(block)
+        return resolved
+
+    return resolve(blocks)
+
+
 def build_report_document(
     draft: ReportDraft,
     *,
     assets: dict[str, ChartAsset | CausalGraphModel] | None = None,
     sources: list[ReportSource] | None = None,
     evidence_refs: list[ReportEvidence] | None = None,
+    required_graph_asset_key: str = "graph_main",
     analysis_outcome: str | None = None,
     finalization_status: str | None = None,
     report_mode: str = "analysis",
@@ -382,7 +410,7 @@ def build_report_document(
             raise ReportSchemaError("证据引用了不存在的来源")
 
     seen_block_ids: set[str] = set()
-    graph_block_count = 0
+    graph_asset_keys: set[str] = set()
     for block in iter_report_blocks(normalized_blocks):
         if block.id in seen_block_ids:
             raise ReportSchemaError(f"报告块 ID 重复: {block.id}")
@@ -393,12 +421,12 @@ def build_report_document(
             if not isinstance(asset, ChartAsset):
                 raise ReportSchemaError(f"未知的图表资源: {block.asset_key}")
         elif isinstance(block, CausalGraphBlock):
-            graph_block_count += 1
-            if graph_block_count > 1:
-                raise ReportSchemaError("一份报告只能展示一张主因果图")
             asset = available_assets.get(block.asset_key)
             if not isinstance(asset, CausalGraphModel):
                 raise ReportSchemaError(f"未知的因果图资源: {block.asset_key}")
+            if block.asset_key in graph_asset_keys:
+                raise ReportSchemaError(f"因果图资源重复引用: {block.asset_key}")
+            graph_asset_keys.add(block.asset_key)
         elif isinstance(block, MarkdownBlock):
             unknown_evidence = [
                 item for item in block.evidence_refs if item not in evidence_ids
@@ -408,16 +436,19 @@ def build_report_document(
                     "报告块引用了不存在的证据: " + ", ".join(unknown_evidence)
                 )
 
-    # 已有可信主图不能因模型遗漏资源块而在报告中消失。
-    if not graph_block_count and isinstance(available_assets.get("graph_main"), CausalGraphModel):
+    # 草稿只引用补充图时，仍补入已选结果的图。
+    required_graph = available_assets.get(required_graph_asset_key)
+    if required_graph_asset_key not in graph_asset_keys and isinstance(required_graph, CausalGraphModel):
         block_id = "primary_causal_graph"
         while block_id in seen_block_ids:
             block_id += "_"
         seen_block_ids.add(block_id)
         normalized_blocks = [*normalized_blocks, CausalGraphBlock(
-            id=block_id, title="候选因果结构", asset_key="graph_main",
+            id=block_id,
+            title=required_graph.metadata.get("report_title") or "候选因果结构",
+            asset_key=required_graph_asset_key,
         )]
-        graph_block_count = 1
+        graph_asset_keys.add(required_graph_asset_key)
 
     # 检查缺口和预算状态是程序事实，固定注入正文，供实时、历史和导出共同使用。
     summary = execution_summary or {}
@@ -425,10 +456,10 @@ def build_report_document(
     if limitations or summary.get("budget_exhausted"):
         normalized_blocks = [block.model_copy(deep=True) for block in normalized_blocks]
         lines = ["### 分析范围与限制"]
-        if graph_block_count:
+        if graph_asset_keys:
             lines.append("本报告展示的是候选因果结构；图的来源和结构通过校验，不表示因果方向或科学假设已经得到确认。")
             for block in iter_report_blocks(normalized_blocks):
-                if isinstance(block, CausalGraphBlock):
+                if isinstance(block, CausalGraphBlock) and block.asset_key == "graph_main":
                     block.title = "候选因果结构"
         if summary.get("budget_exhausted"):
             lines.append("分析执行预算已耗尽，后续工具未执行；报告仅整理已有结果。预算跳过不代表检查通过或算法执行失败。")
@@ -465,7 +496,10 @@ def build_report_document(
         report_mode=report_mode,
         execution_summary=dict(execution_summary or {}),
         blocks=normalized_blocks,
-        assets=available_assets,
+        assets={
+            key: asset for key, asset in available_assets.items()
+            if not isinstance(asset, CausalGraphModel) or key in graph_asset_keys
+        },
         sources=available_sources,
         evidence_refs=available_evidence,
     )

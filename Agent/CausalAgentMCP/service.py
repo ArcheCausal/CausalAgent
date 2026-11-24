@@ -6,6 +6,7 @@ import asyncio
 import csv
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import io
 import inspect
 import json
@@ -44,6 +45,7 @@ from Agent.deep_agent_tools.models import (
 )
 from Agent.deep_agent_tools.graph_validation import validate_graph_structure
 from Agent.deep_agent_tools.preprocessing import build_data_profile_from_csv
+from Agent.deep_agent_tools.time_series import VerifiedTimeAxis
 from Agent.measurement_semantics import (
     ValidatedAlgorithmInput, normalize_semantic_kinds,
     semantic_kinds_from_validation_report,
@@ -63,6 +65,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class EffectValidatedInput(ValidatedAlgorithmInput):
     effect_parameters: dict[str, Any] | None = None
+    time_series: VerifiedTimeAxis | None = None
 
 
 def effect_parameters_from_snapshot(
@@ -94,6 +97,35 @@ def effect_parameters_from_snapshot(
     result["research_identity"] = parameter_identity(parameters)
     result["confirmed_plan_version"] = identity["plan_version"]
     return result
+
+
+def _time_series_from_snapshot(
+    report: Mapping[str, Any], metadata: Any, context: McpInvocationContext,
+) -> VerifiedTimeAxis | None:
+    if report.get("time_series") is None:
+        return None
+    from Agent.data_processing.parameters import PARAMETER_BINDING_KEY, restore_parameter_binding
+    from Agent.data_processing.plans import build_processing_plan_version
+    from Agent.data_processing.time_axis import TimeSeriesWindow
+
+    if isinstance(metadata, (str, bytes, bytearray)):
+        metadata = json.loads(metadata)
+    restored = restore_parameter_binding(metadata, job_id=context.job_id)
+    plan = {key: value for key, value in metadata.items() if key != PARAMETER_BINDING_KEY}
+    identity = plan.pop("processing_plan_identity")
+    source = context.source_input_identity
+    axis = VerifiedTimeAxis.model_validate(report["time_series"])
+    confirmed = TimeSeriesWindow.model_validate(plan.get("time_series"))
+    if (restored["analysis_parameters"].get("discovery_goal") != "time_series"
+        or metadata[PARAMETER_BINDING_KEY]["identity"] != context.research_identity
+        or axis.source_sha256 != source
+        or report.get("row_count") != axis.row_count
+        or VerifiedTimeAxis.model_validate(confirmed.verified_axis(source)) != axis
+        or identity["plan_version"] != build_processing_plan_version(
+            job_id=context.job_id, source_hash=source, semantic_identity=identity["semantic_identity"], metadata=plan,
+        )):
+        raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
+    return axis
 
 
 class McpServiceError(RuntimeError):
@@ -191,12 +223,19 @@ def load_validated_input_from_connection(
         raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
     try:
         semantic_kinds = semantic_kinds_from_validation_report(row.get("validation_report"))
+        report = row["validation_report"]
+        if isinstance(report, (str, bytes, bytearray)):
+            report = json.loads(report)
+        time_series = _time_series_from_snapshot(report, row.get("metadata"), context)
+        if time_series is not None and hashlib.sha256(row["file_content"]).hexdigest() != context.input_snapshot_digest:
+            raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
         return EffectValidatedInput(
             csv_data=row["file_content"].decode("utf-8"),
             semantic_kinds=semantic_kinds,
             effect_parameters=effect_parameters,
+            time_series=time_series,
         )
-    except (AttributeError, UnicodeError, ValueError, TypeError) as exc:
+    except (AttributeError, KeyError, UnicodeError, ValueError, TypeError) as exc:
         raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID) from exc
 
 
@@ -315,6 +354,7 @@ def _error_result(
     code: SafeErrorCode,
     capability_version: str,
     ate_check: AteApplicabilityCheck | None = None,
+    summary: str | None = None,
 ) -> AlgorithmResult:
     spec = next((spec for spec in DEFAULT_ALGORITHM_SPECS if spec.capability_id == command.capability_id), None)
     return AlgorithmResult(
@@ -333,7 +373,7 @@ def _error_result(
             summary=(
                 ATE_REASON_SUMMARIES[ate_check.reason_code]
                 if ate_check is not None and ate_check.reason_code in ATE_REASON_SUMMARIES
-                else "算法调用未产出可用结果。"
+                else (summary or "算法调用未产出可用结果。")
             ),
             safe_error_code=code,
         ),
@@ -631,6 +671,7 @@ class CausalMcpService:
         command = request.command
         context = request.trusted_context
         ate_check: AteApplicabilityCheck | None = None
+        reason: str | None = None
         try:
             trusted_input = await self._read_authority(context)
             csv_data = trusted_input.csv_data
@@ -688,6 +729,9 @@ class CausalMcpService:
             )
             if command.capability_id == "causal.pc":
                 artifacts["semantic_kinds"] = semantic_kinds
+            time_series = getattr(trusted_input, "time_series", None)
+            if spec.discovery_goal == "time_series" and time_series is not None:
+                artifacts["time_series"] = time_series.model_dump(mode="json")
             if spec.kind == "causal_estimation":
                 graph_check = check_ate_graph(
                     graph=graph,
@@ -700,9 +744,11 @@ class CausalMcpService:
                 )
                 applicability = ate_check.applicability
             else:
-                applicability, _reason = spec.assess_applicability(
+                applicability, reason = spec.assess_applicability(
                     profile=processed_profile,
                     semantic_kinds=semantic_kinds,
+                    time_series=time_series,
+                    parameters=parameters,
                 )
             if applicability != "ready":
                 code = (
@@ -732,6 +778,7 @@ class CausalMcpService:
                 context,
                 code=exc.safe_error_code,
                 capability_version=entry.version,
+                summary=reason if command.capability_id == "causal.pcmci_plus" else None,
                 ate_check=(
                     ate_check
                     if exc.safe_error_code == SafeErrorCode.ALGORITHM_NOT_APPLICABLE
@@ -1085,6 +1132,11 @@ class CausalMcpService:
                         capability_version=entry.version,
                         runner_version=metadata["implementation"].runner_version,
                     )
+                    if normalized.time_series is not None and (
+                        normalized.time_series.time_axis != time_series
+                        or normalized.time_series.columns != data_view.columns
+                    ):
+                        raise ValueError("runner time axis or columns differ from the verified input")
                     result = AlgorithmResult(
                         result_ref=build_result_ref(
                             invocation_id=command.invocation_id,
@@ -1098,6 +1150,7 @@ class CausalMcpService:
                         **metadata,
                         standardized_graph=normalized.standardized_graph,
                         graph_validation=normalized.graph_validation,
+                        time_series=normalized.time_series,
                         summary="算法调用完成。",
                         data_view=data_view,
                         diagnostics=normalized.diagnostics,

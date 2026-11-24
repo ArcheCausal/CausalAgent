@@ -66,6 +66,7 @@
         "standardized_graph",
         "status",
         "summary",
+        "time_series",
         "warnings"
       ],
       "required": [
@@ -77,7 +78,7 @@
         "status",
         "provenance"
       ],
-      "sha256": "456ade97ff96bf28b9837f1cd53b255696c3709ab18551917ddc76bccd136bdd",
+      "sha256": "4f530bba729d033824b81ff843d4f7b99bc0b94513268d4452329979778fcbc2",
       "title": "AlgorithmResult"
     },
     "AlgorithmResultProvenance": {
@@ -575,9 +576,15 @@
     },
     {
       "capability_id": "causal.pc",
-      "schema_sha256": "3a54f6cda9165744432f7f48b6f90d9cca2f1313401af842422461cc89bc1148",
-      "spec_digest": "13ce4b31c5ffe4e09bdd26c00d2329f50ef24c9122fe8b2f382e8e5eb2e8156d",
+      "schema_sha256": "01aa6309cc891ae147a299ab4a65eaf513891b552bbb079a474bdbc9d8cd5a3a",
+      "spec_digest": "1256514113ba013d70666f917ed13a2d05d67bbf3094195ce50f8b785c10aad4",
       "tool_name": "causal_pc"
+    },
+    {
+      "capability_id": "causal.pcmci_plus",
+      "schema_sha256": "01cb8796fc04b2f5005d6237843a7ec18540acc51c2e3e358007ce8ed0ef6c8a",
+      "spec_digest": "e46bb03abdc1bb31f24ab89a7962a7051ba8fb2d9cd7c409975c79cca564d6f4",
+      "tool_name": "causal_pcmci_plus"
     }
   ]
 }

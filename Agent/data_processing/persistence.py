@@ -17,6 +17,8 @@ from Agent.data_processing.plans import (
     build_processing_plan_version,
     plan_confirmation_version,
 )
+from Agent.data_processing.time_axis import TimeSeriesWindow
+from Database.agent_connect import require_frozen_file_for_job
 
 
 class DatasetPersistenceError(RuntimeError):
@@ -24,6 +26,40 @@ class DatasetPersistenceError(RuntimeError):
 
 
 _PROCESSING_PLAN_KEY = "processing_plan_identity"
+
+
+def read_frozen_source(identity: Any) -> tuple[bytes, str]:
+    """Strong-read the Job's original object and verify the digest against its actual bytes."""
+    if identity is None or identity.frozen_input is None:
+        raise DatasetPersistenceError("a trusted frozen CSV input is required")
+    frozen = identity.frozen_input
+    if frozen.user_file_id is None or frozen.object_id is None:
+        raise DatasetPersistenceError("the Job has no frozen CSV file reference")
+    row = require_frozen_file_for_job(identity.user_id, str(identity.job_id), frozen.user_file_id, frozen.object_id)
+    content = bytes(row["file_content"])
+    source_hash = str(row["file_hash"])
+    if not content or source_hash != identity.source_input_identity() or _sha256(content) != source_hash:
+        raise DatasetPersistenceError("the frozen source file does not match the trusted Job identity")
+    return content, source_hash
+
+
+def _verified_time_series(report: Any, metadata: dict[str, Any], source_hash: str) -> dict[str, Any] | None:
+    """Use only the accepted independent report, checked against the confirmed selection."""
+    if isinstance(report, str):
+        report = json.loads(report)
+    parameters = metadata[PARAMETER_BINDING_KEY]["parameters"]
+    if parameters.get("discovery_goal") != "time_series":
+        if "time_series" in metadata or "time_series" in report:
+            raise DatasetPersistenceError("static research cannot bind a time-series report or selection")
+        return None
+    try:
+        expected = TimeSeriesWindow.model_validate(metadata.get("time_series")).verified_axis(source_hash)
+    except ValueError as exc:
+        raise DatasetPersistenceError("invalid confirmed time-series selection") from exc
+    axis = report.get("time_series")
+    if (report.get("accepted") is not True or axis != expected or report.get("row_count") != expected["row_count"]):
+        raise DatasetPersistenceError("time-series report does not match the accepted confirmed selection")
+    return expected
 
 
 def _verify_parameter_sources(
@@ -535,6 +571,9 @@ def record_validation(
                 raise DatasetPersistenceError(
                     "candidate processing plan is no longer confirmed by the current Job input"
                 )
+            if accepted:
+                _candidate_plan_binding(job_id=str(job["job_id"]), source_hash=source_hash, metadata=metadata)
+                _verified_time_series(report, metadata, source_hash)
             status = "validated" if accepted else "rejected"
             existing_report = dataset["validation_report"]
             if isinstance(existing_report, str):
@@ -604,6 +643,7 @@ def bind_candidate(
             )
             _verify_parameter_sources(cursor, str(job["job_id"]), analysis_parameter_changes)
             _candidate_plan_binding(job_id=str(job["job_id"]), source_hash=source_hash, metadata=metadata)
+            time_series = _verified_time_series(dataset["validation_report"], metadata, source_hash)
             binding = metadata.get(_PROCESSING_PLAN_KEY) if isinstance(metadata, dict) else None
             stored_version = (
                 binding.get("plan_version") if isinstance(binding, dict) else None
@@ -627,6 +667,7 @@ def bind_candidate(
                     "data_object_id": int(dataset["data_object_id"]),
                     "data_hash": str(dataset["data_hash"]),
                     "metadata": metadata,
+                    "time_series": time_series,
                 }
             cursor.execute(
                 """
@@ -653,6 +694,7 @@ def bind_candidate(
                 "data_object_id": int(dataset["data_object_id"]),
                 "data_hash": str(dataset["data_hash"]),
                 "metadata": metadata,
+                "time_series": time_series,
             }
         except BaseException:
             connection.rollback()
@@ -725,6 +767,7 @@ def read_bound_dataset_identity(identity: Any) -> dict[str, Any] | None:
                 cursor, str(job["job_id"]), restored["analysis_parameter_changes"], include_initial=True,
             )
             _candidate_plan_binding(job_id=str(job["job_id"]), source_hash=source_hash, metadata=metadata)
+            time_series = _verified_time_series(report, metadata, source_hash)
             connection.commit()
             return {
                 "dataset_id": int(row["id"]),
@@ -732,6 +775,8 @@ def read_bound_dataset_identity(identity: Any) -> dict[str, Any] | None:
                 "data_hash": str(row["data_hash"]),
                 "filename": str(metadata.get("output_filename") or "prepared.csv"),
                 "semantic_kinds": semantic_kinds,
+                "time_series": time_series,
+                "validation_report": report,
                 "metadata": metadata,
                 "analysis_context": analysis_context,
                 **restored,
@@ -816,6 +861,8 @@ def read_bound_dataset(identity: Any, *, source_hash: str) -> dict[str, Any]:
             if not isinstance(metadata, dict) or not isinstance(report, dict):
                 raise DatasetPersistenceError("bound dataset metadata or validation report is invalid")
             semantic_kinds_from_validation_report(report)
+            _candidate_plan_binding(job_id=str(job["job_id"]), source_hash=source_hash, metadata=metadata)
+            time_series = _verified_time_series(report, metadata, source_hash)
             connection.commit()
             return {
                 "dataset_id": int(row["id"]),
@@ -827,6 +874,7 @@ def read_bound_dataset(identity: Any, *, source_hash: str) -> dict[str, Any]:
                 "script_bytes": script_bytes,
                 "metadata": metadata,
                 "validation_report": report,
+                "time_series": time_series,
             }
         except BaseException:
             connection.rollback()
@@ -914,6 +962,11 @@ def read_candidate(
                 validation_report, dict
             ):
                 raise DatasetPersistenceError("finalized candidate is missing its validation report")
+            if row["status"] == "validated":
+                semantic_kinds_from_validation_report(validation_report)
+                _verified_time_series(validation_report, metadata, source_hash)
+            elif row["status"] == "rejected" and validation_report.get("accepted") is not False:
+                raise DatasetPersistenceError("rejected candidate has an invalid validation report")
             connection.commit()
             return {
                 "dataset_id": int(row["id"]),

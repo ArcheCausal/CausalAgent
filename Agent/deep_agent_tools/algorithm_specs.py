@@ -21,6 +21,7 @@ from .models import (
     StandardizedGraph,
     canonical_json_bytes,
 )
+from .time_series import TimeSeriesResult, VerifiedTimeAxis, pcmci_sample_issue
 
 
 AlgorithmKind = Literal[
@@ -80,6 +81,11 @@ class CausalOlcInput(ContractModel):
 class CausalDirectLiNGAMInput(ContractModel):
     """DirectLiNGAM 当前没有可由模型改变的公开参数。"""
 
+
+class CausalPcmciPlusInput(ContractModel):
+    tau_min: Literal[0, 1] = Field(default=0, description="0 包含同期关系，1 只搜索滞后关系。")
+    tau_max: int = Field(default=3, ge=1, le=20, description="最大滞后步数，以已验证的采样周期为单位。")
+    pc_alpha: float = Field(default=0.05, gt=0, lt=1, description="ParCorr 条件独立性检验的显著性阈值。")
 
 
 class CausalCdfmInput(ContractModel):
@@ -216,6 +222,7 @@ class AlgorithmSpec(ContractModel):
     concurrency_key: str
     default_concurrency: int = Field(default=1, gt=0)
     kind: AlgorithmKind = "causal_discovery"
+    discovery_goal: Literal["static", "time_series"] = "static"
     analysis_goal: str = ""
     description_source: tuple[str, ...] = ()
     data_requirements: tuple[str, ...] = ()
@@ -312,6 +319,7 @@ class AlgorithmSpec(ContractModel):
             "tool_name": self.tool_name,
             "version": self.version,
             "method": self.method_definition().model_dump(mode="json"),
+            **({"discovery_goal": self.discovery_goal} if self.discovery_goal != "static" else {}),
         }
 
     @property
@@ -368,12 +376,17 @@ class AlgorithmSpec(ContractModel):
 
         return self.supports_encoded_categories
 
+    def supports_discovery_goal(self, goal: str | None) -> bool:
+        return self.kind == "causal_discovery" and self.discovery_goal == (goal or "static")
+
     def assess_applicability(
         self,
         *,
         profile: Any,
         execution_columns: tuple[str, ...] | None = None,
         semantic_kinds: Mapping[str, str] | None = None,
+        time_series: VerifiedTimeAxis | Mapping[str, Any] | None = None,
+        parameters: Mapping[str, Any] | None = None,
     ) -> tuple[str, str | None]:
         """基于实际处理后表格和测量语义判断输入是否满足算法契约。"""
 
@@ -429,6 +442,19 @@ class AlgorithmSpec(ContractModel):
                 "not_applicable",
                 "输入含有非有限值：" + "、".join(sorted(non_finite)),
             )
+        if self.discovery_goal == "time_series":
+            try:
+                axis = VerifiedTimeAxis.model_validate(time_series)
+            except ValueError:
+                return "not_applicable", "缺少经独立校验的连续等间隔时间片段。"
+            if axis.row_count != profile.row_count or axis.time_column in profile.column_names:
+                return "not_applicable", "时间片段与分析表的行数或时间列不一致。"
+            unconfirmed = [column for column in selected if (semantic_kinds or {}).get(column) != "continuous"]
+            if unconfirmed:
+                return "not_applicable", "以下指标缺少连续测量语义：" + "、".join(unconfirmed)
+            tau_max = CausalPcmciPlusInput.model_validate(parameters).tau_max if parameters is not None else 1
+            if issue := pcmci_sample_issue(axis.row_count, len(selected), tau_max):
+                return "not_applicable", issue
         return "ready", None
 
 
@@ -719,10 +745,30 @@ CAUSAL_G_FORMULA_SPEC = AlgorithmSpec(
 )
 
 
+PCMCI_PLUS_SPEC = AlgorithmSpec(
+    capability_id="causal.pcmci_plus", version="1.0", tool_name="causal_pcmci_plus",
+    public_name="PCMCI+ 时序因果发现", discovery_goal="time_series",
+    description="在一段已验证的连续等间隔序列上，用 PCMCI+ 和 ParCorr 搜索滞后及同期关系。",
+    analysis_goal="发现候选时序因果结构，区分滞后、同期未定向和方向冲突",
+    model_input_schema=CausalPcmciPlusInput, result_contract=TimeSeriesResult,
+    requires=frozenset({"tabular_dataset"}), produces=frozenset({"time_series_result", "diagnostics"}),
+    assumptions=("因果平稳性、因果马尔可夫性和忠实性", "假定无潜在共同原因，且观测频率与研究问题相称",
+                 "ParCorr 使用线性偏相关及解析检验，相关科学假设未由输入校验证实"),
+    data_requirements=("连续数值测量", "单个已复核的连续等间隔无缺失片段", "样本量支持所选滞后和变量数"),
+    requires_numeric_columns=True, requires_complete_cases=True,
+    default_timeout_seconds=300, concurrency_key="causal_pcmci_plus", default_concurrency=1,
+    graph_semantics="time_series", matrix_convention="source_target_lag",
+    edge_meanings={"-->": "候选方向", "o-o": "同期方向未定", "x-x": "同期定向规则发生冲突"},
+    limitations=("偏相关统计量和 p 值不能解释为干预效应",
+                 "汇总指标图只用于展示，不能作为静态效应估计图；未检出边不证明没有关系"),
+)
+
+
 DEFAULT_ALGORITHM_SPECS: tuple[AlgorithmSpec, ...] = (
     PC_SPEC,
     DIRECT_LINGAM_SPEC,
     CDFM_SPEC,
+    PCMCI_PLUS_SPEC,
     CAUSAL_BACKDOOR_OLS_SPEC,
     CAUSAL_G_FORMULA_SPEC,
 )

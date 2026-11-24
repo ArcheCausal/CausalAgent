@@ -3,6 +3,8 @@ import { renderToString } from 'vue/server-renderer'
 import { describe, expect, it } from 'vitest'
 import CausalGraphBlock from '../../src/components/CausalGraphBlock.vue'
 import ReportRenderer from '../../src/components/ReportRenderer.vue'
+import { reportToMarkdown } from '../../src/renderers/report-clipboard'
+import { parseReportDocument } from '../../src/renderers/report-document'
 import { cdfmGraph } from '../helpers/cdfm-graph'
 
 // 使用真实 Vue 组件与 SSR，验证模板文字和资源传递；不触发 canvas 挂载或替换 vis-network。
@@ -33,6 +35,37 @@ describe('CDFM graph components', () => {
     expect(html).toContain('本次实际阈值：0.6123')
     expect(html).toContain('p₁ 和 p₂ 分别是 source→target 和 target→source')
     expect(html.match(/aria-label="因果关系图"/g)).toHaveLength(1)
+  })
+
+  it('renders and copies the primary and supporting graph blocks in report order', async () => {
+    const main = cdfmGraph()
+    const supporting = {
+      ...cdfmGraph(),
+      graph_id: 'graph_supporting_1',
+      metadata: { algorithm: 'causal.pc', report_role: 'supporting' },
+    }
+    const document: unknown = JSON.parse(JSON.stringify({
+      schema_version: 1, report_id: 'multi_graph_report', title: '方法比较',
+      blocks: [
+        { id: 'main', type: 'causal_graph', title: '主因果图', asset_key: main.graph_id },
+        {
+          id: 'comparison', type: 'section', title: '补充结果', children: [
+            { id: 'support', type: 'causal_graph', title: '补充因果结构（PC）', asset_key: supporting.graph_id },
+          ],
+        },
+      ],
+      assets: { [main.graph_id]: main, [supporting.graph_id]: supporting },
+    }))
+    const html = await renderToString(createSSRApp({ render: () => h(ReportRenderer, { document }) }))
+    expect(html.match(/aria-label="因果关系图"/g)).toHaveLength(2)
+    expect(html).toContain('主因果图')
+    expect(html).toContain('补充因果结构（PC）')
+    const parsed = parseReportDocument(document)
+    if (!parsed) throw new Error('报告解析失败')
+    const markdown = reportToMarkdown(parsed)
+    expect(markdown).toContain('[因果图：主因果图]')
+    expect(markdown).toContain('[因果图：补充因果结构（PC）]')
+    expect(markdown.indexOf('主因果图')).toBeLessThan(markdown.indexOf('补充因果结构（PC）'))
   })
 
   it('does not describe bidirected encodings for a graph containing only directed predictions', async () => {

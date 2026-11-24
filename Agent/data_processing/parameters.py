@@ -10,7 +10,7 @@ from Agent.effect_request import EffectRequest, EffectExecutionContext, normaliz
 from Agent.measurement_semantics import normalize_measurement_semantics
 
 ParameterField = Literal["target", "treatment", "analysis_question", "measurement_semantics",
-                         "observation_unit", "time_window", "aggregation_scope", "effect_request"]
+                         "observation_unit", "time_window", "aggregation_scope", "effect_request", "discovery_goal"]
 RESEARCH_FIELDS = frozenset(ParameterField.__args__)
 PARAMETER_BINDING_KEY = "analysis_parameter_identity"
 PROCESSING_STATE_VERSION = 4
@@ -37,6 +37,9 @@ class ResearchSpec(BaseModel):
     analysis_question: str | None = Field(description="本次需要回答的研究问题，结合真实输入与已接受的上下文概括。")
     observation_unit: str | None = Field(description="每一行代表的观测对象或记录；没有明确说明时为 null，不写成测量列。")
     time_window: str | None = Field(description="用户指定或接受的研究时间范围；后续未修改时保留当前值。")
+    discovery_goal: Literal["time_series", "static"] | None = Field(
+        default=None, description="明确要求发现时间先后或滞后结构时用 time_series；静态结构发现可省略或写 static。时间范围本身不代表时序目标。",
+    )
     aggregation_scope: str | None = Field(description="用户指定或接受的研究参与范围及聚合范围；后续未修改时保留当前值。")
     measurement_semantics: list[MeasurementScope] = Field(description="完整的原始列测量声明，不从数值或列名猜测；全体原始列使用 all_input_columns，无明确列级声明时为空列表。")
     effect_request: EffectRequest | None = Field(description="唯一效应请求。没有估计需求明确提交 null；存在需求时提交平均总效应及用户明确或确认的干预和单位。不得默认补 (0,1)。目标和处理角色引用现有字段。")
@@ -57,7 +60,12 @@ def research_parameters(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ParameterContractError("analysis parameters must be an object")
     # 缺字段的历史记录保留缺席，不能被投影为明确的未请求。
     result = {key: deepcopy(value.get(key)) for key in RESEARCH_FIELDS
-              if key != "effect_request" or key in value}
+              if key != "discovery_goal" and (key != "effect_request" or key in value)}
+    goal = value.get("discovery_goal")
+    if goal == "time_series":
+        result["discovery_goal"] = goal
+    elif goal not in (None, "static"):
+        raise ParameterContractError("invalid research parameter: discovery_goal")
     for key, item in result.items():
         if key == "effect_request":
             try:
@@ -220,7 +228,9 @@ def validate_parameter_history(parameters: Mapping[str, Any], changes: Any, *, j
         for key, edit in edits.items():
             if not isinstance(edit, dict) or set(edit) != {"before", "after"}:
                 raise ParameterContractError("invalid parameter edit")
-            if edit["before"] == edit["after"] or current[key] != edit["after"]:
+            if key == "discovery_goal" and any(value not in (None, "time_series") for value in edit.values()):
+                raise ParameterContractError("invalid discovery_goal revision")
+            if edit["before"] == edit["after"] or current.get(key) != edit["after"]:
                 raise ParameterContractError("parameter history conflicts with its snapshot")
             current[key] = deepcopy(edit["before"])
         research_parameters(current)
@@ -242,8 +252,9 @@ def commit_research_spec(parameters: Mapping[str, Any], changes: list[dict[str, 
             if last["source_input_id"] == source_input_id and last["reason"] == reason:
                 return deepcopy(dict(parameters)), history
         raise ParameterContractError("research specification revision is stale")
-    delta = {key: {"before": deepcopy(parameters.get(key)), "after": deepcopy(value)}
-             for key, value in updated.items() if parameters.get(key) != value}
+    before = research_parameters(parameters)
+    delta = {key: {"before": deepcopy(before.get(key)), "after": deepcopy(updated.get(key))}
+             for key in before.keys() | updated.keys() if before.get(key) != updated.get(key)}
     if delta:
         history.append({"revision": len(history) + 1, "source_input_id": source_input_id,
             "reason": reason, "changes": delta,

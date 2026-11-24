@@ -21,9 +21,11 @@ from Agent.deep_agent_tools.models import (
     merge_algorithm_results,
     merge_evidence_results,
 )
+from Agent.deep_agent_tools.time_series import VerifiedTimeAxis
 from Agent.deep_agent.prompts import (
     ANALYSIS_ROUTE,
     MANDATORY_ALGORITHM_INSTRUCTION,
+    MANDATORY_TIME_SERIES_INSTRUCTION,
 )
 
 
@@ -207,6 +209,7 @@ def to_deep_agent_input(
     parent_state: Mapping[str, Any],
     *,
     reset_execution_artifacts: bool = False,
+    verified_time_axis: VerifiedTimeAxis | None = None,
 ) -> ProjectDeepAgentState:
     """只把 Deep Agent 所需字段投影到内层 State，不复制父状态。"""
 
@@ -251,6 +254,9 @@ def to_deep_agent_input(
                     ),
                     "data_profile": data_profile.model_dump(mode="json"),
                     "analysis_parameters": dict(analysis_parameters),
+                    **({"verified_time_axis": verified_time_axis.model_dump(
+                        mode="json", exclude={"source_sha256"},
+                    )} if verified_time_axis is not None else {}),
                     "preprocess_summary": preprocess_summary,
                     "data_processing_execution_report": parent_state.get("data_processing_execution_report"),
                 },
@@ -260,9 +266,14 @@ def to_deep_agent_input(
         },
     ]
     if str(parent_state.get("route_decision") or "") == ANALYSIS_ROUTE:
+        instruction = (
+            MANDATORY_TIME_SERIES_INSTRUCTION
+            if analysis_parameters.get("discovery_goal") == "time_series"
+            else MANDATORY_ALGORITHM_INSTRUCTION
+        )
         messages = [
             *messages,
-            {"role": "system", "content": MANDATORY_ALGORITHM_INSTRUCTION},
+            {"role": "system", "content": instruction},
         ]
     retry_instruction = (
         None

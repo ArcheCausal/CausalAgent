@@ -19,6 +19,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .error_codes import SafeErrorCode, is_server_output_error, is_user_input_error
+from .time_series import TimeSeriesResult
 
 
 class ContractModel(BaseModel):
@@ -443,6 +444,7 @@ class AlgorithmResult(ContractModel):
     method: MethodDefinition | None = None
     implementation: MethodImplementation | None = None
     graph_validation: GraphValidation | None = None
+    time_series: TimeSeriesResult | None = None
     causal_effect: CausalEffect | None = None
     ate_check: AteApplicabilityCheck | None = None
     provenance: AlgorithmResultProvenance
@@ -502,7 +504,16 @@ class AlgorithmResult(ContractModel):
             or self.method.contract_version != self.capability_version
         ):
             raise ValueError("method snapshot does not match result identity")
-        if self.status == "valid" and self.standardized_graph is None:
+        if self.capability_id == "causal.pcmci_plus":
+            if any(value is not None for value in (self.standardized_graph, self.graph_validation, self.causal_effect)):
+                raise ValueError("PCMCI+ results cannot provide a static graph or effect")
+            if (self.status == "valid") != (self.time_series is not None):
+                raise ValueError("only successful PCMCI+ results must have a time-series result")
+            if self.time_series is not None and self.provenance.source_input_identity != self.time_series.time_axis.source_sha256:
+                raise ValueError("time-series result does not match the frozen source")
+        elif self.time_series is not None:
+            raise ValueError("unexpected time-series result")
+        elif self.status == "valid" and self.standardized_graph is None:
             raise ValueError("valid AlgorithmResult must include standardized_graph")
         if self.causal_effect is not None and self.standardized_graph is None:
             raise ValueError("causal_effect requires standardized_graph")

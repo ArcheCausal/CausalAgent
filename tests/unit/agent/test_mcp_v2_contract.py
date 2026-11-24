@@ -56,6 +56,7 @@ def test_default_mcp_registry_does_not_expose_disabled_olc() -> None:
         "causal.direct_lingam",
         "causal.g_formula",
         "causal.pc",
+        "causal.pcmci_plus",
     ]
     assert registry.resolve(
         CDFM_SPEC.capability_id,
