@@ -2,47 +2,41 @@
 
 文档职责：记录本地对已启动的 CausalAgent 入口逐集执行因果发现、自动应答交互并按金标准打分的客户端、抽样口径、指标语义与产物。
 
-适用范围：用固定数据集做端到端回归与算法对比。不做并发压测，不评测报告文字质量，不启用联网搜索。接口与实现细节见[实现设计](../Document/planning/evaluation-runner-design.md)；Job、会话与文件接口见[Job API](../Document/api/agent-jobs.md)、[会话与文件 API](../Document/api/chat-files.md)。
+适用范围：使用固定数据集验证已部署 CausalAgent 的 HTTP/SSE 因果分析流程。运行证据和模型评审规则见 [Agent 评测 AGENTS.md](../AGENTS.md)。接口见 [Job API](../../Document/api/agent-jobs.md) 和 [会话与文件 API](../../Document/api/chat-files.md)。
 
 ## 边界
 
 - runner 在本机运行，只调用被测入口的公开 HTTP/SSE 接口；服务端资源与并发能力不在本工具的评价范围。
-- 只使用测试账号与测试数据。账号凭据只写入 `evaluation-runner/local/accounts.local.json`，该目录已被 gitignore，不进入报告、日志或版本库。
+- 使用测试账号和测试数据。凭据保存在本地 `config.yaml` 或 `local/accounts.local.json`，两者均被 Git 忽略。
 - 上传内容来自数据集的 `X` 矩阵，固定提示词不附加领域知识、不引导算法选择；是否触发数据处理交互由被测分支决定。
 - 金标准取自数据集自带的 `adjacency`，不读取服务端中间结果，也不按报告文字人工判分。
-- `local/`、`cdfm_bench_*/`、`config.yaml`、`config.smoke.yaml` 均已 gitignore；进入版本库的只有代码、示例配置与本文档。
-- 根 `.dockerignore` 已排除 `evaluation-runner/`；应用镜像不包含本地评测工具。评测工具需要独立运行环境，不进入 `causalagent_app` 镜像。
+- `local/` 用于存放运行产物。根 `.dockerignore` 从应用镜像的构建上下文排除整个 `agent-test/`。
 
 ## 安装
 
-~~~
-cd evaluation-runner
+~~~powershell
+Set-Location agent-test/causalagent
 python -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item config.example.yaml config.yaml
 ~~~
 
-依赖只有 `httpx`、`PyYAML`、`numpy`。默认数据集目录 `cdfm_bench_D10_30_fixed_r5/` 已导入（1875 个 `.npz`），不随版本库分发。
+命令从仓库根目录开始。后续命令在当前子目录内执行，WSL/Linux 使用 `.venv/bin/python`。数据集不随仓库分发，配置模板从当前子目录解析 `../datasets/cdfm_bench_D10_30_fixed_r5`。也可将 `data.dir` 设为本机已有数据目录的绝对路径。首次运行前检查 `run.base_url`、测试账号与样本范围。
 
 ## 常用命令
 
-~~~
-# 首次：复制配置模板
-cp config.example.yaml config.yaml
-
+~~~powershell
 # 只看抽样结果，不发请求
-.venv\Scripts\python.exe runner.py --config config.yaml --dry-run
+.\.venv\Scripts\python.exe runner.py --config config.yaml --dry-run
 
 # 正常运行：先探活，再打印摘要并要求输入 y
-.venv\Scripts\python.exe runner.py --config config.yaml
+.\.venv\Scripts\python.exe runner.py --config config.yaml
 
 # 无人值守 / 脚本化运行，跳过确认
-.venv\Scripts\python.exe runner.py --config config.yaml --yes
+.\.venv\Scripts\python.exe runner.py --config config.yaml --yes
 
 # 续跑：跳过 results.csv 中 status=success 的集，结束后重建汇总
-.venv\Scripts\python.exe runner.py --config config.yaml --resume local/runs/<run_id>
-
-# 无网络自检
-.venv\Scripts\python.exe selftest.py
+.\.venv\Scripts\python.exe runner.py --config config.yaml --resume "local/runs/<run_id>"
 ~~~
 
 `--dry-run` 只扫描、抽样并打印摘要（机制数、格数、总集数、`parallel`、输出目录），随后退出；它不探活、不登录、不发请求。正常运行的顺序是：打印摘要 → `GET /api/check_auth` 探活 → `y/N` 确认 → 登录 → 建 Job。
@@ -58,7 +52,7 @@ cp config.example.yaml config.yaml
 | `run.timeout_minutes` | 单集总期限 | 15；正整数；在 SSE 循环内按事件到达检查 |
 | `run.max_interactions` | 单集最多交互轮数 | 6；正整数 |
 | `run.interaction_seconds` | 建 Job 起算的交互窗口上限 | 300；正整数 |
-| `run.seed` | 抽样种子 | 0；整数 |
+| `run.seed` | 抽样种子 | 代码默认 0，模板使用 20261030 |
 | `run.backend_version` | 被测后端的已知版本（git sha / 镜像 tag） | 空字符串；写入清单并参与续跑校验 |
 | `auth.username` / `auth.password` | 测试账号 | 留空时读 `local/accounts.local.json`；不存在则自动注册并存盘 |
 | `data.dir` | `.npz` 根目录 | 必填，递归扫描 |
@@ -78,7 +72,7 @@ cp config.example.yaml config.yaml
 - `dim` / `n_rows` 一律取 `X.shape` 实测值，名义 D/N 只用于筛选和报告分组。
 - **分层抽样**：每个 `机制×D×N` 格内按 `blake2b(seed|dataset)` 排序取前 `per_cell` 个，确定性可复现；执行顺序按 `dataset` 字典序。
 - `TimeLag` 默认排除：其 `adjacency` 是 lag-1 块，转成 CSV 后无法恢复时序。需要时从 `exclude` 移除。
-- 默认配置的结果是 **14 机制 × 25 格 = 350 集**（1875 集扣除 TimeLag，每格 1 个 rep）。
+- 完整的 `cdfm_bench_D10_30_fixed_r5` 使用模板预选时，排除 TimeLag 后每格取 1 集。以实际 `--dry-run` 输出为准。
 
 ## 端到端流程（单集）
 
@@ -114,12 +108,12 @@ cp config.example.yaml config.yaml
 | `(i,j)` 与 `(j,i)` 同时 directed | 视为一条无向边（镜像对），计 1 个 FP、0 TP |
 
 - 严格定向：`recall = TP / |gold|`；`precision = TP / (有向边数 + 无向类边数 + 镜像对数)`，分母为 0 记 0。
-- 骨架：所有边无向化后取点对集合（重复点对只计一次），与 gold 骨架求交；precision 分母仍按逐边 FP 计（无向类边每条 1 个、镜像对 1 个）。
+- 骨架：所有边无向化后取点对集合，重复点对只计一次。骨架 precision 除以预测点对数，骨架 recall 除以 gold 点对数。
 - 空图：全部记 0。
 - F1：严格定向 precision / recall 的调和平均，分母为 0 记 0。
 - SHD：缺失 + 多余 + 反转；反转、无向、镜像各计 1，骨架命中的无向边抵消一条 gold。
 - AUROC/AUPRC：仅主图为 CDFM（资产带 `score_type=probability`）时计算；样本空间为全部有序对 `i≠j`；非 CDFM 主结果留空，不与 P/R 混比。
-- **两套口径不可混比**；`report.md` 必须同时声明。`diagnostic` 报告不计入均值；`partial` 计入成功但不代表全部边可读。
+- `diagnostic` 报告不计入均值。`partial` 表示部分边无法映射，仍计入指标均值。与通用 Agent 结果比较时，先核对计分状态和图指标的定义。
 
 ## 产物
 
@@ -171,19 +165,16 @@ token 用量来自 Job 的 `usage` 事件：按 `(job, attempt)` 取每 attempt 
 - 首次运行会在 `run_dir/manifest.json` 记录六项身份：选中案例、每个 npz 的 sha256、配置快照、客户端版本、`run.backend_version`、指标版本；另存 `git_commit`。
 - `--resume` 默认硬校验这些身份；清单缺失或任一不一致时打印差异并以 1 退出，不写新行。
 - `--force-resume` 只能与 `--resume` 同用；它绕过身份校验，并把差异写进 `report.md` 的“续跑身份差异”一节。表头不兼容仍然拒绝。
-- WSL 默认 6 GB 内存、服务端 `JOB_WORKERS=2`：`parallel > 2` 只会排队并可能 OOM，回归默认用 1。
-
 ## 自检与验收
 
-`selftest.py`当前 **61 项全过**，覆盖配置校验、路径与产物名、抽样确定性、npz 读取与 CSV、交互答复与方案确认、取图与双口径指标、F1/SHD（含反转与镜像）与 AUROC/AUPRC（含缺失值跳过）、SSE 解析、幂等键与错误分类、活动 Job 查询、建 Job 恢复与 interrupt/resume 状态机、逐尝试证据与 33 列结果行、运行清单身份校验与报告差异、汇总与报告、续跑去重、损坏数据不中断整轮。
+`selftest.py` 包含离线纯函数检查和模拟 HTTP 客户端用例。真实验收使用测试服务的 Job 和 SSE 证据。先在配置中将 `data.mechanisms`、`data.dims`、`data.ns` 缩至一个组合，设置 `data.per_cell: 1`，用 `--dry-run` 确认只选中一集。
 
 ## 已知限制
 
-- 不评报告文字质量，不启用 `web_search`。
+- 工具计算图指标，评审模型按任务目标审阅报告文字。运行时固定关闭 `web_search`。
 - `diagnostic` 报告或缺少因果图按失败计；模型空回答导致的 `no_causal_graph` 只重试 1 次。
 - 报告中变量名若不是 `X{k}`，整图无法映射，会集体落入 `partial` 或失败；冒烟必须先确认这一映射。
 - 报告按实测 `n_rows` 分组，名义 N 仅用于抽样筛选，两者可能不一致。
-- 阶段 2 计划支持全量 1875 集与更细的失败分析。
 
 ## 目录
 
@@ -197,7 +188,7 @@ token 用量来自 Job 的 `usage` 事件：按 `(job, attempt)` 取每 attempt 
 | `manifest.py` | 运行身份清单的构建、写入与续跑校验 |
 | `runner.py` | 单集流程、并发编排、续跑、CLI |
 | `report.py` | `summary.csv` 与 `report.md` 生成 |
-| `selftest.py` | 无网络自检，不作为真实系统验收证据 |
+| `selftest.py` | 离线函数检查和模拟 HTTP 用例 |
 | `config.example.yaml` | 配置模板 |
 | `local/` | 账号、运行产物与 CSV/事件证据，整体 gitignore |
-| `cdfm_bench_D10_30_fixed_r5/` | 默认数据集（1875 集），gitignore |
+| `../datasets/cdfm_bench_D10_30_fixed_r5/` | 配置模板指向的数据目录，由使用者单独准备 |
