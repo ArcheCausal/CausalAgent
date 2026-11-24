@@ -49,6 +49,8 @@ JobController 为每个 Job 管理订阅 generation，切换 Session、取消、
 
 聊天区滚动按 80px 阈值跟随最新内容：用户在阈值外主动上滑后停止自动跟随，回到底部后恢复；发送、切换或创建会话、新增消息和展示推进都会在跟随状态下滚动到最新内容。逐字推进、定时器和滚动容器由组件或 runtime controller 持有，不进入 Pinia。
 
+用户消息和助手回复的正文下方提供复制图标。普通消息复制原始 Markdown，保留标题、表格、代码块、公式、链接和图片引用。流式回复复制点击时已接收的完整内容。结构化报告将章节和来源整理为 Markdown，并将图表数据和因果图的节点、边写入 JSON 代码块。复制结果在输入框上方显示，停留两秒后淡出。连续复制会重新计时。
+
 ## 结构化报告渲染
 
 报告终态由 `type=report`、`render_mode=structured` 和 `document` 组成，`MessageBody.vue` 把它交给 `ReportRenderer.vue`；报告块的 HTML 不在 `MessageBody.vue` 里拼接。渲染器按块类型分发到 `ReportSection.vue`、`MarkdownBlock.vue`、`ChartBlock.vue` 和 `CausalGraphBlock.vue`：章节递归渲染子块，Markdown 块继续调用 `renderers/markdown-adapter.ts`，因此列表、标题、表格、引用、代码块和链接与普通聊天共用同一套解析。来源页脚按来源分组展示证据，知识库来源的长引用默认收起，来源标题旁只显示一个折叠箭头，点击箭头展开或收起证据；证据被正文块引用时提供“定位正文”按钮并滚动到对应块；前端也兼容历史报告正文中已存在但未填入结构化字段的合法 `ev_...` ID。报告文档在渲染前由 `renderers/report-document.ts` 用 Zod 防御性解析一次：未知块类型降级成占位块，缺失或非法的图表、因果图资源引用降级成受控提示，顶层载荷不合法时显示报告不可用提示，都不能让整页崩溃。

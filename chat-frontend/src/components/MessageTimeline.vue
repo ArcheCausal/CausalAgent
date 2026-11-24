@@ -10,6 +10,7 @@ import StreamingDraft from './StreamingDraft.vue'
 import ThinkingTimeline from './ThinkingTimeline.vue'
 
 const props = defineProps<{ messages: ChatMessage[] }>()
+const emit = defineEmits<{ 'copy-result': [success: boolean] }>()
 const jobs = useJobsStore()
 const scrollFollow = useChatScrollFollow()
 
@@ -139,22 +140,27 @@ watch(() => props.messages.length, () => scrollFollow.keepLatest())
           <strong class="selected-file-name" :title="row.message.fileAttachment.filename">{{ row.message.fileAttachment.filename }}</strong>
         </span>
       </div>
-      <MessageBody :text="row.message.text" />
+      <MessageBody :text="row.message.text" @copy-result="emit('copy-result', $event)" />
     </article>
     <ThinkingTimeline
       v-if="row.thinking"
       :thinking="row.thinking"
       @decision-settled="onDecisionSettled(row.message.analysisJobId, $event)"
     />
-    <StreamingDraft v-if="row.thinking?.draftText" :text="row.thinking.draftText" :animate="isPresentationActive(row.thinking.status)" />
+    <StreamingDraft
+      v-if="row.thinking?.draftText"
+      :text="row.thinking.draftText"
+      :animate="isPresentationActive(row.thinking.status)"
+      @copy-result="emit('copy-result', $event)"
+    />
     <article v-if="row.thinking?.finalResult" class="message ai-message">
-      <MessageBody :text="row.thinking.finalResult" />
+      <MessageBody :text="row.thinking.finalResult" @copy-result="emit('copy-result', $event)" />
     </article>
     <article v-if="row.thinking?.waitingInput" class="message ai-message">
-      <MessageBody :text="{ type: 'human_input_required', summary: row.thinking.waitingInput.prompt }" />
+      <MessageBody :text="{ type: 'human_input_required', summary: row.thinking.waitingInput.prompt }" @copy-result="emit('copy-result', $event)" />
     </article>
     <article v-if="row.thinking?.errorMessage" class="message ai-message">
-      <MessageBody :text="{ type: 'text', summary: `错误：${row.thinking.errorMessage}` }" />
+      <MessageBody :text="{ type: 'text', summary: `错误：${row.thinking.errorMessage}` }" @copy-result="emit('copy-result', $event)" />
     </article>
   </div>
 </template>

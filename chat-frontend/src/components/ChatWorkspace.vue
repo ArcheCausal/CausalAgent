@@ -38,6 +38,8 @@ const userMenuOpen = ref(false)
 const editingSessionId = ref<string | null>(null)
 const editingTitle = ref('')
 const conversationArea = ref<HTMLElement | null>(null)
+const copyNotice = ref<'messageCopied' | 'messageCopyFailed' | null>(null)
+let copyNoticeTimer: number | undefined
 const sessionsHeading = ref<HTMLHeadingElement | null>(null)
 const filesHeading = ref<HTMLHeadingElement | null>(null)
 const confirmationDialog = ref<HTMLElement | null>(null)
@@ -85,7 +87,18 @@ async function jumpToLatest(): Promise<void> {
 }
 
 onMounted(() => scrollFollow.attach(conversationArea.value))
-onBeforeUnmount(() => scrollFollow.detach())
+onBeforeUnmount(() => {
+  scrollFollow.detach()
+  window.clearTimeout(copyNoticeTimer)
+})
+
+function showCopyNotice(success: boolean): void {
+  window.clearTimeout(copyNoticeTimer)
+  copyNotice.value = success ? 'messageCopied' : 'messageCopyFailed'
+  copyNoticeTimer = window.setTimeout(() => {
+    copyNotice.value = null
+  }, 2000)
+}
 
 function report(error: unknown, fallback: string): void {
   if (isApiError(error) && error.status === 401) {
@@ -402,9 +415,14 @@ function closeSettings(): void {
     <main class="main-container" :class="sessions.messages.length ? 'is-conversation' : 'is-new-chat'">
       <NetworkBackground class="network-background" />
       <section ref="conversationArea" class="conversation-area" @scroll.passive="scrollFollow.handleScroll()">
-        <MessageTimeline :messages="sessions.messages" />
+        <MessageTimeline :messages="sessions.messages" @copy-result="showCopyNotice" />
       </section>
       <div class="new-chat-stage">
+        <div class="chat-copy-feedback" role="status" aria-atomic="true">
+          <Transition name="chat-copy-notice">
+            <div v-if="copyNotice" class="chat-copy-notice">{{ text[copyNotice] }}</div>
+          </Transition>
+        </div>
         <div class="welcome-panel">
           <h2>{{ text.welcomeTitle }}</h2>
           <p>{{ text.welcomeDescription }}</p>
