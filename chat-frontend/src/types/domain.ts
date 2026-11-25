@@ -117,6 +117,8 @@ export interface ExecutionPhase {
 
 export interface ChatMessage {
   localId: string
+  messageId?: number
+  checkpointId?: string
   sender: 'user' | 'ai'
   text: MessageText
   analysisJobId?: string

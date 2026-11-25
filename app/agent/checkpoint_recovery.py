@@ -64,12 +64,13 @@ def get_pending_interrupt(
     *,
     job_id: str,
     timeout_ms: int,
+    checkpoint_id: str | None = None,
 ) -> dict[str, str] | None:
     """读取指定 Job 根 checkpoint 的未恢复 interrupt。
 
     只解码 checkpoint_writes 中的控制信号，不读取 checkpoint 正文或 BLOB，避免
-    stale recovery 检查把文件内容重新载入内存。与 LangGraph 运行时一致，已经有
-    同一 task 的 ``__resume__`` 写入时，该 interrupt 不再视为待恢复。
+    stale recovery 检查把文件内容重新载入内存。指定 checkpoint_id 时检查已落库的
+    历史问题，允许原线程已经记录答案。分叉只复制该锚点的 interrupt 控制写入。
     """
     try:
         # 保持 job_service 的轻量导入链可用；只有 stale recovery 真正发生时才加载
@@ -102,10 +103,11 @@ def get_pending_interrupt(
                     SELECT checkpoint_id
                     FROM checkpoints
                     WHERE thread_id = %s AND checkpoint_ns = %s
+                      AND (%s::text IS NULL OR (checkpoint_id = %s AND metadata->>'job_id' = thread_id))
                     ORDER BY checkpoint_id DESC
                     LIMIT 1
                     """,
-                    (str(thread_id), str(checkpoint_ns)),
+                    (thread_id, checkpoint_ns, checkpoint_id, checkpoint_id),
                 )
                 checkpoint = cursor.fetchone()
                 if not checkpoint:
@@ -146,12 +148,15 @@ def get_pending_interrupt(
                 continue
             snapshot = _interrupt_snapshot(value)
             if snapshot:
+                snapshot["checkpoint_id"] = str(checkpoint["checkpoint_id"])
                 pending[task_id] = snapshot
     except Exception as exc:
         raise CheckpointRecoveryUnavailable(
             "无法解码 PostgreSQL checkpoint 的恢复状态"
         ) from exc
 
+    if checkpoint_id:
+        return next(iter(pending.values())) if len(pending) == 1 else None
     for task_id, snapshot in pending.items():
         if task_id not in resumed_tasks:
             return snapshot

@@ -563,6 +563,45 @@
   background: var(--color-surface-muted);
 }
 
+.message-timeline {
+  display: contents;
+}
+
+.message-edit-form {
+  display: grid;
+  width: min(100%, 620px);
+  gap: 8px;
+}
+
+.message-edit-form textarea {
+  width: 100%;
+  min-height: 5rem;
+  padding: 12px 15px;
+  resize: vertical;
+  color: var(--color-text);
+  background: var(--color-surface-muted);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  font: inherit;
+}
+
+.message-edit-form p {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.message-edit-form .message-edit-error {
+  color: var(--color-danger, #a92129);
+}
+
+.message-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .markdown-content,
 .report-content {
   overflow-wrap: anywhere;

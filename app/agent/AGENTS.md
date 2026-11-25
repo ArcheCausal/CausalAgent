@@ -24,6 +24,7 @@
 - 普通用户事件必须经过脱敏，只允许公开文字和稳定状态；禁止输出原始 prompt、ToolMessage、完整工具结果、文件正文、图状态、内部 attempt 或隐藏推理。
 - terminal/interrupt 事件的写入、assistant 消息和 Job 状态必须保持事务语义；稳定生命周期事件必须有可重放的 event key。
 - checkpoint 读取失败时禁止盲目 stale recovery；必须阻止可能重复执行的恢复动作并返回稳定错误。
+- 修改消息编辑或重发时，必须在同一主库事务里复核会话版本与输入阶段，并对当前历史、模型输入和公开 SSE 应用相同的替代边界。历史追问分叉需要复核来源 Job、根 namespace、问题 ID 与 PostgreSQL 边界。缺少可信边界时由用户明确确认重新分析。
 
 ## 修改后验证
 

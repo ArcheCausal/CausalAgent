@@ -8,6 +8,7 @@
 - 所有后端响应先按 `unknown` 接收，再通过 Zod schema 解析；禁止使用 `response.json() as SomeDto`。
 - `Pinia` 只能保存可序列化的领域状态。`AbortController`、ReadableStream reader、定时器、DOM 节点和 vis-network 实例只能由组件生命周期或 runtime controller 持有。
 - Job SSE 必须使用 `fetch()` 和 `ReadableStream`，不得使用原生 `EventSource`。未知但结构合法的命名事件推进传输游标；坏包不推进游标，并进入有界、可观察的错误路径。
+- 编辑消息时按持久化消息 ID 和会话版本提交，保留冲突草稿。切换分支后以服务端历史为准，按新 Job 管理 SSE 订阅和游标。输入法组词期间保留 Enter 的默认行为。
 - Markdown 只通过 `src/renderers/markdown-adapter.ts` 调用 vendored marked；不得在组件中访问全局 marked。当前原始 HTML 行为是有意保留的兼容风险，不在本轮加入清洗策略。
 - 图形库必须延迟加载，并在组件卸载时销毁实例；初始入口不得静态包含 vis-network。
 - 公开决策必须落在对应 `step_id` 的步骤详情里：`decision_delta` 只推进该决策的展示文本，`decision_kind` 决定公开前缀，同一工具的 `tool_call_start`/`tool_call_result` 在该决策完成前只能暂存；`node_start` 未到的明细先暂存，父阶段出现后按原顺序补绘一次。

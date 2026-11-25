@@ -27,6 +27,7 @@ from app.db import (
 from app.request_context import REQUEST_ID_PATTERN
 from config.settings import settings
 from Database.analysis_contexts import (
+    capture_context_version,
     create_or_reuse_context_for_frozen_file,
     record_analysis_results,
 )
@@ -42,6 +43,9 @@ MAX_STRUCTURED_INPUT_DEPTH = 4
 MAX_STRUCTURED_INPUT_ITEMS = 64
 CHECKPOINT_RECOVERY_TIMEOUT_MS = 3000
 JOB_DRAINING_STALE_AFTER_SECONDS = 420
+FILE_SNAPSHOT_COLUMNS = (
+    "input_user_file_id", "input_object_id", "input_file_hash", "input_filename",
+)
 
 
 class FailJobResult(str, Enum):
@@ -380,6 +384,96 @@ def _load_file_snapshot(cursor, user_id: int, user_file_id: int | None) -> dict[
     return snapshot
 
 
+def insert_queued_job(
+    cursor,
+    *,
+    job_id: str,
+    user_id: int,
+    session_id: str,
+    request_id: str,
+    normalized_message: str,
+    idempotency_key: str,
+    fingerprint: str,
+    snapshot_values: dict[str, Any],
+    web_search_enabled: bool,
+    analysis_context_id: str | None,
+    context_before: str,
+    fork_from: dict[str, str] | None = None,
+    update_initial_title: bool = True,
+) -> tuple[int, int]:
+    """Create the Job and its first input while the caller owns the Session lock."""
+    cursor.execute(
+        """
+        INSERT INTO analysis_jobs (
+            job_id, user_id, session_id, request_id, message,
+            input_user_file_id, input_object_id, input_file_hash, input_filename,
+            web_search_enabled, status, max_attempts, active_session_key,
+            idempotency_key, request_fingerprint, analysis_context_id
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, 'queued', %s, %s, %s, %s, %s
+        )
+        """,
+        (
+            job_id,
+            user_id,
+            session_id,
+            request_id,
+            normalized_message,
+            snapshot_values["input_user_file_id"],
+            snapshot_values["input_object_id"],
+            snapshot_values["input_file_hash"],
+            snapshot_values["input_filename"],
+            int(web_search_enabled),
+            settings.JOB_MAX_ATTEMPTS,
+            f"{user_id}:{session_id}",
+            idempotency_key,
+            fingerprint,
+            analysis_context_id,
+        ),
+    )
+    cursor.execute(
+        """
+        INSERT INTO analysis_job_inputs (
+            job_id, sequence, input_type, input_text,
+            idempotency_key, request_fingerprint, analysis_context_id,
+            context_before, file_at_submit, fork_from, question_id
+        ) VALUES (%s, 0, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            job_id,
+            "resume" if fork_from else "initial",
+            normalized_message,
+            idempotency_key,
+            fingerprint,
+            analysis_context_id,
+            context_before,
+            _json_dumps(snapshot_values),
+            _json_dumps(fork_from) if fork_from else None,
+            fork_from["question_id"] if fork_from else None,
+        ),
+    )
+    input_id = int(cursor.lastrowid)
+    chat_message_id = save_user_input_for_job_in_transaction(
+        cursor,
+        job_id=job_id,
+        input_id=input_id,
+        user_id=user_id,
+        session_id=session_id,
+        text=normalized_message,
+        update_initial_title=update_initial_title,
+    )
+    cursor.execute(
+        """
+        UPDATE analysis_job_inputs i JOIN sessions s ON s.id = %s AND s.user_id = %s
+        SET i.chat_message_id = %s, i.conversation_version = s.conversation_version
+        WHERE i.input_id = %s
+        """,
+        (session_id, user_id, chat_message_id, input_id),
+    )
+    return input_id, chat_message_id
+
+
 def create_job(
     user_id: int,
     session_id: str,
@@ -441,7 +535,7 @@ def create_job(
             raise ActiveJobConflictError(active)
 
         cursor.execute(
-            "SELECT id FROM sessions WHERE id = %s AND user_id = %s FOR UPDATE",
+            "SELECT id, conversation_version FROM sessions WHERE id = %s AND user_id = %s FOR UPDATE",
             (session_id, user_id),
         )
         session_row = cursor.fetchone()
@@ -456,12 +550,8 @@ def create_job(
             raise PermissionError("会话不存在或不属于当前用户")
 
         snapshot = _load_file_snapshot(cursor, user_id, input_user_file_id)
-        snapshot_values = snapshot or {
-            "input_user_file_id": None,
-            "input_object_id": None,
-            "input_file_hash": None,
-            "input_filename": None,
-        }
+        snapshot_values = snapshot or dict.fromkeys(FILE_SNAPSHOT_COLUMNS)
+        context_before = capture_context_version(cursor, user_id=user_id, session_id=session_id)
         # 冻结文件存在时在同一个事务里创建或复用分析上下文；普通聊天 Job 可以为空。
         analysis_context_id = create_or_reuse_context_for_frozen_file(
             cursor,
@@ -469,68 +559,26 @@ def create_job(
             session_id=session_id,
             snapshot=snapshot_values,
         )
-        cursor.execute(
-            """
-            INSERT INTO analysis_jobs (
-                job_id, user_id, session_id, request_id, message,
-                input_user_file_id, input_object_id, input_file_hash, input_filename,
-                web_search_enabled, status, max_attempts, active_session_key,
-                idempotency_key, request_fingerprint, analysis_context_id
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, 'queued', %s, %s, %s, %s, %s
-            )
-            """,
-            (
-                job_id,
-                user_id,
-                session_id,
-                request_id,
-                normalized_message,
-                snapshot_values["input_user_file_id"],
-                snapshot_values["input_object_id"],
-                snapshot_values["input_file_hash"],
-                snapshot_values["input_filename"],
-                int(web_search_enabled),
-                settings.JOB_MAX_ATTEMPTS,
-                f"{user_id}:{session_id}",
-                idempotency_key,
-                fingerprint,
-                analysis_context_id,
-            ),
-        )
-        cursor.execute(
-            """
-            INSERT INTO analysis_job_inputs (
-                job_id, sequence, input_type, input_text,
-                idempotency_key, request_fingerprint, analysis_context_id
-            ) VALUES (%s, 0, 'initial', %s, %s, %s, %s)
-            """,
-            (
-                job_id,
-                normalized_message,
-                idempotency_key,
-                fingerprint,
-                analysis_context_id,
-            ),
-        )
-        input_id = int(cursor.lastrowid)
-        chat_message_id = save_user_input_for_job_in_transaction(
+        _, chat_message_id = insert_queued_job(
             cursor,
             job_id=job_id,
-            input_id=input_id,
             user_id=user_id,
             session_id=session_id,
-            text=normalized_message,
-        )
-        cursor.execute(
-            "UPDATE analysis_job_inputs SET chat_message_id = %s WHERE input_id = %s",
-            (chat_message_id, input_id),
+            request_id=request_id,
+            normalized_message=normalized_message,
+            idempotency_key=idempotency_key,
+            fingerprint=fingerprint,
+            snapshot_values=snapshot_values,
+            web_search_enabled=web_search_enabled,
+            analysis_context_id=analysis_context_id,
+            context_before=context_before,
         )
         connection.commit()
         job = get_job_for_user(job_id, user_id)
         if job is None:
             raise RuntimeError("Job 创建后无法读取")
+        job["message_id"] = chat_message_id
+        job["conversation_version"] = int(session_row.get("conversation_version") or 0) + 1
         return job, False
     except IdempotencyConflictError:
         connection.rollback()
@@ -718,6 +766,15 @@ def _repair_pending_interrupt(cursor, job: dict[str, Any]) -> bool:
         return False
 
     question_id = pending["question_id"]
+    cursor.execute(
+        "SELECT input_type, question_id FROM analysis_job_inputs WHERE job_id = %s "
+        "ORDER BY sequence DESC LIMIT 1",
+        (job["job_id"],),
+    )
+    submitted = cursor.fetchone()
+    if submitted and submitted["input_type"] == "resume" and submitted["question_id"] == question_id:
+        # A crash between claiming the submitted answer and applying Command must retry the answer.
+        return False
     payload = {
         "type": "interrupt",
         "message": pending["message"],
@@ -738,6 +795,8 @@ def _repair_pending_interrupt(cursor, job: dict[str, Any]) -> bool:
         ai_response={"type": "human_input_required", "summary": pending["message"]},
         source_event_id=event_id,
         analysis_job_input_id=_latest_input_id(cursor, job["job_id"]),
+        checkpoint_id=pending.get("checkpoint_id"),
+        checkpoint_question_id=question_id,
     )
     cursor.execute(
         """
@@ -770,6 +829,7 @@ def _complete_job_lifecycle(
     result: dict[str, Any] | None = None,
     status: str,
     context_update: dict[str, Any] | None = None,
+    checkpoint_id: str | None = None,
 ) -> bool:
     """在一个事务中完成事件、assistant 消息和 Job 状态更新。"""
     job_id = job["job_id"]
@@ -821,6 +881,8 @@ def _complete_job_lifecycle(
                     ai_response=chat_response,
                     source_event_id=event_id,
                     analysis_job_input_id=_latest_input_id(cursor, job_id),
+                    checkpoint_id=checkpoint_id,
+                    checkpoint_question_id=question_id,
                 )
 
             if status == "waiting_input":
@@ -926,6 +988,14 @@ def _commit_context_results(
     if not context_id:
         return
     report_id = context_update.get("report_id")
+    preprocess_version_id = context_update.get("preprocess_version_id")
+    if preprocess_version_id:
+        cursor.execute(
+            "SELECT id FROM analysis_preprocess_versions WHERE id = %s AND job_id = %s AND input_id = %s",
+            (preprocess_version_id, job_id, _latest_input_id(cursor, job_id)),
+        )
+        if not cursor.fetchone():
+            preprocess_version_id = None
     record_analysis_results(
         cursor,
         context_id=str(context_id),
@@ -934,6 +1004,7 @@ def _commit_context_results(
         web_evidence=context_update.get("web_evidence"),
         report_message_id=assistant_message_id if report_id else None,
         report_id=report_id,
+        preprocess_version_id=preprocess_version_id,
     )
 
 
@@ -1110,7 +1181,7 @@ def _decode_input_record(row: dict[str, Any]) -> dict[str, Any]:
         stored = "" if stored is None else str(stored)
     input_type = str(row.get("input_type") or "")
     runtime_value: Any = stored
-    if input_type == "resume" and stored[:1] in {"{", "["}:
+    if input_type == "resume" and not row.get("fork_from") and stored[:1] in {"{", "["}:
         try:
             parsed = json.loads(stored)
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -1121,6 +1192,8 @@ def _decode_input_record(row: dict[str, Any]) -> dict[str, Any]:
         "input_type": input_type,
         "runtime_value": runtime_value,
         "stored_text": stored,
+        "question_id": row.get("question_id"),
+        "fork_from": _json_loads(row.get("fork_from")),
         "chat_message_id": (
             int(row["chat_message_id"])
             if row.get("chat_message_id") is not None
@@ -1136,7 +1209,7 @@ def _get_input_record(job_id: str, *, sequence: int | None = None) -> dict[str, 
         if sequence is None:
             cursor.execute(
                 """
-                SELECT input_type, input_text, chat_message_id
+                SELECT input_type, input_text, chat_message_id, question_id, fork_from
                 FROM analysis_job_inputs
                 WHERE job_id = %s
                 ORDER BY sequence DESC
@@ -1147,7 +1220,7 @@ def _get_input_record(job_id: str, *, sequence: int | None = None) -> dict[str, 
         else:
             cursor.execute(
                 """
-                SELECT input_type, input_text, chat_message_id
+                SELECT input_type, input_text, chat_message_id, question_id, fork_from
                 FROM analysis_job_inputs
                 WHERE job_id = %s AND sequence = %s
                 LIMIT 1
@@ -1339,19 +1412,39 @@ def write_event(
             raise
 
 
-def read_events_after(job_id: str, after_id: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+PUBLIC_EVENT_BOUNDARY = """
+    SELECT CASE WHEN COUNT(CASE WHEN replaced_by_job_id IS NOT NULL THEN 1 END) > 0
+        THEN COALESCE(MAX(CASE WHEN replaced_by_job_id IS NULL THEN source_event_id END), 0)
+    END AS visible_boundary
+    FROM chat_messages WHERE analysis_job_id = %s AND user_id = %s
+"""
+
+
+def get_public_event_boundary(job_id: str, user_id: int) -> int | None:
+    """读取被截断 Job 的最后可见事件，完整 Job 返回 None。"""
+    with get_read_connection(consistency="strong") as connection:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute(PUBLIC_EVENT_BOUNDARY, (job_id, user_id))
+        boundary = cursor.fetchone()["visible_boundary"]
+        return int(boundary) if boundary is not None else None
+
+
+def read_events_after(
+    job_id: str, after_id: int = 0, limit: int = 100, *, user_id: int,
+) -> list[dict[str, Any]]:
     """读取指定事件 ID 之后的强一致公开事件。"""
     with get_read_connection(consistency="strong") as connection:
         cursor = connection.cursor(dictionary=True)
         cursor.execute(
-            """
+            f"""
             SELECT id, job_id, event_type, event_key, payload_json, created_at
             FROM analysis_job_events
             WHERE job_id = %s AND id > %s
+              AND id <= COALESCE(({PUBLIC_EVENT_BOUNDARY}), id)
             ORDER BY id ASC
             LIMIT %s
             """,
-            (job_id, after_id, limit),
+            (job_id, after_id, job_id, user_id, limit),
         )
         rows = cursor.fetchall()
     for row in rows:
@@ -1392,6 +1485,7 @@ def complete_job_with_chat(
     lease_epoch: int | None = None,
     question_id: str | None = None,
     context_update: dict[str, Any] | None = None,
+    checkpoint_id: str | None = None,
 ) -> bool:
     """在一个事务内完成 final、error 或 interrupt 生命周期。"""
     if event_type == "interrupt":
@@ -1404,6 +1498,7 @@ def complete_job_with_chat(
             question_id=question_id,
             chat_response=chat_response,
             status="waiting_input",
+            checkpoint_id=checkpoint_id,
         )
     if event_type == "error":
         return _complete_job_lifecycle(
@@ -1425,6 +1520,7 @@ def complete_job_with_chat(
         result=result,
         context_update=context_update,
         status="succeeded",
+        checkpoint_id=checkpoint_id,
     )
 
 
@@ -1585,12 +1681,14 @@ def resume_job(
             )
             sequence_row = cursor.fetchone() or {}
             sequence = int(sequence_row.get("next_sequence") or 0)
+            context_before = capture_context_version(cursor, user_id=user_id, session_id=job["session_id"])
+            file_at_submit = {column: job.get(column) for column in FILE_SNAPSHOT_COLUMNS}
             cursor.execute(
                 """
                 INSERT INTO analysis_job_inputs (
                     job_id, sequence, input_type, input_text, question_id,
-                    idempotency_key, request_fingerprint, analysis_context_id
-                ) VALUES (%s, %s, 'resume', %s, %s, %s, %s, %s)
+                    idempotency_key, request_fingerprint, analysis_context_id, context_before, file_at_submit
+                ) VALUES (%s, %s, 'resume', %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     job_id,
@@ -1600,6 +1698,8 @@ def resume_job(
                     idempotency_key,
                     fingerprint,
                     job.get("analysis_context_id"),
+                    context_before,
+                    _json_dumps(file_at_submit),
                 ),
             )
             input_id = int(cursor.lastrowid)
@@ -1612,9 +1712,15 @@ def resume_job(
                 text=normalized_answer,
             )
             cursor.execute(
-                "UPDATE analysis_job_inputs SET chat_message_id = %s WHERE input_id = %s",
-                (chat_message_id, input_id),
+                """
+                UPDATE analysis_job_inputs i JOIN sessions s ON s.id = %s AND s.user_id = %s
+                SET i.chat_message_id = %s, i.conversation_version = s.conversation_version
+                WHERE i.input_id = %s
+                """,
+                (job["session_id"], user_id, chat_message_id, input_id),
             )
+            cursor.execute("SELECT conversation_version FROM analysis_job_inputs WHERE input_id = %s", (input_id,))
+            submitted_version = cursor.fetchone()["conversation_version"]
             cursor.execute(
                 """
                 UPDATE analysis_jobs
@@ -1631,6 +1737,8 @@ def resume_job(
             refreshed = get_job_for_user(job_id, user_id)
             if not refreshed:
                 raise RuntimeError("恢复后无法读取 Job")
+            refreshed["message_id"] = chat_message_id
+            refreshed["conversation_version"] = int(submitted_version)
             return refreshed, False
         except Exception:
             connection.rollback()
@@ -1696,7 +1804,7 @@ def cancel_job(
             cursor.execute(
                 """
                 UPDATE analysis_jobs
-                SET status = 'canceled', active_session_key = NULL,
+                SET active_session_key = NULL,
                     current_question_id = NULL, current_waiting_prompt = NULL,
                     cancel_idempotency_key = %s,
                     cancel_request_fingerprint = %s,
@@ -1707,7 +1815,8 @@ def cancel_job(
                     END,
                     worker_id = CASE WHEN status = 'running' THEN worker_id ELSE NULL END,
                     locked_at = CASE WHEN status = 'running' THEN locked_at ELSE NULL END,
-                    heartbeat_at = CASE WHEN status = 'running' THEN heartbeat_at ELSE NULL END
+                    heartbeat_at = CASE WHEN status = 'running' THEN heartbeat_at ELSE NULL END,
+                    status = 'canceled'
                 WHERE job_id = %s
                   AND status IN ('queued', 'running', 'waiting_input')
                 """,

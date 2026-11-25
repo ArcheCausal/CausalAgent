@@ -16,6 +16,7 @@ from app.agent.worker.event_adapter import (
     classify_graph_failure,
     sanitize_public_error,
 )
+from app.agent.worker.checkpoint_fork import copy_interrupt_checkpoint
 from app.agent.worker.execution_guard import JobExecutionGuard, JobExecutionRevoked
 from app.agent.worker.result_presenter import process_final_result
 from config.settings import settings
@@ -36,6 +37,12 @@ def _build_final_result(state_values: dict[str, Any], *, job_attempt: int) -> di
         "attempt": job_attempt,
         "_context_commit": build_context_commit(state_values),
     }
+
+
+def _checkpoint_id(snapshot: Any) -> str | None:
+    config = getattr(snapshot, "config", None) or {}
+    configurable = config.get("configurable") or {}
+    return configurable.get("checkpoint_id")
 
 
 async def _recovered_after_node_error(
@@ -66,7 +73,7 @@ async def _recovered_after_node_error(
     values = getattr(state, "values", None)
     if not isinstance(values, dict):
         return None
-    return _build_final_result(values, job_attempt=job_attempt)
+    return {**_build_final_result(values, job_attempt=job_attempt), "_checkpoint_id": _checkpoint_id(state)}
 
 
 def _snapshot_interrupts(snapshot: Any) -> list[Any]:
@@ -254,6 +261,37 @@ async def ai_call_stream(
     )
 
     state = await graph.aget_state(config)
+    fork = initial_input.get("fork_from")
+    if fork and not _snapshot_has_checkpoint(state):
+        source = {
+            "configurable": {
+                "thread_id": fork["source_job_id"],
+                "checkpoint_id": fork["checkpoint_id"],
+            },
+        }
+        anchor = await graph.aget_state(source)
+        questions = _snapshot_interrupts(anchor)
+        if (
+            tuple(anchor.next) != ("fold",)
+            or len(questions) != 1
+            or _interrupt_id(questions[0]) != fork["question_id"]
+            or anchor.values.get("user_id") != user_id
+            or anchor.values.get("session_id") != session_id
+            or anchor.values.get("job_id") != fork["source_job_id"]
+        ):
+            raise RuntimeError("历史追问不再是可恢复的父图边界")
+        if execution_guard is not None:
+            await execution_guard.ensure_active()
+        await copy_interrupt_checkpoint(
+            graph.checkpointer, source=fork["source_job_id"], anchor=fork["checkpoint_id"], target=job_id,
+        )
+        state = await graph.aget_state(config)
+        if (
+            _checkpoint_id(state) != fork["checkpoint_id"]
+            or [_interrupt_id(question) for question in _snapshot_interrupts(state)] != [fork["question_id"]]
+            or state.values.get("job_id") != job_id
+        ):
+            raise RuntimeError("新 Job 未能复核分叉边界")
     if execution_guard is not None:
         await execution_guard.check_after_call()
     interrupts = _snapshot_interrupts(state)
@@ -261,7 +299,10 @@ async def ai_call_stream(
     if interrupts:
         if input_type != "resume":
             raise RuntimeError("checkpoint 存在 pending interrupt，但当前输入不是 resume")
-        input_data: Any = Command(resume=runtime_value)
+        question_id = current_input.get("question_id")
+        if question_id and [_interrupt_id(question) for question in interrupts] != [question_id]:
+            raise RuntimeError("当前追问与输入账本不匹配")
+        input_data: Any = Command(resume={question_id: runtime_value} if question_id else runtime_value)
     elif claim_kind == "stale_recovery":
         if has_checkpoint:
             input_data = None
@@ -306,6 +347,7 @@ async def ai_call_stream(
         "stream_mode": ["updates", "messages", "custom", "tasks"],
         "subgraphs": True,
         "version": "v2",
+        "durability": "sync",
     }
     stream_kwargs["context"] = agent_runtime_context or AgentRunContext(
         execution_guard=execution_guard,
@@ -357,12 +399,14 @@ async def ai_call_stream(
                 "message": question,
                 "question_id": _interrupt_id(interrupt_obj),
                 "attempt": job_attempt,
+                "_checkpoint_id": _checkpoint_id(state),
             }
             return
 
         if execution_guard is not None:
             await execution_guard.ensure_active()
         final_result = _build_final_result(state.values, job_attempt=job_attempt)
+        final_result["_checkpoint_id"] = _checkpoint_id(state)
         if execution_guard is not None:
             await execution_guard.check_after_call()
         yield final_result

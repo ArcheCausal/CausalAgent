@@ -590,6 +590,7 @@ def _switched_context_state(
         "web_search_result": None,
         "postprocess_result": None,
         "preprocess_summary": None,
+        "preprocess_version_id": None,
         "chart_assets": None,
         "report_document": None,
         "deep_agent_algorithm_results": {},
@@ -1084,7 +1085,7 @@ async def fold_node(
         }
 
 
-async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
+async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI, runtime=None) -> dict:
     """
     项目预处理模块:
     1.  从状态(state)中加载 DataFrame 和数据摘要。
@@ -1106,6 +1107,30 @@ async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
     ):
         error_msg = "无法执行预处理，因为数据或其摘要信息在状态中丢失。"
         raise RuntimeError(error_msg)
+
+    from Database.analysis_contexts import preprocess_version
+
+    identity = getattr(getattr(runtime, "context", None), "trusted_identity", None)
+    version_options = None
+    summary_message = AIMessage(content="决策：数据预处理完成，进入工具处理路由", name="preprocess")
+    if identity is not None:
+        version_options = {
+            "job_id": str(identity.job_id),
+            "worker_id": identity.worker_id,
+            "attempt_count": identity.attempt_count,
+            "lease_epoch": identity.lease_epoch,
+            "call_id": str(runtime.execution_info.task_id),
+            "source_file_hash": file_summary["file_hash"],
+            "recipe": {
+                "pipeline": "csv_profile_charts_summary_v1",
+                "target": analysis_parameters.get("target"),
+                "treatment": analysis_parameters.get("treatment"),
+            },
+        }
+        existing_version = await asyncio.to_thread(preprocess_version, **version_options)
+        if existing_version:
+            version_id, output = existing_version
+            return {"messages": [summary_message], "preprocess_version_id": version_id, **output}
 
     file_row = await asyncio.to_thread(
         require_frozen_file_for_job,
@@ -1165,20 +1190,11 @@ async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         "data_summary": json.dumps(analysis_parameters, indent=2, ensure_ascii=False),
         "system_role": data_prompt()
     })
-    # 4. 更新状态并返回新消息
-    state["preprocess_summary"] = preprocess_summary
-    
-    summary_message = AIMessage(
-        content= "决策：数据预处理完成，进入工具处理路由",
-        name="preprocess"
-    )
-
-    # 只返回新消息和需要更新的状态
-    return {
-        "messages": [summary_message],
-        "preprocess_summary": state["preprocess_summary"],
-        "chart_assets": state.get("chart_assets", {}),
-    }
+    output = {"preprocess_summary": preprocess_summary, "chart_assets": state.get("chart_assets", {})}
+    version_id = None
+    if version_options is not None:
+        version_id, output = await asyncio.to_thread(preprocess_version, output=output, **version_options)
+    return {"messages": [summary_message], "preprocess_version_id": version_id, **output}
 
 
 from Agent.knowledge_base.query_rag import format_rag_summary_for_prompt

@@ -413,7 +413,8 @@ def build_context_commit(state: Mapping[str, Any]) -> dict[str, Any] | None:
     rag_evidence = normalize_evidence_items(state.get("deep_agent_rag_evidence"))
     web_evidence = normalize_evidence_items(state.get("deep_agent_web_evidence"))
     report_id = _report_id_from_state(state)
-    if not algorithm_summary and not rag_evidence and not web_evidence and not report_id:
+    preprocess_version_id = state.get("preprocess_version_id")
+    if not any((algorithm_summary, rag_evidence, web_evidence, report_id, preprocess_version_id)):
         return None
     return {
         "analysis_context_id": str(context_id) if context_id else None,
@@ -421,4 +422,5 @@ def build_context_commit(state: Mapping[str, Any]) -> dict[str, Any] | None:
         "rag_evidence": rag_evidence or None,
         "web_evidence": web_evidence or None,
         "report_id": report_id,
+        "preprocess_version_id": preprocess_version_id,
     }

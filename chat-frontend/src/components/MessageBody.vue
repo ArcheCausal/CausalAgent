@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Copy } from '@lucide/vue'
+import { Copy, Pencil } from '@lucide/vue'
 import { computed } from 'vue'
 import { useLocale } from '../i18n/use-locale'
 import { renderMarkdown } from '../renderers/markdown-adapter'
@@ -8,8 +8,8 @@ import CausalGraph from './CausalGraph.vue'
 import ReportRenderer from './ReportRenderer.vue'
 import type { CausalGraphData, MessageText, StructuredMessage } from '../types/domain'
 
-const props = defineProps<{ text: MessageText; copyText?: string }>()
-const emit = defineEmits<{ 'copy-result': [success: boolean] }>()
+const props = defineProps<{ text: MessageText; copyText?: string; editable?: boolean }>()
+const emit = defineEmits<{ 'copy-result': [success: boolean]; edit: [] }>()
 const { text: labels } = useLocale()
 const structured = computed<StructuredMessage | null>(() => typeof props.text === 'string' ? null : props.text)
 // 结构化报告由专用渲染器接管；MessageBody 不再拼接报告 HTML。
@@ -94,9 +94,12 @@ async function copyMessage(): Promise<void> {
     <div v-else-if="structured?.summary !== undefined || typeof text === 'string'" class="markdown-content" :class="{ 'causal-report': isReport }" v-html="summaryHtml"></div>
     <pre v-else class="unknown-message">{{ JSON.stringify(text, null, 2) }}</pre>
   </div>
-  <div v-if="clipboardText.trim()" class="message-actions">
-    <button type="button" class="message-copy-button" :aria-label="labels.copyMessage" :title="labels.copyMessage" @click="copyMessage">
+  <div v-if="clipboardText.trim() || editable" class="message-actions">
+    <button v-if="clipboardText.trim()" type="button" class="message-copy-button" :aria-label="labels.copyMessage" :title="labels.copyMessage" @click="copyMessage">
       <Copy :size="16" :stroke-width="1.75" aria-hidden="true" focusable="false" />
+    </button>
+    <button v-if="editable" type="button" class="message-copy-button edit-message-button" :aria-label="labels.editMessage" :title="labels.editMessage" @click="emit('edit')">
+      <Pencil :size="16" :stroke-width="1.75" aria-hidden="true" focusable="false" />
     </button>
   </div>
 </template>

@@ -11,16 +11,18 @@
 | `POST` | `/api/new_chat` | 生成 UUID 并立即在主库创建 Session |
 | `GET` | `/api/sessions` | 读取当前用户未归档会话列表 |
 | `GET` | `/api/load_session?session=<id>` | 读取当前用户会话消息与展示附件 |
+| `POST` | `/api/sessions/<id>/messages/<message_id>/edit-resend` | 从指定用户消息创建新 Job 并切换当前会话历史 |
 | `POST` | `/api/change_session` | 修改当前用户会话标题 |
 | `POST` | `/api/delete_session` | 删除会话业务数据并登记 checkpoint 清理 |
 
 所有会话接口按当前用户过滤。未知或不属于当前用户的 Session 不会被自动重建。新建会话使用主库写入；列表可以使用允许回退的 eventual read；加载、修改、删除和 Job 相关的实时路径使用 strong read 或主库事务。
 
-`GET /api/load_session` 在一个主库只读事务中批量读取消息、展示附件、Session 下的 Job、输入账本和事件。既有 `sender`、`text` 字段保持不变；带 Job 关联的用户消息还可以返回 `analysis_job_id`、`analysis_job_input_id` 和 `thinking_after`：
+`GET /api/load_session` 在一个主库只读事务中批量读取当前消息、展示附件、关联 Job、输入账本和事件。响应顶层的 `conversation_version` 随用户或助手消息提交递增。每条消息返回稳定的 `message_id`。持久化了可信根图终态或 interrupt 的助手消息还返回 `checkpoint_id`。带 Job 关联的用户消息可以返回 `analysis_job_id`、`analysis_job_input_id` 和 `thinking_after`。
 
 ```json
 {
   "sender": "user",
+  "message_id": 51,
   "text": "目标变量是 Y",
   "analysis_job_id": "job-id",
   "analysis_job_input_id": 42,
@@ -66,6 +68,12 @@ assistant 消息的 `text` 在报告场景下是结构化报告载荷，与 SSE 
 删除会话前，服务端锁定该会话的 Job 和 Session；如果存在 `queued`、`running` 或 `waiting_input` Job，返回 `409`。否则在同一个 MySQL 事务中登记所有 Job 的父子图 checkpoint 清理 outbox、删除附件、删除聊天消息和删除 Session，然后返回后台清理状态。MySQL 业务删除成功不代表 PostgreSQL checkpoint 已同步完成。删除会话只清理 Job checkpoint，不删除该用户长期记忆。
 
 当用户消息精确关联到初始 Job 输入，且该 Job 有冻结文件名时，历史响应会附带可选的 file_attachment.filename。服务端通过 analysis_job_input_id、输入账本的 chat_message_id 和 job_id 校验归属；响应只返回文件名，不返回文件内容、文件 ID、对象 ID 或哈希。没有文件的消息、恢复输入和 assistant 消息不包含该字段。
+
+## 编辑并重新发送
+
+请求使用当前登录身份、`X-CSRF-Token` 和 UUID v4 `Idempotency-Key`。提交字段为 `message`、最近一次历史响应的 `conversation_version`、目标之前最近助手消息的 `checkpoint_id`。没有锚点时可以省略该字段或传 `null`。首次接受返回 `202`，同键同参重试返回 `200` 和原有 `job_id`、替换后的 `message_id`、提交后的 `conversation_version`、当前 Job `status` 和 `execution_mode`。`execution_mode` 为 `resume_checkpoint` 或 `reanalyze`。
+
+旧版本、过期或不匹配的锚点、幂等键参数冲突、活动 Job 和 draining 均返回 `409` 及稳定 `code`。活动任务先通过现有取消接口处理，释放后重新加载历史版本。历史补充回答缺少可信 interrupt 时返回 `edit_reanalysis_required`。用户明确选择按保留对话重新分析后，客户端以新的幂等键提交 `allow_reanalysis: true`。PostgreSQL 恢复点检查暂时不可用时返回 `503 checkpoint_unavailable`。业务切换范围见 [Job 与文件生命周期](../architecture/job-file-lifecycle.md)。
 
 ## 文件接口
 

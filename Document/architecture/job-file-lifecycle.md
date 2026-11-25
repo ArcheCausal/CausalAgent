@@ -16,7 +16,7 @@
 | 文件对象 | MySQL `file_objects` | 按用户和 SHA-256 去重的不可变 BLOB |
 | 用户文件 | MySQL `user_files` | 用户可见文件名、访问统计和对象引用 |
 | 父图 checkpoint | PostgreSQL 官方 LangGraph 表 | Job 的外层恢复状态；`thread_id` 是 `analysis_jobs.job_id` |
-| Deep Agent checkpoint | PostgreSQL 官方 LangGraph 表 | 内层消息、工具状态和 raw 文件；使用稳定的 `deep-agent:<uuid5(job_id)>` thread 与 `deep_agent_v1` namespace |
+| Deep Agent checkpoint | PostgreSQL 官方 LangGraph 表 | 内层消息、工具状态和 raw 文件，使用稳定的 `deep-agent:<uuid5(job_id)>` 独立 thread 和空根 namespace |
 | 长期记忆 Store | PostgreSQL 官方 `AsyncPostgresStore` 表 | 按可信 `user_id` namespace 保存 Deep Agent 两份 memory 文件；不属于 Job checkpoint |
 | checkpoint cleanup outbox | MySQL `checkpoint_cleanup_outbox` | Job 父子图 checkpoint 删除请求的可靠账本，按 `thread_id` 唯一 |
 | 用户记忆 cleanup outbox | MySQL `user_memory_cleanup_outbox` | 用户长期记忆 Store 删除请求的可靠账本，按 `user_id` 唯一，不关联 `users` 外键 |
@@ -70,17 +70,27 @@ thread_id = analysis_jobs.job_id
 checkpoint_ns = ""
 ```
 
-业务 `session_id` 仍然是 MySQL `sessions.id`，不是 checkpoint thread。新 Job 从同一 Session 的 MySQL 聊天历史加载有界初始窗口；同一 Job 的 resume 和 stale recovery 才继续原 checkpoint。旧的 session-thread checkpoint 不迁移、不读取、不清理。管理员 checkpoint 摘要必须使用 `metadata.job_id` 精确关联，缺少该字段的记录不能按时间猜测归属。
+业务 `session_id` 使用 MySQL `sessions.id`。普通新 Job 从同一 Session 的当前聊天历史加载有界初始窗口。同一 Job 的 resume 和 stale recovery 接续该 Job 的 checkpoint。已回答的历史追问可以从可信 interrupt 派生新的独立 Job thread。旧的 session-thread checkpoint 不迁移、不读取、不清理。管理员 checkpoint 摘要使用 `metadata.job_id` 精确关联。
 
 Deep Agent 的 checkpoint 与长期记忆共用 PostgreSQL 实例但不是同一类数据：父图以
 `thread_id=job_id` 保存外层 Job State；Deep Agent 子图以
-`thread_id=deep-agent:<uuid5(job_id)>` 和 `checkpoint_ns=deep_agent_v1` 保存内部
+`thread_id=deep-agent:<uuid5(job_id)>` 和空根 namespace 保存内部
 messages、工具状态和短期 raw 文件。`AsyncPostgresStore` 另以
 `("causalagent", "memory", str(user_id))` namespace 保存 `/memories/preferences.md`
 和 `/memories/research_background.md`。worker 首次使用某个用户 namespace 时只做
 create-if-absent 初始化，不覆盖已有内容；运行时对象与 MCP session 不会写入 Store。
 子图 checkpoint 只保存由 Job、attempt、lease 和输入身份计算出的不可逆
 `execution_scope` 摘要，不保存 execution guard、executor、数据库连接或签名材料。
+
+## 会话编辑、上下文与预处理产物
+
+编辑事务锁定活动或 draining Job 和 Session，在主库核对当前版本、用户消息、输入阶段及上一条助手边界。事务记录后缀的替代 Job、保留原始消息和附件，并写入新 Job、替换消息、输入账本及冻结文件快照。普通历史、模型历史和执行阶段按当前消息可见性投影。旧 Job 的公开 SSE 最多回放到仍可见的最后一个助手边界。被替换的后续事件和附件随原记录保留供审计。
+
+各输入阶段保存提交前的分析上下文版本和文件快照。回溯时从版本恢复 Session 活动指针、可见上下文索引、参数、算法摘要、证据和报告引用。事务保留被替换分支的上下文版本供审计。历史输入缺少快照时保守地从消息前缀重新构造输入，并归档无法确证属于截断点的上下文。能够验证的原文件身份按当前文件归属和原对象哈希重新冻结。
+
+当前 CSV 预处理生成数据摘要和图表。持久化输出按 Job、输入阶段及 LangGraph 节点调用 ID 保存为编号版本，登记源文件哈希、处理配方及同源父版本。重试使用同一个版本，独立运行写入不同版本。Worker 凭租约提交产物，成功终态才更新当前上下文的产物引用。截断切换引用，旧产物、文件访问审计和已外发工具副作用继续按原生命周期管理。
+
+## 跨库清理
 
 删除 Session 或用户时，MySQL 事务先锁定并删除业务数据，同时为相关 Job 写入
 `checkpoint_cleanup_outbox`；物理删除用户时还会为同一 `user_id` 登记一条

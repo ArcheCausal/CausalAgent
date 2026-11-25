@@ -46,6 +46,8 @@ export const executionPhaseSchema = z.object({
 
 export const chatMessageSchema = z.object({
   sender: z.enum(['user', 'ai']),
+  message_id: z.number().int().positive().optional(),
+  checkpoint_id: z.string().optional(),
   text: z.union([z.string(), structuredMessageSchema]),
   analysis_job_id: z.string().nullable().optional(),
   analysis_job_input_id: z.number().int().positive().nullable().optional(),
@@ -62,6 +64,7 @@ export const chatMessageSchema = z.object({
 export const loadSessionResponseSchema = z.object({
   success: z.boolean(),
   messages: z.array(chatMessageSchema).optional(),
+  conversation_version: z.number().int().nonnegative().optional(),
   error: z.string().optional(),
 }).passthrough()
 

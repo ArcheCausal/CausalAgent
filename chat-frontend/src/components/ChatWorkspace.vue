@@ -13,7 +13,7 @@ import { useComposerStore } from '../stores/composer.store'
 import { useFilesStore } from '../stores/files.store'
 import { useJobsStore } from '../stores/jobs.store'
 import { useSessionsStore } from '../stores/sessions.store'
-import type { JobRecord } from '../types/domain'
+import type { ChatMessage, JobRecord } from '../types/domain'
 import Composer from './Composer.vue'
 import MessageTimeline from './MessageTimeline.vue'
 import NetworkBackground from './NetworkBackground.vue'
@@ -39,6 +39,18 @@ const editingSessionId = ref<string | null>(null)
 const editingTitle = ref('')
 const conversationArea = ref<HTMLElement | null>(null)
 const copyNotice = ref<'messageCopied' | 'messageCopyFailed' | null>(null)
+const editDraft = ref<{
+  sessionId: string
+  messageId: number
+  value: string
+  version: number
+  checkpointId: string | null
+  request: { payload: string; key: string } | null
+  busy: boolean
+  error: string
+  reanalysisRequired: boolean
+  needsRefresh: boolean
+} | null>(null)
 let copyNoticeTimer: number | undefined
 const sessionsHeading = ref<HTMLHeadingElement | null>(null)
 const filesHeading = ref<HTMLHeadingElement | null>(null)
@@ -75,6 +87,7 @@ provide(chatScrollFollowKey, scrollFollow)
 watch(
   () => props.route.sessionId,
   (sessionId) => {
+    if (editDraft.value?.sessionId !== sessionId) editDraft.value = null
     if (!sessionId || sessions.currentId === sessionId) return
     void loadSession(sessionId)
   },
@@ -116,17 +129,156 @@ async function loadSession(sessionId: string): Promise<void> {
     if (sessions.currentId !== sessionId) return
     /* 只有仍在执行的 Job 需要运行态记录；已结束的历史阶段由消息自带的 thinking_after 渲染。 */
     const activeJobIds = new Set((active.jobs ?? []).map((job) => job.job_id))
+    if (sessions.conversationVersion !== null) {
+      for (const job of Object.values(jobs.records)) {
+        if (job.sessionId === sessionId && !activeJobIds.has(job.jobId)) {
+          props.controller.stop(job.jobId)
+          delete jobs.records[job.jobId]
+        }
+      }
+    }
     for (const message of sessions.messages) {
       const phase = message.thinkingAfter
       if (phase?.analysisJobId && activeJobIds.has(phase.analysisJobId)) jobs.seedPhase(sessionId, phase)
     }
     for (const job of active.jobs ?? []) {
       const record = jobs.observeActive(job)
-      if (record.uiState !== 'waiting_input') void props.controller.subscribe(record.jobId).catch((error: unknown) => report(error, '恢复任务订阅失败。'))
+      if (record.uiState !== 'waiting_input') void subscribeJob(record.jobId, sessionId)
     }
     await jumpToLatest()
   } catch (error) {
     report(error, '加载会话失败。')
+  }
+}
+
+async function subscribeJob(jobId: string, sessionId: string): Promise<void> {
+  try {
+    await props.controller.subscribe(jobId)
+    const job = jobs.byId(jobId)
+    if (
+      job && ['completed', 'failed', 'canceled', 'waiting_input'].includes(job.uiState)
+      && sessions.currentId === sessionId && props.route.sessionId === sessionId
+      && sessions.conversationVersion !== null && !composer.sending
+      && sessions.messages.some((message) => message.analysisJobId === jobId && message.messageId !== undefined)
+    ) {
+      await sessions.select(sessionId, editDraft.value?.messageId)
+    }
+  } catch (error) {
+    report(error, '任务事件订阅失败。')
+  }
+}
+
+function precedingCheckpoint(messageId: number): string | null {
+  const index = sessions.messages.findIndex((message) => message.messageId === messageId)
+  return sessions.messages.slice(0, index).reverse().find((message) => message.sender === 'ai')?.checkpointId ?? null
+}
+
+function beginMessageEdit(message: ChatMessage): void {
+  const sessionId = sessions.currentId
+  const version = sessions.conversationVersion
+  if (!sessionId || version === null || message.messageId === undefined || typeof message.text !== 'string' || editDraft.value?.busy) return
+  editDraft.value = {
+    sessionId, messageId: message.messageId, value: message.text, version,
+    checkpointId: precedingCheckpoint(message.messageId), request: null,
+    busy: false, error: '', reanalysisRequired: false, needsRefresh: false,
+  }
+}
+
+function cancelMessageEdit(): void {
+  const draft = editDraft.value
+  if (!draft || draft.busy) return
+  editDraft.value = null
+  if (draft.needsRefresh && sessions.currentId === draft.sessionId) void loadSession(draft.sessionId)
+}
+
+async function refreshEditHistory(): Promise<void> {
+  const draft = editDraft.value
+  if (!draft || draft.busy) return
+  draft.busy = true
+  try {
+    const retained = await sessions.select(draft.sessionId, draft.messageId)
+    if (editDraft.value !== draft) return
+    if (!retained || sessions.conversationVersion === null) {
+      draft.error = text.value.editTargetReplaced
+      return
+    }
+    draft.version = sessions.conversationVersion
+    draft.checkpointId = precedingCheckpoint(draft.messageId)
+    draft.needsRefresh = false
+    draft.error = ''
+  } catch (error) {
+    draft.error = error instanceof Error ? error.message : text.value.editUnavailable
+  } finally {
+    draft.busy = false
+  }
+}
+
+async function resendMessage(reanalyze: boolean): Promise<void> {
+  const draft = editDraft.value
+  const csrfToken = auth.csrfToken
+  if (!draft || !csrfToken || draft.busy || draft.needsRefresh || !draft.value.trim() || composer.sending) return
+  if (draft.reanalysisRequired && !reanalyze) return
+  const edit = {
+    message: draft.value.trim(),
+    conversation_version: draft.version,
+    checkpoint_id: draft.checkpointId,
+    allow_reanalysis: reanalyze,
+  }
+  draft.busy = true
+  draft.error = ''
+  try {
+    const payload = JSON.stringify(edit)
+    const key = draft.request?.payload === payload ? draft.request.key : createIdempotencyKey()
+    draft.request = { payload, key }
+    const response = await retryIdempotent(() => api.editMessage(draft.sessionId, draft.messageId, csrfToken, key, edit))
+    if (response.existing) {
+      if (editDraft.value === draft) editDraft.value = null
+      if (sessions.currentId === draft.sessionId && props.route.sessionId === draft.sessionId) await loadSession(draft.sessionId)
+      return
+    }
+    for (const job of Object.values(jobs.records)) {
+      if (job.sessionId === draft.sessionId && job.jobId !== response.job_id) {
+        props.controller.stop(job.jobId)
+        delete jobs.records[job.jobId]
+      }
+    }
+    jobs.startFromResponse(response.job_id, draft.sessionId, response.status, 0)
+    if (editDraft.value === draft) editDraft.value = null
+    if (sessions.currentId === draft.sessionId && props.route.sessionId === draft.sessionId) {
+      const target = sessions.messages.findIndex((message) => message.messageId === draft.messageId)
+      if (target >= 0) {
+        const file = sessions.messages[target]?.fileAttachment
+        sessions.messages.splice(target)
+        sessions.conversationVersion = response.conversation_version
+        sessions.appendUserMessage(edit.message, response.job_id, file, response.message_id)
+      }
+      try {
+        if (await sessions.select(draft.sessionId)) {
+          for (const message of sessions.messages) {
+            const phase = message.thinkingAfter
+            if (phase?.analysisJobId === response.job_id) jobs.seedPhase(draft.sessionId, phase)
+          }
+        }
+      } catch (error) {
+        report(error, '重新发送已受理，加载会话失败。')
+      }
+      await jumpToLatest()
+    }
+    if (response.status === 'queued' || response.status === 'running') {
+      void subscribeJob(response.job_id, draft.sessionId)
+    } else if (response.status === 'waiting_input' && sessions.currentId === draft.sessionId) {
+      void loadSession(draft.sessionId)
+    }
+    void sessions.loadList().catch(() => undefined)
+  } catch (error) {
+    draft.error = error instanceof Error ? error.message : text.value.editUnavailable
+    if (isApiError(error)) {
+      draft.reanalysisRequired = draft.reanalysisRequired || error.code === 'edit_reanalysis_required'
+      draft.needsRefresh = ['conversation_version_conflict', 'edit_checkpoint_conflict', 'message_not_found'].includes(error.code)
+      if (error.status === 401) report(error, text.value.editUnavailable)
+    }
+  } finally {
+    draft.busy = false
   }
 }
 
@@ -181,7 +333,12 @@ async function send(): Promise<void> {
     }
     const stillInSubmittedSession = sessions.currentId === sessionId
     if (stillInSubmittedSession) {
-      sessions.appendUserMessage(message, response.job_id, fileAttachment)
+      if (response.existing && response.message_id == null) {
+        await sessions.select(sessionId).catch((error: unknown) => report(error, '消息已受理，加载会话失败。'))
+      } else {
+        sessions.appendUserMessage(message, response.job_id, fileAttachment, response.message_id ?? undefined)
+      }
+      if (response.conversation_version != null) sessions.conversationVersion = response.conversation_version
       composer.draft = ''
     }
     composer.setSending(false)
@@ -189,7 +346,7 @@ async function send(): Promise<void> {
       files.clearSelection()
       composer.setSelectedFile(null)
     }
-    void props.controller.subscribe(response.job_id).catch((error: unknown) => report(error, '任务事件订阅失败。'))
+    void subscribeJob(response.job_id, sessionId)
     void sessions.loadList().catch(() => undefined)
   } catch (error) {
     composer.restoreDraft(message)
@@ -205,6 +362,10 @@ async function cancel(): Promise<void> {
   try {
     await props.controller.cancel(job.jobId)
     await sessions.loadList().catch(() => undefined)
+    if (sessions.currentId === job.sessionId && sessions.conversationVersion !== null) {
+      await sessions.select(job.sessionId, editDraft.value?.messageId)
+      if (editDraft.value) editDraft.value.needsRefresh = true
+    }
   } catch (error) {
     const reconciled = isApiError(error) && error.status === 409 && error.code === 'job_state_conflict'
     if (!reconciled) report(error, '取消任务失败，请稍后重试。')
@@ -415,7 +576,19 @@ function closeSettings(): void {
     <main class="main-container" :class="sessions.messages.length ? 'is-conversation' : 'is-new-chat'">
       <NetworkBackground class="network-background" />
       <section ref="conversationArea" class="conversation-area" @scroll.passive="scrollFollow.handleScroll()">
-        <MessageTimeline :messages="sessions.messages" @copy-result="showCopyNotice" />
+        <MessageTimeline
+          :messages="sessions.messages"
+          :edits-enabled="sessions.conversationVersion !== null"
+          :can-cancel-job="Boolean(activeJob && activeJob.uiState !== 'canceling')"
+          :editing="editDraft"
+          @copy-result="showCopyNotice"
+          @edit="beginMessageEdit"
+          @edit-input="(value) => { if (editDraft) editDraft.value = value }"
+          @cancel-edit="cancelMessageEdit"
+          @resend="resendMessage"
+          @refresh-edit="refreshEditHistory"
+          @cancel-job="cancel"
+        />
       </section>
       <div class="new-chat-stage">
         <div class="chat-copy-feedback" role="status" aria-atomic="true">

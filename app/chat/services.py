@@ -24,6 +24,7 @@ def get_chat_history(session_id: str, user_id: int, limit: int) -> list:
             cursor.execute("""
                 SELECT message_type, content FROM chat_messages
                 WHERE session_id = %s AND user_id = %s
+                  AND replaced_by_job_id IS NULL
                 ORDER BY created_at DESC
                 LIMIT %s
             """, (session_id, user_id, limit))
@@ -60,6 +61,7 @@ def get_job_chat_history(
             FROM chat_messages
             WHERE session_id = %s
               AND user_id = %s
+              AND replaced_by_job_id IS NULL
               AND id <= %s
             ORDER BY id DESC
             LIMIT %s
@@ -131,7 +133,8 @@ def _save_chat_rows(cursor, user_id, session_id, user_msg, ai_response, timestam
         cursor.execute(
             """
             UPDATE sessions
-            SET title = %s, last_activity_at = %s, message_count = message_count + 2
+            SET title = %s, last_activity_at = %s, message_count = message_count + 2,
+                conversation_version = conversation_version + 1
             WHERE id = %s AND user_id = %s
             """,
             (new_title, timestamp_dt, session_id, user_id),
@@ -140,7 +143,8 @@ def _save_chat_rows(cursor, user_id, session_id, user_msg, ai_response, timestam
         cursor.execute(
             """
             UPDATE sessions
-            SET last_activity_at = %s, message_count = message_count + 2
+            SET last_activity_at = %s, message_count = message_count + 2,
+                conversation_version = conversation_version + 1
             WHERE id = %s AND user_id = %s
             """,
             (timestamp_dt, session_id, user_id),
@@ -194,6 +198,7 @@ def save_user_input_for_job_in_transaction(
     user_id: int,
     session_id: str,
     text: str,
+    update_initial_title: bool = True,
 ) -> int:
     """在创建或恢复 Job 事务中写入一条带输入账本关联的用户消息。"""
     cursor.execute(
@@ -219,12 +224,12 @@ def save_user_input_for_job_in_transaction(
         (session_id, user_id, job_id, input_id, text),
     )
     message_id = int(cursor.lastrowid)
-    if int(session_data["message_count"] or 0) == 0:
+    if update_initial_title and int(session_data["message_count"] or 0) == 0:
         cursor.execute(
             """
             UPDATE sessions
             SET title = %s, last_activity_at = UTC_TIMESTAMP(6),
-                message_count = message_count + 1
+                message_count = message_count + 1, conversation_version = conversation_version + 1
             WHERE id = %s AND user_id = %s
             """,
             (build_session_title(text), session_id, user_id),
@@ -234,7 +239,7 @@ def save_user_input_for_job_in_transaction(
             """
             UPDATE sessions
             SET last_activity_at = UTC_TIMESTAMP(6),
-                message_count = message_count + 1
+                message_count = message_count + 1, conversation_version = conversation_version + 1
             WHERE id = %s AND user_id = %s
             """,
             (session_id, user_id),
@@ -251,6 +256,8 @@ def save_assistant_for_job_in_transaction(
     ai_response,
     source_event_id: int,
     analysis_job_input_id: int | None = None,
+    checkpoint_id: str | None = None,
+    checkpoint_question_id: str | None = None,
 ) -> int | None:
     """在生命周期事务中写入一条由稳定事件唯一保护的 assistant 消息。"""
     cursor.execute(
@@ -283,8 +290,9 @@ def save_assistant_for_job_in_transaction(
         """
         INSERT INTO chat_messages (
             session_id, user_id, analysis_job_id, analysis_job_input_id,
-            source_event_id, message_type, content, has_attachment, created_at
-        ) VALUES (%s, %s, %s, %s, %s, 'ai', %s, %s, UTC_TIMESTAMP(6))
+            source_event_id, message_type, content, has_attachment, created_at,
+            checkpoint_id, checkpoint_namespace, checkpoint_question_id
+        ) VALUES (%s, %s, %s, %s, %s, 'ai', %s, %s, UTC_TIMESTAMP(6), %s, %s, %s)
         """,
         (
             session_id,
@@ -294,6 +302,9 @@ def save_assistant_for_job_in_transaction(
             source_event_id,
             ai_content,
             bool(attachment_to_save),
+            checkpoint_id,
+            "" if checkpoint_id else None,
+            checkpoint_question_id if checkpoint_id else None,
         ),
     )
     message_id = int(cursor.lastrowid)
@@ -308,7 +319,8 @@ def save_assistant_for_job_in_transaction(
     cursor.execute(
         """
         UPDATE sessions
-        SET last_activity_at = UTC_TIMESTAMP(6), message_count = message_count + 1
+        SET last_activity_at = UTC_TIMESTAMP(6), message_count = message_count + 1,
+            conversation_version = conversation_version + 1
         WHERE id = %s AND user_id = %s
         """,
         (session_id, user_id),

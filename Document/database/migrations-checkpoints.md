@@ -17,7 +17,7 @@ Docker Compose 中 `db-bootstrap` 是一次性服务，`app`、worker、monitor 
 
 ## 当前迁移链
 
-当前唯一 head 是 `d0e1f2a3b4c5`。develop 的 migration 作为主体链路，RAG 评测 DDL 使用独立且全仓唯一的 revision ID，最终由无 DDL 合流点统一；最终链路和 down revision 以文件内容为准：
+当前唯一 head 是 `e2f3a4b5c6d7`。develop 的 migration 作为主体链路，RAG 评测 DDL 使用独立且全仓唯一的 revision ID，最终由无 DDL 合流点统一；最终链路和 down revision 以文件内容为准：
 
 | Revision | 当前作用 |
 | --- | --- |
@@ -41,8 +41,9 @@ Docker Compose 中 `db-bootstrap` 是一次性服务，`app`、worker、monitor 
 | `w9c0d1e2f3a4` | 建立 `roles`、`permissions`、`user_roles`、`role_permissions`，初始化两个角色与第一阶段权限并回填用户关系 |
 | `c9d0e1f2a3b4` | 建立跨 Job 的 `analysis_contexts`，并给 Session、Job 和输入账本增加上下文绑定字段 |
 | `d0e1f2a3b4c5` | 补齐新注册用户缺失的默认 `user` 角色关系，并为兼容字段仍为 `admin` 的用户补齐管理员关系 |
+| `e2f3a4b5c6d7` | 增加会话版本、消息替代与 checkpoint 关联、输入阶段快照及不可变预处理版本表 |
 
-`f8b9c0d1e2f3` 的 `down_revision` 声明为 `e4f5a6b7c8d9` 与 `e7a9b2c3d4f5`；develop 主链随后经 `f9a0b1c2d3e4`、`a1b2c3d4e5f6`、`b2c3d4e5f6a7`、`c3d4e5f6a7b8` 和 `a0b1c2d3e4f5` 继续，RAG 分支经 `r1...`、`r2...`、`r3...`、`g7...`、`h8...`、`i9...` 继续，最终由 `s4d5e6f7a8b9` 合流，再由 `t5e6f7a8b9c0` 线性追加记忆清理 outbox、由 `u7a8b9c0d1e2` 扩展快照键长度、由 `v8b9c0d1e2f3` 增加结构化报告附件类型、由 `w9c0d1e2f3a4` 建立角色与权限关系表、由 `c9d0e1f2a3b4` 建立分析上下文结构，最后由 `d0e1f2a3b4c5` 补齐注册缺陷遗留的角色关系。回退这类合并迁移必须指定明确目标 revision，不能用 `alembic downgrade -1` 代替。
+`f8b9c0d1e2f3` 的 `down_revision` 声明为 `e4f5a6b7c8d9` 与 `e7a9b2c3d4f5`；develop 主链随后经 `f9a0b1c2d3e4`、`a1b2c3d4e5f6`、`b2c3d4e5f6a7`、`c3d4e5f6a7b8` 和 `a0b1c2d3e4f5` 继续，RAG 分支经 `r1...`、`r2...`、`r3...`、`g7...`、`h8...`、`i9...` 继续，最终由 `s4d5e6f7a8b9` 合流，再由 `t5e6f7a8b9c0` 线性追加记忆清理 outbox、由 `u7a8b9c0d1e2` 扩展快照键长度、由 `v8b9c0d1e2f3` 增加结构化报告附件类型、由 `w9c0d1e2f3a4` 建立角色与权限关系表、由 `c9d0e1f2a3b4` 建立分析上下文结构，由 `d0e1f2a3b4c5` 补齐注册缺陷遗留的角色关系，再由 `e2f3a4b5c6d7` 增加会话版本和预处理产物。回退这类合并迁移必须指定明确目标 revision，不能用 `alembic downgrade -1` 代替。
 
 ## 破坏性事实
 
@@ -56,9 +57,13 @@ Docker Compose 中 `db-bootstrap` 是一次性服务，`app`、worker、monitor 
 - `d0e1f2a3b4c5` 只向缺少对应关系的用户补写 `user_roles`：所有用户至少获得 `user` 角色，兼容字段仍为 `admin` 的用户同时保留管理员角色；不修改 `users`、角色种子或权限种子。由于新增关系无法与迁移前已存在的合法授权区分，downgrade 不删除任何角色关系。
 - 迁移脚本属于高风险历史事实，不应为了让本地旧库“看起来能升级”而静默删除、回填或修改历史 migration。
 
+`e2f3a4b5c6d7` 只追加结构，保留旧历史消息和已有 Job。旧输入的上下文快照、冻结文件快照与 checkpoint 锚点保持为空。已经保存消息分支或预处理版本的库会拒绝降级，避免重新暴露被替换历史或丢失产物。
+
 ## PostgreSQL checkpoint
 
 `Database/checkpoint_setup.py` 调用官方 `AsyncPostgresSaver.setup()` 创建 checkpoint schema。worker 以 `analysis_jobs.job_id` 作为 `thread_id`，根 `checkpoint_ns` 为空；`config.metadata` 同时保存 `job_id` 和业务 `session_id`，供管理员安全摘要精确关联。
+
+历史追问分叉在 PostgreSQL 本地事务中初始化新 Job 的独立根 thread。项目使用的 `AsyncPostgresSaver` 版本尚未实现 `acopy_thread()`，分叉代码按官方表结构复制锚点祖先并绑定目标 Job 身份，保留中断节点重新执行所需的问题控制写入。源 thread 的终态和旧回答不进入新 thread。目标 thread 首次建立和重试由事务锁协调，后续恢复和清理仍使用新 Job ID。实现见 [Worker 分叉入口](../../app/agent/worker/checkpoint_fork.py)。
 
 checkpoint 与长期记忆共用同一个 `postgres-checkpoint` 实例但属于不同 schema：checkpoint schema 由 `db-bootstrap` 通过 `Database/checkpoint_setup.py` 初始化，官方 Store schema 由 Agent worker 启动时调用 `AsyncPostgresStore.setup()` 初始化。清理 worker 只校验 checkpoint migration 版本和 Store migration 版本，不创建任何表；Store schema 尚未就绪时按有界等待重试，超时后以启动失败退出。
 

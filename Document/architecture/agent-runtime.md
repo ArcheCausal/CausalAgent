@@ -36,11 +36,13 @@ agent → fold → preprocess → deep_agent → finalization_gate → report
 
 父图直接表达的其余路径为 `agent → report`（按当前分析上下文重新生成报告）、`agent → context_switch` 与 `context_switch → fold / report / inquiry_answer / normal_chat`（解析并切换分析上下文后再继续）；普通聊天和报告追问仍由 `normal_chat`、`inquiry_answer` 路径结束。父图只把问题、数据画像、分析参数和必要输入消息投影到 Deep Agent；子图返回时只接收算法结果、Action Ledger、RAG/Web evidence、结构化决策和 Gate/report 所需摘要。完整消息、Deep Agents 内部字段和中间计划不会回投影到父 State。
 
-父图 checkpoint 使用 `thread_id=analysis_jobs.job_id` 和空 namespace。Deep Agent 子图使用同一个 PostgreSQL saver，但使用稳定的 `thread_id=deep-agent:<uuid5(job_id)>` 与 `checkpoint_ns=deep_agent_v1`。子图 State 另外保存由 Job、attempt、lease 和当前冻结输入身份构成的 execution scope；scope 不匹配时从父图的最小输入重新开始，不复用旧执行产物。输入身份读取的是 invocation 级可刷新引用，因此服务端按用户表述重新冻结输入或切换分析上下文后，scope 随之变化，旧执行产物不会被复用。Gate 要求修正时，从同一子图 checkpoint 追加受控指令。
+父图 checkpoint 使用 `thread_id=analysis_jobs.job_id` 和空 namespace。Deep Agent 子图使用同一个 PostgreSQL saver，以独立图身份使用稳定的 `thread_id=deep-agent:<uuid5(job_id)>` 和空根 namespace。子图 State 另外保存由 Job、attempt、lease 和当前冻结输入身份构成的 execution scope；scope 不匹配时从父图的最小输入重新开始，不复用旧执行产物。输入身份读取的是 invocation 级可刷新引用，因此服务端按用户表述重新冻结输入或切换分析上下文后，scope 随之变化，旧执行产物不会被复用。Gate 要求修正时，从同一子图 checkpoint 追加受控指令。
 
 长期记忆由 `AsyncPostgresStore` 单独保存，不属于 Job checkpoint。模型只注册 `read_file` 和 `edit_file`，并且只允许写 `/memories/preferences.md` 与 `/memories/research_background.md`；其他写入由兜底 deny 拒绝。namespace 从可信 `AgentRunContext` 的 `user_id` 生成，首次使用时仅做 create-if-absent 初始化。Deep Agent 不启用 subagent、`task`、代码执行或宿主文件系统。
 
-当前 cleanup outbox 只按 `job_id` 删除父图 thread，尚未删除独立的 Deep Agent child thread；这一实现缺口及其影响见 [`job-file-lifecycle.md`](job-file-lifecycle.md)。
+普通编辑使用保留的有界消息前缀、编辑后的输入和回溯的分析上下文启动新父图，Deep Agent 继续按现有 token 用量和比例触发压缩。历史追问编辑从已验证的父图 `fold` interrupt 派生独立 Job，复制根图祖先、引用的 channel blob 和问题控制记录。源回答的 resume 和之后的状态写入留在原 thread。Worker 复核新边界的问题 ID 后提交新回答，重启后从新 Job 最新 checkpoint 继续。新的 Deep Agent 子图从该分支父图的投影启动，使用新 Job 的子图身份。用户级长期记忆仍由同一用户的 Store namespace 提供。
+
+Cleanup outbox 分别删除每个 Job 的父图和 Deep Agent 子图 thread。相关业务保留和删除约定见 [`job-file-lifecycle.md`](job-file-lifecycle.md)。
 
 ## 分析上下文与追问路由
 
