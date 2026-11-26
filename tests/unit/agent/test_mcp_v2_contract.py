@@ -486,7 +486,10 @@ def test_service_exposes_algorithm_timeout_as_result_status() -> None:
         source + 0.05 * rng.normal(size=(1000, 200)),
         columns=[f"x{index}" for index in range(200)],
     )
-    local_input = LocalAlgorithmExecutor(frame.to_csv(index=False)).validated_input
+    local_input = LocalAlgorithmExecutor(
+        frame.to_csv(index=False),
+        semantic_kinds={column: "continuous" for column in frame.columns},
+    ).validated_input
 
     async def scenario():
         context = _context()
