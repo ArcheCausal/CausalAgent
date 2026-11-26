@@ -38,6 +38,11 @@ from Agent.deep_agent_tools.models import (
 from Agent.deep_agent_tools.preprocessing import build_data_profile
 
 
+from tests.support.research_specs import fixed_effect_request, identity_effect_context
+
+
+EFFECT_REQUEST = fixed_effect_request()
+EFFECT_CONTEXT = identity_effect_context("T", "Y")
 GRAPH_REF = "source-graph:0"
 
 
@@ -64,6 +69,10 @@ def _frame() -> pd.DataFrame:
     return pd.DataFrame({"Z": z, "T": t, "Y": 2 * t + 1.5 * z + rng.normal(size=300)})
 
 
+def _estimate_ate(**kwargs):
+    return estimate_ate(effect_request=EFFECT_REQUEST, execution_context=EFFECT_CONTEXT, **kwargs)
+
+
 def _replace_check(check, **fields):
     return AteApplicabilityCheck.model_validate(check.model_dump() | fields)
 
@@ -83,7 +92,7 @@ def _execution():
         invocation_id=context.invocation_id, capability_id=CAUSAL_BACKDOOR_OLS_SPEC.capability_id,
         capability_version=CAUSAL_BACKDOOR_OLS_SPEC.version, spec_digest=CAUSAL_BACKDOOR_OLS_SPEC.spec_digest,
         provider_call_id="call-ate", input_identity=context.input_snapshot_digest,
-        parameters={"graph_result_ref": GRAPH_REF, "treatment": "T", "outcome": "Y"},
+        parameters={"graph_result_ref": GRAPH_REF, "treatment": "T", "outcome": "Y", "effect_request": EFFECT_REQUEST},
         artifacts={"standardized_graph": _graph().model_dump(mode="json")},
     )
     return command, context
@@ -92,7 +101,7 @@ def _execution():
 def _result(*, status="valid", check=None, effect=None, code=None, include_check=True):
     command, context = _execution()
     if status == "valid" and effect is None:
-        payload = estimate_ate(graph=_graph(), data=_frame(), treatment="T", outcome="Y")
+        payload = _estimate_ate(graph=_graph(), data=_frame(), treatment="T", outcome="Y")
         payload.pop("diagnostics_metrics", None)
         effect = CausalEffect(graph_result_ref=GRAPH_REF, **payload)
     return AlgorithmResult(
@@ -176,7 +185,7 @@ def test_explicit_semantics_rejects_every_execution_column(column, kind):
     assert check.reason_code == reason
     assert check.execution_columns == ("T", "Y", "Z") and check.adjustment_set == ("Z",)
     with pytest.raises(AteNotApplicable) as caught:
-        estimate_ate(graph=_graph(), data=frame, treatment="T", outcome="Y", semantic_kinds={column: kind})
+        _estimate_ate(graph=_graph(), data=frame, treatment="T", outcome="Y", semantic_kinds={column: kind})
     assert caught.value.reason_code == reason
     assert str(caught.value) == ATE_REASON_SUMMARIES[reason]
     pd.testing.assert_frame_equal(frame, before)
@@ -212,7 +221,7 @@ def test_profile_and_kernel_share_complete_column_rules(column, condition, reaso
     check = check_ate_profile(_check(), profile=build_data_profile(frame), semantic_kinds=None)
     assert check.reason_code == reason
     with pytest.raises(AteNotApplicable) as caught:
-        estimate_ate(graph=_graph(), data=frame, treatment="T", outcome="Y")
+        _estimate_ate(graph=_graph(), data=frame, treatment="T", outcome="Y")
     assert caught.value.reason_code == reason
     pd.testing.assert_frame_equal(frame, before)
 
@@ -223,7 +232,7 @@ def test_unselected_category_and_missing_column_do_not_block_ols():
     semantics = {"T": "continuous", "Y": "continuous", "Z": "continuous", "unused": "category"}
     check = check_ate_profile(_check(), profile=build_data_profile(frame), semantic_kinds=semantics)
     assert check.applicability == "ready"
-    effect = estimate_ate(graph=_graph(), data=frame, treatment="T", outcome="Y", semantic_kinds=semantics)
+    effect = _estimate_ate(graph=_graph(), data=frame, treatment="T", outcome="Y", semantic_kinds=semantics)
     assert effect["n_rows"] == len(frame)
     assert effect["estimate"] == pytest.approx(2.0, abs=0.15)
     assert effect["adjustment_set"] == ("Z",)
@@ -234,7 +243,7 @@ def test_integer_storage_without_semantics_is_not_inferred_as_category():
     frame["Z"] = np.arange(len(frame)) % 3
     check = check_ate_profile(_check(), profile=build_data_profile(frame), semantic_kinds={})
     assert check.applicability == "ready"
-    assert estimate_ate(graph=_graph(), data=frame, treatment="T", outcome="Y")["n_rows"] == len(frame)
+    assert _estimate_ate(graph=_graph(), data=frame, treatment="T", outcome="Y")["n_rows"] == len(frame)
 
 
 def test_nonconstant_collinearity_has_stable_reason():
@@ -242,7 +251,7 @@ def test_nonconstant_collinearity_has_stable_reason():
     frame["Z"] = 2 * frame["T"]
     assert check_ate_profile(_check(), profile=build_data_profile(frame), semantic_kinds={}).applicability == "ready"
     with pytest.raises(AteNotApplicable) as caught:
-        estimate_ate(graph=_graph(), data=frame, treatment="T", outcome="Y")
+        _estimate_ate(graph=_graph(), data=frame, treatment="T", outcome="Y")
     assert caught.value.reason_code == "ATE_DESIGN_MATRIX_SINGULAR"
 
 
@@ -251,14 +260,14 @@ def test_insufficient_dof_shared_check_and_kernel():
     check = check_ate_profile(_check(), profile=build_data_profile(frame), semantic_kinds={})
     assert check.reason_code == "ATE_INSUFFICIENT_DOF"
     with pytest.raises(AteNotApplicable) as caught:
-        estimate_ate(graph=_graph(), data=frame, treatment="T", outcome="Y")
+        _estimate_ate(graph=_graph(), data=frame, treatment="T", outcome="Y")
     assert caught.value.reason_code == check.reason_code
 
 
 def test_duplicate_columns_rejected_without_mutation():
     frame = pd.concat([_frame(), _frame()[["Z"]]], axis=1)
     with pytest.raises(AteNotApplicable) as caught:
-        estimate_ate(graph=_graph(), data=frame, treatment="T", outcome="Y")
+        _estimate_ate(graph=_graph(), data=frame, treatment="T", outcome="Y")
     assert caught.value.reason_code == "ATE_EXECUTION_COLUMNS_INVALID"
 
 
@@ -447,7 +456,7 @@ def test_shared_module_import_has_no_runtime_dependencies():
 
 
 def test_contract_version_and_public_schema():
-    assert CAUSAL_BACKDOOR_OLS_SPEC.version == "2.0"
+    assert CAUSAL_BACKDOOR_OLS_SPEC.version == "3.0"
     schema = AlgorithmResult.model_json_schema()
     assert "ate_check" in schema["properties"]
     assert "AteApplicabilityCheck" in schema["$defs"]

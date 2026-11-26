@@ -36,7 +36,7 @@ Flask 在确定 request ID 后立即绑定运行日志上下文，只有主库�
 
 ## 幂等键边界
 
-分析 Job 的创建、resume 和 cancel 请求必须提供标准 UUID v4 `Idempotency-Key`；管理员受控业务写入使用自己的操作幂等记录。相同身份、相同键和相同请求指纹可以重放原结果，不同参数必须返回冲突，不得静默覆盖第一次请求。
+分析 Job 的创建、resume、cancel 和编辑重发请求必须提供标准 UUID v4 `Idempotency-Key`；编辑重发还要求 `X-CSRF-Token`。管理员受控业务写入使用自己的操作幂等记录。相同身份、相同键和相同请求指纹可以重放原结果，不同参数必须返回冲突，不得静默覆盖第一次请求。
 
 幂等落盘不等于外部 LLM、MCP 或 PostgreSQL 操作的分布式 exactly-once。Job 的 MySQL 状态、事件、assistant 消息和 worker fencing 负责本地持久化一致性；外部调用的重试边界必须在对应运行时文档中说明。
 

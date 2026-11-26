@@ -11,6 +11,7 @@ import { useChatScrollFollow } from '../runtime/chat/scroll-follow'
 import MessageBody from './MessageBody.vue'
 
 const props = defineProps<{ text: string; animate: boolean }>()
+const emit = defineEmits<{ 'copy-result': [success: boolean] }>()
 const scrollFollow = useChatScrollFollow()
 const visible = ref(props.animate ? '' : props.text)
 let timer: number | null = null
@@ -64,6 +65,6 @@ onBeforeUnmount(stopTimer)
 
 <template>
   <article class="message ai-message" :class="{ 'streaming-draft': streaming }">
-    <MessageBody :text="{ type: 'text', summary: visible }" />
+    <MessageBody :text="{ type: 'text', summary: visible }" :copy-text="text" @copy-result="emit('copy-result', $event)" />
   </article>
 </template>

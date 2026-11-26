@@ -46,8 +46,11 @@ def _csv():
     )
 
 
+PC_CONTINUOUS = {"x": "continuous", "y": "continuous", "z": "continuous"}
+
+
 def _context(events, *, semantic_kinds=None):
-    report = LocalAlgorithmExecutor(_csv(), semantic_kinds=semantic_kinds).validation_report
+    report = LocalAlgorithmExecutor(_csv(), semantic_kinds=PC_CONTINUOUS if semantic_kinds is None else semantic_kinds).validation_report
     analysis_input = AnalysisInputRef()
     analysis_input.bind(
         dataset_id=1, object_id=1, content_hash="explicit-local-pc-csv",
@@ -95,7 +98,10 @@ async def _toolnode(profile, calls, *, local_pc=True, parameter_rejection=False,
         """通过生产本地 PC runner 真实计算本次显式 CSV。"""
         identity = resolve_runtime_invocation(runtime)
         started_at = datetime.now(timezone.utc)
-        payload = await asyncio.to_thread(run_pc_analysis, _csv(), alpha=0.05, test="fisherz")
+        payload = await asyncio.to_thread(
+            run_pc_analysis, _csv(), alpha=0.05,
+            semantic_kinds=context.trusted_identity.analysis_input.semantic_kinds,
+        )
         runner_payloads[runtime.tool_call_id] = payload
         return await algorithm_terminal_command(
             runtime, identity=identity, tool_name="causal_pc", started_at=started_at,
@@ -204,6 +210,7 @@ def test_algorithm_contract_rejects_incompatible_data_or_removed_arguments(mode)
         args = {"alpha": 2.0}
     results, entered, payloads, messages = asyncio.run(_toolnode(
         profile, [_call("causal_pc", "pc", args), _call("causal_cdfm", "cdfm")],
+        semantic_kinds={"x": "continuous", "y": "continuous"},
         local_pc=False, parameter_rejection=mode in {"removed_preprocessing_argument", "invalid_parameter"},
     ))
     assert entered == ["pc"] and payloads == {}
@@ -228,7 +235,7 @@ def test_category_snapshot_blocks_continuous_only_algorithm_without_stopping_rea
     assert profile.categorical_columns == ()
     results, entered, payloads, _ = asyncio.run(_toolnode(
         profile, [_call("causal_pc", "pc"), _call("causal_direct_lingam", "lingam")],
-        semantic_kinds={"x": "category"},
+        semantic_kinds={"x": "category", "y": "category", "z": "category"},
     ))
     assert set(entered) == {"pc", "lingam"}
     assert set(payloads) == {"pc"}
@@ -264,7 +271,10 @@ def test_real_pc_failure_or_missing_input_only_blocks_transitive_downstream(prod
         entered.append(request.call_id)
         # 非数值字符串 CSV 触发 runner 的真实输入失败，不预置失败结果。
         csv = "x,y\na,b\nc,d\n" if request.call_id == "producer" else _csv()
-        payload = await asyncio.to_thread(run_pc_analysis, csv, alpha=0.05, test="fisherz")
+        payload = await asyncio.to_thread(
+            run_pc_analysis, csv, alpha=0.05, test="fisherz",
+            semantic_kinds={"x": "continuous", "y": "continuous"} if request.call_id == "producer" else PC_CONTINUOUS,
+        )
         payloads[request.call_id] = payload
         return _result(payload, context, registry.get_by_tool_name(request.tool_name).spec, request.call_id, "dag")
 

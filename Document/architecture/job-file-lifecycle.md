@@ -103,21 +103,30 @@ thread_id = analysis_jobs.job_id
 checkpoint_ns = ""
 ```
 
-业务 `session_id` 仍然是 MySQL `sessions.id`，不是 checkpoint thread。新 Job 从同一 Session 的 MySQL 聊天历史加载有界初始窗口；同一 Job 的 resume 和 stale recovery 才继续原 checkpoint。旧的 session-thread checkpoint 不迁移、不读取、不清理。管理员 checkpoint 摘要必须使用 `metadata.job_id` 精确关联，缺少该字段的记录不能按时间猜测归属。
+业务 `session_id` 使用 MySQL `sessions.id`。普通新 Job 从同一 Session 的当前聊天历史加载有界初始窗口。同一 Job 的 resume 和 stale recovery 接续该 Job 的 checkpoint。历史补充回答由用户确认后启动新 Job 按保留前缀重新分析。旧的 session-thread checkpoint 不迁移、不读取、不清理。管理员 checkpoint 摘要使用 `metadata.job_id` 精确关联。
 
 Deep Agent 的 checkpoint 与长期记忆共用 PostgreSQL 实例但不是同一类数据：父图以
 `thread_id=job_id` 保存外层 Job State；Deep Agent 子图以
 `thread_id=deep-agent:<uuid5(job_id)>` 保存内部 messages、工具状态和短期 raw 文件。
 数据处理子图也使用 `thread_id=job_id`，以
 `data_processing_v1:<run_hash>` namespace 隔离冻结输入；同一 Job 内参数修订不改变处理 namespace；同一 Job 的 checkpoint 清理会删除该 thread 的全部 namespace。
-父图传入的 namespace 配置是 `deep_agent_v1`，当前独立调用实际保存在根 namespace（空字符串）；
-读取应以实际持久化位置为准，正式中断恢复和故障接管的验证边界见
+Deep Agent 独立调用在该 thread 的空根 namespace 读写。正式中断恢复和故障接管的验证边界见
 [`agent-runtime.md`](agent-runtime.md#父图子图与持久化)。`AsyncPostgresStore` 另以
 `("causalagent", "memory", str(user_id))` namespace 保存 `/memories/preferences.md`
 和 `/memories/research_background.md`。worker 首次使用某个用户 namespace 时只做
 create-if-absent 初始化，不覆盖已有内容；运行时对象与 MCP session 不会写入 Store。
-子图 checkpoint 只保存由 Job、attempt、lease 和输入身份计算出的不可逆
-`execution_scope` 摘要，不保存 execution guard、executor、数据库连接或签名材料。
+
+## 会话编辑、上下文与预处理产物
+
+编辑事务锁定活动或 draining Job 和 Session，在主库核对当前版本、用户消息、输入阶段及上一条助手边界。事务记录后缀的替代 Job、保留原始消息和附件，并写入新 Job、替换消息、输入账本及冻结文件快照。普通历史、模型历史和执行阶段按当前消息可见性投影。旧 Job 的公开 SSE 最多回放到仍可见的最后一个助手边界。被替换的后续事件和附件随原记录保留供审计。
+
+数据处理原生中断同时依赖原 Job 的处理子图、输入账本和候选数据集身份。编辑这类历史回答时，编辑 API 要求用户明确确认重新分析。旧执行图的 fold 追问也沿用这一确认流程。同一 Job 的现行处理中断按原身份继续恢复。
+
+各输入阶段保存提交前的分析上下文版本和文件快照。回溯时从版本恢复 Session 活动指针、可见上下文索引、参数、算法摘要、证据和报告引用。事务保留被替换分支的上下文版本供审计。历史输入缺少快照时保守地从消息前缀重新构造输入，并归档无法确证属于截断点的上下文。能够验证的原文件身份按当前文件归属和原对象哈希重新冻结。
+
+当前 CSV 预处理生成数据摘要和图表。持久化输出按 Job、输入阶段及 LangGraph 节点调用 ID 保存为编号版本，登记源文件哈希、处理配方及同源父版本。重试使用同一个版本，独立运行写入不同版本。Worker 凭租约提交产物，成功终态才更新当前上下文的产物引用。截断切换引用，旧产物、文件访问审计和已外发工具副作用继续按原生命周期管理。
+
+## 跨库清理
 
 删除 Session 或用户时，MySQL 事务先锁定并删除业务数据，同时为相关 Job 写入
 `checkpoint_cleanup_outbox`；物理删除用户时还会为同一 `user_id` 登记一条

@@ -75,6 +75,8 @@ agent → data_processing → validate_dataset → bind_dataset → preprocess �
 
 cleanup outbox 在同一次清理中删除父图 Job thread 和独立的 Deep Agent child thread；两者均成功才确认完成，具体生命周期见 [`job-file-lifecycle.md`](job-file-lifecycle.md)。
 
+普通消息编辑从 MySQL 当前历史的保留前缀启动独立 Job。历史补充回答经用户确认后也按此方式重新分析。同一 Job 的现行处理中断继续通过原生恢复。预处理摘要和图表按已绑定的数据集身份和当前输入阶段保存版本，重复执行同一次节点调用时复用持久化结果。
+
 执行前，数据处理 Agent 必须通过公开交互展示方案并等待用户确认。服务端按 `causalagent-data-processing-plan-v2` 计算 SHA-256 方案版本，绑定 Job、冻结文件 hash、完整研究语义和方案 metadata；其中包含效应定义、角色映射及 `effect_execution_context` 的列、单位与转换说明。确认卡中的 `effect_request` 由程序从当前研究参数投影，方案工具不另行接收一份定义。确认版本保存在 Job 的当前交互和恢复输入账本中，候选元数据也保存该身份。用户以自由文本修改或拒绝时不会形成确认；新的语义答复、效应定义、映射或转换说明变化会使 State 中的确认失效。已确认语义范围内的脚本修正可以复用该确认；脚本与候选文件仍单独记录内容 hash。脚本执行入口和 MySQL 候选写入事务都核对当前租约及最新确认版本，独立校验和最终绑定继续核对同一版本。
 
 数据处理子图把方案草稿保存在 `data_processing_metadata`，只允许 `set_data_processing_plan` 修改；用户确认且服务端核对 MySQL 当前确认凭据后，复制到 `data_processing_confirmed_plan`，与 `data_processing_confirmed_plan_version` 一同写入 PostgreSQL checkpoint。执行后的解释经 `save_data_processing_execution_report` 写入独立的 `data_processing_execution_report`；候选 ID、修订号、方案版本、来源和文件 hash、行数及列名由程序读取实际产物生成，解释不能代替独立校验。这份说明通过父子 State 白名单传给后续因果 Agent，不写回候选 metadata。

@@ -85,10 +85,7 @@ from Agent.deep_agent_tools.models import (
 )
 
 
-# 独立调用的子图由稳定 thread 隔离，LangGraph 将它写入根 namespace。
-# 读取必须使用同一位置，才能恢复已有子图及 Gate 修正状态。
 DEEP_AGENT_CHECKPOINT_NAMESPACE = ""
-
 
 
 def _add_data_processing_stage(workflow: StateGraph, *, agent: Any, registry: Any) -> None:
@@ -589,24 +586,11 @@ async def _stream_deep_agent(
             raise RuntimeError("Deep Agent returned an invalid State")
         return result
 
-    stream_config = {
-        "configurable": {
-            "thread_id": child_config["configurable"]["thread_id"],
-            "checkpoint_ns": child_config["configurable"]["checkpoint_ns"],
-        },
-        "metadata": dict(child_config.get("metadata") or {}),
-    }
-    checkpointer = child_config["configurable"].get("__pregel_checkpointer")
-    if checkpointer is not None:
-        stream_config["configurable"]["__pregel_checkpointer"] = checkpointer
-    if "recursion_limit" in child_config:
-        stream_config["recursion_limit"] = child_config["recursion_limit"]
-
     writer = getattr(runtime, "stream_writer", None)
     final_values: Mapping[str, Any] | None = None
     async for chunk in stream(
         child_input,
-        config=stream_config,
+        config=child_config,
         context=child_context,
         stream_mode=["messages", "values", "custom"],
         subgraphs=True,
@@ -735,15 +719,17 @@ async def _deep_agent_parent_node(
     if supplied_child_run_id and str(supplied_child_run_id) != expected_child_run_id:
         raise RuntimeError("Deep Agent child run identity is invalid")
     child_run_id = expected_child_run_id
-    child_config = dict(config or {})
-    child_config["configurable"] = dict(child_config.get("configurable") or {})
-    # 父图的 checkpoint 位置不能选择独立 child thread 中的状态。
-    child_config["configurable"].pop("checkpoint_id", None)
-    child_config["configurable"].pop("checkpoint_map", None)
-    child_config["configurable"]["thread_id"] = child_run_id
-    child_config["configurable"]["checkpoint_ns"] = DEEP_AGENT_CHECKPOINT_NAMESPACE
-    child_config["metadata"] = dict(child_config.get("metadata") or {})
-    child_config["metadata"]["deep_agent_run_id"] = child_run_id
+    parent_config = config or {}
+    # 独立子图在同一个根 namespace 读写，不继承父图的 checkpoint 位置。
+    child_config = {
+        "configurable": {"thread_id": child_run_id, "checkpoint_ns": DEEP_AGENT_CHECKPOINT_NAMESPACE},
+        "metadata": {**(parent_config.get("metadata") or {}), "deep_agent_run_id": child_run_id},
+    }
+    checkpointer = (parent_config.get("configurable") or {}).get("__pregel_checkpointer")
+    if checkpointer is not None:
+        child_config["configurable"]["__pregel_checkpointer"] = checkpointer
+    if "recursion_limit" in parent_config:
+        child_config["recursion_limit"] = parent_config["recursion_limit"]
 
     child_context = context
     execution_info = getattr(runtime, "execution_info", None)

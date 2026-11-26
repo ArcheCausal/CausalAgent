@@ -17,3 +17,25 @@ def commit(parameters, history, *, patch, job_id, source_input_id, reason="user_
     return commit_research_spec(parameters, history, spec=spec, input_columns=columns, job_id=job_id,
         source_input_id=source_input_id, expected_revision=len(history) if expected_revision is None else expected_revision,
         reason=reason)
+
+
+def fixed_effect_request(start=0.0, stop=1.0):
+    """定义测试数据上明确确认的无量纲固定对比。"""
+    return {
+        "effect": "average_total_effect",
+        "intervention": {"type": "fixed_contrast", "from": start, "to": stop, "unit": "dimensionless"},
+    }
+
+
+def identity_effect_context(treatment, outcome):
+    """描述测试 CSV 中保持原列和原单位的处理方案。"""
+    return {
+        "treatment_column": treatment,
+        "outcome_column": outcome,
+        "treatment_unit": "dimensionless",
+        "treatment_transform": {
+            "type": "identity", "source_column": treatment, "output_column": treatment,
+            "source_unit": "dimensionless", "output_unit": "dimensionless",
+        },
+        "outcome_transform": {"type": "identity"},
+    }

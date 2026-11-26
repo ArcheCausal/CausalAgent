@@ -517,6 +517,7 @@ def check_database_readiness():
                 "user_roles",
                 "role_permissions",
                 "analysis_contexts",
+                "analysis_preprocess_versions",
             ]
             cursor.execute(
                 """
@@ -723,11 +724,20 @@ def check_database_readiness():
                   AND (
                     (
                       table_name = 'sessions'
-                      AND column_name = 'active_analysis_context_id'
+                      AND column_name IN ('active_analysis_context_id', 'conversation_version')
                     )
                     OR (
                       table_name = 'analysis_job_inputs'
-                      AND column_name = 'analysis_context_id'
+                      AND column_name IN (
+                        'analysis_context_id', 'context_before', 'file_at_submit',
+                        'replaces_message_id', 'conversation_version', 'fork_from', 'replaced_context'
+                      )
+                    )
+                    OR (
+                      table_name = 'chat_messages'
+                      AND column_name IN (
+                        'replaced_by_job_id', 'checkpoint_id', 'checkpoint_namespace', 'checkpoint_question_id'
+                      )
                     )
                     OR (
                       table_name = 'analysis_contexts'
@@ -736,7 +746,13 @@ def check_database_readiness():
                         'file_object_id', 'file_hash', 'filename', 'target',
                         'treatment', 'analysis_question', 'latest_algorithm_summary',
                         'latest_rag_evidence', 'latest_web_evidence',
-                        'latest_report_message_id', 'latest_report_id'
+                        'latest_report_message_id', 'latest_report_id', 'latest_preprocess_version_id'
+                      )
+                    )
+                    OR (
+                      table_name = 'analysis_preprocess_versions'
+                      AND column_name IN (
+                        'id', 'job_id', 'input_id', 'call_id', 'source_file_hash', 'parent_version_id', 'recipe', 'output'
                       )
                     )
                   )
@@ -746,7 +762,21 @@ def check_database_readiness():
             context_columns = {(row[0], row[1]) for row in cursor.fetchall()}
             required_context_columns = {
                 ("sessions", "active_analysis_context_id"),
+                ("sessions", "conversation_version"),
                 ("analysis_job_inputs", "analysis_context_id"),
+                ("analysis_job_inputs", "context_before"),
+                ("analysis_job_inputs", "file_at_submit"),
+                ("analysis_job_inputs", "replaces_message_id"),
+                ("analysis_job_inputs", "conversation_version"),
+                ("analysis_job_inputs", "fork_from"),
+                ("analysis_job_inputs", "replaced_context"),
+                ("chat_messages", "replaced_by_job_id"),
+                ("chat_messages", "checkpoint_id"),
+                ("chat_messages", "checkpoint_namespace"),
+                ("chat_messages", "checkpoint_question_id"),
+            } | {
+                ("analysis_preprocess_versions", name)
+                for name in ("id", "job_id", "input_id", "call_id", "source_file_hash", "parent_version_id", "recipe", "output")
             } | {
                 ("analysis_contexts", name)
                 for name in (
@@ -765,6 +795,7 @@ def check_database_readiness():
                     "latest_web_evidence",
                     "latest_report_message_id",
                     "latest_report_id",
+                    "latest_preprocess_version_id",
                 )
             }
             missing_context_columns = required_context_columns - context_columns

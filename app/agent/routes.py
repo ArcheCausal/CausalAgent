@@ -107,6 +107,8 @@ def create_analysis_job():
             "job_id": job["job_id"],
             "status": job["status"],
             "existing": existing,
+            "message_id": job.get("message_id"),
+            "conversation_version": job.get("conversation_version"),
         }), 200 if existing else 202
     except job_service.OwnershipDeniedError as exc:
         log_authorization_denied(
@@ -182,6 +184,9 @@ def stream_analysis_job_events(job_id: str):
         return jsonify({"success": False, "error": "任务不存在"}), 404
     if not job:
         return jsonify({"success": False, "error": "任务不存在"}), 404
+    visible_boundary = job_service.get_public_event_boundary(job_id, current_user["id"])
+    if visible_boundary == 0:
+        return jsonify({"success": False, "error": "任务所属消息已被替换", "code": "job_superseded"}), 404
     bind_request_log_context(
         session_id=job.get("session_id"),
         job_id=job["job_id"],
@@ -201,7 +206,7 @@ def stream_analysis_job_events(job_id: str):
         try:
             ## 循环监听
             while True:
-                events = job_service.read_events_after(job_id, after_id)
+                events = job_service.read_events_after(job_id, after_id, user_id=current_user["id"])
                 for row in events:
                     # 这里获取数据库中的id，并传给前端
                     after_id = int(row["id"])
@@ -215,7 +220,7 @@ def stream_analysis_job_events(job_id: str):
                         return
 
                 current_job = job_service.get_job_for_user(job_id, current_user["id"])
-                if current_job and current_job["status"] in job_service.TERMINAL_STATUSES:
+                if not current_job or current_job["status"] in job_service.TERMINAL_STATUSES:
                     return
                 ## 返回单调递增的时间戳
                 now = time.monotonic()
@@ -268,6 +273,8 @@ def resume_analysis_job(job_id: str):
             "job_id": job["job_id"],
             "status": job["status"],
             "existing": existing,
+            "message_id": job.get("message_id"),
+            "conversation_version": job.get("conversation_version"),
         }), 200 if existing else 202
     except job_service.InvalidIdempotencyKeyError as exc:
         return jsonify({"success": False, "error": str(exc)}), 400

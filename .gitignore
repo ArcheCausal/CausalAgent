@@ -274,4 +274,8 @@ outputs/
 # 压测客户端的本地凭据、运行产物与报告正文统一收在 local/，不进入版本库。
 /loadtest/local/
 
+# chroma 向量库数据库
+*.sqlite3
+
 tmp/
+

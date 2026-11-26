@@ -53,6 +53,9 @@ class FakeCursor:
         """返回下一条预设查询结果。"""
         return self.fetch_results.pop(0) if self.fetch_results else None
 
+    def fetchall(self):
+        return []
+
 
 class FakeConnection:
     """模拟请求幂等查询和 job 插入使用的 MySQL 事务连接。"""
@@ -143,6 +146,7 @@ class JobIdempotencyTests(unittest.TestCase):
                 None,
                 None,
                 {"id": "session-1"},
+                {"active_analysis_context_id": None},
                 {"message_count": 0, "title": ""},
             ]
         )
@@ -194,6 +198,7 @@ class JobIdempotencyTests(unittest.TestCase):
                     "input_filename": "data.csv",
                 },
                 {"active_analysis_context_id": None},
+                {"active_analysis_context_id": None},
                 {"message_count": 0, "title": ""},
             ]
         )
@@ -233,7 +238,7 @@ class JobIdempotencyTests(unittest.TestCase):
         self.assertEqual(context_insert[4], 22)
         # Job 与 initial 输入账本都绑定同一个上下文。
         self.assertEqual(job_insert[-1], context_insert[0])
-        self.assertEqual(input_insert[-1], context_insert[0])
+        self.assertEqual(input_insert[5], context_insert[0])
         self.assertEqual(connection.commits, 1)
 
     def test_duplicate_key_race_returns_committed_job_after_insert_conflict(self):
@@ -248,7 +253,7 @@ class JobIdempotencyTests(unittest.TestCase):
             "request_id": "first-request",
         }
         connection = FakeConnection(
-            fetch_results=[None, None, {"id": "session-1"}],
+            fetch_results=[None, None, {"id": "session-1"}, {"active_analysis_context_id": None}],
             insert_error=duplicate_error,
         )
 

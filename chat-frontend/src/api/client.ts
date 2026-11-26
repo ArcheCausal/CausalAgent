@@ -10,7 +10,7 @@ import {
 import type { FileResponse, UploadFileResponse, DeleteFileResponse } from './files.schemas'
 import { deleteFileResponseSchema, filesResponseSchema, uploadFileResponseSchema } from './files.schemas'
 import type { ActiveJobsResponse, JobActionResponse } from './jobs.schemas'
-import { activeJobsResponseSchema, jobActionResponseSchema } from './jobs.schemas'
+import { activeJobsResponseSchema, editMessageResponseSchema, jobActionResponseSchema } from './jobs.schemas'
 import type {
   ChangeSessionResponse,
   DeleteSessionResponse,
@@ -152,6 +152,22 @@ export const api = {
   },
   loadSession(sessionId: string): Promise<LoadSessionResponse> {
     return requestJson(`/api/load_session?session=${encodeURIComponent(sessionId)}`, {}, loadSessionResponseSchema)
+  },
+  editMessage(sessionId: string, messageId: number, csrfToken: string, key: string, edit: {
+    message: string
+    conversation_version: number
+    checkpoint_id: string | null
+    allow_reanalysis: boolean
+  }) {
+    return requestJson(`/api/sessions/${encodeURIComponent(sessionId)}/messages/${messageId}/edit-resend`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': key,
+        'X-CSRF-Token': csrfToken,
+      },
+      body: JSON.stringify(edit),
+    }, editMessageResponseSchema)
   },
   changeSession(sessionId: string, title: string): Promise<ChangeSessionResponse> {
     return requestJson('/api/change_session', {

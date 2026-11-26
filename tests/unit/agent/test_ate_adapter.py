@@ -11,6 +11,8 @@ from Agent.deep_agent_tools.adapters.base import AdapterInput
 from Agent.deep_agent_tools.error_codes import SafeErrorCode
 from tests.support.local_algorithm_execution import LocalAlgorithmExecutor
 from Agent.deep_agent_tools.models import DataProfile
+from tests.support.bound_analysis_input import bind_analysis_input
+from tests.support.research_specs import fixed_effect_request, identity_effect_context
 
 
 IDENTITY = TrustedJobIdentity(
@@ -33,7 +35,9 @@ GRAPH = {
     ],
 }
 
-PARAMETERS = {"graph_result_ref": "inv-1:0", "treatment": "x", "outcome": "y"}
+EFFECT_REQUEST = fixed_effect_request(1.0, 2.0)
+RESEARCH = {"target": "y", "treatment": "x", "effect_request": EFFECT_REQUEST}
+PARAMETERS = {"graph_result_ref": "inv-1:0", "treatment": "x", "outcome": "y", "effect_request": EFFECT_REQUEST}
 
 
 def _profile(*, rows: int = 250) -> DataProfile:
@@ -46,7 +50,15 @@ def _profile(*, rows: int = 250) -> DataProfile:
 
 
 def test_adapter_forwards_graph_artifact_to_command() -> None:
-    executor = LocalAlgorithmExecutor("z,x,y\n0,1,2\n1,3,7\n2,2,5\n3,5,11\n4,4,9\n")
+    csv_data = "z,x,y\n0,1,2\n1,3,7\n2,2,5\n3,5,11\n4,4,9\n"
+    executor = LocalAlgorithmExecutor(
+        csv_data, semantic_kinds={"z": "continuous", "x": "continuous", "y": "continuous"},
+        analysis_parameters=RESEARCH, effect_execution_context=identity_effect_context("x", "y"),
+    )
+    identity = bind_analysis_input(
+        IDENTITY, csv_data, semantic_kinds={"z": "continuous", "x": "continuous", "y": "continuous"},
+        analysis_parameters=RESEARCH,
+    )
     adapter = BackdoorOlsAdapter(
         executor=executor,
         raw_backend=build_in_memory_backend(user_id=7),
@@ -56,10 +68,10 @@ def test_adapter_forwards_graph_artifact_to_command() -> None:
             parameters=PARAMETERS,
             adapter_input=AdapterInput(
                 data_profile=_profile(),
-                input_identity="input-sha",
+                input_identity=identity.current_input_identity(),
                 artifacts={"standardized_graph": GRAPH},
             ),
-            trusted_context=IDENTITY,
+            trusted_context=identity,
             provider_call_id="call-1",
             response_identity="response-1",
         )

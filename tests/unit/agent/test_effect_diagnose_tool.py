@@ -22,6 +22,7 @@ from Agent.deep_agent_tools.models import (
 )
 from tests.support.bound_analysis_input import bind_analysis_input
 from tests.support.local_algorithm_execution import PC_CSV
+from tests.support.research_specs import fixed_effect_request
 
 
 def _identity() -> TrustedJobIdentity:
@@ -82,6 +83,7 @@ def _graph_result(
             input_identity=identity.current_input_identity(),
             source_input_identity=identity.source_input_identity(),
             analysis_dataset_id=identity.analysis_input.dataset_id,
+            research_identity=identity.analysis_input.research_identity,
             spec_digest=PC_SPEC.spec_digest,
         ),
     )
@@ -97,7 +99,10 @@ def _run(identity, result, *, treatment="x", outcome="y", ref="graph-invocation:
                 state={
                     "message_execution_id": "diagnose-response-1",
                     "algorithm_results": {result.result_ref: result},
-                    "analysis_parameters": {"data_profile": {"row_count": 100}},
+                    "analysis_parameters": {
+                        "target": outcome, "treatment": treatment,
+                        "effect_request": fixed_effect_request(), "data_profile": {"row_count": 100},
+                    },
                 },
                 context=context,
                 config={},

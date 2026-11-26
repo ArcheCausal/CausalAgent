@@ -17,6 +17,13 @@ from Agent.deep_agent_tools.models import (
 )
 
 
+from tests.support.research_specs import fixed_effect_request
+
+
+EFFECT_REQUEST = fixed_effect_request()
+RESEARCH = {"target": "y", "treatment": "x", "effect_request": EFFECT_REQUEST}
+
+
 IDENTITY = TrustedJobIdentity(
     job_id="00000000-0000-0000-0000-000000000001",
     session_id="00000000-0000-0000-0000-000000000002",
@@ -59,7 +66,7 @@ def _discovery_result(
         invocation_id="inv-1",
         provider_call_id="call-0",
         capability_id="causal.pc",
-        capability_version="2.0",
+        capability_version=PC_SPEC.version,
         status=status,
         standardized_graph=graph,
         diagnostics=(
@@ -83,8 +90,8 @@ def test_resolves_graph_artifact_for_estimation() -> None:
     state = {"algorithm_results": {"inv-1:0": _discovery_result()}}
     rejection, artifacts = _resolve_graph_artifacts(
         spec=CAUSAL_BACKDOOR_OLS_SPEC,
-        state=state,
-        arguments={"graph_result_ref": "inv-1:0"},
+        state={**state, "analysis_parameters": RESEARCH},
+        arguments={"treatment": "x", "outcome": "y", "effect_request": EFFECT_REQUEST, "graph_result_ref": "inv-1:0"},
         trusted_identity=IDENTITY,
     )
     assert rejection is None
@@ -95,8 +102,8 @@ def test_rejects_unknown_ref_and_lists_available() -> None:
     state = {"algorithm_results": {"inv-1:0": _discovery_result()}}
     rejection, artifacts = _resolve_graph_artifacts(
         spec=CAUSAL_BACKDOOR_OLS_SPEC,
-        state=state,
-        arguments={"graph_result_ref": "missing:0"},
+        state={**state, "analysis_parameters": RESEARCH},
+        arguments={"treatment": "x", "outcome": "y", "effect_request": EFFECT_REQUEST, "graph_result_ref": "missing:0"},
         trusted_identity=IDENTITY,
     )
     assert artifacts == {}
@@ -114,8 +121,8 @@ def test_rejects_non_valid_result() -> None:
     }
     rejection, _ = _resolve_graph_artifacts(
         spec=CAUSAL_BACKDOOR_OLS_SPEC,
-        state=state,
-        arguments={"graph_result_ref": "inv-1:0"},
+        state={**state, "analysis_parameters": RESEARCH},
+        arguments={"treatment": "x", "outcome": "y", "effect_request": EFFECT_REQUEST, "graph_result_ref": "inv-1:0"},
         trusted_identity=IDENTITY,
     )
     assert rejection is not None
@@ -126,8 +133,8 @@ def test_rejects_stale_attempt() -> None:
     state = {"algorithm_results": {"inv-1:0": _discovery_result(attempt_count=3)}}
     rejection, _ = _resolve_graph_artifacts(
         spec=CAUSAL_BACKDOOR_OLS_SPEC,
-        state=state,
-        arguments={"graph_result_ref": "inv-1:0"},
+        state={**state, "analysis_parameters": RESEARCH},
+        arguments={"treatment": "x", "outcome": "y", "effect_request": EFFECT_REQUEST, "graph_result_ref": "inv-1:0"},
         trusted_identity=IDENTITY,
     )
     assert rejection is not None
@@ -139,8 +146,8 @@ def test_rejects_other_input_identity() -> None:
     }
     rejection, _ = _resolve_graph_artifacts(
         spec=CAUSAL_BACKDOOR_OLS_SPEC,
-        state=state,
-        arguments={"graph_result_ref": "inv-1:0"},
+        state={**state, "analysis_parameters": RESEARCH},
+        arguments={"treatment": "x", "outcome": "y", "effect_request": EFFECT_REQUEST, "graph_result_ref": "inv-1:0"},
         trusted_identity=IDENTITY,
     )
     assert rejection is not None
@@ -154,8 +161,8 @@ def test_rejects_other_source_input() -> None:
     }
     rejection, _ = _resolve_graph_artifacts(
         spec=CAUSAL_BACKDOOR_OLS_SPEC,
-        state=state,
-        arguments={"graph_result_ref": "inv-1:0"},
+        state={**state, "analysis_parameters": RESEARCH},
+        arguments={"treatment": "x", "outcome": "y", "effect_request": EFFECT_REQUEST, "graph_result_ref": "inv-1:0"},
         trusted_identity=IDENTITY,
     )
     assert rejection is not None
@@ -167,8 +174,8 @@ def test_rejects_other_analysis_dataset() -> None:
     }
     rejection, _ = _resolve_graph_artifacts(
         spec=CAUSAL_BACKDOOR_OLS_SPEC,
-        state=state,
-        arguments={"graph_result_ref": "inv-1:0"},
+        state={**state, "analysis_parameters": RESEARCH},
+        arguments={"treatment": "x", "outcome": "y", "effect_request": EFFECT_REQUEST, "graph_result_ref": "inv-1:0"},
         trusted_identity=IDENTITY,
     )
     assert rejection is not None

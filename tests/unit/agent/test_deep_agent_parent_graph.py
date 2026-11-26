@@ -99,6 +99,7 @@ def test_bound_finalization_gate_executes_with_langgraph_config() -> None:
     builder.add_edge("finalization_gate", END)
     state = asyncio.run(builder.compile().ainvoke(
         {
+            "analysis_parameters": {"effect_request": None},
             "deep_agent_structured_response": decision,
             "deep_agent_algorithm_results": {}, "deep_agent_action_ledger": {},
         },
@@ -106,7 +107,10 @@ def test_bound_finalization_gate_executes_with_langgraph_config() -> None:
         context=AgentRunContext(execution_guard=None, trusted_identity=identity),
     ))
     assert state["finalization_status"] == "valid"
-    assert state["deep_agent_decision"] == decision
+    assert state["deep_agent_decision"] == decision.model_copy(update={
+        "effect_status": "not_requested",
+        "effect_reason": "本次未请求效应估计。",
+    })
 
 
 def test_finalization_gate_enforces_processing_route_after_projection() -> None:
@@ -143,7 +147,7 @@ def test_finalization_gate_enforces_processing_route_after_projection() -> None:
                     HumanMessage(content="更早的问题"),
                     HumanMessage(content="请分析 x 对 y 的因果效应。"),
                 ],
-                "analysis_parameters": {"target": "y", "treatment": "x"},
+                "analysis_parameters": {"target": "y", "treatment": "x", "effect_request": None},
                 "route_decision": "data_processing",
                 "deep_agent_structured_response": decision,
                 "deep_agent_algorithm_results": {},
@@ -226,6 +230,7 @@ def test_retry_path_emits_public_progress_notices() -> None:
     registry = build_default_registry(build_default_adapters(executor=LocalAlgorithmExecutor()))
     gate = FinalizationGate(registry=registry)
     state = {
+        "analysis_parameters": {"effect_request": None},
         "deep_agent_structured_response": decision,
         "deep_agent_algorithm_results": {}, "deep_agent_action_ledger": {},
     }

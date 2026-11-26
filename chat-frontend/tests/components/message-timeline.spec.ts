@@ -270,7 +270,7 @@ describe('MessageTimeline', () => {
       current_question_id: 'q-plan', current_waiting_prompt: '请确认方案', input_wait_expires_at: expiresAt,
       current_interaction: {
         interaction_type: 'data_processing_plan_confirmation', plan_version: planVersion,
-        plan: { summary: '按日期聚合', observation_unit: '日期', transformations: ['统计每日数量'], variable_semantics: { count: '每日数量' }, limitations: ['仅包含已有记录'] },
+        plan: { summary: '按日期聚合', observation_unit: '日期', effect_request: null, transformations: ['统计每日数量'], variable_semantics: { count: '每日数量' }, limitations: ['仅包含已有记录'] },
       },
     })
     const messages = [

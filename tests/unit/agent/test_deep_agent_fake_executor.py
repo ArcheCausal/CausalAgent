@@ -27,6 +27,7 @@ def test_parent_projection_keeps_runtime_dependencies_out_of_state() -> None:
     deep = to_deep_agent_input(
         {
             "messages": [],
+            "analysis_parameters": {"effect_request": None},
             "file_summary": {"rows": 10, "columns": ["A", "B"]},
             "algorithm_executor": object(),
         }

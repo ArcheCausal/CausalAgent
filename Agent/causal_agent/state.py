@@ -118,6 +118,7 @@ class CausalAgentState(TypedDict):
     web_search_result: Optional[dict]
 
     preprocess_summary: Optional[str]
+    preprocess_version_id: NotRequired[int | None]
     postprocess_result: Optional[dict]
 
     chart_assets: NotRequired[Optional[dict]]

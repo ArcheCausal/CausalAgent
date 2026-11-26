@@ -566,6 +566,7 @@ def _switched_context_state(
         "web_search_result": None,
         "postprocess_result": None,
         "preprocess_summary": None,
+        "preprocess_version_id": None,
         "chart_assets": None,
         "report_document": None,
         "deep_agent_algorithm_results": {},
@@ -907,56 +908,81 @@ async def preprocess_node(
         }
     )
     summary["nonlinearity"] = measure_nonlinearity(df, summary)
-    # 生成结构化图表资源
-    try:
-        chart_assets = await asyncio.to_thread(build_chart_assets, df, summary)
-        state["chart_assets"] = {
-            asset_key: asset.model_dump(mode="json")
-            for asset_key, asset in chart_assets.items()
-        }
-    except Exception:
-        _log_node_degradation(
-            "chart_asset_error",
-            "skip_chart_assets",
-            exc_info=True,
+    from Database.analysis_contexts import preprocess_version
+
+    version_options = {
+        "job_id": str(identity.job_id),
+        "worker_id": identity.worker_id,
+        "attempt_count": identity.attempt_count,
+        "lease_epoch": identity.lease_epoch,
+        "call_id": str(runtime.execution_info.task_id),
+        "source_file_hash": identity.source_input_identity(),
+        "recipe": {
+            "pipeline": "bound_csv_profile_charts_summary_v1",
+            "dataset_id": int(bound_data["dataset_id"]),
+            "dataset_hash": str(bound_data["data_hash"]),
+            "research_identity": parameter_identity(source_parameters),
+        },
+    }
+    existing = await asyncio.to_thread(preprocess_version, **version_options)
+    if existing is not None:
+        version_id, output = existing
+    else:
+        chart_output = {}
+        # 生成结构化图表资源
+        try:
+            chart_assets = await asyncio.to_thread(build_chart_assets, df, summary)
+            chart_output = {
+                asset_key: asset.model_dump(mode="json")
+                for asset_key, asset in chart_assets.items()
+            }
+        except Exception:
+            _log_node_degradation(
+                "chart_asset_error",
+                "skip_chart_assets",
+                exc_info=True,
+            )
+            # 图表资源生成失败不阻断流程，记录日志后继续执行后续步骤
+
+        # 3. 调用LLM进行自然语言总结
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system",
+                 """
+                 system role: {system_role}
+                 mission:
+                你的任务是根据提供的数据摘要信息，为即将进行的因果分析撰写一段简洁明了的自然语言总结。
+
+                # 数据摘要信息:
+                {data_summary}
+
+                # 你的任务:
+                1.  **开篇总结**: 简要说明数据集的规模（行数和列数）。
+                2.  **目标变量和处理变量的摘录**: 仅在已提供时摘录“target”和“treatment”；未指定时说明本次进行结构发现，不补造变量或阻断分析。
+                3.  **风险提示**: 提及数据中存在的潜在问题，例如高缺失值列、常数列、高基数分类变量或疑似ID列。
+                4.  **结论**: 给出一个总体评价，说明数据是否已准备好进行下一步的因果分析。
+                5.  **线性/非线性说明**: 根据 `nonlinearity` 字段说明是否检出非线性及统计强度，不能据此断言真实机制；`verdict` 为 `linear` 只表示未检出显著非线性结构，不等于确定线性；`verdict` 为 `insufficient` 时说明本次未能评估。
+
+                请使用清晰、专业的语言，让非技术人员也能理解数据的基本状况。
+                """),
+                ("human", "请根据上述指示和提供的数据摘要，生成总结报告。")
+            ]
         )
-        # 图表资源生成失败不阻断流程，记录日志后继续执行后续步骤
-    
-    # 3. 调用LLM进行自然语言总结
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system",
-             """
-             system role: {system_role}
-             mission:
-            你的任务是根据提供的数据摘要信息，为即将进行的因果分析撰写一段简洁明了的自然语言总结。
 
-            # 数据摘要信息:
-            {data_summary}
 
-            # 你的任务:
-            1.  **开篇总结**: 简要说明数据集的规模（行数和列数）。
-            2.  **目标变量和处理变量的摘录**: 仅在已提供时摘录“target”和“treatment”；未指定时说明本次进行结构发现，不补造变量或阻断分析。
-            3.  **风险提示**: 提及数据中存在的潜在问题，例如高缺失值列、常数列、高基数分类变量或疑似ID列。
-            4.  **结论**: 给出一个总体评价，说明数据是否已准备好进行下一步的因果分析。
-            5.  **线性/非线性说明**: 根据 `nonlinearity` 字段说明是否检出非线性及统计强度，不能据此断言真实机制；`verdict` 为 `linear` 只表示未检出显著非线性结构，不等于确定线性；`verdict` 为 `insufficient` 时说明本次未能评估。
+        runnable = prompt | llm | StrOutputParser()
 
-            请使用清晰、专业的语言，让非技术人员也能理解数据的基本状况。
-            """),
-            ("human", "请根据上述指示和提供的数据摘要，生成总结报告。")
-        ]
-    )
-    
-    
-    runnable = prompt | llm | StrOutputParser()
-    
-    preprocess_summary = await runnable.ainvoke({
-        "data_summary": json.dumps(summary, indent=2, ensure_ascii=False),
-        "system_role": data_prompt()
-    })
-    # 4. 更新状态并返回新消息
-    state["preprocess_summary"] = preprocess_summary
-    
+        preprocess_summary = await runnable.ainvoke({
+            "data_summary": json.dumps(summary, indent=2, ensure_ascii=False),
+            "system_role": data_prompt()
+        })
+        await context.check_after_call()
+        version_id, output = await asyncio.to_thread(
+            preprocess_version,
+            output={"preprocess_summary": preprocess_summary, "chart_assets": chart_output},
+            **version_options,
+        )
+
     summary_message = AIMessage(
         content= "决策：数据预处理完成，进入工具处理路由",
         name="preprocess"
@@ -965,8 +991,8 @@ async def preprocess_node(
     # 只返回新消息和需要更新的状态
     update = {
         "messages": [summary_message],
-        "preprocess_summary": state["preprocess_summary"],
-        "chart_assets": state.get("chart_assets", {}),
+        **output,
+        "preprocess_version_id": version_id,
         "analysis_parameters": summary,
         "analysis_parameter_changes": bound_identity["analysis_parameter_changes"],
         "data_profile": profile,

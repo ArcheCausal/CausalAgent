@@ -9,10 +9,22 @@ const jobResponseBaseSchema = z.object({
   job_id: z.string().optional(),
   status: backendJobStatusSchema.optional(),
   existing: z.boolean().optional(),
+  message_id: z.number().int().positive().nullish(),
+  conversation_version: z.number().int().nonnegative().nullish(),
   error: z.string().optional(),
 }).passthrough()
 
 export const jobActionResponseSchema = jobResponseBaseSchema
+
+export const editMessageResponseSchema = z.object({
+  success: z.literal(true),
+  job_id: z.string(),
+  status: backendJobStatusSchema,
+  message_id: z.number().int().positive(),
+  conversation_version: z.number().int().nonnegative(),
+  execution_mode: z.enum(['resume_checkpoint', 'reanalyze']),
+  existing: z.boolean(),
+})
 
 export const activeJobSchema = z.object({
   job_id: z.string(),

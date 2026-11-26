@@ -76,9 +76,10 @@ def test_cycle_is_retained_and_fails_normalization_and_primary_gate():
         final_status="succeeded", result_ref=result.result_ref, job_id=identity.job_id, attempt_count=1,
         lease_epoch=1, worker_id="worker", input_identity=identity.current_input_identity(),
         source_input_identity=identity.source_input_identity(), analysis_dataset_id=identity.analysis_input.dataset_id,
+        research_identity=identity.analysis_input.research_identity,
         attempts={0: ActionAttempt(retry_ordinal=0, revision=2, status="succeeded", started_at=now, finished_at=now)})
-    decision = {"outcome": "algorithm_supported", "primary_result_ref": result.result_ref,
-        "result_assessments": [{"result_ref": result.result_ref, "disposition": "primary", "rationale": "contract input"}],
+    decision = {"outcome": "algorithm_supported", "primary_graph_result_ref": result.result_ref,
+        "result_assessments": [{"result_ref": result.result_ref, "disposition": "primary_graph", "rationale": "contract input"}],
         "conflict_status": "none", "conflicts": [], "revision_proposals": [],
         "selection_rationale": "contract input", "confidence": "low", "confidence_basis": []}
     with pytest.raises(StructuredResponseError, match="graph structure"):

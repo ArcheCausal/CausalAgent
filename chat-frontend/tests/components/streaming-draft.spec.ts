@@ -13,29 +13,31 @@ describe('StreamingDraft', () => {
 
   it('advances the visible text and shows the full buffer once animation stops', async () => {
     const wrapper = mount(StreamingDraft, { props: { text: '因果分析', animate: true } })
-    expect(wrapper.text()).toBe('')
+    const body = wrapper.get('.markdown-content')
+    expect(body.text()).toBe('')
 
     await vi.advanceTimersByTimeAsync(25)
-    expect(wrapper.text()).toBe('因')
+    expect(body.text()).toBe('因')
 
     await vi.advanceTimersByTimeAsync(75)
-    expect(wrapper.text()).toBe('因果分析')
+    expect(body.text()).toBe('因果分析')
     expect(wrapper.get('article').classes()).toContain('streaming-draft')
 
     await wrapper.setProps({ animate: false })
-    expect(wrapper.text()).toBe('因果分析')
+    expect(body.text()).toBe('因果分析')
     expect(wrapper.get('article').classes()).not.toContain('streaming-draft')
   })
 
   it('restarts the presentation cursor when the received buffer is replaced', async () => {
     const wrapper = mount(StreamingDraft, { props: { text: 'abc', animate: true } })
+    const body = wrapper.get('.markdown-content')
     await vi.advanceTimersByTimeAsync(1000)
-    expect(wrapper.text()).toBe('abc')
+    expect(body.text()).toBe('abc')
 
     await wrapper.setProps({ text: 'xyz' })
-    expect(wrapper.text()).toBe('')
+    expect(body.text()).toBe('')
 
     await vi.advanceTimersByTimeAsync(1000)
-    expect(wrapper.text()).toBe('xyz')
+    expect(body.text()).toBe('xyz')
   })
 })

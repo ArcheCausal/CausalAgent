@@ -17,7 +17,7 @@ Docker Compose 中 `db-bootstrap` 是一次性服务，`app`、worker、monitor 
 
 ## 当前迁移链
 
-当前唯一 head 是 `x1y2z3a4b5c6`。develop 的 migration 作为主体链路，RAG 评测 DDL 使用独立且全仓唯一的 revision ID，最终由无 DDL 合流点统一；最终链路和 down revision 以文件内容为准：
+当前唯一 head 是 `z2a3b4c5d6e7`。develop 的 migration 作为主体链路，RAG 评测 DDL 使用独立且全仓唯一的 revision ID，最终由无 DDL 合流点统一；最终链路和 down revision 以文件内容为准：
 
 | Revision | 当前作用 |
 | --- | --- |
@@ -43,8 +43,10 @@ Docker Compose 中 `db-bootstrap` 是一次性服务，`app`、worker、monitor 
 | `d0e1f2a3b4c5` | 补齐新注册用户缺失的默认 `user` 角色关系，并为兼容字段仍为 `admin` 的用户补齐管理员关系 |
 | `e1f2a3b4c5d6` | 增加当前公开交互 JSON、等待截止时间、过期扫描索引和 `input_timeout` 释放原因 |
 | `x1y2z3a4b5c6` | 增加 Job 数据处理产物、最终产物指针及受租约 fencing 的全局沙盒容量记录 |
+| `e2f3a4b5c6d7` | 增加会话版本、消息替代与 checkpoint 关联、输入阶段快照及不可变预处理版本表 |
+| `z2a3b4c5d6e7` | 合流数据集和会话编辑两条迁移分支，无 DDL |
 
-`f8b9c0d1e2f3` 的 `down_revision` 声明为 `e4f5a6b7c8d9` 与 `e7a9b2c3d4f5`；develop 主链随后经 `f9a0b1c2d3e4`、`a1b2c3d4e5f6`、`b2c3d4e5f6a7`、`c3d4e5f6a7b8` 和 `a0b1c2d3e4f5` 继续，RAG 分支经 `r1...`、`r2...`、`r3...`、`g7...`、`h8...`、`i9...` 继续，最终由 `s4d5e6f7a8b9` 合流，再由 `t5e6f7a8b9c0` 线性追加记忆清理 outbox、由 `u7a8b9c0d1e2` 扩展快照键长度、由 `v8b9c0d1e2f3` 增加结构化报告附件类型、由 `w9c0d1e2f3a4` 建立角色与权限关系表、由 `c9d0e1f2a3b4` 建立分析上下文结构，由 `d0e1f2a3b4c5` 补齐注册缺陷遗留的角色关系，最后经 `e1f2a3b4c5d6` 增加等待确认字段，再由 `x1y2z3a4b5c6` 增加数据处理产物与沙盒租约。回退这类合并迁移必须指定明确目标 revision，不能用 `alembic downgrade -1` 代替。
+`f8b9c0d1e2f3` 的 `down_revision` 声明为 `e4f5a6b7c8d9` 与 `e7a9b2c3d4f5`；develop 主链随后经 `f9a0b1c2d3e4`、`a1b2c3d4e5f6`、`b2c3d4e5f6a7`、`c3d4e5f6a7b8` 和 `a0b1c2d3e4f5` 继续，RAG 分支经 `r1...`、`r2...`、`r3...`、`g7...`、`h8...`、`i9...` 继续，最终由 `s4d5e6f7a8b9` 合流，再由 `t5e6f7a8b9c0` 线性追加记忆清理 outbox、由 `u7a8b9c0d1e2` 扩展快照键长度、由 `v8b9c0d1e2f3` 增加结构化报告附件类型、由 `w9c0d1e2f3a4` 建立角色与权限关系表、由 `c9d0e1f2a3b4` 建立分析上下文结构，由 `d0e1f2a3b4c5` 补齐注册缺陷遗留的角色关系，最后经 `e1f2a3b4c5d6` 增加等待确认字段，再由 `x1y2z3a4b5c6` 增加数据处理产物与沙盒租约。`e2f3a4b5c6d7` 从 `d0e1f2a3b4c5` 增加会话编辑和预处理版本，最终经 `z2a3b4c5d6e7` 合流。回退这类合并迁移必须指定明确目标 revision，不能用 `alembic downgrade -1` 代替。
 
 ## 破坏性事实
 
@@ -59,6 +61,8 @@ Docker Compose 中 `db-bootstrap` 是一次性服务，`app`、worker、monitor 
 - `e1f2a3b4c5d6` 为 `analysis_jobs` 增加 `current_interaction JSON`、`input_wait_expires_at DATETIME(6)` 和 `(status, input_wait_expires_at)` 索引，并把 `execution_release_reason` 扩展为包含 `input_timeout`；这些字段供公开处理确认与五分钟过期扫描使用。downgrade 只移除新增字段与索引并收回枚举值，不删除 Job、事件或用户数据；回退前必须确认不存在仍在等待的 Job。
 - `x1y2z3a4b5c6` 创建 `analysis_job_datasets`、`analysis_sandbox_sessions`，并在 `analysis_jobs` 增加可空 `prepared_dataset_id`。downgrade 在删除前检查产物与全部沙盒生命周期记录；包括已关闭资源在内，只要仍有记录就拒绝回退，不会自动删除数据。
 - 迁移脚本属于高风险历史事实，不应为了让本地旧库“看起来能升级”而静默删除、回填或修改历史 migration。
+
+`e2f3a4b5c6d7` 只追加结构，保留旧历史消息和已有 Job。旧输入的上下文快照、冻结文件快照与 checkpoint 锚点保持为空。已经保存消息分支或预处理版本的库会拒绝降级，避免重新暴露被替换历史或丢失产物。
 
 ## PostgreSQL checkpoint
 

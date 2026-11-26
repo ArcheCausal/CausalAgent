@@ -28,11 +28,13 @@ EXPECTED_COLUMNS = {
     "sessions": {
         "id", "user_id", "title", "created_at", "last_activity_at",
         "message_count", "is_archived", "archived_at",
+        "conversation_version", "active_analysis_context_id",
     },
     "chat_messages": {
         "id", "session_id", "user_id", "message_type", "content",
         "has_attachment", "analysis_job_id", "analysis_job_input_id",
         "source_event_id", "created_at",
+        "replaced_by_job_id", "checkpoint_id", "checkpoint_namespace", "checkpoint_question_id",
     },
     "chat_attachments": {
         "id", "message_id", "attachment_type", "content",
@@ -77,6 +79,7 @@ EXPECTED_COLUMNS = {
         "target", "treatment", "analysis_question", "latest_algorithm_summary",
         "latest_rag_evidence", "latest_web_evidence",
         "latest_report_message_id", "latest_report_id",
+        "latest_preprocess_version_id",
         "created_at", "updated_at",
     },
     "analysis_job_events": {
@@ -86,6 +89,12 @@ EXPECTED_COLUMNS = {
         "input_id", "job_id", "sequence", "input_type", "input_text",
         "question_id", "idempotency_key", "request_fingerprint",
         "chat_message_id", "created_at", "analysis_context_id",
+        "context_before", "file_at_submit", "replaces_message_id",
+        "conversation_version", "fork_from", "replaced_context",
+    },
+    "analysis_preprocess_versions": {
+        "id", "job_id", "input_id", "call_id", "source_file_hash",
+        "parent_version_id", "recipe", "output", "created_at",
     },
     "analysis_job_datasets": {
         "id", "job_id", "revision", "idempotency_key", "source_hash",
@@ -168,7 +177,8 @@ EXPECTED_INDEXES = {
         "PRIMARY", "uq_user_files_name_object", "idx_user_files_user_accessed",
         "idx_user_files_user_filename", "idx_user_files_object",
     },
-    "chat_messages": {"PRIMARY", "uq_chat_messages_source_event"},
+    "chat_messages": {"PRIMARY", "uq_chat_messages_source_event", "idx_chat_messages_current"},
+    "analysis_preprocess_versions": {"PRIMARY", "uq_analysis_preprocess_call"},
     "admin_audit_events": {"PRIMARY", "idx_admin_audit_target_created"},
     "checkpoint_cleanup_outbox": {
         "PRIMARY",
@@ -212,6 +222,7 @@ EXPECTED_FOREIGN_KEYS = {
     "fk_analysis_contexts_file_object",
     "fk_analysis_jobs_analysis_context",
     "fk_analysis_job_inputs_analysis_context",
+    "fk_preprocess_job",
     "fk_analysis_job_datasets_job",
     "fk_analysis_job_datasets_data_object",
     "fk_analysis_job_datasets_script_object",

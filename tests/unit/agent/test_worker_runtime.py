@@ -207,6 +207,8 @@ def test_slot_runtime_builds_graph_from_explicit_dependencies():
         tools,
         checkpointer,
         rag_available=True,
+        data_processing_agent=process_runtime.data_processing_agent,
+        registry=process_runtime.algorithm_registry,
     )
     assert slot_runtime.llm is llm
     assert slot_runtime.mcp_resources is resources

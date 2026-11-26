@@ -124,6 +124,16 @@ docker compose -f docker-compose.prod.yml config --quiet
 
 四个前端 dist 缺失需分别验证稳定的 503、对应的 `*_frontend_missing` 错误码和 request ID；`/chat-next`、`/rag_eval` 和 `/static/rag_eval_app/...` 应返回 404，三套 Compose 文件中不得再出现 `CHAT_FRONTEND_ENTRY`。
 
+### 编辑重发的真实验收
+
+先在隔离 PostgreSQL 使用项目固定依赖执行 `python -m tests.e2e.chat.verify_checkpoint_fork`，核对历史 interrupt、重复分叉、重启连接后继续和独立清理。隔离 MySQL 完成迁移后，在没有 Worker 自动领取的 `causalagent_edit*` 临时库执行 `python -m tests.e2e.chat.verify_edit_fencing`。测试会临时创建 MySQL trigger，在写入替换账本时制造数据库错误，验证此前的截断与上下文改动整体回滚。运行账号需要能创建和删除该测试 trigger。该入口也验证 CSRF、跨用户访问、重复请求、draining、预处理重试和旧租约写入。
+
+在隔离环境启动 Flask、Worker、MCP 与真实模型，并使用当前聊天前端构建。将 `CHAT_EDIT_TEST_URL` 指向其 HTTP 入口，在 `chat-frontend/` 运行 `node tests/acceptance/edit-resend.mjs` 。前者在转发真实 HTTP 流时主动断开一次 SSE，检查浏览器发送的 `Last-Event-ID`，同时覆盖普通编辑、输入法事件、双标签页及幂等。历史回复的验证覆盖未经确认返回 `409 edit_reanalysis_required`、草稿保持、确认后生成新 Job 与保留前缀。
+
+现行数据处理等待和故障接管使用本页的数据处理验收入口。
+
+隔离 cleanup worker 启动后，可设置 `CHAT_EDIT_VERIFY_CLEANUP=1` 重跑普通浏览器验收。脚本会删除本次创建的测试会话。把输出的 Job ID 传给 `python -m tests.e2e.chat.verify_checkpoint_fork --cleanup <job_id> ...`，核对实际 outbox 收敛与 PostgreSQL 父子 thread 清理。
+
 ## Windows 桌面客户端
 
 桌面逻辑测试不启动窗口，也不连接 Flask、MySQL、模型或 WebView2 Runtime：
@@ -479,7 +489,7 @@ runner 通过 pytest 执行白名单内的测试文件，从而继承 `tests/con
 
 ## 迁移链验证
 
-空库升级和 migration graph 检查必须确认唯一 head 为 `x1y2z3a4b5c6`：
+空库升级和 migration graph 检查必须确认唯一 head 为 `z2a3b4c5d6e7`：
 
 ```bash
 python -m alembic heads

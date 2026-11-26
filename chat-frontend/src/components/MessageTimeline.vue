@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
+import { useLocale } from '../i18n/use-locale'
 import { isPresentationActive } from '../runtime/chat/presentation'
 import { useChatScrollFollow } from '../runtime/chat/scroll-follow'
 import { stepDetailText, textDetail } from '../runtime/jobs/step-details'
@@ -14,17 +15,65 @@ import ThinkingTimeline from './ThinkingTimeline.vue'
 
 const props = defineProps<{
   messages: ChatMessage[]
+  editsEnabled?: boolean
+  canCancelJob?: boolean
+  editing?: {
+    messageId: number
+    value: string
+    busy: boolean
+    error: string
+    reanalysisRequired: boolean
+    needsRefresh: boolean
+  } | null
   submittingOptionId?: string | null
   activeJob?: JobRecord | null
   interactionSubmitting?: boolean
   interactionError?: string | null
 }>()
 const emit = defineEmits<{
+  'copy-result': [success: boolean]
+  edit: [message: ChatMessage]
+  'edit-input': [value: string]
+  'cancel-edit': []
+  resend: [reanalyze: boolean]
+  'refresh-edit': []
+  'cancel-job': []
   'choose-processing-option': [action: ProcessingOptionAction]
   'use-other-requirement': [identity: InteractionIdentity]
 }>()
 const jobs = useJobsStore()
 const scrollFollow = useChatScrollFollow()
+const { text } = useLocale()
+const timeline = ref<HTMLElement | null>(null)
+let composing = false
+
+watch(() => props.editing?.messageId, async (id, previous) => {
+  composing = false
+  await nextTick()
+  if (id !== undefined) timeline.value?.querySelector('textarea')?.focus({ preventScroll: true })
+  else if (previous !== undefined) {
+    timeline.value?.querySelector<HTMLButtonElement>(`[data-message-id="${previous}"] .edit-message-button`)?.focus({ preventScroll: true })
+  }
+})
+
+function editKeydown(event: KeyboardEvent): void {
+  if (composing || event.isComposing || event.keyCode === 229) return
+  if (event.key === 'Escape' && !props.editing?.busy) {
+    event.preventDefault()
+    emit('cancel-edit')
+  } else if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
+    if (!props.editing?.busy && !props.editing?.needsRefresh && !props.editing?.reanalysisRequired) emit('resend', false)
+  }
+}
+
+function startComposition(): void {
+  composing = true
+}
+
+function endComposition(): void {
+  composing = false
+}
 
 function onDecisionSettled(jobId: string | undefined, payload: { stepId: string; key: string }): void {
   if (!jobId) return
@@ -203,47 +252,79 @@ watch(() => currentInteraction.value?.waiting, () => scrollFollow.keepLatest())
 </script>
 
 <template>
-  <div v-if="!messageRows.length" class="conversation-empty" aria-live="polite">CausalAgent</div>
-  <div v-for="row in messageRows" :key="row.message.localId" class="message-row" :class="`${row.message.sender}-message-row`">
-    <article class="message" :class="`${row.message.sender}-message`">
-      <div v-if="row.message.sender === 'user' && row.message.fileAttachment" class="selected-file-card message-file-card">
-        <span class="selected-file-icon" aria-hidden="true">{{ fileExtension(row.message.fileAttachment.filename) }}</span>
-        <span class="selected-file-details">
-          <strong class="selected-file-name" :title="row.message.fileAttachment.filename">{{ row.message.fileAttachment.filename }}</strong>
-        </span>
-      </div>
-      <MessageBody :text="row.message.text" />
-    </article>
-    <p v-if="historicalPromptStatus(row.message, row.index)" class="processing-options-status">{{ historicalPromptStatus(row.message, row.index) }}</p>
-    <ThinkingTimeline
-      v-if="row.thinking"
-      :thinking="row.thinking"
-      @decision-settled="onDecisionSettled(row.message.analysisJobId, $event)"
-    />
-    <StreamingDraft v-if="row.thinking?.draftText" :text="row.thinking.draftText" :animate="isPresentationActive(row.thinking.status)" />
-    <article v-if="row.thinking?.finalResult" class="message ai-message">
-      <MessageBody :text="row.thinking.finalResult" />
-    </article>
-    <article v-if="row.waiting" class="message ai-message interaction-message">
-      <MessageBody v-if="!hasPersistedPrompt(row.message, row.waiting)" :text="{ type: 'human_input_required', summary: row.waiting.prompt }" />
+  <div ref="timeline" class="message-timeline">
+    <div v-if="!messageRows.length" class="conversation-empty" aria-live="polite">CausalAgent</div>
+    <div v-for="row in messageRows" :key="row.message.localId" class="message-row" :class="`${row.message.sender}-message-row`" :data-message-id="row.message.messageId">
+      <article class="message" :class="`${row.message.sender}-message`">
+        <div v-if="row.message.sender === 'user' && row.message.fileAttachment" class="selected-file-card message-file-card">
+          <span class="selected-file-icon" aria-hidden="true">{{ fileExtension(row.message.fileAttachment.filename) }}</span>
+          <span class="selected-file-details">
+            <strong class="selected-file-name" :title="row.message.fileAttachment.filename">{{ row.message.fileAttachment.filename }}</strong>
+          </span>
+        </div>
+        <form v-if="editing && editing.messageId === row.message.messageId" class="message-edit-form" @submit.prevent="emit('resend', false)">
+          <textarea
+            :value="editing.value"
+            :aria-label="text.editMessage"
+            :readonly="editing.busy"
+            rows="4"
+            @input="emit('edit-input', ($event.target as HTMLTextAreaElement).value)"
+            @compositionstart="startComposition"
+            @compositionend="endComposition"
+            @keydown="editKeydown"
+          ></textarea>
+          <p v-if="row.index < messages.length - 1 || row.thinking?.finalResult || row.thinking?.waitingInput">
+            {{ text.replaceFollowing }}
+          </p>
+          <p v-if="editing.reanalysisRequired">{{ text.reanalyzeNotice }}</p>
+          <p v-if="editing.error" class="message-edit-error" role="alert">{{ editing.error }}</p>
+          <div class="message-edit-actions">
+            <button type="button" class="secondary-button" :disabled="editing.busy" @click="emit('cancel-edit')">{{ text.cancel }}</button>
+            <button v-if="canCancelJob" type="button" class="secondary-button" :disabled="editing.busy" @click="emit('cancel-job')">{{ text.cancelJob }}</button>
+            <button v-if="editing.needsRefresh" type="button" class="secondary-button" :disabled="editing.busy" @click="emit('refresh-edit')">{{ text.refreshEditHistory }}</button>
+            <button v-else-if="editing.reanalysisRequired" type="button" class="secondary-button" :disabled="editing.busy || !editing.value.trim()" @click="emit('resend', true)">{{ text.reanalyzeMessage }}</button>
+            <button v-else type="submit" class="secondary-button" :disabled="editing.busy || !editing.value.trim()">{{ editing.busy ? text.editSubmitting : text.resendMessage }}</button>
+          </div>
+        </form>
+        <MessageBody
+          v-else
+          :text="row.message.text"
+          :editable="editsEnabled && row.message.sender === 'user' && typeof row.message.text === 'string' && row.message.messageId !== undefined"
+          @copy-result="emit('copy-result', $event)"
+          @edit="emit('edit', row.message)"
+        />
+      </article>
+      <p v-if="historicalPromptStatus(row.message, row.index)" class="processing-options-status">{{ historicalPromptStatus(row.message, row.index) }}</p>
+      <ThinkingTimeline
+        v-if="row.thinking"
+        :thinking="row.thinking"
+        @decision-settled="onDecisionSettled(row.message.analysisJobId, $event)"
+      />
+      <StreamingDraft v-if="row.thinking?.draftText" :text="row.thinking.draftText" :animate="isPresentationActive(row.thinking.status)" @copy-result="emit('copy-result', $event)" />
+      <article v-if="row.thinking?.finalResult" class="message ai-message">
+        <MessageBody :text="row.thinking.finalResult" @copy-result="emit('copy-result', $event)" />
+      </article>
+      <article v-if="row.waiting" class="message ai-message interaction-message">
+        <MessageBody v-if="!hasPersistedPrompt(row.message, row.waiting)" :text="{ type: 'human_input_required', summary: row.waiting.prompt }" @copy-result="emit('copy-result', $event)" />
+        <ProcessingOptions
+          :waiting="row.waiting"
+          :identity="{ jobId: row.message.analysisJobId ?? '', questionId: row.waiting.questionId, planVersion: row.waiting.planVersion }"
+        />
+      </article>
+      <article v-if="row.thinking?.errorMessage" class="message ai-message">
+        <MessageBody :text="{ type: 'text', summary: `错误：${row.thinking.errorMessage}` }" @copy-result="emit('copy-result', $event)" />
+      </article>
+    </div>
+    <article v-if="currentInteraction" class="message ai-message interaction-message current-interaction" aria-label="当前待回答问题">
+      <MessageBody :text="{ type: 'human_input_required', summary: currentInteraction.waiting.prompt }" @copy-result="emit('copy-result', $event)" />
       <ProcessingOptions
-        :waiting="row.waiting"
-        :identity="{ jobId: row.message.analysisJobId ?? '', questionId: row.waiting.questionId, planVersion: row.waiting.planVersion }"
+        :waiting="currentInteraction.waiting"
+        :identity="currentInteraction.identity"
+        :submitting="interactionSubmitting || Boolean(props.submittingOptionId)"
+        :error-message="interactionError"
+        @choose="emit('choose-processing-option', $event)"
+        @other="emit('use-other-requirement', $event)"
       />
     </article>
-    <article v-if="row.thinking?.errorMessage" class="message ai-message">
-      <MessageBody :text="{ type: 'text', summary: `错误：${row.thinking.errorMessage}` }" />
-    </article>
   </div>
-  <article v-if="currentInteraction" class="message ai-message interaction-message current-interaction" aria-label="当前待回答问题">
-    <MessageBody :text="{ type: 'human_input_required', summary: currentInteraction.waiting.prompt }" />
-    <ProcessingOptions
-      :waiting="currentInteraction.waiting"
-      :identity="currentInteraction.identity"
-      :submitting="interactionSubmitting || Boolean(props.submittingOptionId)"
-      :error-message="interactionError"
-      @choose="emit('choose-processing-option', $event)"
-      @other="emit('use-other-requirement', $event)"
-    />
-  </article>
 </template>

@@ -30,7 +30,12 @@ GRAPH_PAYLOAD = {
     ],
 }
 
-PARAMETERS = {"graph_result_ref": "inv-1:0", "treatment": "x", "outcome": "y"}
+from tests.support.research_specs import fixed_effect_request, identity_effect_context
+
+
+GRAPH_PARAMETERS = {"graph_result_ref": "inv-1:0", "treatment": "x", "outcome": "y"}
+PARAMETERS = {**GRAPH_PARAMETERS, "effect_request": fixed_effect_request()}
+ARTIFACTS = {"standardized_graph": GRAPH_PAYLOAD, "effect_execution_context": identity_effect_context("x", "y")}
 
 
 def _frame() -> pd.DataFrame:
@@ -51,7 +56,7 @@ def _command() -> AlgorithmExecutionCommand:
         provider_call_id="call-1",
         input_identity="input-sha",
         parameters=PARAMETERS,
-        artifacts={"standardized_graph": GRAPH_PAYLOAD},
+        artifacts=ARTIFACTS,
     )
 
 
@@ -76,10 +81,10 @@ def _context(command: AlgorithmExecutionCommand) -> McpInvocationContext:
 
 def test_run_runner_passes_artifacts() -> None:
     envelope = _run_runner(
-        _backdoor_ols, _frame().to_csv(index=False), PARAMETERS, {"standardized_graph": GRAPH_PAYLOAD}
+        _backdoor_ols, _frame().to_csv(index=False), PARAMETERS, ARTIFACTS
     )
     assert envelope.value["success"] is True
-    assert envelope.value["runner_version"] == BACKDOOR_OLS_RUNNER_VERSION == "backdoor-ols-runner-v3"
+    assert envelope.value["runner_version"] == BACKDOOR_OLS_RUNNER_VERSION == "backdoor-ols-runner-v4"
     assert envelope.value["causal_effect"]["adjustment_set"] == ("z",)
     assert abs(envelope.value["causal_effect"]["estimate"] - 2.0) < 0.1
     assert set(envelope.value["causal_effect"]["diagnostics_metrics"]) == {
@@ -91,7 +96,7 @@ def test_ate_runner_estimates_from_artifact_graph() -> None:
     payload = _backdoor_ols(
         _frame().to_csv(index=False),
         PARAMETERS,
-        {"standardized_graph": GRAPH_PAYLOAD},
+        ARTIFACTS,
     )
     assert payload["success"] is True
     assert abs(payload["causal_effect"]["estimate"] - 2.0) < 0.1
@@ -117,7 +122,7 @@ def test_ate_runner_reports_not_applicable() -> None:
 
 def _completed_check(csv_data: str, graph: StandardizedGraph):
     return check_ate_profile(
-        check_ate_graph(graph=graph, **PARAMETERS),
+        check_ate_graph(graph=graph, **GRAPH_PARAMETERS),
         profile=build_data_profile_from_csv(csv_data), semantic_kinds={},
     )
 
@@ -127,7 +132,7 @@ def test_estimation_result_reuses_input_graph_and_effect() -> None:
     graph = StandardizedGraph.model_validate(GRAPH_PAYLOAD)
     csv_data = _frame().to_csv(index=False)
     check = _completed_check(csv_data, graph)
-    payload = _backdoor_ols(csv_data, PARAMETERS, {"standardized_graph": GRAPH_PAYLOAD})
+    payload = _backdoor_ols(csv_data, PARAMETERS, ARTIFACTS)
     result = _estimation_result(
         payload,
         command=command,
@@ -147,15 +152,15 @@ def test_estimation_result_reuses_input_graph_and_effect() -> None:
     assert set(result.diagnostics.metrics) == {
         "residual_spearman_max", "residual_abs_spearman_max",
     }
-    assert result.implementation.runner_version == "backdoor-ols-runner-v3"
-    assert result.provenance.algorithm_runner_version == "backdoor-ols-runner-v3"
+    assert result.implementation.runner_version == "backdoor-ols-runner-v4"
+    assert result.provenance.algorithm_runner_version == "backdoor-ols-runner-v4"
 
 
 def test_estimation_result_rejects_mismatched_pair() -> None:
     command = _command()
     graph = StandardizedGraph.model_validate(GRAPH_PAYLOAD)
     csv_data = _frame().to_csv(index=False)
-    payload = _backdoor_ols(csv_data, PARAMETERS, {"standardized_graph": GRAPH_PAYLOAD})
+    payload = _backdoor_ols(csv_data, PARAMETERS, ARTIFACTS)
     payload["causal_effect"]["treatment"] = "z"
     try:
         _estimation_result(

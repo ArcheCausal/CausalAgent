@@ -40,12 +40,13 @@ class HistoryCursor:
             return {
                 "id": "session-1",
                 "user_id": 7,
+                "conversation_version": 2,
                 "snapshot_at": BASE + timedelta(seconds=5),
             }
         return None
 
     def fetchall(self):
-        if "FROM chat_messages" in self.current_sql:
+        if "FROM chat_messages" in self.current_sql and "FROM analysis_jobs" not in self.current_sql:
             return [
                 {
                     "id": 10,
@@ -162,7 +163,7 @@ STORED_INTERNAL_GRAPH = {
 
 class GraphAttachmentHistoryCursor(HistoryCursor):
     def fetchall(self):
-        if "FROM chat_messages" in self.current_sql:
+        if "FROM chat_messages" in self.current_sql and "FROM analysis_jobs" not in self.current_sql:
             rows = super().fetchall()
             for row in rows:
                 if row["id"] == 11:
@@ -217,7 +218,7 @@ class ReportAttachmentHistoryCursor(HistoryCursor):
         )
 
     def fetchall(self):
-        if "FROM chat_messages" in self.current_sql:
+        if "FROM chat_messages" in self.current_sql and "FROM analysis_jobs" not in self.current_sql:
             rows = super().fetchall()
             for row in rows:
                 if row["id"] == 11:

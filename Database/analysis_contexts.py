@@ -12,6 +12,7 @@ analysis_jobs -> sessions -> analysis_contexts，与 Job 服务保持一致。
 
 from __future__ import annotations
 
+from datetime import datetime
 import json
 from typing import Any
 from uuid import uuid4
@@ -36,6 +37,63 @@ JSON_COLUMNS = (
     "latest_rag_evidence",
     "latest_web_evidence",
 )
+CONTEXT_VERSION_COLUMNS = (
+    "target", "treatment", "analysis_question", *JSON_COLUMNS,
+    "latest_report_message_id", "latest_report_id", "latest_preprocess_version_id",
+)
+
+
+def capture_context_version(cursor, *, user_id: int, session_id: str) -> str:
+    """保存输入提交前的活动上下文及可见索引。调用方持有 Session 锁。"""
+    cursor.execute(
+        "SELECT active_analysis_context_id FROM sessions WHERE id = %s AND user_id = %s",
+        (session_id, user_id),
+    )
+    session = cursor.fetchone()
+    cursor.execute(
+        """
+        SELECT * FROM analysis_contexts
+        WHERE user_id = %s AND session_id = %s AND status = 'active'
+        """,
+        (user_id, session_id),
+    )
+    contexts = [_serialize_context_row(row) for row in cursor.fetchall()]
+    return _json_dumps({"active": session["active_analysis_context_id"], "contexts": contexts})
+
+
+def restore_context_version(cursor, *, user_id: int, session_id: str, version: Any) -> str | None:
+    """恢复快照的可见范围和可变字段，保留文件删除导致的外键撤销。"""
+    snapshot = _json_loads(version) or {}
+    cursor.execute(
+        """
+        UPDATE analysis_contexts SET status = 'archived', updated_at = updated_at
+        WHERE user_id = %s AND session_id = %s AND status = 'active'
+        """,
+        (user_id, session_id),
+    )
+    active = None
+    assignments = ", ".join(f"{column} = %s" for column in CONTEXT_VERSION_COLUMNS)
+    for row in snapshot.get("contexts", []):
+        values = [
+            _json_dumps(row[column]) if column in JSON_COLUMNS and row[column] is not None else row[column]
+            for column in CONTEXT_VERSION_COLUMNS
+        ]
+        cursor.execute(
+            f"""
+            UPDATE analysis_contexts
+            SET status = 'active', {assignments}, updated_at = %s
+            WHERE analysis_context_id = %s AND user_id = %s AND session_id = %s
+            """,
+            (*values, datetime.fromisoformat(row["updated_at"]),
+             row["analysis_context_id"], user_id, session_id),
+        )
+        if row["analysis_context_id"] == snapshot["active"]:
+            active = row["analysis_context_id"]
+    cursor.execute(
+        "UPDATE sessions SET active_analysis_context_id = %s WHERE id = %s AND user_id = %s",
+        (active, session_id, user_id),
+    )
+    return active
 
 
 class AnalysisContextFencedError(RuntimeError):
@@ -268,6 +326,7 @@ def _serialize_context_row(
         "latest_web_evidence": _json_loads(row.get("latest_web_evidence")),
         "latest_report_message_id": row.get("latest_report_message_id"),
         "latest_report_id": row.get("latest_report_id"),
+        "latest_preprocess_version_id": row.get("latest_preprocess_version_id"),
         "latest_report_title": latest_report_title,
         "updated_at": (
             updated_at.isoformat() if hasattr(updated_at, "isoformat") else updated_at
@@ -289,8 +348,8 @@ def load_active_context(user_id: int, session_id: str) -> dict[str, Any] | None:
                  AND c.user_id = s.user_id
                  AND c.session_id = s.id
                 LEFT JOIN chat_messages AS cm
-                  ON cm.id = c.latest_report_message_id
-                WHERE s.id = %s AND s.user_id = %s
+                  ON cm.id = c.latest_report_message_id AND cm.replaced_by_job_id IS NULL
+                WHERE s.id = %s AND s.user_id = %s AND c.status = 'active'
                 """,
                 (session_id, user_id),
             )
@@ -320,7 +379,7 @@ def load_context_index(
                 SELECT c.*, cm.content AS latest_report_title
                 FROM analysis_contexts AS c
                 LEFT JOIN chat_messages AS cm
-                  ON cm.id = c.latest_report_message_id
+                  ON cm.id = c.latest_report_message_id AND cm.replaced_by_job_id IS NULL
                 WHERE c.user_id = %s AND c.session_id = %s
                   AND c.status = 'active'
                   AND (%s IS NULL OR c.analysis_context_id <> %s)
@@ -359,9 +418,9 @@ def load_context(
                 SELECT c.*, cm.content AS latest_report_title
                 FROM analysis_contexts AS c
                 LEFT JOIN chat_messages AS cm
-                  ON cm.id = c.latest_report_message_id
+                  ON cm.id = c.latest_report_message_id AND cm.replaced_by_job_id IS NULL
                 WHERE c.analysis_context_id = %s
-                  AND c.user_id = %s AND c.session_id = %s
+                  AND c.user_id = %s AND c.session_id = %s AND c.status = 'active'
                 """,
                 (context_id, user_id, session_id),
             )
@@ -595,6 +654,7 @@ def record_analysis_results(
     web_evidence: Any = None,
     report_message_id: int | None = None,
     report_id: str | None = None,
+    preprocess_version_id: int | None = None,
 ) -> None:
     """在调用方已持有的 Job 终态事务内写入本次执行确认的事实。
 
@@ -608,6 +668,7 @@ def record_analysis_results(
         ("latest_web_evidence", web_evidence),
         ("latest_report_message_id", report_message_id),
         ("latest_report_id", report_id),
+        ("latest_preprocess_version_id", preprocess_version_id),
     ):
         if value is None:
             continue
@@ -624,6 +685,71 @@ def record_analysis_results(
         """,
         tuple(params),
     )
+
+
+def preprocess_version(
+    *,
+    job_id: str,
+    worker_id: str,
+    attempt_count: int,
+    lease_epoch: int,
+    call_id: str,
+    source_file_hash: str,
+    recipe: dict,
+    output: dict | None = None,
+) -> tuple[int, dict] | None:
+    """按输入阶段和节点调用取回或首次提交不可变预处理产物。"""
+    with get_write_connection() as connection:
+        try:
+            connection.start_transaction()
+            cursor = connection.cursor(dictionary=True)
+            job = _lock_running_job(
+                cursor, job_id=job_id, worker_id=worker_id,
+                attempt_count=attempt_count, lease_epoch=lease_epoch,
+            )
+            if not job or job["input_file_hash"] != source_file_hash:
+                raise AnalysisContextFencedError("预处理调用已失去当前文件的执行资格")
+            cursor.execute(
+                "SELECT input_id FROM analysis_job_inputs WHERE job_id = %s ORDER BY sequence DESC LIMIT 1",
+                (job_id,),
+            )
+            input_id = cursor.fetchone()["input_id"]
+            cursor.execute(
+                """
+                SELECT id, source_file_hash, recipe, output FROM analysis_preprocess_versions
+                WHERE job_id = %s AND input_id = %s AND call_id = %s
+                """,
+                (job_id, input_id, call_id),
+            )
+            if existing := cursor.fetchone():
+                if existing["source_file_hash"] != source_file_hash or _json_loads(existing["recipe"]) != recipe:
+                    raise RuntimeError("预处理调用的输入或配方已变化")
+                connection.commit()
+                return int(existing["id"]), _json_loads(existing["output"])
+            if output is None:
+                connection.commit()
+                return None
+            cursor.execute(
+                """
+                INSERT INTO analysis_preprocess_versions
+                    (job_id, input_id, call_id, source_file_hash, parent_version_id, recipe, output)
+                VALUES (%s, %s, %s, %s, (
+                    SELECT v.id FROM analysis_contexts c JOIN analysis_preprocess_versions v
+                      ON v.id = c.latest_preprocess_version_id
+                    WHERE c.analysis_context_id = %s AND c.status = 'active' AND v.source_file_hash = %s
+                ), %s, %s)
+                """,
+                (job_id, input_id, call_id, source_file_hash, job["analysis_context_id"],
+                 source_file_hash, _json_dumps(recipe), _json_dumps(output)),
+            )
+            version_id = int(cursor.lastrowid)
+            cursor.execute("SELECT output FROM analysis_preprocess_versions WHERE id = %s", (version_id,))
+            persisted_output = _json_loads(cursor.fetchone()["output"])
+            connection.commit()
+            return version_id, persisted_output
+        except Exception:
+            connection.rollback()
+            raise
 def _read_valid_file_snapshot(
     cursor,
     *,

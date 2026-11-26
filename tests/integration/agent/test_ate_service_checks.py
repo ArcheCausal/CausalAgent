@@ -22,13 +22,14 @@ from Agent.CausalAgentMCP.auth import sign_invocation
 from Agent.CausalAgentMCP.config import McpServerConfig
 from Agent.CausalAgentMCP.executor_pool import BoundedProcessPool
 from Agent.CausalAgentMCP.runner_registry import BACKDOOR_OLS_RUNNER_VERSION, _backdoor_ols, build_default_registry
-from Agent.CausalAgentMCP.service import CausalMcpService, McpServiceError, _estimation_result
+from Agent.CausalAgentMCP.service import CausalMcpService, EffectValidatedInput, McpServiceError, _estimation_result
 from Agent.deep_agent_tools.algorithm_specs import CAUSAL_BACKDOOR_OLS_SPEC
 from Agent.deep_agent_tools.ate_applicability import ATE_REASON_SUMMARIES, check_ate_graph, check_ate_profile
 from Agent.deep_agent_tools.error_codes import SafeErrorCode
 from Agent.deep_agent_tools.models import AlgorithmExecutionCommand, AlgorithmResult, McpInvocationContext, StandardizedGraph
 from Agent.deep_agent_tools.preprocessing import build_data_profile_from_csv
-from Agent.measurement_semantics import ValidatedAlgorithmInput
+from Agent.data_processing.parameters import parameter_identity
+from tests.support.research_specs import fixed_effect_request, identity_effect_context
 
 
 GRAPH = {
@@ -40,7 +41,12 @@ GRAPH = {
         {"source": "t", "target": "y", "edge_type": "directed"},
     ],
 }
-PARAMETERS = {"graph_result_ref": "source-discovery:0", "treatment": "t", "outcome": "y"}
+GRAPH_PARAMETERS = {"graph_result_ref": "source-discovery:0", "treatment": "t", "outcome": "y"}
+EFFECT_REQUEST = fixed_effect_request()
+PARAMETERS = {**GRAPH_PARAMETERS, "effect_request": EFFECT_REQUEST}
+RESEARCH = {"target": "y", "treatment": "t", "effect_request": EFFECT_REQUEST}
+EFFECT_CONTEXT = identity_effect_context("t", "y")
+RESEARCH_ID = parameter_identity(RESEARCH)
 
 
 def _frame() -> pd.DataFrame:
@@ -65,12 +71,12 @@ def _request(csv_data: str, *, graph: dict | None = None):
         invocation_id=str(uuid4()), job_id=str(uuid4()), session_id=str(uuid4()), user_id=7,
         attempt_count=1, lease_epoch=3, worker_id="component-test:1",
         input_snapshot_digest=digest, source_input_identity="frozen-source-hash",
-        analysis_dataset_id=17, issued_at=now, expires_at=now + timedelta(minutes=5), key_id="current",
+        analysis_dataset_id=17, research_identity=RESEARCH_ID, issued_at=now, expires_at=now + timedelta(minutes=5), key_id="current",
     )
     command = AlgorithmExecutionCommand(
         invocation_id=context.invocation_id, capability_id=CAUSAL_BACKDOOR_OLS_SPEC.capability_id,
         capability_version=CAUSAL_BACKDOOR_OLS_SPEC.version, spec_digest=CAUSAL_BACKDOOR_OLS_SPEC.spec_digest,
-        provider_call_id="ate-call", input_identity=digest, parameters=PARAMETERS,
+        provider_call_id="ate-call", input_identity=digest, parameters=PARAMETERS, research_identity=RESEARCH_ID,
         artifacts={"standardized_graph": deepcopy(GRAPH if graph is None else graph)},
     )
     payload = {
@@ -83,7 +89,10 @@ def _request(csv_data: str, *, graph: dict | None = None):
 def _execute(frame: pd.DataFrame, *, semantics=None, graph=None, config=None, wrong_identity=False):
     csv_data = frame.to_csv(index=False)
     command, expected_context, payload = _request(csv_data, graph=graph)
-    trusted_input = ValidatedAlgorithmInput(csv_data=csv_data, semantic_kinds=semantics or {})
+    trusted_input = EffectValidatedInput(
+        csv_data=csv_data, semantic_kinds=semantics or {},
+        effect_parameters={**RESEARCH, "effect_execution_context": EFFECT_CONTEXT, "research_identity": RESEARCH_ID},
+    )
     reads = []
 
     def read_in_process_input(context):
@@ -133,7 +142,7 @@ def test_continuous_confounder_runs_real_service_and_process_runner():
     assert result.causal_effect.outcome == result.ate_check.outcome
     assert abs(result.causal_effect.estimate - 2.0) < 0.2
     assert result.causal_effect.n_rows == len(_frame())
-    assert result.implementation.runner_version == BACKDOOR_OLS_RUNNER_VERSION == "backdoor-ols-runner-v3"
+    assert result.implementation.runner_version == BACKDOOR_OLS_RUNNER_VERSION == "backdoor-ols-runner-v4"
     assert result.provenance.analysis_dataset_id == 17
     assert result.provenance.source_input_identity == "frozen-source-hash"
     assert response["trace"]["executor_slot_id"].startswith("process-")
@@ -240,7 +249,7 @@ def test_kernel_collinearity_updates_completed_record_and_controlled_diagnostic(
     assert result.ate_check.adjustment_set == ("z",)
     assert response["raw_payload"]["reason_code"] == result.ate_check.reason_code
     assert "message" not in response["raw_payload"]
-    assert result.implementation.runner_version == "backdoor-ols-runner-v3"
+    assert result.implementation.runner_version == "backdoor-ols-runner-v4"
 
 
 def test_insufficient_dof_is_not_applicable_without_changing_rows_or_adjustments():
@@ -286,10 +295,10 @@ def test_success_adapter_rejects_effect_mismatching_real_completed_check(change)
     command, context, _ = _request(csv_data)
     graph = StandardizedGraph.model_validate(GRAPH)
     check = check_ate_profile(
-        check_ate_graph(graph=graph, **PARAMETERS),
+        check_ate_graph(graph=graph, **GRAPH_PARAMETERS),
         profile=build_data_profile_from_csv(csv_data), semantic_kinds={},
     )
-    payload = _backdoor_ols(csv_data, PARAMETERS, {"standardized_graph": GRAPH})
+    payload = _backdoor_ols(csv_data, PARAMETERS, {"standardized_graph": GRAPH, "effect_execution_context": EFFECT_CONTEXT})
     payload["causal_effect"].update(change)
     with pytest.raises(ValueError):
         _estimation_result(

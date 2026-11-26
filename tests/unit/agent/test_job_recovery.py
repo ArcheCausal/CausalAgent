@@ -49,7 +49,7 @@ class ScriptedCursor:
         if "message_count" in statement:
             return self.fetch_results.pop(0) if self.fetch_results else None
         if "FROM sessions" in statement:
-            return {"id": "session-1"}
+            return {"id": "session-1", "active_analysis_context_id": None}
         return self.fetch_results.pop(0) if self.fetch_results else None
 
     def fetchall(self):
@@ -204,6 +204,7 @@ class JobRecoveryTests(unittest.TestCase):
             None,
             {"next_sequence": 1},
             {"message_count": 1, "title": "分析"},
+            {"conversation_version": 3},
         ])
 
         with (

@@ -3,6 +3,7 @@ app.chat.routes - 聊天路由
 '''
 from flask import Blueprint, request, jsonify
 from app.auth.session_guard import get_current_session_user
+from app.auth.csrf import csrf_rejection_response, csrf_token_is_valid
 import logging
 import json
 from app.chat.response_storage import project_causal_graph, render_summary_for_display
@@ -12,6 +13,7 @@ from app.agent.persistence_cleanup import enqueue_checkpoint_cleanup_many
 from app.db import record_database_failure
 from app.request_context import (
     bind_request_log_context,
+    get_request_id,
     log_authorization_denied,
     log_request_failure,
 )
@@ -20,6 +22,47 @@ from observability.logging_runtime import log_event
 chat_bp = Blueprint('chat', __name__, url_prefix='/api')
 LOGGER = logging.getLogger(__name__)
 import uuid
+
+
+@chat_bp.post("/sessions/<uuid:session_id>/messages/<int:message_id>/edit-resend")
+def edit_session_message(session_id, message_id):
+    from app.agent.checkpoint_recovery import CheckpointRecoveryUnavailable
+    from app.agent.job_service import ActiveJobConflictError
+    from app.agent.message_edit import EditConflict, edit_message
+
+    current_user = get_current_session_user()
+    if not current_user:
+        return jsonify(success=False, code="auth_required", error="用户未登录或会话已过期"), 401
+    if not csrf_token_is_valid():
+        return csrf_rejection_response()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(success=False, code="invalid_edit", error="消息编辑请求无效"), 400
+    try:
+        result = edit_message(
+            user_id=current_user["id"], session_id=str(session_id), message_id=message_id,
+            message=data.get("message"), version=data.get("conversation_version"),
+            checkpoint_id=data.get("checkpoint_id"), reanalyze=data.get("allow_reanalysis", False),
+            idempotency_key=request.headers.get("Idempotency-Key"), request_id=get_request_id(),
+        )
+        bind_request_log_context(session_id=str(session_id), job_id=result["job_id"])
+        return jsonify(result), 200 if result["existing"] else 202
+    except PermissionError:
+        return jsonify(success=False, code="message_not_found", error="会话或消息不存在"), 404
+    except ActiveJobConflictError as exc:
+        return jsonify(
+            success=False, code="active_job_conflict", error="请先取消活动任务，再重新发送",
+            active_job={"job_id": exc.job["job_id"], "status": exc.job["status"]},
+        ), 409
+    except EditConflict as exc:
+        return jsonify(success=False, code=exc.code, error=str(exc)), 409
+    except ValueError as exc:
+        return jsonify(success=False, code="invalid_edit", error=str(exc)), 400
+    except CheckpointRecoveryUnavailable:
+        return jsonify(success=False, code="checkpoint_unavailable", error="暂时无法核对追问恢复点"), 503
+    except Exception:
+        log_request_failure(LOGGER, reason_code="unexpected_error")
+        return jsonify(success=False, code="edit_failed", error="重新发送失败"), 500
 
 # 新对话
 @chat_bp.route('/new_chat',methods=['POST'])
@@ -123,7 +166,7 @@ def load_session_content():
             cursor = conn.cursor(dictionary=True)
 
             cursor.execute(
-                "SELECT id, UTC_TIMESTAMP(6) AS snapshot_at FROM sessions WHERE id = %s AND user_id = %s",
+                "SELECT id, conversation_version, UTC_TIMESTAMP(6) AS snapshot_at FROM sessions WHERE id = %s AND user_id = %s",
                 (session_id, user_id),
             )
             session_exists = cursor.fetchone()
@@ -148,10 +191,11 @@ def load_session_content():
                 SELECT
                     id, message_type, content, has_attachment,
                     analysis_job_id, analysis_job_input_id, source_event_id,
-                    created_at
+                    created_at, checkpoint_id
                 FROM chat_messages
                 WHERE session_id = %s AND user_id = %s
-                ORDER BY created_at ASC, id ASC
+                  AND replaced_by_job_id IS NULL
+                ORDER BY id ASC
             """, (session_id, user_id))
             chat_rows = cursor.fetchall()
 
@@ -176,6 +220,11 @@ def load_session_content():
                 SELECT job_id, status, created_at, finished_at, input_filename
                 FROM analysis_jobs
                 WHERE session_id = %s AND user_id = %s
+                  AND EXISTS (SELECT 1 FROM chat_messages m
+                              WHERE m.analysis_job_id = analysis_jobs.job_id
+                                AND m.user_id = analysis_jobs.user_id
+                                AND m.session_id = analysis_jobs.session_id
+                                AND m.replaced_by_job_id IS NULL)
                 ORDER BY created_at, id
                 """,
                 (session_id, user_id),
@@ -188,10 +237,11 @@ def load_session_content():
                 placeholders = ", ".join(["%s"] * len(job_ids))
                 cursor.execute(
                     f"""
-                    SELECT input_id, job_id, sequence, input_type, chat_message_id, created_at
-                    FROM analysis_job_inputs
-                    WHERE job_id IN ({placeholders})
-                    ORDER BY job_id, sequence, input_id
+                    SELECT i.input_id, i.job_id, i.sequence, i.input_type, i.chat_message_id,
+                           i.created_at, i.file_at_submit
+                    FROM analysis_job_inputs i JOIN chat_messages m ON m.id = i.chat_message_id
+                    WHERE i.job_id IN ({placeholders}) AND m.replaced_by_job_id IS NULL
+                    ORDER BY i.job_id, i.sequence, i.input_id
                     """,
                     tuple(job_ids),
                 )
@@ -222,10 +272,13 @@ def load_session_content():
                 sender = "user" if row["message_type"] == 'user' else "ai"
                 message = {
                     "sender": sender,
+                    "message_id": int(row["id"]),
                     "text": row["content"],
                     "analysis_job_id": row.get("analysis_job_id"),
                     "analysis_job_input_id": row.get("analysis_job_input_id"),
                 }
+                if sender == "ai" and row.get("checkpoint_id"):
+                    message["checkpoint_id"] = row["checkpoint_id"]
 
                 if sender == "user" and row.get("analysis_job_input_id") is not None:
                     input_row = inputs_by_id.get(int(row["analysis_job_input_id"]))
@@ -237,7 +290,11 @@ def load_session_content():
                         and job_id
                         and str(input_row.get("job_id")) == str(job_id)
                     ):
-                        filename = jobs_by_id.get(str(job_id), {}).get("input_filename")
+                        frozen_file = input_row.get("file_at_submit")
+                        filename = (
+                            json.loads(frozen_file).get("input_filename") if frozen_file
+                            else jobs_by_id.get(str(job_id), {}).get("input_filename")
+                        )
                         if isinstance(filename, str) and filename.strip():
                             message["file_attachment"] = {"filename": filename}
 
@@ -330,15 +387,18 @@ def load_session_content():
 
             conn.commit()
 
-        return jsonify({"success": True, "messages": messages})
+        return jsonify({
+            "success": True, "messages": messages,
+            "conversation_version": int(session_exists["conversation_version"]),
+        })
 
     except mysql.connector.Error as e:
         record_database_failure(e, operation="session_history_query")
         log_request_failure(LOGGER, reason_code="database_unavailable")
-        return jsonify({"success": False, "error": f"加载会话时出错: {e}"}), 500
-    except Exception as e:
+        return jsonify({"success": False, "error": "加载会话失败"}), 500
+    except Exception:
         log_request_failure(LOGGER)
-        return jsonify({"success": False, "error": f"加载会话时出错: {e}"}), 500
+        return jsonify({"success": False, "error": "加载会话失败"}), 500
 
 ## 更改会话
 @chat_bp.route('/change_session', methods=['POST'])

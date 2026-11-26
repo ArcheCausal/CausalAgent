@@ -55,6 +55,7 @@ def test_complete_profile_preserves_all_facts_and_consumer_input(
     assert "record_id" in quality_profile.numeric_columns
     parent = {
         "analysis_parameters": {
+            "effect_request": None,
             "data_profile": quality_profile if as_model else original,
             "columns": list(quality_profile.column_names),
             "column_profiles": {
@@ -96,6 +97,7 @@ def test_nested_profile_takes_priority_even_over_invalid_top(stale_top: object) 
         {
             "data_profile": stale_top,
             "analysis_parameters": {
+                "effect_request": None,
                 "data_profile": profile.model_dump(mode="json"),
                 "columns": ["old"],
                 "n_rows": 900,
@@ -117,7 +119,7 @@ def test_top_profile_is_compatible_and_clears_stale_missing_flag(as_model: bool)
     state = to_deep_agent_input(
         {
             "data_profile": profile if as_model else profile.model_dump(mode="json"),
-            "analysis_parameters": {"target": "b"},
+            "analysis_parameters": {"effect_request": None, "target": "b"},
             "missing_values_present": True,
         }
     )
@@ -146,6 +148,7 @@ def test_top_profile_is_compatible_and_clears_stale_missing_flag(as_model: bool)
 def test_invalid_present_profile_fails_without_fallback(invalid: object, source: str) -> None:
     parent = {
         "analysis_parameters": {
+            "effect_request": None,
             "columns": ["a", "b"],
             "n_rows": 3,
             "column_profiles": {"a": {"inferred_type": "continuous"}},
@@ -167,6 +170,7 @@ def test_legacy_statistics_never_confirm_storage_types(label: str) -> None:
     state = to_deep_agent_input(
         {
             "analysis_parameters": {
+                "effect_request": None,
                 "n_rows": 4,
                 "columns": ["z", "a"],
                 "column_profiles": {
@@ -201,7 +205,7 @@ def test_legacy_statistics_never_confirm_storage_types(label: str) -> None:
 def test_legacy_sources_recover_only_basic_facts(
     parameters: dict, summary: dict, rows: int, columns: tuple[str, ...]
 ) -> None:
-    parent = {"analysis_parameters": parameters, "file_summary": summary}
+    parent = {"analysis_parameters": {"effect_request": None, **parameters}, "file_summary": summary}
     state = to_deep_agent_input(parent)
     profile = state["data_profile"]
 
@@ -230,6 +234,7 @@ def test_real_alarm_csv_keeps_all_eleven_numeric_columns() -> None:
     state = to_deep_agent_input(
         {
             "analysis_parameters": {
+                "effect_request": None,
                 "data_profile": profile.model_dump(mode="json"),
                 "columns": list(profile.column_names),
                 "n_rows": profile.row_count,
@@ -288,7 +293,7 @@ def test_unconfirmed_column_sets_never_publish_numeric_artifact(
     profile = DataProfile(
         row_count=4, column_count=2, column_names=columns, numeric_columns=numeric
     )
-    state = to_deep_agent_input({"data_profile": profile})
+    state = to_deep_agent_input({"analysis_parameters": {"effect_request": None}, "data_profile": profile})
 
     assert state["data_profile"] == profile
     assert AlgorithmTool._data_profile_from_state(state) == profile

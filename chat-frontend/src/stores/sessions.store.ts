@@ -7,6 +7,7 @@ interface SessionsState {
   items: SessionSummary[]
   currentId: string | null
   messages: ChatMessage[]
+  conversationVersion: number | null
   listStatus: 'idle' | 'loading' | 'ready' | 'error'
   loadStatus: 'idle' | 'loading' | 'ready' | 'error'
   error: string | null
@@ -35,6 +36,8 @@ function toMessage(value: ChatMessageResponse, localId: string): ChatMessage {
   const text: MessageText = typeof value.text === 'string' ? value.text : toStructuredMessage(value.text)
   return {
     localId,
+    messageId: value.message_id,
+    checkpointId: value.checkpoint_id,
     sender: value.sender,
     text,
     analysisJobId: value.analysis_job_id ?? undefined,
@@ -50,6 +53,7 @@ export const useSessionsStore = defineStore('sessions', {
     items: [],
     currentId: null,
     messages: [],
+    conversationVersion: null,
     listStatus: 'idle',
     loadStatus: 'idle',
     error: null,
@@ -82,38 +86,47 @@ export const useSessionsStore = defineStore('sessions', {
     async create(): Promise<string> {
       const response = await api.newChat()
       if (!response.success || !response.new_session_id) throw new Error(response.error || '创建新对话失败。')
+      this.loadGeneration += 1
       this.currentId = response.new_session_id
       this.messages = []
+      this.conversationVersion = 0
       this.loadStatus = 'ready'
       return response.new_session_id
     },
-    async select(sessionId: string): Promise<void> {
+    async select(sessionId: string, preserveMessageId?: number): Promise<boolean> {
       const generation = this.loadGeneration + 1
       this.loadGeneration = generation
       this.loadStatus = 'loading'
       try {
         const response = await api.loadSession(sessionId)
-        if (this.loadGeneration !== generation) return
+        if (this.loadGeneration !== generation) return false
         if (!response.success) throw new Error(response.error || '无法加载会话。')
+        if (preserveMessageId !== undefined && !response.messages?.some((message) => message.message_id === preserveMessageId)) {
+          this.loadStatus = 'ready'
+          return false
+        }
         this.currentId = sessionId
+        this.conversationVersion = response.conversation_version ?? null
         this.localMessageSequence = 0
         this.messages = (response.messages ?? []).map((message) => {
           this.localMessageSequence += 1
-          return toMessage(message, `message-${this.localMessageSequence}`)
+          return toMessage(message, message.message_id === undefined ? `message-${this.localMessageSequence}` : `saved-${message.message_id}`)
         })
         this.loadStatus = 'ready'
         this.error = null
+        return true
       } catch (error) {
-        if (this.loadGeneration !== generation) return
+        if (this.loadGeneration !== generation) return false
         this.loadStatus = 'error'
         this.error = error instanceof Error ? error.message : '加载会话失败。'
         throw error
       }
     },
-    appendUserMessage(text: string, jobId: string, fileAttachment?: ChatMessage['fileAttachment']): void {
+    appendUserMessage(text: string, jobId: string, fileAttachment?: ChatMessage['fileAttachment'], messageId?: number): void {
       this.localMessageSequence += 1
       this.messages.push({
-        localId: `message-${this.localMessageSequence}`,
+        localId: messageId === undefined ? `message-${this.localMessageSequence}` : `saved-${messageId}`,
+        messageId,
         sender: 'user',
         text,
         analysisJobId: jobId,
@@ -143,6 +156,7 @@ export const useSessionsStore = defineStore('sessions', {
       if (this.currentId === sessionId) {
         this.currentId = null
         this.messages = []
+        this.conversationVersion = null
         this.loadStatus = 'idle'
       }
     },
@@ -150,6 +164,7 @@ export const useSessionsStore = defineStore('sessions', {
       this.items = []
       this.currentId = null
       this.messages = []
+      this.conversationVersion = null
       this.listStatus = 'idle'
       this.loadStatus = 'idle'
       this.error = null

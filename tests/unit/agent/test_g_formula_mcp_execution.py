@@ -19,6 +19,9 @@ from Agent.deep_agent_tools.models import (
     StandardizedGraph,
 )
 
+from tests.support.research_specs import fixed_effect_request, identity_effect_context
+
+
 GRAPH_PAYLOAD = {
     "graph_semantics": "pdag",
     "nodes": ["x", "y"],
@@ -28,10 +31,13 @@ PARAMETERS = {
     "graph_result_ref": "inv-1:0",
     "treatment": "x",
     "outcome": "y",
-    "contrast": [0.0, 1.0],
+    "effect_request": fixed_effect_request(),
     "outcome_model": "linear",
     "bootstrap": 0,
 }
+
+
+ARTIFACTS = {"standardized_graph": GRAPH_PAYLOAD, "effect_execution_context": identity_effect_context("x", "y")}
 
 
 def _frame() -> pd.DataFrame:
@@ -44,12 +50,12 @@ def _command() -> AlgorithmExecutionCommand:
     return AlgorithmExecutionCommand(
         invocation_id="00000000-0000-0000-0000-000000000011",
         capability_id="causal.g_formula",
-        capability_version="1.0",
+        capability_version=CAUSAL_G_FORMULA_SPEC.version,
         spec_digest=CAUSAL_G_FORMULA_SPEC.spec_digest,
         provider_call_id="call-gf-1",
         input_identity="input-sha",
         parameters=PARAMETERS,
-        artifacts={"standardized_graph": GRAPH_PAYLOAD},
+        artifacts=ARTIFACTS,
     )
 
 
@@ -81,7 +87,7 @@ def test_runner_estimates_from_artifact_graph() -> None:
     payload = _g_formula(
         _frame().to_csv(index=False),
         PARAMETERS,
-        {"standardized_graph": GRAPH_PAYLOAD},
+        ARTIFACTS,
     )
     assert payload["success"] is True
     assert payload["algorithm"] == "g_formula"
@@ -108,34 +114,14 @@ def test_runner_reports_not_applicable() -> None:
 def test_estimation_result_injects_source_graph_ref_and_controls() -> None:
     command = _command()
     graph = StandardizedGraph.model_validate(GRAPH_PAYLOAD)
-    payload = {
-        "success": True,
-        "algorithm": "g_formula",
-        "runner_version": "g-formula-runner-v2",
-        "causal_effect": {
-            "estimand": "ATE",
-            "treatment": "x",
-            "outcome": "y",
-            "estimate": 2.0,
-            "standard_error": 0.1,
-            "ci95": [1.8, 2.2],
-            "estimator": "g_formula",
-            "n_rows": 1000,
-            "contrast": [0.0, 1.0],
-            "outcome_model": "linear",
-            "bootstrap_n": 200,
-            "diagnostics_metrics": {
-                "linear_estimate": 2.0,
-                "effect_difference": 0.25,
-                "difference_se": 0.5,
-            },
-        },
-    }
+    payload = _g_formula(_frame().to_csv(index=False), PARAMETERS, ARTIFACTS)
+    metrics = {"linear_estimate": 2.0, "effect_difference": 0.25, "difference_se": 0.5}
+    payload["causal_effect"]["diagnostics_metrics"] = metrics
     result = _estimation_result(
         payload,
         command=command,
         context=_context(command),
-        capability_version="1.0",
+        capability_version=CAUSAL_G_FORMULA_SPEC.version,
         graph=graph,
         data_view=None,
     )
@@ -144,7 +130,7 @@ def test_estimation_result_injects_source_graph_ref_and_controls() -> None:
     assert result.causal_effect.graph_result_ref == "inv-1:0"
     assert result.causal_effect.contrast == (0.0, 1.0)
     assert result.causal_effect.outcome_model == "linear"
-    assert result.causal_effect.bootstrap_n == 200
+    assert result.causal_effect.bootstrap_n == PARAMETERS["bootstrap"]
     assert result.diagnostics.metrics == {
         "linear_estimate": 2.0, "effect_difference": 0.25, "difference_se": 0.5,
     }
@@ -153,20 +139,12 @@ def test_estimation_result_injects_source_graph_ref_and_controls() -> None:
 def test_estimation_result_drops_non_finite_and_non_numeric_metrics() -> None:
     command = _command()
     graph = StandardizedGraph.model_validate(GRAPH_PAYLOAD)
-    payload = {
-        "success": True,
-        "algorithm": "g_formula",
-        "runner_version": "g-formula-runner-v2",
-        "causal_effect": {
-            "estimand": "ATE", "treatment": "x", "outcome": "y",
-            "estimate": 2.0, "estimator": "g_formula", "n_rows": 1000,
-            "diagnostics_metrics": {
-                "ok": 0.25, "nan": float("nan"), "text": "x", "flag": True,
-            },
-        },
+    payload = _g_formula(_frame().to_csv(index=False), PARAMETERS, ARTIFACTS)
+    payload["causal_effect"]["diagnostics_metrics"] = {
+        "ok": 0.25, "nan": float("nan"), "text": "x", "flag": True,
     }
     result = _estimation_result(
         payload, command=command, context=_context(command),
-        capability_version="1.0", graph=graph, data_view=None,
+        capability_version=CAUSAL_G_FORMULA_SPEC.version, graph=graph, data_view=None,
     )
     assert result.diagnostics.metrics == {"ok": 0.25}

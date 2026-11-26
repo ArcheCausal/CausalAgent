@@ -22,7 +22,7 @@ from Agent.deep_agent_tools.interaction import DataProcessingQuestionRequest
 
 JOB = "00000000-0000-0000-0000-000000000951"
 RUN = build_data_processing_run_id(job_id=JOB, source_input_identity="a" * 64)
-BASE = {"target": "outcome", "treatment": None, "analysis_question": "研究关系", "measurement_semantics": []}
+BASE = {"effect_request": None, "target": "outcome", "treatment": None, "analysis_question": "研究关系", "measurement_semantics": []}
 
 
 def child_config(saver, namespace=None):

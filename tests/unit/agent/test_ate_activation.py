@@ -48,11 +48,11 @@ def test_mcp_registry_resolves_ate() -> None:
     assert entry.capability_id == "causal.backdoor_ols"
 
 
-def test_ate_v2_registry_handshake_rejects_old_version_and_changed_digest() -> None:
+def test_ate_v3_registry_handshake_rejects_old_version_and_changed_digest() -> None:
     registry = build_default_registry()
     assert ("causal.backdoor_ols", CAUSAL_BACKDOOR_OLS_SPEC.version, CAUSAL_BACKDOOR_OLS_SPEC.spec_digest) in registry.capability_summary()
-    assert CAUSAL_BACKDOOR_OLS_SPEC.version == "2.0"
-    for version, digest in (("1.0", CAUSAL_BACKDOOR_OLS_SPEC.spec_digest), ("2.0", "0" * 64)):
+    assert CAUSAL_BACKDOOR_OLS_SPEC.version == "3.0"
+    for version, digest in (("2.0", CAUSAL_BACKDOOR_OLS_SPEC.spec_digest), ("3.0", "0" * 64)):
         with pytest.raises(RunnerRegistryError) as failure:
             registry.resolve("causal.backdoor_ols", version, digest)
         assert failure.value.safe_error_code == "MCP_CAPABILITY_VERSION_UNSUPPORTED"
