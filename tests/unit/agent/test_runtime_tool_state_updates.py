@@ -5,25 +5,22 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt import ToolNode, ToolRuntime
 
 from Agent.deep_agent import AgentRunContext, TrustedJobIdentity
+from Agent.deep_agent.context import AnalysisInputRef
 from Agent.deep_agent.state import ProjectDeepAgentState
 from Agent.deep_agent.memory import build_in_memory_backend
-from Agent.deep_agent_tools import (
-    DataProfile,
-    FakeAlgorithmExecutor,
-    RagEvidenceTool,
-    SafeErrorCode,
-    WebEvidenceTool,
-    build_algorithm_tools,
-    build_default_registry,
-)
+from Agent.deep_agent_tools import build_default_registry
 from Agent.deep_agent_tools.adapters import build_default_adapters
+from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
+from Agent.measurement_semantics import semantic_kinds_from_validation_report
+from tests.support.local_algorithm_execution import LocalAlgorithmExecutor, PC_INSUFFICIENT_SAMPLE_CSV
+from Agent.deep_agent_tools.rag_evidence_tool import RagEvidenceTool
+from Agent.deep_agent_tools.web_evidence_tool import WebEvidenceTool
 
 
 IDENTITY = TrustedJobIdentity(
@@ -38,22 +35,36 @@ IDENTITY = TrustedJobIdentity(
 
 
 def _context(executor=None) -> AgentRunContext:
+    executor = executor or LocalAlgorithmExecutor()
+    analysis_input = AnalysisInputRef()
+    analysis_input.bind(
+        dataset_id=1, object_id=1, content_hash=IDENTITY.input_identity,
+        filename="local.csv",
+        semantic_kinds=semantic_kinds_from_validation_report(executor.validation_report),
+    )
     return AgentRunContext(
         execution_guard=None,
-        trusted_identity=IDENTITY,
-        algorithm_executor=executor or FakeAlgorithmExecutor(),
+        trusted_identity=replace(IDENTITY, analysis_input=analysis_input),
+        algorithm_executor=executor,
     )
 
 
 def _runtime(context: AgentRunContext, *, call_id: str):
-    return SimpleNamespace(
+    return ToolRuntime(
         tool_call_id=call_id,
-        state={"message_execution_id": "message-execution-1"},
+        state={
+            "message_execution_id": "message-execution-1",
+            "data_profile": (
+                context.algorithm_executor.data_profile
+                if context.algorithm_executor is not None else None
+            ),
+        },
         context=context,
+        config={}, stream_writer=[].append, store=None,
     )
 
 
-def _algorithm_tool(*, executor: FakeAlgorithmExecutor):
+def _algorithm_tool(*, executor: LocalAlgorithmExecutor):
     context = _context(executor)
     registry = build_default_registry(
         build_default_adapters(
@@ -64,19 +75,14 @@ def _algorithm_tool(*, executor: FakeAlgorithmExecutor):
     tools = build_algorithm_tools(
         registry,
         runtime_context=context,
-        data_profile=DataProfile(
-            row_count=100,
-            column_count=2,
-            column_names=("x", "y"),
-            numeric_columns=("x", "y"),
-        ),
+        data_profile=executor.data_profile,
     )
     wrapped = next(tool for tool in tools if tool.name == "causal_pc").to_langchain_tool()
     return context, wrapped
 
 
 def test_algorithm_langchain_tool_writes_result_and_terminal_ledger() -> None:
-    context, tool = _algorithm_tool(executor=FakeAlgorithmExecutor())
+    context, tool = _algorithm_tool(executor=LocalAlgorithmExecutor())
 
     command = asyncio.run(
         tool.coroutine(
@@ -98,8 +104,37 @@ def test_algorithm_langchain_tool_writes_result_and_terminal_ledger() -> None:
     assert command.update["messages"][0].tool_call_id == "provider-call-1"
 
 
+def test_signed_mcp_context_separates_source_and_analysis_dataset_identity() -> None:
+    source_hash = "b" * 64
+    analysis_input = AnalysisInputRef()
+    analysis_input.bind(
+        dataset_id=21,
+        object_id=34,
+        content_hash="a" * 64,
+        filename="prepared.csv",
+        semantic_kinds=semantic_kinds_from_validation_report(LocalAlgorithmExecutor().validation_report),
+    )
+    identity = TrustedJobIdentity(
+        job_id=IDENTITY.job_id,
+        session_id=IDENTITY.session_id,
+        user_id=IDENTITY.user_id,
+        attempt_count=IDENTITY.attempt_count,
+        lease_epoch=IDENTITY.lease_epoch,
+        worker_id=IDENTITY.worker_id,
+        input_identity=source_hash,
+        input_snapshot_digest=source_hash,
+        analysis_input=analysis_input,
+    )
+
+    context = identity.to_mcp_context(invocation_id="00000000-0000-0000-0000-000000000003")
+
+    assert context.source_input_identity == source_hash
+    assert context.analysis_dataset_id == 21
+    assert context.input_snapshot_digest == "a" * 64
+
+
 def test_algorithm_public_decision_is_emitted_and_removed_before_execution() -> None:
-    executor = FakeAlgorithmExecutor()
+    executor = LocalAlgorithmExecutor()
     events = []
     context, tool = _algorithm_tool(executor=executor)
     context = replace(
@@ -116,12 +151,7 @@ def test_algorithm_public_decision_is_emitted_and_removed_before_execution() -> 
                 )
             ),
             runtime_context=context,
-            data_profile=DataProfile(
-                row_count=100,
-                column_count=2,
-                column_names=("x", "y"),
-                numeric_columns=("x", "y"),
-            ),
+            data_profile=executor.data_profile,
         )
         if item.name == "causal_pc"
     ).to_langchain_tool()
@@ -141,11 +171,14 @@ def test_algorithm_public_decision_is_emitted_and_removed_before_execution() -> 
     ]
     assert events[0]["decision_kind"] == "algorithm"
     assert events[0]["tool_name"] == "causal_pc"
-    assert executor.calls[0].command.parameters == {"alpha": 0.05}
+    assert executor.calls[0].command.parameters == {
+        "alpha": 0.05,
+        "test": "auto",
+    }
 
 
 def test_invalid_public_decision_does_not_block_algorithm_execution() -> None:
-    executor = FakeAlgorithmExecutor()
+    executor = LocalAlgorithmExecutor()
     events = []
     context, tool = _algorithm_tool(executor=executor)
     context = replace(
@@ -162,7 +195,7 @@ def test_invalid_public_decision_does_not_block_algorithm_execution() -> None:
                 )
             ),
             runtime_context=context,
-            data_profile=DataProfile(row_count=100, column_count=2),
+            data_profile=executor.data_profile,
         )
         if item.name == "causal_pc"
     ).to_langchain_tool()
@@ -183,7 +216,7 @@ def test_invalid_public_decision_does_not_block_algorithm_execution() -> None:
 
 
 def test_tool_node_injects_runtime_and_reducers_commit_command_update() -> None:
-    context, tool = _algorithm_tool(executor=FakeAlgorithmExecutor())
+    context, tool = _algorithm_tool(executor=LocalAlgorithmExecutor())
     builder = StateGraph(ProjectDeepAgentState, context_schema=AgentRunContext)
     builder.add_node("tools", ToolNode([tool], handle_tool_errors=False))
     builder.add_edge(START, "tools")
@@ -207,6 +240,7 @@ def test_tool_node_injects_runtime_and_reducers_commit_command_update() -> None:
                     )
                 ],
                 "message_execution_id": "message-execution-1",
+                "data_profile": context.algorithm_executor.data_profile,
                 "algorithm_results": {},
                 "action_ledger": {},
                 "rag_evidence": {},
@@ -226,9 +260,7 @@ def test_tool_node_injects_runtime_and_reducers_commit_command_update() -> None:
 
 
 def test_algorithm_execution_failed_is_returned_and_recorded() -> None:
-    executor = FakeAlgorithmExecutor(
-        failures={"causal.pc": SafeErrorCode.ALGORITHM_EXECUTION_FAILED}
-    )
+    executor = LocalAlgorithmExecutor(PC_INSUFFICIENT_SAMPLE_CSV)
     context, tool = _algorithm_tool(executor=executor)
 
     command = asyncio.run(
@@ -607,7 +639,7 @@ def test_evidence_unavailable_is_recorded_without_leaking_exception() -> None:
     context = AgentRunContext(
         execution_guard=None,
         trusted_identity=IDENTITY,
-        algorithm_executor=FakeAlgorithmExecutor(),
+        algorithm_executor=LocalAlgorithmExecutor(),
         event_sink=sink,
     )
 
@@ -633,12 +665,8 @@ def test_evidence_unavailable_is_recorded_without_leaking_exception() -> None:
 
 
 def test_runtime_identity_has_no_static_fallback() -> None:
-    context, tool = _algorithm_tool(executor=FakeAlgorithmExecutor())
-    runtime = SimpleNamespace(
-        tool_call_id=None,
-        state={"message_execution_id": "message-execution-1"},
-        context=context,
-    )
+    context, tool = _algorithm_tool(executor=LocalAlgorithmExecutor())
+    runtime = _runtime(context, call_id=None)
 
     try:
         asyncio.run(tool.coroutine(runtime=runtime, alpha=0.05))

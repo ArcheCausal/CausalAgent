@@ -1,0 +1,86 @@
+# Shared service contracts. Root Compose files supply images, DB host and networks.
+services:
+  sandbox-controller:
+    command: ["python", "-m", "sandbox_controller"]
+    scale: 1
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 75s
+    group_add: ["3000"]
+    environment:
+      CAUSALAGENT_SECRET_FILE: /run/secrets/causalagent.env
+      CAUSALAGENT_SANDBOX_CONTROLLER_PORT: "8081"
+      CAUSALAGENT_SANDBOX_URL: http://opensandbox:8080
+      CAUSALAGENT_SANDBOX_ALLOW_HTTP: "true"
+      # The controller validates this required digest before binding its API.
+      # An empty default keeps offline Compose inspection possible without inventing an image.
+      CAUSALAGENT_SANDBOX_IMAGE: ${CAUSALAGENT_SANDBOX_IMAGE:-}
+      CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY: ${CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY:-4}
+      CAUSALAGENT_SANDBOX_HEARTBEAT_TIMEOUT_SECONDS: ${CAUSALAGENT_SANDBOX_HEARTBEAT_TIMEOUT_SECONDS:-90}
+      CAUSALAGENT_SANDBOX_RECONCILE_INTERVAL_SECONDS: ${CAUSALAGENT_SANDBOX_RECONCILE_INTERVAL_SECONDS:-15}
+      CAUSALAGENT_SANDBOX_CPU_LIMIT: ${CAUSALAGENT_SANDBOX_CPU_LIMIT:-1}
+      CAUSALAGENT_SANDBOX_MEMORY_LIMIT: ${CAUSALAGENT_SANDBOX_MEMORY_LIMIT:-2Gi}
+      CAUSALAGENT_SANDBOX_TTL_SECONDS: ${CAUSALAGENT_SANDBOX_TTL_SECONDS:-900}
+      CAUSALAGENT_SANDBOX_COMMAND_TIMEOUT_SECONDS: ${CAUSALAGENT_SANDBOX_COMMAND_TIMEOUT_SECONDS:-300}
+      CAUSALAGENT_SANDBOX_API_TIMEOUT_SECONDS: ${CAUSALAGENT_SANDBOX_API_TIMEOUT_SECONDS:-30}
+      CAUSALAGENT_SANDBOX_MAX_INPUT_BYTES: ${CAUSALAGENT_SANDBOX_MAX_INPUT_BYTES:-67108864}
+      CAUSALAGENT_SANDBOX_MAX_PREVIEW_BYTES: ${CAUSALAGENT_SANDBOX_MAX_PREVIEW_BYTES:-32768}
+      CAUSALAGENT_SANDBOX_MAX_OUTPUT_FILE_BYTES: ${CAUSALAGENT_SANDBOX_MAX_OUTPUT_FILE_BYTES:-67108864}
+      CAUSALAGENT_SANDBOX_MAX_COMMAND_BYTES: ${CAUSALAGENT_SANDBOX_MAX_COMMAND_BYTES:-16384}
+      CAUSALAGENT_SANDBOX_MAX_COMMAND_OUTPUT_BYTES: ${CAUSALAGENT_SANDBOX_MAX_COMMAND_OUTPUT_BYTES:-65536}
+      CAUSALAGENT_SANDBOX_AGENT_UID: ${CAUSALAGENT_SANDBOX_AGENT_UID:-10001}
+      CAUSALAGENT_SANDBOX_AGENT_GID: ${CAUSALAGENT_SANDBOX_AGENT_GID:-10001}
+      JOB_STALE_AFTER_SECONDS: ${JOB_STALE_AFTER_SECONDS:-120}
+      MYSQL_PORT: "3306"
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_WRITE_USER: ${MYSQL_WRITE_USER:-${MYSQL_USER}}
+      MYSQL_READ_USER: ${MYSQL_READ_USER:-${MYSQL_USER}}
+      MYSQL_READ_HOSTS: ""
+      MYSQL_POOL_SIZE_WRITE: "4"
+      MYSQL_POOL_SIZE_READ: "1"
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+  opensandbox:
+    image: docker.io/opensandbox/server@sha256:bcd5f264101262cebfa7e1ff9cd0424403e42f31a6596e4364cf90d8cb5c936b
+    entrypoint: ["python", "/opt/causalagent/server_entrypoint.py"]
+    command: []
+    scale: 1
+    init: true
+    restart: unless-stopped
+    group_add: ["3000"]
+    environment:
+      SANDBOX_CONFIG_PATH: /etc/opensandbox/config.toml
+      CAUSALAGENT_SECRET_FILE: /run/secrets/causalagent.env
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - opensandbox_state:/var/lib/opensandbox
+      - ./server_entrypoint.py:/opt/causalagent/server_entrypoint.py:ro
+      - ../../config/secret_file.py:/opt/causalagent/config/secret_file.py:ro
+    configs:
+      - source: opensandbox_config
+        target: /etc/opensandbox/config.toml
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}

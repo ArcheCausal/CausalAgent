@@ -1,8 +1,8 @@
 """独立的 MySQL 数据库配置。
 
-该模块供 ``app.db`` 以及不需要模型能力的数据库消费者使用，不导入
-``config.settings``，也不检查模型地址和名称。但它调用的密钥加载器会校验全部
-``REQUIRED_SECRET_KEYS``，因此仍要求应用和模型等全局必需密钥存在于同一个文件中。
+该模块供 app.db 以及不需要模型能力的数据库消费者使用，不导入 config.settings，
+也不检查模型地址和名称。数据库入口显式要求三个 MySQL 密码键；应用入口仍单独校验
+完整应用密钥，独立数据库消费者不需要模型密钥。
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ class DatabaseConfig:
     @classmethod
     def from_env(cls) -> "DatabaseConfig":
         """加载数据库配置：连接参数来自环境变量，密码只来自密钥文件。"""
-        load_secrets()
+        load_secrets(required_keys=("MYSQL_PASSWORD", "MYSQL_WRITE_PASSWORD", "MYSQL_READ_PASSWORD"))
 
         legacy_host = _get_config("MYSQL_HOST", required=False)
         write_host = _get_config(

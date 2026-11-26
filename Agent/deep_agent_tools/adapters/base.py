@@ -6,7 +6,7 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -17,19 +17,24 @@ from ..algorithm_executor import (
     validate_executor_result,
 )
 from ..algorithm_specs import AlgorithmSpec
+from ..ate_applicability import ATE_REASON_SUMMARIES, check_ate_graph, check_ate_profile
 from ..error_codes import SafeErrorCode
 from ..identity import build_invocation_id, build_result_ref
+from ..runtime_updates import publish_ate_check
 from .normalization import result_from_runner_payload
 from ..models import (
     AlgorithmExecutionCommand,
     AlgorithmResult,
     AlgorithmResultProvenance,
+    AteApplicabilityCheck,
+    DataViewSummary,
     DataProfile,
     Diagnostics,
     McpInvocationContext,
     RAW_RESULT_SERIALIZATION_VERSION,
     RawResultMetadata,
     SafeWarning,
+    StandardizedGraph,
     build_raw_result_metadata,
     canonical_json_bytes,
 )
@@ -50,31 +55,15 @@ class AdapterInput:
 
     data_profile: DataProfile
     input_identity: str
-    dataset_csv: str | None = None
     missing_values_present: bool = False
-    # 新 MCP 路径由服务端按可信 Job/文件快照强读 CSV；因此不把文件正文
-    # 放进 Deep Agent State。协议测试仍可要求显式 dataset_csv。
     dataset_authority_available: bool = False
+    execution_columns: tuple[str, ...] | None = None
+    semantic_kinds: Mapping[str, str] | None = None
+    artifacts: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.input_identity or self.input_identity != self.input_identity.strip():
             raise ValueError("input_identity must be a non-blank string")
-
-
-@dataclass(frozen=True)
-class PreprocessingRecipe:
-    version: str
-    operations: tuple[str, ...]
-    parameters: Mapping[str, Any]
-
-    @property
-    def digest(self) -> str:
-        payload = {
-            "version": self.version,
-            "operations": list(self.operations),
-            "parameters": dict(self.parameters),
-        }
-        return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
 class AlgorithmAdapter(Protocol):
@@ -95,7 +84,7 @@ class AlgorithmAdapter(Protocol):
 
 
 class BaseAlgorithmAdapter(ABC):
-    """统一执行顺序：参数→可信输入→预处理→executor→硬契约→raw metadata。"""
+    """统一执行顺序：参数→可信输入→executor→硬契约→raw metadata。"""
 
     def __init__(
         self,
@@ -107,10 +96,6 @@ class BaseAlgorithmAdapter(ABC):
         self.spec = spec
         self.executor = executor
         self.raw_backend = raw_backend or build_in_memory_backend(user_id=1)
-
-    @abstractmethod
-    def preprocessing_recipe(self, adapter_input: AdapterInput) -> PreprocessingRecipe:
-        """返回可逆、确定性且不删除样本的算法专属配方。"""
 
     @abstractmethod
     def validate_input(self, adapter_input: AdapterInput) -> tuple[str, SafeErrorCode] | None:
@@ -136,8 +121,11 @@ class BaseAlgorithmAdapter(ABC):
         status: str,
         safe_error_code: SafeErrorCode | str | None = None,
         summary: str | None = None,
-        preprocessing_recipe_digest: str | None = None,
+        data_view: DataViewSummary | None = None,
+        ate_check: AteApplicabilityCheck | None = None,
     ) -> AlgorithmResult:
+        if self.spec.capability_id != "causal.backdoor_ols":
+            ate_check = None
         return AlgorithmResult(
             result_ref=build_result_ref(
                 invocation_id=command.invocation_id,
@@ -148,6 +136,8 @@ class BaseAlgorithmAdapter(ABC):
             capability_id=command.capability_id,
             capability_version=command.capability_version,
             status=status,
+            ate_check=ate_check,
+            method=self.spec.method_definition(),
             diagnostics=Diagnostics(
                 summary=summary,
                 safe_error_code=safe_error_code,
@@ -157,13 +147,17 @@ class BaseAlgorithmAdapter(ABC):
                 attempt_count=context.attempt_count,
                 lease_epoch=context.lease_epoch,
                 input_identity=command.input_identity,
+                source_input_identity=context.source_input_identity,
+                analysis_dataset_id=context.analysis_dataset_id,
+                research_identity=context.research_identity,
                 spec_digest=command.spec_digest,
                 invocation_id=command.invocation_id,
                 capability_id=command.capability_id,
                 capability_version=command.capability_version,
-                preprocessing_recipe_digest=preprocessing_recipe_digest,
             ),
+            data_view=data_view,
         )
+
 
     @staticmethod
     def _expected_raw_result_ref(command: AlgorithmExecutionCommand) -> str:
@@ -341,7 +335,6 @@ class BaseAlgorithmAdapter(ABC):
                 context=context,
                 status="invalid_input",
                 safe_error_code=SafeErrorCode.ALGORITHM_INPUT_INVALID,
-                preprocessing_recipe_digest=None,
             )
 
         invocation_id = build_invocation_id(
@@ -354,7 +347,84 @@ class BaseAlgorithmAdapter(ABC):
             provider_call_id=provider_call_id,
         )
         context = self._context(trusted_context, invocation_id=invocation_id)
-        recipe = self.preprocessing_recipe(adapter_input)
+        data_view = DataViewSummary(
+            row_count=adapter_input.data_profile.row_count,
+            column_count=adapter_input.data_profile.column_count,
+            columns=adapter_input.data_profile.column_names,
+        )
+        ate_check = None
+        if self.spec.kind == "causal_estimation":
+            graph_payload = adapter_input.artifacts.get("standardized_graph")
+            if graph_payload is not None:
+                try:
+                    graph = StandardizedGraph.model_validate(graph_payload)
+                except (ValueError, TypeError):
+                    command = AlgorithmExecutionCommand(
+                        invocation_id=invocation_id, capability_id=self.spec.capability_id,
+                        capability_version=self.spec.version, spec_digest=self.spec.spec_digest,
+                        provider_call_id=provider_call_id, input_identity=adapter_input.input_identity,
+                        result_index=result_index, timeout_seconds=self.spec.default_timeout_seconds,
+                    )
+                    return self._base_result(
+                        command=command, context=context, status="invalid_input",
+                        safe_error_code=SafeErrorCode.ALGORITHM_INPUT_INVALID,
+                    )
+                ate_check = check_ate_graph(
+                    graph=graph, graph_result_ref=parsed_parameters.graph_result_ref,
+                    treatment=parsed_parameters.treatment, outcome=parsed_parameters.outcome,
+                )
+                ate_check = check_ate_profile(
+                    ate_check, profile=adapter_input.data_profile,
+                    semantic_kinds=adapter_input.semantic_kinds,
+                )
+                publish_ate_check(invocation_id, ate_check)
+            applicability = ate_check.applicability if ate_check else "ready"
+            reason = ATE_REASON_SUMMARIES.get(ate_check.reason_code) if ate_check else None
+            if self.spec.capability_id != "causal.backdoor_ols":
+                ate_check = None
+        else:
+            applicability, reason = self.spec.assess_applicability(
+                profile=adapter_input.data_profile,
+                execution_columns=adapter_input.execution_columns,
+                semantic_kinds=adapter_input.semantic_kinds,
+            )
+        if applicability == "not_applicable":
+            invocation_id = build_invocation_id(
+                job_id=(
+                    trusted_context.job_id
+                    if hasattr(trusted_context, "job_id")
+                    else "00000000-0000-0000-0000-000000000000"
+                ),
+                response_identity=response_identity,
+                provider_call_id=provider_call_id,
+            )
+            context = self._context(trusted_context, invocation_id=invocation_id)
+            command = AlgorithmExecutionCommand(
+                invocation_id=invocation_id,
+                capability_id=self.spec.capability_id,
+                capability_version=self.spec.version,
+                spec_digest=self.spec.spec_digest,
+                provider_call_id=provider_call_id,
+                input_identity=adapter_input.input_identity,
+                parameters=parsed_parameters.model_dump(mode="json"),
+                result_index=result_index,
+                timeout_seconds=self.spec.default_timeout_seconds,
+            )
+            # 各 Adapter 仍可给出比通用 Spec 更严格的既有诊断；二者都是
+            # 结构性不适用，但这里不掩盖 Adapter 自己的状态与错误码。
+            legacy = self.validate_input(adapter_input)
+            legacy_status, legacy_code = legacy if legacy is not None else (
+                "not_applicable",
+                SafeErrorCode.ALGORITHM_NOT_APPLICABLE,
+            )
+            return self._base_result(
+                command=command,
+                context=context,
+                status=legacy_status,
+                safe_error_code=legacy_code,
+                summary=reason,
+                ate_check=ate_check,
+            )
         command = AlgorithmExecutionCommand(
             invocation_id=invocation_id,
             capability_id=self.spec.capability_id,
@@ -365,7 +435,17 @@ class BaseAlgorithmAdapter(ABC):
             parameters=parsed_parameters.model_dump(mode="json"),
             result_index=result_index,
             timeout_seconds=self.spec.default_timeout_seconds,
+            artifacts=dict(adapter_input.artifacts),
+            research_identity=context.research_identity,
         )
+        if self.spec.kind == "causal_estimation":
+            confirmed = adapter_input.artifacts.get("effect_request")
+            if confirmed is not None and confirmed != parsed_parameters.effect_request:
+                return self._base_result(
+                    command=command, context=context, status="invalid_input",
+                    safe_error_code=SafeErrorCode.ALGORITHM_INPUT_INVALID,
+                    summary="工具效应请求与已确认定义不一致。",
+                )
         not_ready = self.validate_input(adapter_input)
         if not_ready is not None:
             status, safe_error_code = not_ready
@@ -374,13 +454,22 @@ class BaseAlgorithmAdapter(ABC):
                 context=context,
                 status=status,
                 safe_error_code=safe_error_code,
-                preprocessing_recipe_digest=recipe.digest,
+                data_view=data_view,
             )
 
         try:
             active_executor = executor or self.executor
             active_raw_backend = raw_backend or self.raw_backend
-            execution_response = await active_executor.execute(command, context)
+            try:
+                execution_response = await active_executor.execute(command, context)
+            except (AlgorithmExecutorError, TimeoutError, JobExecutionRevoked):
+                raise
+            except Exception:
+                return self._base_result(
+                    command=command, context=context, status="execution_failed",
+                    safe_error_code=SafeErrorCode.ALGORITHM_EXECUTION_FAILED,
+                    summary="算法执行器未能完成调用。", ate_check=ate_check,
+                )
             raw_executor_payload = None
             if isinstance(execution_response, AlgorithmExecutionResponse):
                 result = execution_response.result
@@ -409,11 +498,20 @@ class BaseAlgorithmAdapter(ABC):
             result = result.model_copy(
                 deep=True,
                 update={
-                    "provenance": result.provenance.model_copy(
-                        update={"preprocessing_recipe_digest": recipe.digest}
-                    )
+                    "data_view": (
+                        data_view
+                        or result.data_view
+                        or DataViewSummary(
+                            row_count=adapter_input.data_profile.row_count,
+                            column_count=adapter_input.data_profile.column_count,
+                            columns=adapter_input.data_profile.column_names,
+                        )
+                    ),
                 },
             )
+            if result.status == "timed_out":
+                # deadline 已结束执行；没有成功算法产物，不能保存标准化快照冒充 raw。
+                return result
             # Fake executor 没有远端 raw payload，因此以标准化结果快照作为可复核
             # 的协议级 raw；真实 executor 若已提供 metadata 也必须从同一个 backend
             # 回读验证，不能仅凭引用和声明的 hash/size/version 放行。
@@ -458,7 +556,7 @@ class BaseAlgorithmAdapter(ABC):
                 context=context,
                 status=status,
                 safe_error_code=exc.safe_error_code,
-                preprocessing_recipe_digest=recipe.digest,
+                ate_check=(ate_check if status in {"execution_failed", "timed_out"} else None),
             )
         except TimeoutError:
             return self._base_result(
@@ -466,7 +564,7 @@ class BaseAlgorithmAdapter(ABC):
                 context=context,
                 status="timed_out",
                 safe_error_code=SafeErrorCode.ALGORITHM_TIMED_OUT,
-                preprocessing_recipe_digest=recipe.digest,
+                ate_check=ate_check,
             )
         except Exception as exc:
             # Job revoke 是 worker 控制流；它继承 RuntimeError，必须先于
@@ -478,5 +576,5 @@ class BaseAlgorithmAdapter(ABC):
                 context=context,
                 status="execution_failed",
                 safe_error_code=SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID,
-                preprocessing_recipe_digest=recipe.digest,
+                ate_check=ate_check,
             )

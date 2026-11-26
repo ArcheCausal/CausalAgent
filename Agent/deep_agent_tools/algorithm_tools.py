@@ -2,37 +2,158 @@
 
 from __future__ import annotations
 
-import inspect
 import asyncio
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
 from Agent.execution_control import JobExecutionRevoked
+from Agent.measurement_semantics import normalize_semantic_kinds
 
 if TYPE_CHECKING:
     from Agent.deep_agent.context import AgentRunContext
 
 from .adapters.base import AdapterInput
-from .algorithm_specs import build_model_tool_input_schema
+from .algorithm_specs import AlgorithmSpec, build_model_tool_input_schema, get_algorithm_spec
 from .models import (
     ActionAttempt,
     AlgorithmResult,
+    AlgorithmResultProvenance,
     DataProfile,
+    Diagnostics,
     InvocationRecord,
-    McpInvocationContext,
 )
-from .identity import build_invocation_id, current_input_identity
+from .error_codes import SafeErrorCode
+from .functional_form import build_effect_query
+from .graph_validation import validate_graph_structure
+from .identity import (
+    build_invocation_id,
+    build_result_ref,
+    current_input_identity,
+    provenance_matches_identity,
+)
 from .registry import AlgorithmRegistry, RegistryEntry
 from .runtime_updates import (
-    build_terminal_invocation,
-    build_tool_command,
+    algorithm_terminal_command,
     emit_public_decision_event,
     emit_tool_lifecycle_event,
+    normalize_tool_status,
     resolve_runtime_invocation,
     with_tool_runtime_schema,
 )
+
+
+def _graph_source_identity(trusted_identity: Any) -> tuple[str | None, int | None]:
+    """当前可信身份的用户源文件摘要与分析数据集标识。"""
+
+    resolver = getattr(trusted_identity, "source_input_identity", None)
+    source = resolver() if callable(resolver) else None
+    analysis_input = getattr(trusted_identity, "analysis_input", None)
+    dataset_id = getattr(analysis_input, "dataset_id", None)
+    return (
+        source if isinstance(source, str) and source else None,
+        dataset_id if isinstance(dataset_id, int) and not isinstance(dataset_id, bool) else None,
+    )
+
+
+def _trusted_graph_result_refs(
+    state: Mapping[str, Any],
+    *,
+    trusted_identity: Any,
+) -> list[str]:
+    """列出本调用开始前已存在、可被当前模型引用的有效图结果。"""
+
+    source, dataset_id = _graph_source_identity(trusted_identity)
+    refs: list[str] = []
+    for ref, raw_result in (state.get("algorithm_results") or {}).items():
+        try:
+            result = (
+                raw_result
+                if isinstance(raw_result, AlgorithmResult)
+                else AlgorithmResult.model_validate(raw_result)
+            )
+            source_spec = get_algorithm_spec(result.capability_id)
+        except (TypeError, ValueError):
+            continue
+        if (
+            ref == result.result_ref
+            and source_spec.kind == "causal_discovery"
+            and result.capability_version == source_spec.version
+            and result.provenance.spec_digest == source_spec.spec_digest
+            and result.status == "valid"
+            and result.standardized_graph is not None
+            and validate_graph_structure(
+                result.standardized_graph,
+                graph_semantics=source_spec.graph_semantics,
+            ).valid
+            and provenance_matches_identity(result.provenance, trusted_identity)
+            and result.provenance.source_input_identity == source
+            and result.provenance.analysis_dataset_id == dataset_id
+        ):
+            refs.append(ref)
+    return sorted(refs)
+
+
+def _resolve_graph_artifacts(
+    *,
+    spec: AlgorithmSpec,
+    state: Mapping[str, Any],
+    arguments: Mapping[str, Any],
+    trusted_identity: Any,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """估计能力在调用前校验图引用；拒绝时返回可行动的 ToolMessage 载荷。"""
+
+    if spec.kind != "causal_estimation":
+        return None, {}
+    parameters = state.get("analysis_parameters") or {}
+    confirmed = parameters.get("effect_request") if isinstance(parameters, Mapping) else None
+    if not isinstance(confirmed, Mapping) or dict(confirmed) != arguments.get("effect_request") or (
+        arguments.get("treatment"), arguments.get("outcome")
+    ) != (parameters.get("treatment"), parameters.get("target")):
+        return {
+            "status": "invalid_input",
+            "reason": "本次没有已确认的效应请求，或工具定义及变量与确认方案不同。",
+            "next_action": "仅执行结构探索；需要调整研究问题时返回原有参数修订与确认流程。",
+        }, {}
+    available = _trusted_graph_result_refs(
+        state, trusted_identity=trusted_identity
+    )
+    ref = arguments.get("graph_result_ref")
+    if not isinstance(ref, str) or ref not in available:
+        raw_source = (state.get("algorithm_results") or {}).get(ref) if isinstance(ref, str) else None
+        not_ready = ref is None and not available
+        if raw_source is not None:
+            try:
+                source_result = AlgorithmResult.model_validate(raw_source)
+                not_ready = (
+                    source_result.status == "not_ready"
+                    and provenance_matches_identity(source_result.provenance, trusted_identity)
+                    and source_result.provenance.source_input_identity == _graph_source_identity(trusted_identity)[0]
+                    and source_result.provenance.analysis_dataset_id == _graph_source_identity(trusted_identity)[1]
+                )
+            except (TypeError, ValueError):
+                pass
+        return (
+            {
+                "status": "not_ready" if not_ready else "invalid_input",
+                "reason": (
+                    "所引用的因果图不存在、不是本次运行的有效结果，"
+                    "或与当前数据版本不一致。"
+                ),
+                "available_graph_result_refs": available,
+                "next_action": (
+                    "先调用因果发现工具得到 status=valid 的结果，再携带它的 "
+                    "result_ref 重试；若列表为空，确认数据版本与本次一致。"
+                ),
+                "unmet_requirements": ["valid_graph_result"],
+            },
+            {},
+        )
+    result = state["algorithm_results"][ref]
+    if not isinstance(result, AlgorithmResult):
+        result = AlgorithmResult.model_validate(result)
+    return None, {"standardized_graph": result.standardized_graph.model_dump(mode="json")}
 
 
 def _mark_unfinished_invocation(
@@ -64,7 +185,7 @@ class AlgorithmTool:
 
     @property
     def description(self) -> str:
-        return self.entry.spec.description
+        return self.entry.spec.model_description()
 
     @property
     def args_schema(self) -> type:
@@ -80,19 +201,21 @@ class AlgorithmTool:
             return profile.model_copy(deep=True)
         if isinstance(profile, Mapping):
             return DataProfile.model_validate(profile)
-        file_summary = state.get("file_summary")
-        if not isinstance(file_summary, Mapping):
-            file_summary = {}
-        columns = tuple(
-            str(column) for column in file_summary.get("columns", ()) if str(column)
-        )
-        return DataProfile(
-            row_count=max(0, int(file_summary.get("rows") or 0)),
-            column_count=len(columns),
-            column_names=columns,
+        raise ValueError("converted data_profile is required in algorithm State")
+
+    @staticmethod
+    def _trusted_semantic_kinds(identity: Any, profile: DataProfile) -> dict[str, str]:
+        analysis_input = getattr(identity, "analysis_input", None)
+        if analysis_input is None or analysis_input.dataset_id is None:
+            raise ValueError("bound analysis dataset is required for algorithm input")
+        return normalize_semantic_kinds(
+            analysis_input.semantic_kinds, columns=profile.column_names,
         )
 
-    def _adapter_input_from_runtime(self, runtime: Any) -> AdapterInput:
+    def _adapter_input_from_runtime(
+        self,
+        runtime: Any,
+    ) -> AdapterInput:
         """从当前 ToolRuntime 生成输入快照；文件正文不进入 State。"""
 
         context = getattr(runtime, "context", None)
@@ -102,13 +225,13 @@ class AlgorithmTool:
         state = getattr(runtime, "state", None)
         if not isinstance(state, Mapping):
             raise RuntimeError("ToolRuntime.state must be a mapping")
-        dataset_csv = state.get("dataset_csv")
+        profile = self._data_profile_from_state(state)
         return AdapterInput(
-            data_profile=self._data_profile_from_state(state),
+            data_profile=profile,
             input_identity=current_input_identity(identity),
-            dataset_csv=dataset_csv if isinstance(dataset_csv, str) else None,
             missing_values_present=bool(state.get("missing_values_present")),
             dataset_authority_available=True,
+            semantic_kinds=self._trusted_semantic_kinds(identity, profile),
         )
 
     def _record(
@@ -136,6 +259,7 @@ class AlgorithmTool:
         if result is not None:
             safe_error_code = result.diagnostics.safe_error_code
         return InvocationRecord(
+            research_identity=getattr(active_context.trusted_identity.analysis_input, "research_identity", None),
             invocation_id=invocation_id,
             response_identity=response_identity,
             response_identity_source=response_identity_source,
@@ -153,6 +277,10 @@ class AlgorithmTool:
                 if status == "timed_out"
                 else "not_ready"
                 if status == "not_ready"
+                else "not_applicable"
+                if status == "not_applicable"
+                else "skipped"
+                if status == "skipped"
                 else "failed"
             ),
             result_ref=result_ref,
@@ -161,6 +289,12 @@ class AlgorithmTool:
             lease_epoch=int(active_context.trusted_identity.lease_epoch),
             worker_id=active_context.trusted_identity.worker_id,
             input_identity=current_input_identity(active_context.trusted_identity),
+            source_input_identity=active_context.trusted_identity.source_input_identity(),
+            analysis_dataset_id=(
+                active_context.trusted_identity.analysis_input.dataset_id
+                if active_context.trusted_identity.analysis_input is not None
+                else None
+            ),
             attempts={
                 retry_ordinal: ActionAttempt(
                     retry_ordinal=retry_ordinal,
@@ -202,14 +336,17 @@ class AlgorithmTool:
             active_input = AdapterInput(
                 data_profile=self._data_profile_from_state(state),
                 input_identity=current_input_identity(active_context.trusted_identity),
-                dataset_csv=(
-                    state.get("dataset_csv")
-                    if isinstance(state.get("dataset_csv"), str)
-                    else None
-                ),
                 missing_values_present=bool(state.get("missing_values_present")),
                 dataset_authority_available=True,
             )
+        # 每次调用重读可信绑定；显式 AdapterInput 和 State 都不能覆盖语义。
+        active_input = replace(
+            active_input,
+            dataset_authority_available=True,
+            semantic_kinds=self._trusted_semantic_kinds(
+                active_context.trusted_identity, active_input.data_profile,
+            ),
+        )
         invocation_id = build_invocation_id(
             job_id=active_context.trusted_identity.job_id,
             response_identity=response_identity,
@@ -288,14 +425,7 @@ class AlgorithmTool:
             )
             raise
 
-        terminal_status = {
-            "valid": "succeeded",
-            "timed_out": "timed_out",
-            "not_ready": "not_ready",
-            "not_applicable": "failed",
-            "invalid_input": "failed",
-            "execution_failed": "failed",
-        }[result.status]
+        terminal_status = normalize_tool_status(result.status)
         terminal = self._record(
             provider_call_id=provider_call_id,
             response_identity=response_identity,
@@ -323,21 +453,68 @@ class AlgorithmTool:
     def to_langchain_tool(self) -> Any:
         """包装为使用 ToolRuntime/Command 原子回写结果和 Ledger 的 Tool。"""
 
-        try:
-            from langchain.tools import ToolRuntime
-            from langchain_core.tools import StructuredTool
-        except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover
-            raise RuntimeError("LangChain is not installed") from exc
+        from langchain.tools import ToolRuntime
+        from langchain_core.tools import StructuredTool
 
         async def call(runtime: Any, **kwargs: Any) -> Any:
             identity = resolve_runtime_invocation(
                 runtime,
                 expected_context=self.runtime_context,
             )
+            state = getattr(runtime, "state", None)
+            if not isinstance(state, Mapping):
+                raise RuntimeError("ToolRuntime.state must be a mapping")
             started_at = datetime.now(timezone.utc)
-            active_adapter_input = self.adapter_input or self._adapter_input_from_runtime(
-                runtime
+            effect_query = build_effect_query(
+                capability_id=self.entry.spec.capability_id, parameters=kwargs,
             )
+            runtime_adapter_input = self._adapter_input_from_runtime(runtime)
+            active_adapter_input = runtime_adapter_input
+            graph_rejection, graph_artifacts = _resolve_graph_artifacts(
+                spec=self.entry.spec,
+                state=state,
+                arguments=kwargs,
+                trusted_identity=identity.runtime_context.trusted_identity,
+            )
+            if graph_rejection is not None:
+                await identity.runtime_context.ensure_active()
+                trusted = identity.runtime_context.trusted_identity
+                invocation_id = build_invocation_id(
+                    job_id=trusted.job_id, response_identity=identity.response_identity,
+                    provider_call_id=identity.provider_call_id,
+                )
+                source, dataset_id = _graph_source_identity(trusted)
+                result = AlgorithmResult(
+                    result_ref=build_result_ref(invocation_id=invocation_id, result_index=0),
+                    invocation_id=invocation_id, provider_call_id=identity.provider_call_id,
+                    capability_id=self.entry.spec.capability_id,
+                    capability_version=self.entry.spec.version,
+                    status=graph_rejection["status"], method=self.entry.spec.method_definition(),
+                    diagnostics=Diagnostics(
+                        summary=graph_rejection["reason"] + graph_rejection["next_action"],
+                        safe_error_code=(
+                            SafeErrorCode.ALGORITHM_NOT_READY if graph_rejection["status"] == "not_ready"
+                            else SafeErrorCode.ALGORITHM_INPUT_INVALID
+                        ),
+                    ),
+                    provenance=AlgorithmResultProvenance(
+                        research_identity=getattr(trusted.analysis_input, "research_identity", None),
+                        job_id=str(trusted.job_id), attempt_count=trusted.attempt_count,
+                        lease_epoch=trusted.lease_epoch, input_identity=current_input_identity(trusted),
+                        source_input_identity=source, analysis_dataset_id=dataset_id,
+                        spec_digest=self.entry.spec.spec_digest,
+                        invocation_id=invocation_id, capability_id=self.entry.spec.capability_id,
+                        capability_version=self.entry.spec.version,
+                    ),
+                )
+                return await algorithm_terminal_command(
+                    runtime, identity=identity, tool_name=self.name,
+                    result=result, started_at=started_at, effect_query=effect_query,
+                )
+            if graph_artifacts:
+                active_adapter_input = replace(
+                    active_adapter_input, artifacts=graph_artifacts
+                )
             public_decision = kwargs.pop("public_decision", None)
             if public_decision is not None:
                 await emit_public_decision_event(
@@ -352,76 +529,26 @@ class AlgorithmTool:
                 identity=identity,
                 tool_name=self.name,
             )
-            try:
-                result = await self.ainvoke(
-                    kwargs,
-                    provider_call_id=identity.provider_call_id,
-                    response_identity=identity.response_identity,
-                    runtime_context=identity.runtime_context,
-                    adapter_input=active_adapter_input,
-                )
-                await identity.runtime_context.ensure_active()
-            except (asyncio.CancelledError, JobExecutionRevoked):
-                await emit_tool_lifecycle_event(
-                    runtime,
-                    event_type="tool_call_result",
-                    identity=identity,
-                    tool_name=self.name,
-                    status="canceled",
-                )
-                raise
-            except Exception:
-                await emit_tool_lifecycle_event(
-                    runtime,
-                    event_type="tool_call_result",
-                    identity=identity,
-                    tool_name=self.name,
-                    status="failed",
-                    safe_error_code="ALGORITHM_RESULT_CONTRACT_INVALID",
-                )
-                raise
-            attempt_status = {
-                "valid": "succeeded",
-                "timed_out": "timed_out",
-                "not_ready": "not_ready",
-                "not_applicable": "failed",
-                "invalid_input": "failed",
-                "execution_failed": "failed",
-            }[result.status]
-            safe_error_code = result.diagnostics.safe_error_code
-            if hasattr(safe_error_code, "value"):
-                safe_error_code = safe_error_code.value
-            await emit_tool_lifecycle_event(
-                runtime,
-                event_type="tool_call_result",
-                identity=identity,
-                tool_name=self.name,
-                status=("succeeded" if result.status == "valid" else "failed"),
-                safe_error_code=safe_error_code,
+            # 取消只清理资源并传播；调度层区分 deadline 和外部撤销，统一收口终态。
+            result = await self.ainvoke(
+                kwargs,
+                provider_call_id=identity.provider_call_id,
+                response_identity=identity.response_identity,
+                runtime_context=identity.runtime_context,
+                adapter_input=active_adapter_input,
             )
-            terminal = build_terminal_invocation(
-                identity=identity,
-                tool_name=self.name,
-                attempt_status=attempt_status,
-                started_at=started_at,
-                result_ref=result.result_ref,
-                safe_error_code=safe_error_code,
-            )
-            return build_tool_command(
-                identity=identity,
-                tool_name=self.name,
-                payload=result.model_dump(mode="json"),
-                ledger_record=terminal,
-                state_updates={
-                    "algorithm_results": {result.result_ref: result},
-                },
+            return await algorithm_terminal_command(
+                runtime, identity=identity, tool_name=self.name,
+                result=result, started_at=started_at, effect_query=effect_query,
             )
 
         # StructuredTool 会把 ToolRuntime 识别为 injected arg；显式 args_schema
         # 仍只暴露 AlgorithmSpec 中的科学参数，不让模型填写内部身份。
         call.__annotations__["runtime"] = ToolRuntime
         runtime_args_schema = with_tool_runtime_schema(
-            build_model_tool_input_schema(self.args_schema),
+            build_model_tool_input_schema(
+                self.args_schema,
+            ),
             tool_name=self.name,
             tool_runtime_type=ToolRuntime,
         )
@@ -439,7 +566,6 @@ def build_algorithm_tools(
     runtime_context: "AgentRunContext | None" = None,
     data_profile: DataProfile | None = None,
     input_identity: str | None = None,
-    dataset_csv: str | None = None,
     missing_values_present: bool = False,
 ) -> tuple[AlgorithmTool, ...]:
     """按 Registry 静态顺序生成当前启用的领域工具。"""
@@ -454,8 +580,11 @@ def build_algorithm_tools(
         adapter_input = AdapterInput(
             data_profile=data_profile,
             input_identity=identity,
-            dataset_csv=dataset_csv,
             missing_values_present=missing_values_present,
+            dataset_authority_available=True,
+            semantic_kinds=AlgorithmTool._trusted_semantic_kinds(
+                runtime_context.trusted_identity, data_profile,
+            ),
         )
     tools: list[AlgorithmTool] = []
     for entry in registry.entries:

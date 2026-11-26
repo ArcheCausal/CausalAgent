@@ -4,9 +4,12 @@ import { useLocale } from '../i18n/use-locale'
 import { isPresentationActive } from '../runtime/chat/presentation'
 import { useChatScrollFollow } from '../runtime/chat/scroll-follow'
 import { stepDetailText, textDetail } from '../runtime/jobs/step-details'
+import { waitingInputFromInteraction } from '../runtime/jobs/event-reducer'
+import { interactionIdentity } from '../runtime/jobs/interaction'
 import { useJobsStore } from '../stores/jobs.store'
-import type { ChatMessage, ExecutionPhase, StepDetail, ThinkingProjection } from '../types/domain'
+import type { ChatMessage, ExecutionPhase, InteractionIdentity, JobRecord, ProcessingOptionAction, StepDetail, ThinkingProjection, WaitingInput } from '../types/domain'
 import MessageBody from './MessageBody.vue'
+import ProcessingOptions from './ProcessingOptions.vue'
 import StreamingDraft from './StreamingDraft.vue'
 import ThinkingTimeline from './ThinkingTimeline.vue'
 
@@ -22,6 +25,10 @@ const props = defineProps<{
     reanalysisRequired: boolean
     needsRefresh: boolean
   } | null
+  submittingOptionId?: string | null
+  activeJob?: JobRecord | null
+  interactionSubmitting?: boolean
+  interactionError?: string | null
 }>()
 const emit = defineEmits<{
   'copy-result': [success: boolean]
@@ -31,6 +38,8 @@ const emit = defineEmits<{
   resend: [reanalyze: boolean]
   'refresh-edit': []
   'cancel-job': []
+  'choose-processing-option': [action: ProcessingOptionAction]
+  'use-other-requirement': [identity: InteractionIdentity]
 }>()
 const jobs = useJobsStore()
 const scrollFollow = useChatScrollFollow()
@@ -77,6 +86,16 @@ function fileExtension(filename: string): string {
 }
 
 /** 只有已持久化的历史阶段事件会走到这里；公开决策在历史中本来就是完整文本。 */
+function waitingForPhase(phase: ExecutionPhase): ThinkingProjection['waitingInput'] {
+  const interrupt = [...phase.events].reverse().find((event) => event.type === 'interrupt')
+  if (!interrupt) return null
+  return waitingInputFromInteraction(
+    interrupt,
+    typeof interrupt.question_id === 'string' ? interrupt.question_id : '',
+    typeof interrupt.message === 'string' ? interrupt.message : '',
+  )
+}
+
 function phaseThinking(phase: ExecutionPhase): ThinkingProjection {
   const steps: ThinkingProjection['steps'] = {}
   const order: string[] = []
@@ -127,7 +146,7 @@ function phaseThinking(phase: ExecutionPhase): ThinkingProjection {
     draftText: '',
     finalResult: null,
     errorMessage: null,
-    waitingInput: null,
+    waitingInput: waitingForPhase(phase),
   }
 }
 
@@ -170,22 +189,72 @@ const answeredInputs = computed(() => {
   return keys
 })
 
-const messageRows = computed(() => props.messages.map((message) => ({
+const currentInteraction = computed(() => {
+  const job = props.activeJob
+  const waiting = job?.thinking.waitingInput
+  const identity = job ? interactionIdentity(job) : null
+  return job && waiting && identity && waiting.status === 'waiting'
+    && (job.uiState === 'waiting_input' || job.uiState === 'resuming')
+    ? { waiting, identity, job } : null
+})
+
+function promptText(message: ChatMessage): string | null {
+  if (message.sender !== 'ai') return null
+  return typeof message.text === 'string' ? message.text
+    : message.text.type === 'human_input_required' ? message.text.summary ?? '' : null
+}
+
+/* 活动提示只搬动当前输入的最后一条匹配消息；旧问题即使正文相同也保留。 */
+const currentPromptId = computed(() => {
+  const current = currentInteraction.value
+  if (!current) return null
+  return [...props.messages].reverse().find((message) =>
+    message.analysisJobId === current.identity.jobId
+    && message.analysisJobInputId === (current.job.phaseInputId ?? undefined)
+    && promptText(message) === current.waiting.prompt)?.localId ?? null
+})
+
+function historicalWaiting(message: ChatMessage, thinking: ThinkingProjection | null, index: number): WaitingInput | null {
+  const waiting = thinking?.waitingInput
+  if (!waiting) return null
+  const current = currentInteraction.value
+  if (current && message.analysisJobId === current.identity.jobId
+    && waiting.questionId === current.identity.questionId && waiting.planVersion === current.identity.planVersion) return null
+  if (waiting.status !== 'waiting') return waiting
+  const answered = props.messages.slice(index + 1).some((next) => next.sender === 'user' && next.analysisJobId === message.analysisJobId)
+  return { ...waiting, status: answered ? 'answered' : 'closed' }
+}
+
+function hasPersistedPrompt(message: ChatMessage, waiting: WaitingInput): boolean {
+  return props.messages.some((other) => other.analysisJobId === message.analysisJobId
+    && other.analysisJobInputId === message.analysisJobInputId && promptText(other) === waiting.prompt)
+}
+
+function historicalPromptStatus(message: ChatMessage, index: number): string | null {
+  if (typeof message.text === 'string' || message.text.type !== 'human_input_required') return null
+  return props.messages.slice(index + 1).some((next) => next.sender === 'user' && next.analysisJobId === message.analysisJobId)
+    ? '已回答' : '已结束'
+}
+
+const messageRows = computed(() => props.messages.map((message, index) => ({
   message,
+  index,
   thinking: thinkingForMessage(message, {
     liveOwnerLocalId: message.analysisJobId ? liveOwnerByJob.value.get(message.analysisJobId) : undefined,
     answerInHistory: Boolean(message.analysisJobId)
       && answeredInputs.value.has(`${message.analysisJobId}:${message.thinkingAfter?.analysisJobInputId ?? ''}`),
   }),
-})))
+})).filter((row) => row.message.localId !== currentPromptId.value)
+  .map((row) => ({ ...row, waiting: historicalWaiting(row.message, row.thinking, row.index) })))
 
 watch(() => props.messages.length, () => scrollFollow.keepLatest())
+watch(() => currentInteraction.value?.waiting, () => scrollFollow.keepLatest())
 </script>
 
 <template>
   <div ref="timeline" class="message-timeline">
     <div v-if="!messageRows.length" class="conversation-empty" aria-live="polite">CausalAgent</div>
-    <div v-for="(row, index) in messageRows" :key="row.message.localId" class="message-row" :class="`${row.message.sender}-message-row`" :data-message-id="row.message.messageId">
+    <div v-for="row in messageRows" :key="row.message.localId" class="message-row" :class="`${row.message.sender}-message-row`" :data-message-id="row.message.messageId">
       <article class="message" :class="`${row.message.sender}-message`">
         <div v-if="row.message.sender === 'user' && row.message.fileAttachment" class="selected-file-card message-file-card">
           <span class="selected-file-icon" aria-hidden="true">{{ fileExtension(row.message.fileAttachment.filename) }}</span>
@@ -204,7 +273,7 @@ watch(() => props.messages.length, () => scrollFollow.keepLatest())
             @compositionend="endComposition"
             @keydown="editKeydown"
           ></textarea>
-          <p v-if="index < messageRows.length - 1 || row.thinking?.finalResult || row.thinking?.waitingInput">
+          <p v-if="row.index < messages.length - 1 || row.thinking?.finalResult || row.thinking?.waitingInput">
             {{ text.replaceFollowing }}
           </p>
           <p v-if="editing.reanalysisRequired">{{ text.reanalyzeNotice }}</p>
@@ -225,26 +294,37 @@ watch(() => props.messages.length, () => scrollFollow.keepLatest())
           @edit="emit('edit', row.message)"
         />
       </article>
+      <p v-if="historicalPromptStatus(row.message, row.index)" class="processing-options-status">{{ historicalPromptStatus(row.message, row.index) }}</p>
       <ThinkingTimeline
         v-if="row.thinking"
         :thinking="row.thinking"
         @decision-settled="onDecisionSettled(row.message.analysisJobId, $event)"
       />
-      <StreamingDraft
-        v-if="row.thinking?.draftText"
-        :text="row.thinking.draftText"
-        :animate="isPresentationActive(row.thinking.status)"
-        @copy-result="emit('copy-result', $event)"
-      />
+      <StreamingDraft v-if="row.thinking?.draftText" :text="row.thinking.draftText" :animate="isPresentationActive(row.thinking.status)" @copy-result="emit('copy-result', $event)" />
       <article v-if="row.thinking?.finalResult" class="message ai-message">
         <MessageBody :text="row.thinking.finalResult" @copy-result="emit('copy-result', $event)" />
       </article>
-      <article v-if="row.thinking?.waitingInput" class="message ai-message">
-        <MessageBody :text="{ type: 'human_input_required', summary: row.thinking.waitingInput.prompt }" @copy-result="emit('copy-result', $event)" />
+      <article v-if="row.waiting" class="message ai-message interaction-message">
+        <MessageBody v-if="!hasPersistedPrompt(row.message, row.waiting)" :text="{ type: 'human_input_required', summary: row.waiting.prompt }" @copy-result="emit('copy-result', $event)" />
+        <ProcessingOptions
+          :waiting="row.waiting"
+          :identity="{ jobId: row.message.analysisJobId ?? '', questionId: row.waiting.questionId, planVersion: row.waiting.planVersion }"
+        />
       </article>
       <article v-if="row.thinking?.errorMessage" class="message ai-message">
         <MessageBody :text="{ type: 'text', summary: `错误：${row.thinking.errorMessage}` }" @copy-result="emit('copy-result', $event)" />
       </article>
     </div>
+    <article v-if="currentInteraction" class="message ai-message interaction-message current-interaction" aria-label="当前待回答问题">
+      <MessageBody :text="{ type: 'human_input_required', summary: currentInteraction.waiting.prompt }" @copy-result="emit('copy-result', $event)" />
+      <ProcessingOptions
+        :waiting="currentInteraction.waiting"
+        :identity="currentInteraction.identity"
+        :submitting="interactionSubmitting || Boolean(props.submittingOptionId)"
+        :error-message="interactionError"
+        @choose="emit('choose-processing-option', $event)"
+        @other="emit('use-other-requirement', $event)"
+      />
+    </article>
   </div>
 </template>

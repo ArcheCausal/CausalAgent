@@ -59,24 +59,31 @@ emit_string() {
 }
 
 MYSQL_USER_VALUE="$(read_env MYSQL_USER)"
-MYSQL_PASSWORD_VALUE="$(read_env MYSQL_PASSWORD)"
 MYSQL_DATABASE_VALUE="$(read_env MYSQL_DATABASE)"
 [ -z "$MYSQL_DATABASE_VALUE" ] && MYSQL_DATABASE_VALUE="rag_eval_staging"
 
 mysql_query() {
-    if [ -z "$MYSQL_USER_VALUE" ] || [ -z "$MYSQL_PASSWORD_VALUE" ]; then
+    if [ -z "$MYSQL_USER_VALUE" ]; then
         printf 'missing'
         return 0
     fi
-    dk exec "$PROJECT-mysql-primary-1" mysql \
-        -u"$MYSQL_USER_VALUE" -p"$MYSQL_PASSWORD_VALUE" --default-character-set=utf8mb4 -N -B -e "$1" 2>/dev/null \
+    dk exec "$PROJECT-mysql-primary-1" sh -c '
+        . /opt/causalagent/secret-env.sh
+        MYSQL_PWD="$(secret_value MYSQL_PASSWORD)" || exit 1
+        export MYSQL_PWD
+        exec mysql "$@"
+    ' _ -u"$MYSQL_USER_VALUE" --default-character-set=utf8mb4 -N -B -e "$1" 2>/dev/null \
         || printf 'error'
 }
 
 replica_query() {
     if [ "$DOCKER_SUDO" = "-1" ]; then printf 'missing'; return 0; fi
-    sudo -n docker exec "$PROJECT-mysql-replica-1" sh -c \
-        'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -B -e "$1" 2>/dev/null' _ "$1" 2>/dev/null \
+    dk exec "$PROJECT-mysql-replica-1" sh -c '
+        . /opt/causalagent/secret-env.sh
+        MYSQL_PWD="$(secret_value MYSQL_ROOT_PASSWORD)" || exit 1
+        export MYSQL_PWD
+        exec mysql "$@"
+    ' _ -uroot -N -B -e "$1" 2>/dev/null \
         || printf 'error'
 }
 
@@ -126,7 +133,7 @@ if [ "$DOCKER_SUDO" != "-1" ]; then
     printf '    %s\n' "$(emit_string app_image_revision_label "$app_rev")"
     printf '  },\n'
 
-    if [ -n "$MYSQL_USER_VALUE" ] && [ -n "$MYSQL_PASSWORD_VALUE" ]; then
+    if [ -n "$MYSQL_USER_VALUE" ]; then
         tcon="$(mysql_query "SHOW GLOBAL STATUS WHERE Variable_name='Threads_connected';" | awk '{print $2}')"
         trun="$(mysql_query "SHOW GLOBAL STATUS WHERE Variable_name='Threads_running';" | awk '{print $2}')"
         tcre="$(mysql_query "SHOW GLOBAL STATUS WHERE Variable_name='Threads_created';" | awk '{print $2}')"
@@ -153,7 +160,7 @@ if [ "$DOCKER_SUDO" != "-1" ]; then
         printf '    %s\n' "$(emit_string counts "$jobs")"
         printf '  },\n'
     else
-        printf '  "mysql": {"status": "missing", "reason": "凭据文件无 MYSQL_USER 或 MYSQL_PASSWORD"},\n'
+        printf '  "mysql": {"status": "missing", "reason": "部署环境文件无 MYSQL_USER"},\n'
         printf '  "job_queue": {"status": "missing", "reason": "凭据不可用"},\n'
     fi
 else

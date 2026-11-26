@@ -37,6 +37,16 @@ Vue 的 Job 传输层使用 `fetch()` 和 `ReadableStream`，不使用原生 `Ev
 
 JobController 为每个 Job 管理订阅 generation，切换 Session、取消、登出或卸载时使旧回调失效。`waiting_input` 是可恢复暂停态；`final_result`、`error` 和 `canceled` 进入终态并停止订阅，终态保留已渲染结果但释放原始文本拼接和语义去重缓冲。创建、恢复、取消分别使用独立幂等键，取消的 409 终态冲突按后端状态对账。运行态不显示独立取消按钮；发送键变为带旋转进度环和中心方块的停止键，再次点击调用相同的取消 API。
 
+历史阶段恢复时先按事件 ID 回放公开事件，再设置该阶段的最终状态，避免终态守卫跳过历史错误消息和结果。数据处理失败使用服务端的 `error` 终态；参数提取失败显示“参数解析失败”及未启动因果分析的说明，刷新后仍恢复同一失败消息。
+
+当前交互从活动 Job 的 `current_question_id`、`current_waiting_prompt` 和 `current_interaction` 单独恢复，不依赖历史执行阶段是否包含 `interrupt`。时间线末尾只显示一份当前问题，已持久化的同一输入提示由该区域承载；问题正文、方案摘要、操作按钮与剩余时间纵向排列。方案摘要包含观察单位、`role_columns` 中结果变量与处理变量对应的输出列、处理步骤、字段含义与限制；未声明的角色不显示对应条目，历史方案可省略映射。长字段换行，窄屏按钮使用完整宽度。
+
+交互生命周期区分 `waiting`（等待）、`answered`（已回答）、`expired`（已过期）和 `closed`（已结束）。提交选项、确认或修改操作携带 `jobId + questionId + planVersion`，组件和提交入口分别核对当前身份。文本回答在发起请求前固定同一身份，重试不读取其他问题；提交期间禁止重复操作。只有恢复请求成功后，原阶段才固定为已完成、问题标记为已回答并停止倒计时；失败时保留问题、方案和原截止时间，卡片显示错误并允许在期限内重试。迟到响应不能清除新问题，切换会话后的提交响应也不能追加到其他会话。
+
+仅等待中的问题显示倒计时，问题身份或截止时间变化时重新初始化计时器。刷新优先使用活动 Job 的数据库截止时间 `input_wait_expires_at`，缺少时沿用交互载荷中的 `expires_at`，不在浏览器重新生成期限。历史问题保留原位置，已回答与已结束的问题没有操作入口。内存快照可保留已结束方案摘要；当前历史接口未返回完整交互字段，因此整页刷新后不保证恢复已结束方案的摘要。
+
+重新加载会话时，按每个活动 Job 最新的历史输入重建执行投影，并移除已不活跃的旧内存记录。历史仍显示执行或等待、活动摘要却已无该 Job 时，保留历史游标回放遗漏事件，再重新加载会话，覆盖两次读取之间任务结束的情况。提交响应只有在原会话及加载代次仍有效时才追加本地答复；历史已经重新加载或当前问题已经变化时，重新读取会话，避免重复追加。恢复响应即使已经是终态，也先从原游标回放 SSE，收到最终事件后再结束订阅，保证报告或错误内容能够渲染。
+
 ## 阶段明细、公开决策与展示节奏
 
 阶段明细只挂在同一个 `step_id` 下：`node_start` 创建阶段，`progress`、`decision`、`tool_call_start`、`tool_call_result` 和 `decision_delta` 作为明细追加，`node_end` 结束阶段。明细早于父 `node_start` 到达时先按 `step_id` 暂存，父阶段出现后按原顺序补绘一次，避免把明细挂到错误的阶段或改变阶段顺序。
@@ -59,6 +69,12 @@ JobController 为每个 Job 管理订阅 generation，切换 Session、取消、
 
 图表只读取经过校验的资源数据，使用 SVG 和 CSS 绘制直方图、分类柱状图和相关性热力图，第一阶段不引入第三方图表库，也不支持缩放、拖拽和导出。因果图只接受业务模型，由 `projectCausalGraphForVis()` 投影成 vis-network 载荷；`CausalGraph.vue` 支持 `view` 和 `select` 两种模式，数据变化时原地更新 `setData`，卸载时销毁实例，`select` 模式下向上抛出 `selectNode`/`selectEdge`。图形库仍然动态加载，初始入口不静态包含 vis-network。报告正文与普通聊天和追问消息共用同一条消息盒子，`.report-document` 只保留块间距与文字颜色，不再自带底色、边框和内边距；图表和因果图块仍各自使用白色卡片。报告的颜色、间距、标题层级、表格和移动端布局由 `.report-document` 上的 CSS 变量与各组件作用域样式控制，LLM 不返回类名或样式。
 
+报告标题右侧提供一键复制按钮，复制内容由 `renderers/report-clipboard.ts` 从同一份已校验文档投影成 Markdown：标题、章节层级、正文段落和来源清单按页面顺序保留，图表和因果图在文本副本里降级成 `[图表：标题]`、`[因果图：标题]` 占位行，来源页脚里默认收起的检索证据不写进副本，未知块直接跳过。复制期间按钮忽略重复点击，成功后就地显示“已复制”，失败显示“复制失败，请重试”，2 秒后恢复初始文案，切换到另一份报告时立即复位。剪贴板写入优先使用 `navigator.clipboard`，HTTP 非安全上下文退回临时 textarea 选中复制，两条路径都不可用时落到失败状态而不是静默丢内容。
+
+CDFM 主图沿用同一个 `CausalGraphBlock` 和选边说明。边的可选 `prediction` 与结构系数 `weight` 分开；Zod 接受缺失或 null 的旧字段，对存在的正反概率检查有限值及 `[0,1]` 范围。有向边显示 `p=…`，双箭头保留两个箭头并显示 `p₁`、`p₂`；选边说明按变量标签明确 `source→target` 和 `target→source` 的矩阵编码位置，两个分数共同编码潜在共同原因候选。图注说明模型预测概率的含义，并读取 `metadata.diagnostics.metrics.threshold` 显示实际阈值。数据保留完整精度，显示使用四位有效数字。CDFM 作为辅助结果时只供现有比较文字引用，不增加图入口；其他算法继续使用既有权重标签。旧报告不回填概率。字段来源及方法边界见[Agent 运行时](../architecture/agent-runtime.md)。
+
+`npm run test:cdfm` 使用独立配置检查真实解析函数、图投影和 Vue SSR 组件，不加载全局替身或模拟图形库；它证明契约与组件文字，不代表 canvas 点击、真实后端或完整模型会话。真实推理与可选 MCP HTTP 的人工入口见[测试与验证](testing.md#cdfm-边概率)。
+
 ## 开发与构建
 
 在仓库根目录执行：
@@ -76,6 +92,7 @@ npm run lint
 npm run typecheck
 npm run test:unit
 npm run test:components
+npm run test:interactions
 npm run test:e2e:mock
 npm run build
 npm run check
@@ -83,6 +100,8 @@ Pop-Location
 ```
 
 `npm run check` 当前串联上述检查。构建时图形库通过动态 import 延迟加载，初始入口不静态包含 vis-network；`public/vendor/marked.min.js` 通过 `markdown-adapter.ts` 兼容现有 Markdown 行为。当前原始 HTML 输出行为是已接受的兼容风险，本阶段不偷偷增加清洗策略或 CSP 语义变化。
+
+`npm run test:interactions` 使用独立配置，不加载全局 setup 或替换外部 API，直接验证实际 reducer、Pinia Store、组件及真实计时器；覆盖成功后旧问题不再过期、失败保留等待、身份校验、活动方案恢复和会话切换。该检查属于代码与组件回归，不代表真实后端或模型链路验收。
 
 ## Docker 与启动失败边界
 

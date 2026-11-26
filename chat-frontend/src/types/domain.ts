@@ -1,3 +1,5 @@
+import type { EffectRequest, EffectExecutionContext } from '../api/effect-request.schemas'
+
 export type Locale = 'zh' | 'en'
 
 export type JsonPrimitive = string | number | boolean | null
@@ -27,6 +29,10 @@ export interface CausalGraphEdge {
   target: string
   edge_type: string
   weight?: number | null
+  prediction?: {
+    forward_probability: number
+    reverse_probability: number
+  } | null
   metadata?: Record<string, unknown>
   evidence_refs?: string[]
 }
@@ -151,9 +157,58 @@ export type BackendJobStatus = 'queued' | 'running' | 'waiting_input' | 'succeed
 export type JobConnectionState = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed'
 export type JobUiState = 'idle' | 'creating' | 'queued' | 'running' | 'waiting_input' | 'resuming' | 'canceling' | 'completed' | 'failed' | 'canceled'
 
+export interface ProcessingOptionStep {
+  operation: string
+  columns: string[]
+  method: string | null
+}
+
+export interface ProcessingOption {
+  optionId: string
+  label: string
+  capabilityId: string
+  steps: ProcessingOptionStep[]
+  impact: string[]
+  risks: string[]
+}
+
+export interface ProcessingPlanSummary {
+  summary: string
+  observationUnit: string
+  transformations: string[]
+  variableSemantics: Record<string, string>
+  analysisColumns?: string[]
+  derivedMeasurementSemantics?: { column: string; kind: string; evidence: string }[]
+  roleColumns?: { target?: string | null; treatment?: string | null }
+  measurementColumns?: Record<string, string | null>
+  limitations: string[]
+  effectRequest?: EffectRequest | null
+  effectExecutionContext?: EffectExecutionContext | null
+}
+
 export interface WaitingInput {
+  status: 'waiting' | 'answered' | 'expired' | 'closed'
   questionId: string
+  interactionType: string | null
   prompt: string
+  algorithmName: string
+  expiresAt: string | null
+  options: ProcessingOption[]
+  planVersion: string | null
+  plan: ProcessingPlanSummary | null
+  allowOther: boolean
+  selectedOptionId: string | null
+  expired: boolean
+}
+
+export interface InteractionIdentity {
+  jobId: string
+  questionId: string
+  planVersion: string | null
+}
+
+export interface ProcessingOptionAction extends InteractionIdentity {
+  optionId: string
 }
 
 export type DetailTone = 'default' | 'error' | 'retry'

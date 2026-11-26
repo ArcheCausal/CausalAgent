@@ -13,6 +13,7 @@ from .models import McpInvocationContext, canonical_json_bytes
 # 固定项目命名空间，不是 secret；改变它会破坏 checkpoint replay 的身份稳定性。
 CAUSAL_INVOCATION_NAMESPACE = UUID("5f4b8f6b-0f3b-4c37-9e40-9d18a97a2e6f")
 DEEP_AGENT_RUN_NAMESPACE = UUID("7c1b3a10-5f2e-4e75-8e8c-1e9f8d4f1a2b")
+DATA_PROCESSING_RUN_NAMESPACE = UUID("b45c4713-cfc0-4aed-9550-aaf1546f60ba")
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,20 @@ def current_input_identity(identity: Any) -> str:
     return str(
         getattr(identity, "input_snapshot_digest", None)
         or getattr(identity, "input_identity", "")
+    )
+
+
+def provenance_matches_identity(provenance: Any, identity: Any) -> bool:
+    """结果 provenance 是否由当前 job/attempt/lease 与冻结输入产生。"""
+
+    return (
+        str(provenance.job_id) == str(identity.job_id)
+        and int(provenance.attempt_count) == int(identity.attempt_count)
+        and int(provenance.lease_epoch) == int(identity.lease_epoch)
+        and provenance.input_identity == current_input_identity(identity)
+        and getattr(provenance, "research_identity", None) == getattr(
+            getattr(identity, "analysis_input", identity), "research_identity", None,
+        )
     )
 
 
@@ -130,6 +145,28 @@ def build_deep_agent_run_id(*, job_id: str | UUID) -> str:
     return f"deep-agent:{uuid5(DEEP_AGENT_RUN_NAMESPACE, canonical_job_id)}"
 
 
+def build_data_processing_run_id(
+    *,
+    job_id: str | UUID,
+    source_input_identity: str,
+    semantic_identity: str | None = None,
+) -> str:
+    """同一 Job 和冻结输入保持一个处理空间，研究参数修订不改变身份。"""
+
+    canonical_job_id = str(UUID(str(job_id)))
+    payload = {
+        "job_id": canonical_job_id,
+        "source_input_identity": _non_blank(
+            source_input_identity, field_name="source_input_identity"
+        ),
+    }
+    identity = uuid5(
+        DATA_PROCESSING_RUN_NAMESPACE,
+        canonical_json_bytes(payload).decode("utf-8"),
+    )
+    return f"data-processing:{identity}"
+
+
 def build_deep_agent_step_id(
     *, job_id: str | UUID, attempt_count: int, task_id: str
 ) -> str:
@@ -165,6 +202,30 @@ def build_deep_agent_execution_scope(
     }
     digest = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
     return f"deep-agent-scope:{digest}"
+
+
+def build_deep_agent_analysis_scope(
+    *,
+    job_id: str | UUID,
+    input_identity: str,
+    research_identity: str | None = None,
+    spec_digests: Mapping[str, str] | None = None,
+) -> str:
+    """生成跨 worker/attempt 稳定的分析身份。
+
+    恢复时 attempt、lease 和 worker 会变化，但它们只代表本次执行权限；
+    同一 Job、同一冻结输入和同一算法 Spec 组合必须命中同一子图 checkpoint。
+    """
+
+    canonical_job_id = str(UUID(str(job_id)))
+    payload = {
+        "job_id": canonical_job_id,
+        "input_identity": _non_blank(input_identity, field_name="input_identity"),
+        "research_identity": research_identity,
+        "spec_digests": dict(sorted((spec_digests or {}).items())),
+    }
+    digest = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+    return f"deep-agent-analysis-scope:{digest}"
 
 
 def build_result_ref(*, invocation_id: str | UUID, result_index: int = 0) -> str:

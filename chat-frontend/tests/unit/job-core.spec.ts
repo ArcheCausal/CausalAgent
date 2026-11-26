@@ -2,13 +2,53 @@ import { describe, expect, it } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import type { DecodedSseEvent } from '../../src/api/events.schemas'
 import { useJobsStore } from '../../src/stores/jobs.store'
-import { createJobRecord, reduceJobEvent, settleDecision } from '../../src/runtime/jobs/event-reducer'
+import { createJobRecord, reduceJobEvent, seedJobFromPhase, settleDecision } from '../../src/runtime/jobs/event-reducer'
 
 function event(type: string, id: number, fields: Record<string, unknown> = {}, known = true): DecodedSseEvent {
   return { event: type, id, data: { type, ...fields }, known }
 }
 
 describe('job reducer and cursor semantics', () => {
+  const extractionFailure = '参数解析失败，未能从用户答复中提取有效的研究参数。本次未启动因果分析。'
+
+  it('shows parameter extraction failure and ignores a later success event', () => {
+    const state = createJobRecord('job-1', 'session-1', 'running')
+    const failed = reduceJobEvent(state, event('error', 1, { message: extractionFailure }))
+    expect(failed.terminal).toBe(true)
+    expect(failed.state).toMatchObject({
+      backendStatus: 'failed', uiState: 'failed', errorMessage: extractionFailure,
+      thinking: { status: 'failed', errorMessage: extractionFailure, finalResult: null },
+    })
+    const late = reduceJobEvent(failed.state, event('final_result', 2, { data: { type: 'text', summary: '完成' } }))
+    expect(late.applied).toBe(false)
+    expect(late.state.uiState).toBe('failed')
+  })
+
+  it('restores the parameter failure message and steps from a failed historical phase', () => {
+    const state = seedJobFromPhase('job-1', 'session-1', {
+      status: 'failed', elapsedSeconds: 5, lastEventId: 2,
+      events: [
+        { type: 'node_start', event_id: 1, step_id: 'processing', node_name: 'data_processing', title: '数据处理' },
+        { type: 'error', event_id: 2, message: extractionFailure },
+      ],
+    })
+    expect(state).toMatchObject({
+      backendStatus: 'failed', uiState: 'failed', errorMessage: extractionFailure,
+      thinking: { status: 'failed', errorMessage: extractionFailure },
+    })
+    expect(state.thinking.stepOrder).toEqual(['processing'])
+    expect(state.renderedEventId).toBe(2)
+  })
+
+  it('restores a successful historical result before applying its terminal status', () => {
+    const state = seedJobFromPhase('job-1', 'session-1', {
+      status: 'succeeded', elapsedSeconds: 5, lastEventId: 1,
+      events: [{ type: 'final_result', event_id: 1, data: { type: 'text', summary: '正常回复' } }],
+    })
+    expect(state.uiState).toBe('completed')
+    expect(state.thinking.finalResult).toMatchObject({ type: 'text', summary: '正常回复' })
+  })
+
   it('advances transport/resume cursor for unknown legal events without visible projection', () => {
     let state = createJobRecord('job-1', 'session-1', 'running')
     const unknown = reduceJobEvent(state, event('future_event', 1, { value: 'kept for transport only' }, false))

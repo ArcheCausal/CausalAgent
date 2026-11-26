@@ -10,6 +10,8 @@ import logging
 import sys
 import types
 
+import numpy as np
+import pandas as pd
 import pytest
 
 
@@ -181,67 +183,47 @@ def test_direct_lingam_reports_unavailable_dependency(monkeypatch) -> None:
     assert "raw_results" not in result
 
 
-def test_direct_lingam_returns_structured_success_result(monkeypatch) -> None:
-    """合法数据必须返回带方向、权重和因果顺序的完整成功结果。"""
+def test_direct_lingam_returns_structured_success_result() -> None:
+    """真实依赖在非高斯数据上返回完整方法快照、版本和 target/source 系数。"""
+    from causallearn.search.FCMBased import lingam
+    from Agent.deep_agent_tools.algorithm_specs import DIRECT_LINGAM_SPEC
 
-    class SuccessfulDirectLiNGAM:
-        """模拟 causal-learn 在固定两变量数据上的公开结果属性。"""
+    rng = np.random.default_rng(108)
+    source = rng.laplace(size=500)
+    data = pd.DataFrame({"A": source, "B": 0.8 * source + rng.laplace(size=500)})
+    result = causalachieve.run_direct_lingam_analysis(data.to_csv(index=False))
 
-        def __init__(self, *, measure):
-            self.measure = measure
-
-        def fit(self, data):
-            self.causal_order_ = [0, 1]
-            self.adjacency_matrix_ = [[0.0, 0.0], [0.82, 0.0]]
-            return self
-
-    _install_fake_lingam_module(monkeypatch, SuccessfulDirectLiNGAM)
-
-    result = causalachieve.run_direct_lingam_analysis(
-        "A,B\n1,3\n2,5\n3,8\n"
-    )
-
-    assert result == {
-        "schema_version": "causal_discovery_v1",
-        "success": True,
-        "algorithm": "direct_lingam",
-        "implementation": {
-            "package": "causal-learn",
-            "version": "0.1.4.7",
-            "module": "causallearn.search.FCMBased.lingam",
-            "embedded_version": "1.5.4",
-        },
-        "parameters": {"measure": "pwling"},
-        "matrix_convention": "target_to_source",
-        "data": {
-            "nodes": [
-                {"id": "A", "label": "A"},
-                {"id": "B", "label": "B"},
-            ],
-            "edges": [
-                {
-                    "from": "A",
-                    "to": "B",
-                    "arrows": "to",
-                    "label": "0.82",
-                    "weight": 0.82,
-                }
-            ],
-        },
-        "raw_results": {
-            "adjacency_matrix": [[0.0, 0.0], [0.82, 0.0]],
-            "edges": ["A --> B"],
-            "causal_order": [0, 1],
-            "causal_order_names": ["A", "B"],
-        },
-        "diagnostics": {
-            "n_samples": 3,
-            "n_features": 2,
-            "warnings": [],
-        },
-        "message": "DirectLiNGAM 因果发现完成。",
-        "analyzed_filename": None,
+    assert result["success"] is True
+    assert result["schema_version"] == "causal_discovery_v1"
+    assert result["algorithm"] == "direct_lingam"
+    assert result["runner_version"] == "causalachieve-v2"
+    assert result["method"] == DIRECT_LINGAM_SPEC.method_definition().model_dump(mode="json")
+    assert result["implementation"] == {
+        "package": "causal-learn",
+        "version": importlib.metadata.version("causal-learn"),
+        "module": "causallearn.search.FCMBased.lingam",
+        "embedded_version": lingam.__version__,
     }
+    assert result["parameters"] == {"measure": "pwling"}
+    assert result["matrix_convention"] == "target_to_source"
+    assert result["data"]["nodes"] == [
+        {"id": "A", "label": "A"}, {"id": "B", "label": "B"},
+    ]
+    assert sorted(result["raw_results"]["causal_order"]) == [0, 1]
+    assert set(result["raw_results"]["causal_order_names"]) == {"A", "B"}
+    matrix = result["raw_results"]["adjacency_matrix"]
+    expected_edges = {
+        (data.columns[source_index], data.columns[target_index]): matrix[target_index][source_index]
+        for target_index in range(2) for source_index in range(2)
+        if matrix[target_index][source_index] != 0
+    }
+    assert expected_edges
+    assert {(edge["from"], edge["to"]): edge["weight"]
+            for edge in result["data"]["edges"]} == expected_edges
+    assert all(edge["arrows"] == "to" for edge in result["data"]["edges"])
+    assert result["diagnostics"] == {"n_samples": 500, "n_features": 2, "warnings": []}
+    assert result["message"] == "DirectLiNGAM 因果发现完成。"
+    assert result["analyzed_filename"] is None
 
 
 def test_direct_lingam_converts_fit_failure_to_structured_error(monkeypatch) -> None:

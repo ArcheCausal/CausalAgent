@@ -146,8 +146,70 @@ def test_edit(app, username, password):
     jobs.cancel_job(user_id, a[1]["job_id"], str(uuid4()))
 
 
+def test_historical_answer_reanalysis(app, username, password):
+    client = app.test_client()
+    assert client.post("/api/register", json={"username": username, "password": password}).status_code == 200
+    auth = client.post("/api/login", json={"username": username, "password": password}).get_json()
+    csrf = auth["csrf_token"]
+    session_id = client.post("/api/new_chat").get_json()["new_session_id"]
+    created = client.post(
+        "/api/agent/jobs",
+        json={"session_id": session_id, "message": "分析请求"},
+        headers={"Idempotency-Key": str(uuid4())},
+    )
+    assert created.status_code == 202
+    job_id = created.get_json()["job_id"]
+    worker = jobs.claim_next_job("edit-reanalysis-acceptance")
+    assert worker and worker["job_id"] == job_id
+    question_id = "acceptance-history-question"
+    question = "请补充观察单位"
+    assert jobs.complete_job_with_chat(
+        worker, worker["worker_id"], "interrupt",
+        {"type": "interrupt", "message": question, "question_id": question_id},
+        {"type": "human_input_required", "summary": question}, None,
+        question_id=question_id, lease_epoch=worker["lease_epoch"],
+    )
+    resumed, existing = jobs.resume_job(
+        worker["user_id"], job_id, question_id, "按日", str(uuid4())
+    )
+    assert resumed["status"] == "queued" and not existing
+    worker = jobs.claim_next_job("edit-reanalysis-acceptance")
+    assert worker and worker["job_id"] == job_id
+    assert jobs.complete_job_with_chat(
+        worker, worker["worker_id"], "final_result", {"type": "final_result"},
+        {"type": "text", "summary": "原分析结果"}, {}, lease_epoch=worker["lease_epoch"],
+    )
+
+    def history():
+        response = client.get(f"/api/load_session?session={session_id}")
+        assert response.status_code == 200
+        return response.get_json()
+
+    original = history()
+    messages = original["messages"]
+    assert [entry["sender"] for entry in messages] == ["user", "ai", "user", "ai"]
+    path = f"/api/sessions/{session_id}/messages/{messages[2]['message_id']}/edit-resend"
+    body = {"message": "按周", "conversation_version": original["conversation_version"]}
+    headers = {"X-CSRF-Token": csrf, "Idempotency-Key": str(uuid4())}
+    refused = client.post(path, json=body, headers=headers)
+    assert refused.status_code == 409 and refused.get_json()["code"] == "edit_reanalysis_required"
+    assert history()["conversation_version"] == original["conversation_version"]
+    headers["Idempotency-Key"] = str(uuid4())
+    accepted = client.post(path, json={**body, "allow_reanalysis": True}, headers=headers)
+    assert accepted.status_code == 202
+    replacement = accepted.get_json()
+    assert replacement["execution_mode"] == "reanalyze" and replacement["job_id"] != job_id
+    visible = history()["messages"]
+    assert [entry["message_id"] for entry in visible] == [
+        messages[0]["message_id"], messages[1]["message_id"], replacement["message_id"],
+    ]
+    assert visible[-1]["text"] == "按周"
+    jobs.cancel_job(worker["user_id"], replacement["job_id"], str(uuid4()))
+
+
 if __name__ == "__main__":
     if not database_settings.MYSQL_DATABASE.startswith("causalagent_edit"):
         raise SystemExit("This acceptance test requires a disposable causalagent_edit* database.")
     test_edit(create_app(), f"fence_{uuid4().hex[:12]}", f"A3{uuid4()}")
-    print("MySQL and Flask: rollback, permissions, concurrency, draining, preprocessing retry and late worker fencing passed.")
+    test_historical_answer_reanalysis(create_app(), f"answer_{uuid4().hex[:12]}", f"A3{uuid4()}")
+    print("MySQL and Flask: rollback, permissions, concurrency, draining, preprocessing retry, late worker fencing and explicit historical reanalysis passed.")

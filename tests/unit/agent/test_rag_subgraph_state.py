@@ -75,7 +75,7 @@ def _parent_input() -> dict:
         "tool_call_request": False,
         "file_summary": None,
         "route_decision": "postprocess",
-        "fold_decision": "preprocess",
+        "dataset_validation_status": "accepted",
         "postprocess_result": None,
         "chart_assets": None,
         "report_document": None,

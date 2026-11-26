@@ -7,7 +7,7 @@ P2-U 测试不要求真实 deepagents/langgraph 包已安装。只有显式调�
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 import importlib
 import inspect
@@ -17,6 +17,7 @@ from Agent.deep_agent_tools.identity import new_message_execution_id
 from Agent.deep_agent_tools.models import FinalAnalysisDecision
 from Agent.deep_agent_tools.registry import AlgorithmRegistry
 from Agent.deep_agent_tools.dependency_dispatch import (
+    _tool_calls_from_state,
     build_algorithm_dependency_middleware,
 )
 
@@ -25,6 +26,10 @@ from .memory import MEMORY_PATHS
 from .profile import DeepAgentBudget, DeepAgentProfile, build_filesystem_permissions
 from .prompts import build_deep_agent_system_prompt
 from .state import ProjectDeepAgentState
+from .tool_call_limit import PendingToolCallLimitMiddleware
+from .analysis_budget import AnalysisBudgetMiddleware
+from .tool_call_protocol import ToolCallProtocolMiddleware
+from .tool_visibility import ToolVisibilityMiddleware
 
 
 class DeepAgentDependencyError(RuntimeError):
@@ -63,9 +68,13 @@ def build_tool_strategy() -> Any:
     return ToolStrategy(FinalAnalysisDecision)
 
 
-def build_budget_middlewares(profile: DeepAgentProfile) -> list[Any]:
-    """构造官方模型/Tool limit middleware；缺失时 fail closed。"""
+def build_budget_middlewares(profile: DeepAgentProfile, *, analysis_closeout: bool = False) -> list[Any]:
+    """构造预算限制；因果分析额外提供独立的结构化收尾阶段。"""
 
+    if analysis_closeout:
+        return [AnalysisBudgetMiddleware(
+            tool_limit=profile.budget.tool_call_limit, model_limit=profile.budget.model_call_limit,
+        )]
     try:
         module = importlib.import_module("langchain.agents.middleware")
     except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover - 真实版本门禁
@@ -92,7 +101,7 @@ def build_budget_middlewares(profile: DeepAgentProfile) -> list[Any]:
 
     return [
         construct(classes["ModelCallLimitMiddleware"], profile.budget.model_call_limit),
-        construct(classes["ToolCallLimitMiddleware"], profile.budget.tool_call_limit),
+        construct(PendingToolCallLimitMiddleware, profile.budget.tool_call_limit),
     ]
 
 
@@ -181,31 +190,54 @@ def _extract_verified_provider_response_id(
 
 
 def _build_message_identity_middleware(
-    *, provider_response_id_extractor: ProviderResponseIdExtractor | None = None
+    *, provider_response_id_extractor: ProviderResponseIdExtractor | None = None,
+    registry: AlgorithmRegistry | None = None,
 ) -> Any:
     """在每次模型响应后持久化 Tool 调用使用的 response fallback identity。"""
 
-    try:
-        from langchain.agents.middleware import AgentMiddleware
-    except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover
-        raise DeepAgentDependencyError("LangChain AgentMiddleware is not installed") from exc
+    from langchain.agents.middleware import AgentMiddleware
+    from Agent.deep_agent_tools.runtime_updates import (
+        RuntimeInvocationIdentity, build_pending_invocation,
+    )
 
     class MessageExecutionIdentityMiddleware(AgentMiddleware):
         def after_model(self, state: Any, runtime: Any) -> dict[str, Any]:
             # fallback 每轮都重新生成；provider ID 缺失时显式写 None，清除
             # 可能来自上一轮的旧值，而不是让 State reducer 沿用 stale identity。
-            return {
+            update = {
                 "message_execution_id": new_message_execution_id(),
                 "provider_response_id": _extract_verified_provider_response_id(
                     state, runtime, provider_response_id_extractor
                 ),
             }
+            if registry is not None:
+                tools = frozenset(entry.spec.tool_name for entry in registry.entries)
+                calls = _tool_calls_from_state(state, tools)
+                records = {}
+                provider_id = update["provider_response_id"]
+                for call in calls:
+                    if call.get("name") not in tools:
+                        continue
+                    identity = RuntimeInvocationIdentity(
+                        provider_call_id=call["id"],
+                        response_identity=provider_id or update["message_execution_id"],
+                        response_identity_source=(
+                            "provider_response_id" if provider_id else "message_execution_id"
+                        ),
+                        provider_response_id=provider_id,
+                        runtime_context=runtime.context,
+                    )
+                    record = build_pending_invocation(identity=identity, tool_name=call["name"])
+                    records[record.invocation_id] = record
+                if records:
+                    update["action_ledger"] = records
+            return update
 
     return MessageExecutionIdentityMiddleware()
 
 
 def _register_harness_profile(profile_key: str) -> None:
-    """关闭 0.7.13 自动注入的 general-purpose subagent 和 ``task`` 工具。"""
+    """关闭自动通用子 Agent，并移除 Worker 不允许执行的内置工具。"""
 
     if not profile_key.strip():
         raise DeepAgentDependencyError("harness profile key must be non-blank")
@@ -220,7 +252,18 @@ def _register_harness_profile(profile_key: str) -> None:
     register_harness_profile(
         profile_key,
         HarnessProfile(
-            general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)
+            general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False),
+            excluded_tools=frozenset(
+                {
+                    "execute",
+                    "write_file",
+                    "delete",
+                    "ls",
+                    "glob",
+                    "grep",
+                    "task",
+                }
+            ),
         ),
     )
 
@@ -295,11 +338,13 @@ def build_deep_agent(
         tools=["read_file", "edit_file"],
         _permissions=permissions,
     )
+    # after_model hooks execute in reverse registration order; place the protocol
+    # middleware first so it checks the response after identity, dispatch and budget.
     middleware = [
+        ToolCallProtocolMiddleware(),
         filesystem_middleware,
         _build_summarization_middleware(configured_model, profile),
-        *build_budget_middlewares(profile),
-        _build_message_identity_middleware(),
+        *build_budget_middlewares(profile, analysis_closeout=True),
     ]
     if registry is not None:
         middleware.append(
@@ -309,6 +354,12 @@ def build_deep_agent(
                 timeout_seconds=profile.budget.tool_node_timeout_seconds,
             )
         )
+    # 放在会修改工具集合的项目 middleware 之后；框架后续的 MemoryMiddleware
+    # 只修改提示词，ToolStrategy 单独追加结构化输出，不重新加入领域工具。
+    middleware.append(ToolVisibilityMiddleware())
+    # after_model 按注册的反序执行：先持久化 identity/queued，再写 running，
+    # 协议钩子最后补齐无效 JSON 调用，随后才进入工具路由。各 hook 有独立边界。
+    middleware.append(_build_message_identity_middleware(registry=registry))
     kwargs: dict[str, Any] = {
         "model": configured_model,
         "tools": _materialize_domain_tools(domain_tools),

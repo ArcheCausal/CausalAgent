@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Mapping
 from .state import CausalAgentState, RagSubgraphState, WebSearchState
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
@@ -7,6 +8,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 from typing import Literal, Optional, Any, List, Tuple, Dict
+import copy
 import logging
 import json
 import re
@@ -19,13 +21,18 @@ from langgraph.func import task
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 from Agent.llm_structured_output import StructuredOutputError, ainvoke_structured
+from Agent.data_processing.parameters import execution_parameters, parameter_identity
 from .fault_tolerance import (
     RAG_DEGRADATION_SUMMARY,
     build_rag_degradation_result,
 )
 from .analysis_context import (
-    MAX_CONTEXT_QUESTION_CHARS,
     build_context_index,
+    latest_user_message_text as _latest_human_text,
+    rebuild_context_index as _rebuild_context_index,
+    build_report_analysis_context,
+    report_primary_result,
+    report_data_metadata,
     context_algorithm_summary,
     context_facts_text,
     context_graph,
@@ -78,9 +85,7 @@ from Agent.causal_agent.web_search_node import (
 )
 
 # 数据库
-from Database.agent_connect import require_frozen_file_for_job
 from Database.analysis_contexts import (
-    apply_fold_context,
     create_context_for_new_file,
     find_user_file_by_name,
     switch_to_context,
@@ -147,10 +152,10 @@ class AgentIntentDecision(BaseModel):
 # 意图到路由的映射由后端固定，模型不能直接决定图路由。
 INTENT_ROUTES: Dict[str, str] = {
     "normal_chat": "normal_chat",
-    "start_analysis": "fold",
+    "start_analysis": "data_processing",
     "answer_report": "inquiry_answer",
     "revise_report": "report",
-    "rerun_analysis": "fold",
+    "rerun_analysis": "data_processing",
     "switch_analysis_context": "context_switch",
     "clarify": "inquiry_answer",
 }
@@ -180,15 +185,6 @@ _CSV_NAME_PATTERN = re.compile(r"[\w\-.]+\.csv", flags=re.IGNORECASE)
 # 整段重复进入提示词。
 INTENT_HISTORY_MESSAGE_CHARS = 400
 INTENT_HISTORY_TOTAL_CHARS = 2000
-
-
-def _latest_human_text(state: CausalAgentState) -> str:
-    """Return the latest human message content from the graph state."""
-    for message in reversed(state.get("messages", [])):
-        if isinstance(message, HumanMessage):
-            content = getattr(message, "content", "")
-            return content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-    return ""
 
 
 def _recent_history_text(state: CausalAgentState, limit: int = 20) -> str:
@@ -321,10 +317,10 @@ def _resolve_agent_route(
         return "context_switch", "normal_generation", None
     if intent == "rerun_analysis":
         hint = (decision.context_hint or "").strip()
-        route = "context_switch" if hint else "fold"
+        route = "context_switch" if hint else "data_processing"
         return route, "normal_generation", None
     if intent == "start_analysis":
-        return "fold", "normal_generation", None
+        return "data_processing", "normal_generation", None
     return INTENT_ROUTES.get(intent, "normal_chat"), "normal_generation", None
 
 
@@ -393,10 +389,11 @@ async def agent_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         latest_human_text,
         _frozen_filename(state),
     ):
-        response_message = AIMessage(content="决策：信息不全，启动文件加载模块。", name="agent")
+        response_message = AIMessage(content="决策：进入数据处理流程。", name="agent")
         return {
             "messages": [response_message],
-            "route_decision": "fold",
+            "route_decision": "data_processing",
+            "analysis_question": latest_human_text,
             "agent_decision": {"intent": "start_analysis"},
             "report_revision_mode": "normal_generation",
         }
@@ -436,7 +433,7 @@ async def agent_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
     )
 
     # 根据后端映射出的路由生成用于审计的展示消息。
-    if route_decision == "fold":
+    if route_decision == "data_processing":
         response_message = AIMessage(content="决策：进入因果分析流程。", name="agent")
     elif route_decision == "report":
         response_message = AIMessage(content="决策：按当前分析上下文重新生成报告。", name="agent")
@@ -452,6 +449,8 @@ async def agent_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         "route_decision": route_decision,
         "report_revision_mode": revision_mode,
     }
+    if route_decision in {"data_processing", "context_switch"}:
+        update["analysis_question"] = latest_human_text
     if decision is not None:
         decision_dump = decision.model_dump()
         if _clarification:
@@ -513,10 +512,10 @@ def _context_has_confirmed_facts(context_row: dict) -> bool:
 def _switch_followup_route(*, intent: Optional[str], context_row: dict) -> str:
     """按原意图和目标上下文的事实决定切换之后的下一步。"""
     if intent == "rerun_analysis":
-        return "fold"
+        return "data_processing"
     if _context_has_confirmed_facts(context_row):
         return "inquiry_answer"
-    return "fold"
+    return "data_processing"
 
 
 def _context_candidates_text(candidates: list) -> str:
@@ -534,30 +533,6 @@ def _context_candidates_text(candidates: list) -> str:
             parts.append(f"报告 {entry['latest_report_title']}")
         lines.append("、".join(parts))
     return "\n".join(f"- {line}" for line in lines)
-
-
-def _rebuild_context_index(
-    previous_index: Any,
-    previous_context: Any,
-    switched_to_id: Optional[str],
-    *,
-    limit: int = 8,
-) -> list:
-    """切换后用内存中的旧索引与旧当前上下文重建历史索引，不额外读库。"""
-    entries: list = []
-    if isinstance(previous_context, dict) and previous_context.get("analysis_context_id"):
-        entries.extend(build_context_index([previous_context]))
-    if isinstance(previous_index, list):
-        entries.extend(entry for entry in previous_index if isinstance(entry, dict))
-    unique: list = []
-    seen: set = set()
-    for entry in entries:
-        context_id = entry.get("analysis_context_id")
-        if not context_id or context_id in seen or context_id == switched_to_id:
-            continue
-        seen.add(context_id)
-        unique.append(entry)
-    return unique[: max(0, int(limit))]
 
 
 def _switched_context_state(
@@ -585,6 +560,7 @@ def _switched_context_state(
             AIMessage(content="决策：已切换分析上下文。", name="context_switch")
         ],
         "analysis_parameters": None,
+        "analysis_parameter_changes": [],
         "causal_analysis_result": None,
         "knowledge_base_result": None,
         "web_search_result": None,
@@ -599,10 +575,13 @@ def _switched_context_state(
         "deep_agent_web_evidence": {},
         "deep_agent_decision": None,
         "deep_agent_structured_response": None,
+        "deep_agent_accepted_decision": None,
         "deep_agent_retry_instruction": "",
         "finalization_retry_count": 0,
         "finalization_status": None,
         "finalization_error": None,
+        "deep_agent_budget_exhausted": False,
+        "analysis_limitations": [],
     }
     if file_snapshot:
         update["file_summary"] = {
@@ -770,11 +749,11 @@ async def context_switch_node(
                     previous_context=previous_context,
                     previous_index=previous_index,
                     file_snapshot=result.get("file_snapshot"),
-                    route="fold",
+                    route="data_processing",
                     resolution={
                         "status": result.get("status"),
                         "analysis_context_id": result["analysis_context_id"],
-                        "followup_route": "fold",
+                        "followup_route": "data_processing",
                     },
                 )
         if len(files) > 1:
@@ -793,68 +772,6 @@ async def context_switch_node(
             )
     return _clarification_update(question=None, status="no_match")
 
-async def _bind_analysis_context(
-    state: CausalAgentState,
-    runtime: Any,
-    *,
-    target: Optional[str],
-    treatment: Optional[str],
-) -> dict:
-    """fold 确定参数后把 Job 绑定到正确的分析上下文。
-
-    绑定上下文还没有参数时回填；参数与绑定上下文不同时优先复用同一文件上参数一致的
-    历史上下文，没有才新建并切换 active 指针。没有可信 Job 身份时不做任何写入。
-    """
-    identity = getattr(getattr(runtime, "context", None), "trusted_identity", None)
-    if identity is None:
-        return {}
-    question = _latest_human_text(state).strip()
-    result = await asyncio.to_thread(
-        apply_fold_context,
-        user_id=int(identity.user_id),
-        session_id=str(identity.session_id),
-        job_id=str(identity.job_id),
-        worker_id=identity.worker_id,
-        attempt_count=int(identity.attempt_count),
-        lease_epoch=int(identity.lease_epoch),
-        target=target,
-        treatment=treatment,
-        analysis_question=question[:MAX_CONTEXT_QUESTION_CHARS] or None,
-    )
-    if not result:
-        return {}
-    update: dict = {
-        "context_resolution": {
-            "status": "fold_bound",
-            "analysis_context_id": result.get("analysis_context_id"),
-            "action": result.get("action"),
-        },
-        "analysis_context_index": _rebuild_context_index(
-            state.get("analysis_context_index"),
-            state.get("analysis_context"),
-            result.get("analysis_context_id"),
-        ),
-    }
-    context = result.get("context")
-    if isinstance(context, dict):
-        update["analysis_context"] = context
-    return update
-
-class foldQuery(BaseModel):
-    """只从用户对话中提取因果分析所需的关键参数。"""
-    target: Optional[str] = Field(
-        None,
-        description="从用户对话中识别出的目标变量(target)或结果变量(outcome)。如果未提及，则留空。"
-    )
-    treatment: Optional[str] = Field(
-        None,
-        description="从用户对话中识别出的处理变量(treatment)或干预变量(intervention)。如果未提及，则留空。"
-    )
-
-## fold节点用到的函数
-from Agent.Processing.fold_processing import get_data_summary
-from Agent.Processing.fold_verify import validate_analysis
-from Agent.Processing.nonlinearity import measure_nonlinearity
 from Agent.Report.assets import (
     build_causal_graph_model,
     build_chart_assets,
@@ -864,228 +781,22 @@ from Agent.Report.assets import (
 )
 from Agent.Report.document import (
     ChartAsset,
+    MarkdownBlock,
     ReportDraft,
+    ReportSchemaError,
     ReportDocument,
     build_report_document,
+    iter_report_blocks,
     report_document_summary,
 )
 
 
-FILE_LOAD_INTERRUPT_MESSAGE = (
-    "当前任务冻结的 CSV 文件无法读取或解析。请取消任务，重新上传可用的 CSV 文件后再试。"
-)
-
-
-def _normalize_optional_llm_text(value: str | None) -> str | None:
-    """将 LLM 可空文本中的明确缺失哨兵转换为 None。"""
-    if value is None:
-        return None
-    normalized = value.strip()
-    if not normalized or normalized.casefold() in {"none", "null"}:
-        return None
-    return value
-
-
-async def fold_node(
+async def preprocess_node(
     state: CausalAgentState,
     llm: ChatOpenAI,
     *,
     runtime: Any = None,
 ) -> dict:
-    """
-    文件加载、解析与验证节点。
-    1.  使用LLM从对话中提取目标和处理变量。
-    2.  按 Job 冻结的对象 ID 从数据库加载文件内容。
-    3.  运行 get_data_summary 进行全面的数据分析。
-    4.  调用 validate_analysis 进行严格的条件验证。
-    5.  根据验证结果，决策进入 'preprocess' 节点或 'ask_human' 节点。
-    """
-    user_id = state.get("user_id")
-    file_summary = state.get("file_summary") or {}
-    input_user_file_id = file_summary.get("user_file_id")
-    input_object_id = file_summary.get("object_id")
-
-    if not input_user_file_id or not input_object_id:
-        return {
-            "messages": [
-                AIMessage(
-                    content="请先上传并选择一个 CSV 文件，再开始因果分析。",
-                    name="fold",
-                )
-            ],
-            "fold_decision": "normal_chat",
-        }
-
-    # 1. 使用 LLM 提取分析参数，不从自然语言选择文件
-    prompt = ChatPromptTemplate.from_messages([
-            ("system",
-            """你是一个智能助手，你的任务是从用户的最新消息中识别出以下信息，并以JSON格式返回：
-            1. 用户关心的目标变量 (target/outcome)。
-            2. 用户想要评估效果的处理变量 (treatment/intervention)。
-
-            文件已经由当前 Job 的冻结输入确定，严禁从自然语言选择文件。
-            如果用户没有提到目标或处理变量，请将对应字段设为 null。
-
-            示例:
-            - 用户: "帮我分析销售额和促销活动的关系..."
-            -> 提取: `target='销售额'`, `treatment='促销活动'`
-            - 用户: "分析一下我的数据，看看是什么影响了客户流失"
-            -> 提取: `target='客户流失'`, `treatment=null`
-            
-            你必须严格按照 `foldQuery` 的 schema 返回一个 JSON 对象。
-            **绝对不要**在你的回复中包含任何Markdown格式或解释性文字。
-            **重要：如果某个字段为空，请使用 JSON 的 null 值，而不是字符串 "None"。**
-
-            示例输出（所有字段都有值）:
-            {{
-                "target": "销售额",
-                "treatment": "促销活动"
-            }}
-            
-            示例输出（部分字段为空）:
-            {{
-                "target": "客户流失",
-                "treatment": null
-            }}
-            
-            """),
-            MessagesPlaceholder(variable_name="messages"),
-        ])
-    try:
-        structured_response = await ainvoke_structured(
-            llm=llm,
-            schema=foldQuery,
-            prompt=prompt,
-            inputs={"messages": llm_prompt_messages(state["messages"])},
-            node_name="fold",
-        )
-
-        target = _normalize_optional_llm_text(structured_response.target)
-        treatment = _normalize_optional_llm_text(structured_response.treatment)
-        
-    except StructuredOutputError:
-        _log_node_degradation("structured_output_error", "empty_parameters")
-        target = None
-        treatment = None
-
-    try:
-        file_row = await asyncio.to_thread(
-            require_frozen_file_for_job,
-            user_id,
-            state.get("job_id", ""),
-            input_user_file_id,
-            input_object_id,
-        )
-        file_content_str = file_row["file_content"].decode("utf-8")
-        df = await asyncio.to_thread(pd.read_csv, io.StringIO(file_content_str))
-        data_summary = await asyncio.to_thread(get_data_summary, df)
-    
-    except Exception:
-        _log_node_degradation(
-            "file_load_error",
-            "waiting_input",
-            exc_info=True,
-        )
-        
-        # 使用 interrupt() 暂停并等待用户输入
-        user_response = interrupt(FILE_LOAD_INTERRUPT_MESSAGE)
-        new_message = HumanMessage(content=resume_value_to_message_content(user_response))
-        
-        return {"messages": [new_message], "fold_decision": "agent"}
-
-    state['analysis_parameters'] = data_summary
-    # 刻意放在上面的 try 块之外：那块抛异常会走 interrupt() 挂起等用户输入。
-    # measure_nonlinearity 内部全兜、绝不抛异常，但仍不放进那条路径。
-    state['analysis_parameters']['nonlinearity'] = measure_nonlinearity(
-        df, state['analysis_parameters']
-    )
-    file_summary = {
-        "user_file_id": input_user_file_id,
-        "object_id": input_object_id,
-        "file_hash": file_summary.get("file_hash"),
-        "filename": file_summary.get("filename"),
-        "rows": data_summary.get("n_rows"),
-        "columns": data_summary.get("columns", []),
-    }
-    state["file_summary"] = file_summary
-    
-    # 运行确定性验证
-    is_ready, issues, recommends = await asyncio.to_thread(
-        validate_analysis,
-        data_summary, 
-        target=target,
-        treatment=treatment,
-    )
-
-    # 根据验证结果决策
-    if is_ready == 0 or is_ready == 1:
-        state['analysis_parameters'].update({"target": target, "treatment": treatment})
-
-        # 收集需要返回的新消息
-        new_messages = []
-        recommend_message = AIMessage(content = "决策：信息完备，进入预处理节点。", name="fold")
-        new_messages.append(recommend_message)
-
-        # 针对建议，生成提示
-        if recommends:
-            recommend_message = AIMessage(content=f"决策：信息完备，进入预处理节点。提示：\n- {recommends}")
-            new_messages.append(recommend_message)
-        
-        update = {"messages": new_messages,
-                "analysis_parameters": state['analysis_parameters'],
-                "file_summary": file_summary,
-                "tool_call_request": False,
-                "fold_decision": "preprocess",
-                }
-        # 参数确定后再把 Job 绑定到正确的分析上下文；同一文件、不同目标变量
-        # 会得到不同的上下文，而不是覆盖历史上下文。
-        update.update(
-            await _bind_analysis_context(
-                state,
-                runtime,
-                target=target,
-                treatment=treatment,
-            )
-        )
-        return update
-    
-    else:
-        # 对于issue中有存在变量缺失的情况的，进行修正询问，对于数据有问题，进行数据补充询问
-        has_param_issue = any("目标变量" in issue or "处理变量" in issue for issue in issues)
-        has_data_quality_issue = any("缺失" in issue or "样本量" in issue or "常数列" in issue or "高基数" in issue or "ID列" in issue for issue in issues)
-
-        call_to_action = "请您根据上述问题进行调整。" # 通用备用方案
-        if has_param_issue:
-            call_to_action = "请您根据上述问题，明确或修正'目标变量'和'处理变量'的指定。"
-        elif has_data_quality_issue:
-            call_to_action = "您的数据似乎存在一些质量问题。请您考虑对数据进行清洗，或上传一份新的文件。"
-        
-        columns_list = data_summary.get('columns', [])
-        question = (
-            "为了开始因果分析，我需要您的帮助来解决以下问题：\n"
-            f"- {issues}\n\n"
-            f"作为参考，您的数据中包含以下可用列：\n`{', '.join(columns_list)}`\n\n"
-            f"**{call_to_action}**"
-        )
-        
-        # interrupt() 会立即暂停节点执行，返回 question 给调用者
-        # 当用户提供输入后，interrupt() 会返回用户的输入值
-        user_response = interrupt(question)
-        
-        # 将用户的响应添加到消息历史，并返回一个路由消息
-        # 让 fold_router 知道需要回到 agent 重新判断
-        return {
-            "messages": [
-                HumanMessage(content=resume_value_to_message_content(user_response)),
-                AIMessage(content="决策：已收到用户输入，返回 agent 重新判断", name="fold")
-            ],
-            "analysis_parameters": state['analysis_parameters'],
-            "file_summary": state.get("file_summary"),
-            "fold_decision": "agent",
-        }
-
-
-async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI, runtime=None) -> dict:
     """
     项目预处理模块:
     1.  从状态(state)中加载 DataFrame 和数据摘要。
@@ -1094,107 +805,210 @@ async def preprocess_node(state: CausalAgentState, llm: ChatOpenAI, runtime=None
     3.  调用 LLM 对数据摘要进行自然语言总结。
     4.  将图表和总结存入状态，然后直接进入下一步。
     """
-    analysis_parameters = state.get("analysis_parameters", {})
+    from Agent.deep_agent_tools.preprocessing import build_data_profile
+    from Agent.data_processing.persistence import (
+        read_bound_dataset,
+        read_bound_dataset_identity,
+    )
 
-    file_summary = state.get("file_summary") or {}
-    input_user_file_id = file_summary.get("user_file_id")
-    input_object_id = file_summary.get("object_id")
+    context = getattr(runtime, "context", None)
+    identity = getattr(context, "trusted_identity", None)
+    if identity is None:
+        raise RuntimeError("重建分析数据需要可信 Job 身份。")
+    await context.ensure_active()
+    bound_identity = await asyncio.to_thread(read_bound_dataset_identity, identity)
+    if bound_identity is None:
+        raise RuntimeError("当前 Job 没有经过独立校验并绑定的数据集。")
+    expected_dataset_id = state.get("prepared_dataset_id")
+    if expected_dataset_id is not None and int(expected_dataset_id) != int(bound_identity["dataset_id"]):
+        raise RuntimeError("checkpoint 中的数据集身份与 MySQL 绑定记录不一致。")
+    if identity.analysis_input is None:
+        raise RuntimeError("可信 Job 身份缺少分析数据引用。")
+    identity.analysis_input.bind(
+        dataset_id=int(bound_identity["dataset_id"]),
+        object_id=int(bound_identity["data_object_id"]),
+        content_hash=str(bound_identity["data_hash"]),
+        filename=str(bound_identity["filename"]),
+        semantic_kinds=bound_identity["semantic_kinds"],
+        research_identity=parameter_identity(bound_identity["analysis_parameters"]),
+    )
+    bound_data = await asyncio.to_thread(
+        read_bound_dataset,
+        identity,
+        source_hash=identity.source_input_identity(),
+    )
+    await context.check_after_call()
+    if int(bound_data["dataset_id"]) != int(bound_identity["dataset_id"]):
+        raise RuntimeError("读取到的数据集与 Job 当前绑定身份不一致。")
+    try:
+        csv_text = bound_data["data_bytes"].decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("已绑定数据集不是有效的 UTF-8 CSV。") from exc
+    df = await asyncio.to_thread(pd.read_csv, io.StringIO(csv_text), low_memory=False)
+    profile = build_data_profile(df)
 
-    if (
-        not analysis_parameters
-        or not input_user_file_id
-        or not input_object_id
-    ):
-        error_msg = "无法执行预处理，因为数据或其摘要信息在状态中丢失。"
-        raise RuntimeError(error_msg)
+    from Agent.Processing.fold_processing import (
+        get_data_summary,
+    )
+    from Agent.Processing.fold_verify import validate_analysis
+    from Agent.Processing.nonlinearity import measure_nonlinearity
 
-    from Database.analysis_contexts import preprocess_version
-
-    identity = getattr(getattr(runtime, "context", None), "trusted_identity", None)
-    version_options = None
-    summary_message = AIMessage(content="决策：数据预处理完成，进入工具处理路由", name="preprocess")
-    if identity is not None:
-        version_options = {
-            "job_id": str(identity.job_id),
-            "worker_id": identity.worker_id,
-            "attempt_count": identity.attempt_count,
-            "lease_epoch": identity.lease_epoch,
-            "call_id": str(runtime.execution_info.task_id),
-            "source_file_hash": file_summary["file_hash"],
-            "recipe": {
-                "pipeline": "csv_profile_charts_summary_v1",
-                "target": analysis_parameters.get("target"),
-                "treatment": analysis_parameters.get("treatment"),
+    source_parameters = dict(bound_identity["analysis_parameters"])
+    prepared_metadata = bound_data["metadata"]
+    resolved_parameters = execution_parameters(source_parameters, prepared_metadata)
+    summary = get_data_summary(df)
+    for column, kind in bound_identity["semantic_kinds"].items():
+        if column not in summary["column_profiles"]:
+            raise RuntimeError("已校验的测量声明引用了缺失的输出列。")
+        summary["column_profiles"][column]["measurement_semantics"] = {
+            "kind": kind, "status": "user_stated", "source": "validated_research_spec",
+            "candidates": [],
+        }
+    validation_code, validation_issues, recommendations = validate_analysis(
+        summary,
+        target=resolved_parameters.get("target"),
+        treatment=resolved_parameters.get("treatment"),
+    )
+    if validation_code == 2:
+        raise RuntimeError("目标变量或处理变量未映射到经过校验的数据集。")
+    summary.update(
+        {
+            **source_parameters,
+            # 原始研究角色与解析后的执行列同时保留；报告只展示研究角色。
+            "research_roles": {
+                "target": source_parameters.get("target"),
+                "treatment": source_parameters.get("treatment"),
+            },
+            "role_columns": prepared_metadata.get("role_columns", {}),
+            "measurement_columns": prepared_metadata.get("measurement_columns", {}),
+            "transformations": prepared_metadata.get("transformations", []),
+            "variable_semantics": prepared_metadata.get("variable_semantics", {}),
+            "processing_summary": prepared_metadata.get("summary", ""),
+            "processing_limitations": prepared_metadata.get("limitations", []),
+            "analysis_dataset_id": int(bound_data["dataset_id"]),
+            "analysis_dataset_hash": str(bound_data["data_hash"]),
+            "source_file_hash": identity.source_input_identity(),
+            "validation_issues": validation_issues,
+            "recommendations": recommendations,
+            "dataset_validation_report": bound_data["validation_report"],
+            "data_profile": profile.model_dump(mode="json"),
+            "data_preparation": {
+                "source_filename": (state.get("file_summary") or {}).get("filename"),
+                "analysis_filename": str(
+                    prepared_metadata.get("output_filename") or "prepared.csv"
+                ),
+                "row_count": int(profile.row_count),
+                "column_count": int(profile.column_count),
+                "observation_unit": prepared_metadata.get("observation_unit"),
+                "role_columns": prepared_metadata.get("role_columns", {}),
+                "processing_summary": prepared_metadata.get("summary", ""),
+                "transformations": list(prepared_metadata.get("transformations") or []),
+                "limitations": list(prepared_metadata.get("limitations") or []),
             },
         }
-        existing_version = await asyncio.to_thread(preprocess_version, **version_options)
-        if existing_version:
-            version_id, output = existing_version
-            return {"messages": [summary_message], "preprocess_version_id": version_id, **output}
+    )
+    summary["nonlinearity"] = measure_nonlinearity(df, summary)
+    from Database.analysis_contexts import preprocess_version
 
-    file_row = await asyncio.to_thread(
-        require_frozen_file_for_job,
-        state.get("user_id"),
-        state.get("job_id", ""),
-        input_user_file_id,
-        input_object_id,
-    )
-    df = await asyncio.to_thread(
-        pd.read_csv,
-        io.BytesIO(file_row["file_content"]),
-    )
-    # 生成结构化图表资源
-    try:
-        chart_assets = await asyncio.to_thread(build_chart_assets, df, analysis_parameters)
-        state["chart_assets"] = {
-            asset_key: asset.model_dump(mode="json")
-            for asset_key, asset in chart_assets.items()
-        }
-    except Exception:
-        _log_node_degradation(
-            "chart_asset_error",
-            "skip_chart_assets",
-            exc_info=True,
+    version_options = {
+        "job_id": str(identity.job_id),
+        "worker_id": identity.worker_id,
+        "attempt_count": identity.attempt_count,
+        "lease_epoch": identity.lease_epoch,
+        "call_id": str(runtime.execution_info.task_id),
+        "source_file_hash": identity.source_input_identity(),
+        "recipe": {
+            "pipeline": "bound_csv_profile_charts_summary_v1",
+            "dataset_id": int(bound_data["dataset_id"]),
+            "dataset_hash": str(bound_data["data_hash"]),
+            "research_identity": parameter_identity(source_parameters),
+        },
+    }
+    existing = await asyncio.to_thread(preprocess_version, **version_options)
+    if existing is not None:
+        version_id, output = existing
+    else:
+        chart_output = {}
+        # 生成结构化图表资源
+        try:
+            chart_assets = await asyncio.to_thread(build_chart_assets, df, summary)
+            chart_output = {
+                asset_key: asset.model_dump(mode="json")
+                for asset_key, asset in chart_assets.items()
+            }
+        except Exception:
+            _log_node_degradation(
+                "chart_asset_error",
+                "skip_chart_assets",
+                exc_info=True,
+            )
+            # 图表资源生成失败不阻断流程，记录日志后继续执行后续步骤
+
+        # 3. 调用LLM进行自然语言总结
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system",
+                 """
+                 system role: {system_role}
+                 mission:
+                你的任务是根据提供的数据摘要信息，为即将进行的因果分析撰写一段简洁明了的自然语言总结。
+
+                # 数据摘要信息:
+                {data_summary}
+
+                # 你的任务:
+                1.  **开篇总结**: 简要说明数据集的规模（行数和列数）。
+                2.  **目标变量和处理变量的摘录**: 仅在已提供时摘录“target”和“treatment”；未指定时说明本次进行结构发现，不补造变量或阻断分析。
+                3.  **风险提示**: 提及数据中存在的潜在问题，例如高缺失值列、常数列、高基数分类变量或疑似ID列。
+                4.  **结论**: 给出一个总体评价，说明数据是否已准备好进行下一步的因果分析。
+                5.  **线性/非线性说明**: 根据 `nonlinearity` 字段说明是否检出非线性及统计强度，不能据此断言真实机制；`verdict` 为 `linear` 只表示未检出显著非线性结构，不等于确定线性；`verdict` 为 `insufficient` 时说明本次未能评估。
+
+                请使用清晰、专业的语言，让非技术人员也能理解数据的基本状况。
+                """),
+                ("human", "请根据上述指示和提供的数据摘要，生成总结报告。")
+            ]
         )
-        # 图表资源生成失败不阻断流程，记录日志后继续执行后续步骤
-    
-    # 3. 调用LLM进行自然语言总结
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system",
-             """
-             system role: {system_role}
-             mission:
-            你的任务是根据提供的数据摘要信息，为即将进行的因果分析撰写一段简洁明了的自然语言总结。
 
-            # 数据摘要信息:
-            {data_summary}
 
-            # 你的任务:
-            1.  **开篇总结**: 简要说明数据集的规模（行数和列数）。
-            2.  **目标变量和处理变量的摘录**: 对输入数据中的“target”和“treatment”进行摘取，并告知用户目前处理的变量是这两个变量。
-            3.  **风险提示**: 提及数据中存在的潜在问题，例如高缺失值列、常数列、高基数分类变量或疑似ID列。
-            4.  **结论**: 给出一个总体评价，说明数据是否已准备好进行下一步的因果分析。
-            5.  **线性/非线性说明**: 根据 `nonlinearity` 字段说明变量间关系以线性还是非线性机制为主及强度；`verdict` 为 `linear` 只表示未检出显著非线性结构，不等于确定线性；`verdict` 为 `insufficient` 时说明本次未能评估。
+        runnable = prompt | llm | StrOutputParser()
 
-            请使用清晰、专业的语言，让非技术人员也能理解数据的基本状况。
-            """),
-            ("human", "请根据上述指示和提供的数据摘要，生成总结报告。")
-        ]
+        preprocess_summary = await runnable.ainvoke({
+            "data_summary": json.dumps(summary, indent=2, ensure_ascii=False),
+            "system_role": data_prompt()
+        })
+        await context.check_after_call()
+        version_id, output = await asyncio.to_thread(
+            preprocess_version,
+            output={"preprocess_summary": preprocess_summary, "chart_assets": chart_output},
+            **version_options,
+        )
+
+    summary_message = AIMessage(
+        content= "决策：数据预处理完成，进入工具处理路由",
+        name="preprocess"
     )
-    
-    
-    runnable = prompt | llm | StrOutputParser()
-    
-    preprocess_summary = await runnable.ainvoke({
-        "data_summary": json.dumps(analysis_parameters, indent=2, ensure_ascii=False),
-        "system_role": data_prompt()
-    })
-    output = {"preprocess_summary": preprocess_summary, "chart_assets": state.get("chart_assets", {})}
-    version_id = None
-    if version_options is not None:
-        version_id, output = await asyncio.to_thread(preprocess_version, output=output, **version_options)
-    return {"messages": [summary_message], "preprocess_version_id": version_id, **output}
+
+    # 只返回新消息和需要更新的状态
+    update = {
+        "messages": [summary_message],
+        **output,
+        "preprocess_version_id": version_id,
+        "analysis_parameters": summary,
+        "analysis_parameter_changes": bound_identity["analysis_parameter_changes"],
+        "data_profile": profile,
+        "prepared_dataset_id": int(bound_data["dataset_id"]),
+        "prepared_dataset_hash": str(bound_data["data_hash"]),
+        "prepared_dataset_metadata": prepared_metadata,
+        "analysis_file_summary": {
+            "dataset_id": int(bound_data["dataset_id"]),
+            "object_id": int(bound_data["data_object_id"]),
+            "content_hash": str(bound_data["data_hash"]),
+            "filename": str(prepared_metadata.get("output_filename") or "prepared.csv"),
+            "rows": int(profile.row_count),
+            "columns": list(profile.column_names),
+        },
+    }
+    return update
 
 
 from Agent.knowledge_base.query_rag import format_rag_summary_for_prompt
@@ -1911,41 +1725,9 @@ async def postprocess_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
 
 ## 调用元数据
 def _causal_method_context_for_report(analysis_result: Dict[str, Any]) -> str:
-    """为报告节点生成算法专用解释边界。"""
-    if not isinstance(analysis_result, dict):
-        return "No structured causal analysis result is available."
-
-    algorithm = str(analysis_result.get("algorithm", "")).strip().lower()
-    if algorithm != "direct_lingam":
-        return "No additional algorithm-specific reporting guidance is required."
-
-    implementation = analysis_result.get("implementation", {})
-    parameters = analysis_result.get("parameters", {})
-    raw_results = analysis_result.get("raw_results", {})
-    diagnostics = analysis_result.get("diagnostics", {})
-    causal_order_names = raw_results.get("causal_order_names", [])
-    causal_order_text = (
-        " -> ".join(str(name) for name in causal_order_names)
-        if isinstance(causal_order_names, list) and causal_order_names
-        else "not available"
-    )
-
-    return (
-        "DirectLiNGAM reporting guidance:\n"
-        f"- Implementation: causal-learn {implementation.get('version', 'unknown')} "
-        f"with embedded LiNGAM {implementation.get('embedded_version', 'unknown')}.\n"
-        f"- Parameters: measure={parameters.get('measure', 'unknown')}.\n"
-        f"- Samples/features: n_samples={diagnostics.get('n_samples', 'unknown')}, "
-        f"n_features={diagnostics.get('n_features', 'unknown')}.\n"
-        f"- Matrix convention: {analysis_result.get('matrix_convention', 'target_to_source')}; "
-        "B[target, source] means source -> target.\n"
-        f"- Estimated causal order: {causal_order_text}.\n"
-        "- Required assumptions: continuous numeric variables, linear structural equation model, "
-        "non-Gaussian and mutually independent errors, acyclic causal graph, and no unmodeled "
-        "latent confounders among the observed variables.\n"
-        "- Interpretation rule: weighted directed edges are candidate causal relations under these "
-        "assumptions, not experimentally verified causal facts."
-    )
+    """读取执行时的方法快照，不根据工具名推断算法或套用其他方法的假设。"""
+    return _prompt_json([{key: result.get(key) for key in ("algorithm", "method", "implementation", "data_view")}
+                         for result in analysis_result.get("results", [])])
 
 
 def _report_language_instruction() -> str:
@@ -1973,40 +1755,31 @@ def _report_revision_instruction(regeneration: bool) -> str:
 
 
 def _report_graph_asset(state: CausalAgentState):
-    """选择报告使用的因果图资源：优先采用通过校验的修订图，否则回退原始算法图。"""
-    analysis_result = state.get("causal_analysis_result")
-    if not isinstance(analysis_result, dict) or not analysis_result.get("success"):
-        # 报告修订只使用当前分析上下文里已经确认的规范化图。
-        context = _current_context(state)
-        graph_data = context_graph(context)
-        if graph_data is None:
-            return None
-        summary = context_algorithm_summary(context) or {}
-        return build_causal_graph_model(
-            graph_data,
-            graph_id=REPORT_GRAPH_ASSET_KEY,
-            algorithm=str(summary.get("algorithm") or ""),
-            graph_source="analysis_context",
-        )
-    postprocess_result = state.get("postprocess_result") or {}
-    revised_graph = postprocess_result.get("revised_graph")
-    has_valid_revised_graph = (
-        isinstance(revised_graph, dict)
-        and isinstance(revised_graph.get("nodes"), list)
-        and isinstance(revised_graph.get("edges"), list)
-        and not postprocess_result.get("error")
+    """仅展示本次（或对应保存快照）经门禁选择的唯一主图。"""
+    primary = report_primary_result(build_report_analysis_context(state))
+    if primary is None or not primary.get("graph"):
+        return None
+    selected_graph = dict(
+        primary["graph"], graph_semantics=primary.get("graph_semantics"),
+        diagnostics=primary.get("diagnostics"),
     )
-    selected_graph = (
-        revised_graph if has_valid_revised_graph else analysis_result.get("data")
-    )
-    algorithm = analysis_result.get("algorithm")
     return build_causal_graph_model(
         selected_graph,
         graph_id=REPORT_GRAPH_ASSET_KEY,
-        algorithm=str(algorithm) if algorithm else "",
-        graph_source="postprocessed" if has_valid_revised_graph else "original",
-        revision_summary=str(postprocess_result.get("revision_summary") or ""),
+        algorithm=str(primary.get("algorithm") or ""),
+        graph_source="analysis_context" if state.get("report_revision_mode") == "full_regeneration_from_context" else "original",
     )
+
+
+def _prompt_analysis_facts(facts: Dict[str, Any]) -> Dict[str, Any]:
+    """报告提示词不使用图分数；剥离后与既有提示词保持一致。"""
+    projected = copy.deepcopy(facts)
+    for result in projected.get("results", []):
+        graph = result.get("graph")
+        if isinstance(graph, dict):
+            graph.pop("edge_score_matrix", None)
+            graph.pop("score_type", None)
+    return projected
 
 
 def _prompt_json(value: Any) -> str:
@@ -2019,24 +1792,6 @@ def _prompt_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2)
 
 
-_REPORT_METADATA_COLUMN_FIELDS = (
-    "inferred_type",
-    "unique_count",
-    "is_constant",
-    "missing_ratio",
-    "causal_suitability",
-    "possible_id",
-    "stats",
-    "issues",
-)
-
-_REPORT_METADATA_QUALITY_FIELDS = (
-    "total_missing_ratio",
-    "constant_columns",
-    "high_missing_columns",
-)
-
-
 def _report_metadata_for_prompt(analysis_parameters: Any) -> str:
     """给报告模型的数据概览：规模、列清单和每列的类型与质量标记。
 
@@ -2044,39 +1799,7 @@ def _report_metadata_for_prompt(analysis_parameters: Any) -> str:
     增长而不是随每列的取值数量增长。
     """
 
-    params = analysis_parameters if isinstance(analysis_parameters, dict) else {}
-    column_profiles = params.get("column_profiles")
-    columns = [str(column) for column in (params.get("columns") or [])]
-    if not columns and isinstance(column_profiles, dict):
-        columns = [str(column) for column in column_profiles]
-
-    profiles: dict[str, dict] = {}
-    if isinstance(column_profiles, dict):
-        for column, profile in column_profiles.items():
-            if not isinstance(profile, dict):
-                continue
-            profiles[str(column)] = {
-                field: profile[field]
-                for field in _REPORT_METADATA_COLUMN_FIELDS
-                if field in profile
-            }
-
-    quality = params.get("quality_assessment")
-    quality_summary: dict[str, Any] = {}
-    if isinstance(quality, dict):
-        quality_summary = {
-            field: quality[field]
-            for field in _REPORT_METADATA_QUALITY_FIELDS
-            if field in quality
-        }
-
-    return _prompt_json({
-        "n_rows": params.get("n_rows"),
-        "n_cols": params.get("n_cols", len(columns) or None),
-        "columns": columns,
-        "column_profiles": profiles,
-        "quality_assessment": quality_summary,
-    })
+    return _prompt_json(report_data_metadata(analysis_parameters))
 
 
 def _report_asset_manifest(assets: dict[str, Any]) -> list[dict[str, str]]:
@@ -2116,6 +1839,104 @@ def _report_document_from_state(state: CausalAgentState):
     """从 State 读取结构化报告文档；缺失或类型不符时返回 None。"""
     document = state.get("report_document")
     return document if isinstance(document, ReportDocument) else None
+
+
+def _report_fact_text(value: Any) -> str:
+    """Render a short plain-text fact without allowing it to become Markdown syntax."""
+    text = " ".join(str(value or "").split()).replace("\\", "\\\\")
+    for marker in (chr(96), "*", "_", "{", "}", "[", "]", "(", ")", "#", "+", ".", "!", "|"):
+        text = text.replace(marker, "\\" + marker)
+    return text.replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _with_dataset_preparation_block(
+    draft: ReportDraft,
+    facts: Mapping[str, Any],
+) -> ReportDraft:
+    """Add measured data dimensions and clearly labeled processing declarations."""
+    metadata = facts.get("data_metadata")
+    preparation = metadata.get("data_preparation") if isinstance(metadata, Mapping) else None
+    if not isinstance(preparation, Mapping):
+        return draft
+
+    rows = preparation.get("row_count")
+    columns = preparation.get("column_count")
+    if (
+        isinstance(rows, int) and not isinstance(rows, bool)
+        and isinstance(columns, int) and not isinstance(columns, bool)
+    ):
+        size = f"{rows} 行、{columns} 列"
+    else:
+        size = "未知"
+    transformations = preparation.get("transformations")
+    transformation_text = "；".join(
+        _report_fact_text(item)
+        for item in transformations
+        if isinstance(item, str) and item.strip()
+    ) if isinstance(transformations, (list, tuple)) else ""
+    limitations = preparation.get("limitations")
+    limitation_text = "；".join(
+        _report_fact_text(item)
+        for item in limitations
+        if isinstance(item, str) and item.strip()
+    ) if isinstance(limitations, (list, tuple)) else ""
+    lines = [
+        "### 数据来源与分析数据",
+        "",
+        f"- 原始输入文件：{_report_fact_text(preparation.get('source_filename') or '未提供文件名')}",
+        f"- 实际分析数据：{_report_fact_text(preparation.get('analysis_filename') or '未知')}（{size}）",
+        f"- 记录的观察单位：{_report_fact_text(preparation.get('observation_unit') or '未记录')}",
+        f"- 处理摘要（提交记录）：{_report_fact_text(preparation.get('processing_summary') or '未记录')}",
+        f"- 声明的转换步骤：{transformation_text or '未记录'}",
+        f"- 记录的限制：{limitation_text or '未记录其他限制'}",
+    ]
+    occupied = {block.id for block in iter_report_blocks(draft.blocks)}
+    block_id = "dataset_preparation_summary"
+    suffix = 2
+    while block_id in occupied:
+        block_id = f"dataset_preparation_summary_{suffix}"
+        suffix += 1
+    block = MarkdownBlock(id=block_id, content="\n".join(lines))
+    return draft.model_copy(update={"blocks": [block, *draft.blocks]})
+
+
+def _report_execution_summary(state: CausalAgentState) -> dict[str, Any]:
+    """按真实结果公开数据视图差异、算法状态和报告完整性事实。"""
+
+    facts = build_report_analysis_context(state)
+    algorithms: list[dict[str, Any]] = []
+    for result in facts.get("results", []):
+        view = result.get("data_view") or {}
+        algorithms.append(
+            {
+                "capability_id": result["algorithm"],
+                "public_name": (result.get("method") or {}).get("public_name"),
+                "status": result["status"], "disposition": result.get("disposition"),
+                "sample_count": view.get("row_count"),
+                "variable_count": view.get("column_count"),
+                "operations": view.get("operations", []),
+            }
+        )
+    decision = facts.get("decision") or {}
+    primary_effect = next(
+        (result for result in facts.get("results", [])
+         if result.get("result_ref") == facts.get("primary_effect_result_ref")
+         and result.get("status") == "valid"),
+        None,
+    )
+    return {
+        "analysis_outcome": decision.get("outcome"),
+        "report_completeness": "complete",
+        "finalization_status": facts.get("finalization_status"),
+        "algorithms": algorithms,
+        "data_views_differ": (facts.get("data_view_comparison") or {}).get("data_views_differ"),
+        "analysis_limitations": facts.get("analysis_limitations", []),
+        "budget_exhausted": facts.get("budget_exhausted", False),
+        "preliminary_ols": bool(
+            (facts.get("analysis_limitations") or facts.get("budget_exhausted"))
+            and (primary_effect or {}).get("algorithm") == "causal.backdoor_ols"
+        ),
+    }
 
 
 def _report_followup_context(state: CausalAgentState) -> dict[str, str]:
@@ -2160,6 +1981,8 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
     图表资源、因果图模型、来源和证据全部由后端注入并校验。资源引用、块 ID 或
     证据引用非法时抛出 ReportSchemaError，进入图节点受控错误路径，不保存部分报告。
     """
+    facts = build_report_analysis_context(state)
+    decision = facts.get("decision") or {}
     chart_assets = coerce_chart_assets(state.get("chart_assets"))
     assets: dict[str, Any] = dict(chart_assets)
     graph_asset = _report_graph_asset(state)
@@ -2168,12 +1991,19 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
 
     regeneration = state.get("report_revision_mode") == "full_regeneration_from_context"
     context = _current_context(state)
+    rag_evidence = state.get("deep_agent_rag_evidence")
+    web_evidence = state.get("deep_agent_web_evidence")
+    file_summary = state.get("file_summary")
+    if regeneration:
+        rag_evidence = {item["evidence_ref"]: item for item in ((context or {}).get("latest_rag_evidence") or [])}
+        web_evidence = {item["evidence_ref"]: item for item in ((context or {}).get("latest_web_evidence") or [])}
+        file_summary = {"filename": (context or {}).get("filename")}
 
     resources = build_report_resources(
-        file_summary=state.get("file_summary"),
-        web_search_result=state.get("web_search_result"),
-        rag_evidence=state.get("deep_agent_rag_evidence"),
-        web_evidence=state.get("deep_agent_web_evidence"),
+        file_summary=file_summary,
+        web_search_result=None if regeneration else state.get("web_search_result"),
+        rag_evidence=rag_evidence,
+        web_evidence=web_evidence,
     )
 
     system_prompt_template = """
@@ -2195,11 +2025,30 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         {revision_instruction}
 
         ## 因果分析结果解读规则
-        - 如果因果分析结果包含 error_type，请明确说明算法未能产生有效因果图，不要声称“没有因果关系”。
-        - 如果因果分析结果包含 fallback_from 和 fallback_reason，请说明原算法不适用并已改用 fallback_tool 的结果。
-        - 只有当算法 success 为 true 且边列表为空时，才可以表述为“未发现显著因果边/因果关系”。
-        - 如果算法解释补充中出现 DirectLiNGAM，请明确说明线性、非高斯、误差独立、DAG 和无潜在混杂假设。
-        - DirectLiNGAM 的带权边只能解释为模型假设下的候选因果关系，不得写成实验已验证事实。
+        - 以统一分析事实中的方法快照、执行状态、输入视图和已通过门禁的选择为准。不得根据名称猜测方法，不得把一种方法的假设套用到另一种方法。
+        - 明确说明主结果是谁、selection_rationale、辅助与舍弃结果及其理由、conflicts 和 confidence_basis；没有主结果时说明 no_primary_reason，不能声称不存在因果关系。
+        - 所有图边都是本次方法约束下的候选结构。双箭头表示潜在共同原因候选，未证实共同原因；无向边的方向尚未识别。
+        - 边数只读取各结果的 edge_counts，不自行计数；directed、undirected、bidirected 分别计数，双箭头只算一条边。文字中的边数与逐边清单必须一致。
+        - 按 data_view_comparison 说明实际行数、列和处理差异；骨架接近不等于因果方向得到验证，算法结果没有自动合并。
+        - 逐边比较以 graph_comparisons 的实际端点、边型和 relation 为准。opposite_direction 才是方向相反；left_only/right_only 是仅一方存在，不能写成反向。
+        - 比较中的左右身份固定由 left_algorithm/right_algorithm 指定，不能自行将主结果叫作左侧。各类关系数量只读取 relation_counts，不自行重数清单。
+        - decision.conflicts 和取舍理由是模型评估文本，不是另一份图。若其中的边引用与 graph_comparisons 不符，明确说明该表述无法由边表支持，使用实际比较结果解释，不复述错误方向。
+        - 区分 checks_performed、assumptions_checked 和 not_checked。结构检查通过不证明统计假设、识别条件或方向正确。
+        - 整数不等于计数，低基数不等于业务类别；CSV 推断不是用户确认，测量语义未知时保持未知。
+        - 标题、章节名和结论也遵守测量语义边界：只有 user_description 且 user_stated 的语义可以当作用户陈述；未知列不能仅凭文件名或变量名命名为计数、告警次数等业务量。
+        - 统计检验限制须依据实际检验方法说明，不把离散列联表的格子频数要求套用于 Fisher-Z；没有执行的适用性诊断只列为未检验事项。
+        - PC 算法的一般性质与本次 independence_test 的条件分别解释；若使用 Fisher-Z，不能声称本次检验不受线性或分布条件限制。
+        - 没有可引用的知识库或联网证据时只说明缺少证据；除非存在明确失败状态，不得将未执行、未启用或不可用猜测为检索失败。
+        - 主图读取 primary_graph_result_ref，主效应只读取 primary_effect_result_ref；旧 primary_result_ref 只是兼容投影。主效应为空时如实说明 effect_status 和 effect_reason。
+        - 效应定义只读取 effect_request 和实际结果中的同名定义，不能将每单位系数写成指定区间的变化。
+        - 方法比较只读取 effect_comparisons 中 comparable=true 的组，说明差值方向、成对 bootstrap 差值区间及支持诊断。不同源图作为结构敏感性结果分别说明。方法差异不能直接证明非线性，没有业务阈值不能断言实质差异，也不能根据估计器名称替 Agent 选择主结果。
+        - effect_difference 的方向是 difference_direction（right_minus_left）；成对差值点值读取 paired_effect_difference，区间读取 difference_ci95，二者方向为 paired_difference_direction（linear_minus_flexible）。两种方向不可混用，不能将 right_minus_left 点值配上 linear_minus_flexible 的区间。缺少成对点值时仅报告已有区间及其方向，不自行填值。
+        - 差值区间包含零只表示本次比较未能区分两种估计，不证明线性、方法等价、无设定偏差或无实质偏差；没有业务容忍阈值及相应检验时不能作等价或实质性判断。模型 selection_rationale 或 assessment 若有此推断，应按实际比较事实解释，不能当作已验证结论复述。
+        - 每个效应数值都须对应其实际源图与估计器。同一图的两种估计不能计作两张图的效应证据，没有执行估计的图不能算作效应支持。跨图结果同号只描述本次结构敏感性观察，不证明结构正确或效应结论不依赖结构。
+        - selection_rationale、assessment、conflicts 和 revision_proposals 都是模型评估文本，Gate 接受不代表这些科学解释已被证明。若其数值、源图或估计器归属与 results 不符，报告必须按 results 更正解释；不能在冲突章节再次复述错误归属。
+        - 不同单位的边权不能仅按绝对数值大小判为不合理，必须结合量纲、变量尺度和已知业务约束；没有这些依据时，只能列出尚未检查的尺度与方向假设。
+        - analysis_limitations 是程序确认的检查缺口，必须如实说明；预算跳过不是算法执行失败，也不表示检查通过。
+          存在检查缺口时，图称为“候选因果结构”，OLS 称为“线性假设下的初步估计”；区间仅反映该模型下的不确定性。
 
         ## 报告文档结构
         你必须返回一个 JSON 对象，只包含 title 和 blocks 两个字段：
@@ -2217,6 +2066,7 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         - markdown 块的 evidence_refs 只能引用下面“可用证据”列出的证据 ID；没有可用证据时请留空数组。
         - 块 id 在整篇报告中必须唯一，使用稳定的英文或拼音短名。
         - 不要重新计算或编造数据，图表数据由系统根据真实数据注入。
+        - 有 graph_main 资源时必须且只能使用一次 causal_graph 块；没有该资源时不得生成因果图块。
 
         ## 可用资源
         {asset_manifest}
@@ -2249,27 +2099,34 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         state.get("web_search_result", {}),
     )
 
+    # 设置报告输出上限
+    report_llm = llm.model_copy(
+        update={
+            "extra_body": {
+                **(llm.extra_body or {}),
+                "max_tokens": 32768,
+            }
+        }
+    )
     draft = await ainvoke_structured(
-        llm=llm,
+        llm=report_llm,
         schema=ReportDraft,
         prompt=prompt,
         inputs={
-            "messages": llm_prompt_messages(state["messages"]),
-            "preprocess_meta_data": _report_metadata_for_prompt(
-                state.get("analysis_parameters")
-            ),
-            "preprocess_summary": state.get("preprocess_summary", {}),
-            "causal_analysis_result": state.get("causal_analysis_result", {}),
+            "messages": [message for message in state.get("messages", []) if isinstance(message, HumanMessage)][-1:],
+            "preprocess_meta_data": _prompt_json(facts.get("data_metadata", {})),
+            "preprocess_summary": "见数据概览和统计检查。",
+            "causal_analysis_result": _prompt_json(_prompt_analysis_facts(facts)),
             "knowledge_base_result": knowledge_summary,
             "web_search_result": web_summary,
-            "postprocess_result": state.get("postprocess_result", {}),
+            "postprocess_result": "主图来自通过门禁的原始算法结果；修订建议不替换图。",
             "method_context": _causal_method_context_for_report(
-                state.get("causal_analysis_result", {})
+                facts
             ),
             "report_language": _report_language_instruction(),
             "system_role": causal_report_prompt(),
             "analysis_context_facts": (
-                context_facts_text(context) if context else "当前没有已保存的分析上下文。"
+                "本次报告只使用上面的统一分析事实，不能从历史报告补充结果。"
             ),
             "revision_instruction": _report_revision_instruction(regeneration),
             "asset_manifest": _prompt_json(_report_asset_manifest(assets)),
@@ -2279,13 +2136,24 @@ async def report_node(state: CausalAgentState, llm: ChatOpenAI) -> dict:
         },
         node_name="report",
     )
+    draft = _with_dataset_preparation_block(draft, facts)
 
     document = build_report_document(
         draft,
         assets=assets,
         sources=resources.sources,
         evidence_refs=resources.evidence_refs,
+        analysis_outcome=decision.get("outcome"),
+        finalization_status=facts.get("finalization_status"),
+        report_mode=(
+            "diagnostic"
+            if not facts.get("primary_result_ref")
+            else "analysis"
+        ),
+        execution_summary=_report_execution_summary(state),
     )
+    if graph_asset is not None and not any(block.type == "causal_graph" for block in iter_report_blocks(document.blocks)):
+        raise ReportSchemaError("已选主结果的报告必须展示主图")
 
     return {
         "report_document": document,

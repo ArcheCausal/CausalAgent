@@ -60,6 +60,24 @@ async function installApiMocks(page: Page, options: MockOptions = {}): Promise<R
       await route.fulfill({ ...json(options.files ?? []) })
       return
     }
+    if (url.pathname === '/api/upload_file' && request.method() === 'POST') {
+      await route.fulfill({
+        ...json({
+          success: true,
+          file: {
+            id: 1,
+            user_file_id: 1,
+            filename: 'dragged.csv',
+            mime_type: 'text/csv',
+            file_size: 7,
+            uploaded_at: '2026-10-20T00:00:00Z',
+            last_accessed_at: null,
+            access_count: 0,
+          },
+        }),
+      })
+      return
+    }
     if (url.pathname === '/api/agent/jobs/active') {
       await route.fulfill({ ...json({ success: true, jobs: [] }) })
       return
@@ -130,6 +148,29 @@ test('登录用户在工作区创建任务并看到终态事件', async ({ page 
   await expect(page.getByText('算法决策：选择 PC')).toBeVisible()
   await expect(page.getByText('调用工具：pc（参数字段：data）')).toBeVisible()
   await expect(page.getByText('pc：算法执行完成')).toBeVisible()
+})
+
+test('拖入 CSV 文件时调用上传接口并选中该文件', async ({ page }) => {
+  const traffic = await installApiMocks(page)
+
+  await page.goto('/')
+  const composer = page.locator('.composer')
+  await composer.evaluate((element) => {
+    const dataTransfer = new DataTransfer()
+    dataTransfer.items.add(new File(['x,y\n1,2'], 'dragged.csv', { type: 'text/csv' }))
+    element.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer }))
+  })
+  await expect(composer).toHaveClass(/is-drag-over/)
+  await expect(composer).toContainText('释放 CSV 文件以上传')
+
+  await composer.evaluate((element) => {
+    const dataTransfer = new DataTransfer()
+    dataTransfer.items.add(new File(['x,y\n1,2'], 'dragged.csv', { type: 'text/csv' }))
+    element.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer }))
+  })
+
+  await expect(composer.locator('.selected-file-draft')).toContainText('dragged.csv')
+  expect(traffic.businessPaths).toContain('/api/upload_file')
 })
 
 test('设置页由地址决定，关闭后回到工作区', async ({ page }) => {

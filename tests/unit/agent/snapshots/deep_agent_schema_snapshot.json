@@ -14,17 +14,19 @@
         "revision",
         "status"
       ],
-      "sha256": "ca1b54d755d4272899e3f971ab5aec93cc9a183ce0f8209ac0cd1af834593e75",
+      "sha256": "ac46b5ba6788eba73285acec25fdc2436b7e9e2adc04fa22f31d5e307a93a7e9",
       "title": "ActionAttempt"
     },
     "AlgorithmExecutionCommand": {
       "properties": [
+        "artifacts",
         "capability_id",
         "capability_version",
         "input_identity",
         "invocation_id",
         "parameters",
         "provider_call_id",
+        "research_identity",
         "result_index",
         "spec_digest",
         "timeout_seconds"
@@ -37,17 +39,23 @@
         "provider_call_id",
         "input_identity"
       ],
-      "sha256": "e3ac2d8d6ccce1010fb406e0a87fd3b545114f2ae9b2db4fe55e7ad29b07f366",
+      "sha256": "8289eab1331dd6648c508c203bde4910b57ecb3c60d0ef40a1da19279cd56a16",
       "title": "AlgorithmExecutionCommand"
     },
     "AlgorithmResult": {
       "properties": [
+        "ate_check",
         "capability_id",
         "capability_version",
+        "causal_effect",
+        "data_view",
         "diagnostics",
         "graph_semantics",
+        "graph_validation",
+        "implementation",
         "input_identity",
         "invocation_id",
+        "method",
         "provenance",
         "provider_call_id",
         "raw_result_ref",
@@ -69,12 +77,13 @@
         "status",
         "provenance"
       ],
-      "sha256": "ad83178522ddc5e54aaa50bf9433e75144898d99be5eba3c824fcaf26d7f63d1",
+      "sha256": "456ade97ff96bf28b9837f1cd53b255696c3709ab18551917ddc76bccd136bdd",
       "title": "AlgorithmResult"
     },
     "AlgorithmResultProvenance": {
       "properties": [
         "algorithm_runner_version",
+        "analysis_dataset_id",
         "attempt_count",
         "capability_id",
         "capability_version",
@@ -82,7 +91,8 @@
         "invocation_id",
         "job_id",
         "lease_epoch",
-        "preprocessing_recipe_digest",
+        "research_identity",
+        "source_input_identity",
         "spec_digest"
       ],
       "required": [
@@ -92,23 +102,114 @@
         "input_identity",
         "spec_digest"
       ],
-      "sha256": "922fd25e8c50ca3ce1b7333f02a1bcb1b33b926510f692f0bd3de16d6d5f3dd3",
+      "sha256": "7651d3c7a5fe8f6722b2f853a8bd11a8a5fb71db55791d7813b78a8f9de7b3a6",
       "title": "AlgorithmResultProvenance"
+    },
+    "AteApplicabilityCheck": {
+      "properties": [
+        "adjustment_set",
+        "applicability",
+        "execution_columns",
+        "graph_result_ref",
+        "outcome",
+        "reason_code",
+        "treatment"
+      ],
+      "required": [
+        "graph_result_ref",
+        "treatment",
+        "outcome",
+        "adjustment_set",
+        "execution_columns",
+        "applicability"
+      ],
+      "sha256": "bc0a20b1e0d2f4ff47d4c0af5b96617c5ee16bb43fede72480ce0eaf3e5c4086",
+      "title": "AteApplicabilityCheck"
+    },
+    "CausalEffect": {
+      "properties": [
+        "adjustment_rule",
+        "adjustment_set",
+        "bootstrap_n",
+        "ci95",
+        "contrast",
+        "effect_request",
+        "estimand",
+        "estimate",
+        "estimator",
+        "graph_result_ref",
+        "n_rows",
+        "outcome",
+        "outcome_model",
+        "sample_identity",
+        "standard_error",
+        "support",
+        "treatment"
+      ],
+      "required": [
+        "estimand",
+        "graph_result_ref",
+        "treatment",
+        "outcome",
+        "estimate",
+        "estimator",
+        "n_rows"
+      ],
+      "sha256": "12cbca79f116b1ff5dcb4cc1a68519cf656244e79661c699725341698ee32abc",
+      "title": "CausalEffect"
+    },
+    "DataIssue": {
+      "properties": [
+        "blocking",
+        "code",
+        "columns",
+        "message"
+      ],
+      "required": [
+        "code",
+        "message"
+      ],
+      "sha256": "28864def7db321fa12577febbcd4111f2346b6f6e63bc030b535fc1f4c90aa3d",
+      "title": "DataIssue"
     },
     "DataProfile": {
       "properties": [
         "categorical_columns",
         "column_count",
         "column_names",
+        "constant_columns",
+        "empty_columns",
+        "issues",
+        "missing_columns",
+        "non_finite_columns",
         "numeric_columns",
+        "row_count",
+        "suspected_id_columns"
+      ],
+      "required": [
+        "row_count",
+        "column_count"
+      ],
+      "sha256": "a11e80b09ba357658cb147d744a69a635f3e4c197ae44e917cb13e5c3e8631af",
+      "title": "DataProfile"
+    },
+    "DataViewSummary": {
+      "properties": [
+        "column_count",
+        "columns",
+        "dropped_row_count",
+        "encoded_columns",
+        "imputed_columns",
+        "operations",
+        "plan_digest",
         "row_count"
       ],
       "required": [
         "row_count",
         "column_count"
       ],
-      "sha256": "a0be9d853c86ce2045031d29b8a7a70d2d5fc338f359f0a41d07024910aa9a57",
-      "title": "DataProfile"
+      "sha256": "b1aaa906130e02cb5de4ecfbc7554bfa0674965de9a77251263a6f53f1258032",
+      "title": "DataViewSummary"
     },
     "Diagnostics": {
       "properties": [
@@ -120,7 +221,7 @@
         "variable_count"
       ],
       "required": [],
-      "sha256": "255efc66b0d713f12b59bd37f08be7f1c59553ab576b4b959a08d7839faf11bc",
+      "sha256": "70a34c5a747266340c40317648185cac7454041380a9f19de38279e68cc49df6",
       "title": "Diagnostics"
     },
     "EvidenceResult": {
@@ -147,13 +248,35 @@
       "sha256": "12f2c95a8c0ef1ea41921daa8deda8a72cac2227481efa064830ab4ada30115c",
       "title": "EvidenceResult"
     },
+    "EffectQuery": {
+      "properties": [
+        "contrast",
+        "effect_request",
+        "estimator_config",
+        "graph_result_ref",
+        "outcome",
+        "outcome_model",
+        "treatment"
+      ],
+      "required": [
+        "graph_result_ref",
+        "treatment",
+        "outcome"
+      ],
+      "sha256": "eef9ea1fe602142709f316def1dc568a0f24bb746fb66ae7b53ca83af61fead5",
+      "title": "EffectQuery"
+    },
     "FinalAnalysisDecision": {
       "properties": [
         "confidence",
         "confidence_basis",
         "conflict_status",
         "conflicts",
+        "effect_reason",
+        "effect_status",
         "outcome",
+        "primary_effect_result_ref",
+        "primary_graph_result_ref",
         "primary_result_ref",
         "result_assessments",
         "revision_proposals",
@@ -165,12 +288,13 @@
         "selection_rationale",
         "confidence"
       ],
-      "sha256": "398a337fce47181bbc1994bbdef44ec75a9d485e1c6f9e6edb2decbda035909c",
+      "sha256": "9e4c3af13abf00d316a8e7d11b781fafe878861e41612f062c7b1991197d1fc6",
       "title": "FinalAnalysisDecision"
     },
     "GraphEdge": {
       "properties": [
         "edge_type",
+        "prediction",
         "source",
         "target",
         "weight"
@@ -179,13 +303,29 @@
         "source",
         "target"
       ],
-      "sha256": "31cb634ae48fad84dc221be40fcff438ddcba9b6b893ee55e2d5dc9abf6f3ae6",
+      "sha256": "bc3159b0e2dc3134b6410ae618c0402e27d7e2a3a31c4fcc178a7e5163b19c22",
       "title": "GraphEdge"
+    },
+    "GraphValidation": {
+      "properties": [
+        "checks_performed",
+        "not_checked",
+        "valid",
+        "violations"
+      ],
+      "required": [
+        "valid"
+      ],
+      "sha256": "5da315ede3f5d455749d7b6d97516b825a9ef96493ba4ad1d18d514e2bd9acc0",
+      "title": "GraphValidation"
     },
     "InvocationRecord": {
       "properties": [
+        "analysis_dataset_id",
         "attempt_count",
         "attempts",
+        "effect_query",
+        "event_step_id",
         "final_status",
         "input_identity",
         "invocation_id",
@@ -194,9 +334,12 @@
         "provider_call_id",
         "provider_item_id",
         "provider_response_id",
+        "research_identity",
         "response_identity",
         "response_identity_source",
         "result_ref",
+        "source_input_identity",
+        "subject_ref",
         "tool_name",
         "worker_id"
       ],
@@ -208,11 +351,12 @@
         "tool_name",
         "final_status"
       ],
-      "sha256": "6e875d0ac71965656d7c6c3ad62567c7683038e66c9324fb9e35002c148226fc",
+      "sha256": "2df1d0a8737d2e1db263f93e688e6698a5664c1c2025e3f0773d50df50fa9e2d",
       "title": "InvocationRecord"
     },
     "McpInvocationContext": {
       "properties": [
+        "analysis_dataset_id",
         "attempt_count",
         "expires_at",
         "input_snapshot_digest",
@@ -221,7 +365,9 @@
         "job_id",
         "key_id",
         "lease_epoch",
+        "research_identity",
         "session_id",
+        "source_input_identity",
         "user_id",
         "worker_id"
       ],
@@ -238,8 +384,44 @@
         "expires_at",
         "key_id"
       ],
-      "sha256": "d07f8d4b713ce44abb36454327ba09e8c91896551350922a55a541d96721246f",
+      "sha256": "c6ea84ac47e8518cdd512acbef4767d2e4256724a0e3411fca391b22e65f9bb9",
       "title": "McpInvocationContext"
+    },
+    "MethodDefinition": {
+      "properties": [
+        "assumptions",
+        "capability_id",
+        "contract_version",
+        "description",
+        "edge_meanings",
+        "graph_semantics",
+        "input_requirements",
+        "limitations",
+        "matrix_convention",
+        "public_name"
+      ],
+      "required": [
+        "capability_id",
+        "public_name",
+        "contract_version",
+        "description",
+        "graph_semantics",
+        "matrix_convention"
+      ],
+      "sha256": "b226e8c639eaae22552051c528acc98962f95e4484c1e650f6701183f724fb6c",
+      "title": "MethodDefinition"
+    },
+    "MethodImplementation": {
+      "properties": [
+        "embedded_version",
+        "package",
+        "package_version",
+        "runner_version",
+        "weights"
+      ],
+      "required": [],
+      "sha256": "971d380a384df0d0e35a2bbda0c776c4a583793e43e3522ce1685586c358de02",
+      "title": "MethodImplementation"
     },
     "PublicDecision": {
       "properties": [
@@ -278,7 +460,7 @@
         "disposition",
         "rationale"
       ],
-      "sha256": "470e990b2b72874ad955153a6b6f07952fedd7371059ce9cdf6d7eef674902f1",
+      "sha256": "28a4c6ab658b9fcf5e7a170833359f7b10cfed46e67a0e0156e32b89562165e6",
       "title": "ResultAssessment"
     },
     "RevisionProposal": {
@@ -305,7 +487,7 @@
         "code",
         "message"
       ],
-      "sha256": "f7eb121fdd4fa2bd6a26bf5c70ae39c0792e9259864a7c70cebc1e186279cf35",
+      "sha256": "fa6eb8e7f9d7888a2b5ff25758c9bc032131ea92681d91cb0dd952a334805a3b",
       "title": "SafeWarning"
     },
     "ScientificConflict": {
@@ -324,14 +506,16 @@
     },
     "StandardizedGraph": {
       "properties": [
+        "edge_score_matrix",
         "edges",
         "graph_semantics",
-        "nodes"
+        "nodes",
+        "score_type"
       ],
       "required": [
         "graph_semantics"
       ],
-      "sha256": "dca4ab789e84a85fc28004cde8380e150f0122412979e717d46d92bfcfa10437",
+      "sha256": "a3eb17feecaccac1b8bab5edbb68e5c8136743867c71d190a20d41537d49180f",
       "title": "StandardizedGraph"
     },
     "WebEvidenceResult": {
@@ -363,24 +547,36 @@
       "title": "WebEvidenceResult"
     }
   },
-  "schema_version": "p1-v1",
+  "schema_version": "p2-v1",
   "tools": [
     {
+      "capability_id": "causal.backdoor_ols",
+      "schema_sha256": "baee787153ee02d38b3bcf442ca00818ce3c62280f3a92f94f84a7a58398f84c",
+      "spec_digest": "043f5c83df1e31007be68a8ead3a5d683cac719bc50a3355ffc687bbd2d7af66",
+      "tool_name": "causal_backdoor_ols"
+    },
+    {
       "capability_id": "causal.cdfm",
-      "schema_sha256": "751074663c761fd14ce1d755a2e8ec3a0f3fcb8820649f936ecd0c4a9ec3d583",
-      "spec_digest": "8fdd047d486462685aa0f7c94ffbc851e74a5d41dd06575f1b6ab1281f90fbec",
+      "schema_sha256": "385c538df8c00298de501b5fc06ef4eff28b8e365f83f8811c492353f5fd829c",
+      "spec_digest": "0d28f5d6eda546df490f48541da9200582b924a308d44277939468ce0e0362cd",
       "tool_name": "causal_cdfm"
     },
     {
       "capability_id": "causal.direct_lingam",
-      "schema_sha256": "723945a1c464701111fa0c2b5399ef06264230e540a19f3ecde58e50c07ea59c",
-      "spec_digest": "718ac64c3efe7790b5bda8a2b700e850cfa554500ad11a095d8fba9450898915",
+      "schema_sha256": "97654a33c42ade597f332000a44f260e2db45bc7ea5581c85df01e5f2332d4a7",
+      "spec_digest": "d4081c00e524ba4819c5f1980d4506d8112ac381f6ae5fc997a5f080802d23b2",
       "tool_name": "causal_direct_lingam"
     },
     {
+      "capability_id": "causal.g_formula",
+      "schema_sha256": "552bb504b088a2da00912c340f07ab089cade6029f0d944751e9e74a6091dccd",
+      "spec_digest": "9ed3276ace565645c1937a3aa969343a024de204e875c32cdb010400ac85f86f",
+      "tool_name": "causal_g_formula"
+    },
+    {
       "capability_id": "causal.pc",
-      "schema_sha256": "1ae6f556853dc118755e124cee3f282572a3a6dc267a63e9d1ea5cc3e0dde118",
-      "spec_digest": "2be84a02ec63d244fbc0533f130fdf5c3f7ea1f43364414d9a3bb8d4c56036db",
+      "schema_sha256": "3a54f6cda9165744432f7f48b6f90d9cca2f1313401af842422461cc89bc1148",
+      "spec_digest": "13ce4b31c5ffe4e09bdd26c00d2329f50ef24c9122fe8b2f382e8e5eb2e8156d",
       "tool_name": "causal_pc"
     }
   ]

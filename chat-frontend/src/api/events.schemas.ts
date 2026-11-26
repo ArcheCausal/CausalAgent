@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { effectRequestSchema, effectExecutionContextSchema } from './effect-request.schemas'
 import type { PublicEvent } from '../types/domain'
 
 const phaseEventBase = {
@@ -81,10 +82,60 @@ export const finalResultEventSchema = z.object({
   data: z.unknown(),
 }).passthrough()
 
+export const processingOptionStepSchema = z.object({
+  operation: z.string().min(1),
+  columns: z.array(z.string()),
+  method: z.string().nullable().optional(),
+}).passthrough()
+
+export const processingOptionSchema = z.object({
+  option_id: z.string().min(1),
+  label: z.string().min(1),
+  capability_id: z.string().min(1),
+  steps: z.array(processingOptionStepSchema),
+  impact: z.array(z.string()).optional(),
+  risks: z.array(z.string()).optional(),
+}).passthrough()
+
+export const processingPlanSummarySchema = z.object({
+  summary: z.string().min(1),
+  observation_unit: z.string().min(1),
+  transformations: z.array(z.string()),
+  variable_semantics: z.record(z.string(), z.string()),
+  analysis_columns: z.array(z.string().min(1).max(255)).min(1).max(128).optional(),
+  derived_measurement_semantics: z.array(z.object({
+    column: z.string().min(1).max(255),
+    kind: z.enum(['binary', 'category', 'ordinal', 'count', 'continuous', 'unknown']),
+    evidence: z.string().min(1).max(600),
+  })).max(128).optional(),
+  measurement_columns: z.record(z.string().min(1).max(255), z.string().min(1).max(255).nullable()).optional(),
+  role_columns: z.object({
+    target: z.string().min(1).max(255).nullable().optional(),
+    treatment: z.string().min(1).max(255).nullable().optional(),
+  }).optional(),
+  limitations: z.array(z.string()).optional(),
+  effect_request: effectRequestSchema.nullable().optional(),
+  effect_execution_context: effectExecutionContextSchema.nullable().optional(),
+}).passthrough()
+
+export const interactionPayloadSchema = z.object({
+  type: z.literal('interaction'),
+  interaction_type: z.string().min(1),
+  question_id: z.string().optional(),
+  message: z.string(),
+  algorithm_name: z.string().optional(),
+  expires_at: z.string().optional(),
+  allow_other: z.boolean().optional(),
+  options: z.array(processingOptionSchema).optional(),
+  plan_version: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  plan: processingPlanSummarySchema.optional(),
+}).passthrough()
+
 export const interruptEventSchema = z.object({
   type: z.literal('interrupt'),
   message: z.string(),
   question_id: z.string().min(1),
+  interaction: interactionPayloadSchema.optional(),
 }).passthrough()
 
 export const errorEventSchema = z.object({

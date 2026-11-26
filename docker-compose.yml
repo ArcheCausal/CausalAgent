@@ -6,6 +6,40 @@ secrets:
     file: ${CAUSALAGENT_SECRET_FILE:-./causalagent.env}
 
 services:
+  sandbox-controller:
+    extends:
+      file: ./deploy/opensandbox/services.yml
+      service: sandbox-controller
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./sandbox_controller:/app/sandbox_controller:ro
+      - ./config/secret_file.py:/app/config/secret_file.py:ro
+    environment:
+      ENVIRONMENT: development
+      MYSQL_HOST: mysql-primary
+      MYSQL_WRITE_HOST: mysql-primary
+    networks: [causalagent_replica_network, sandbox_upstream]
+    depends_on:
+      mysql-primary: {condition: service_healthy}
+      db-bootstrap: {condition: service_completed_successfully}
+      opensandbox: {condition: service_healthy}
+
+  opensandbox:
+    extends:
+      file: ./deploy/opensandbox/services.yml
+      service: opensandbox
+    secrets:
+      - source: causalagent_env
+        target: causalagent.env
+    environment:
+      ENVIRONMENT: development
+    networks: [sandbox_upstream]
+
   mysql-primary:
     group_add:
       - "3000"
@@ -14,6 +48,7 @@ services:
       dockerfile: Dockerfile.primary
     container_name: causalagent_mysql_primary
     environment:
+      ENVIRONMENT: development
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_WRITE_USER: ${MYSQL_WRITE_USER:-${MYSQL_USER}}
@@ -43,6 +78,7 @@ services:
     image: postgres:16-alpine
     container_name: causalagent_postgres_checkpoint
     environment:
+      ENVIRONMENT: development
       POSTGRES_DB: ${CHECKPOINT_POSTGRES_DATABASE:-causalagent_checkpoints}
       POSTGRES_USER: ${CHECKPOINT_POSTGRES_USER:-causalagent_checkpoint}
     command:
@@ -73,6 +109,7 @@ services:
       dockerfile: Dockerfile.replica
     container_name: causalagent_mysql_replica
     environment:
+      ENVIRONMENT: development
       MYSQL_REPLICATION_USER: ${MYSQL_REPLICATION_USER:-replica}
     ports:
       - "3308:3306"
@@ -105,6 +142,7 @@ services:
       causalagent_service: "web"
       causalagent_environment: "development"
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=mysql-replica
@@ -206,6 +244,7 @@ services:
       causalagent_environment: "development"
     command: python -m app.agent.worker
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=mysql-replica
@@ -236,11 +275,17 @@ services:
       - JOB_DRAIN_TIMEOUT_SECONDS=${JOB_DRAIN_TIMEOUT_SECONDS:-60}
       - JOB_MAX_ATTEMPTS=${JOB_MAX_ATTEMPTS:-3}
       - JOB_CHAT_HISTORY_LIMIT=${JOB_CHAT_HISTORY_LIMIT:-20}
+      - CAUSALAGENT_SANDBOX_CONTROLLER_URL=${CAUSALAGENT_SANDBOX_CONTROLLER_URL:-http://sandbox-controller:8081}
+      - CAUSALAGENT_SECRET_FILE=/run/secrets/causalagent.env
+      - CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS=${CAUSALAGENT_SANDBOX_CONTROLLER_TIMEOUT_SECONDS:-330}
+      - CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER=${CAUSALAGENT_SANDBOX_MAX_CONCURRENT_PER_WORKER:-2}
+      - CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY_WAIT_SECONDS=${CAUSALAGENT_SANDBOX_GLOBAL_CAPACITY_WAIT_SECONDS:-300}
       - WEB_SEARCH_PROVIDER=${WEB_SEARCH_PROVIDER:-searxng}
       - SEARXNG_URL=${SEARXNG_URL:-http://searxng:8080}
       - BASE_URL=${BASE_URL}
       - MODEL=${MODEL}
       - DEEP_AGENT_MODEL=${DEEP_AGENT_MODEL:-deepseek-v4-flash}
+      - DEEP_AGENT_REASONING_EFFORT=${DEEP_AGENT_REASONING_EFFORT:-high}
       - DEEP_AGENT_BASE_URL=${DEEP_AGENT_BASE_URL:-${BASE_URL}}
       - DEEP_AGENT_CONTEXT_WINDOW_TOKENS=${DEEP_AGENT_CONTEXT_WINDOW_TOKENS:-1000000}
       - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-}
@@ -268,6 +313,7 @@ services:
       - ./Agent/knowledge_base/multimodal_indexes:/app/Agent/knowledge_base/multimodal_indexes
       - ./Agent/knowledge_base/multimodal_runtime:/app/Agent/knowledge_base/multimodal_runtime
     depends_on:
+      sandbox-controller: {condition: service_healthy}
       mysql-primary:
         condition: service_healthy
       mysql-replica:
@@ -289,12 +335,15 @@ services:
       context: .
       dockerfile: Agent/CausalAgentMCP/Dockerfile
     container_name: causalagent_causal_mcp
+    volumes:
+      - ./config/secret_file.py:/app/config/secret_file.py:ro
     labels:
       causalagent_observability: "true"
       causalagent_service: "mcp"
       causalagent_environment: "development"
     command: python -m Agent.CausalAgentMCP.app
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=
@@ -313,7 +362,7 @@ services:
       - CAUSAL_MCP_ENQUEUE_TIMEOUT_SECONDS=${CAUSAL_MCP_ENQUEUE_TIMEOUT_SECONDS:-5}
       - CAUSAL_MCP_ALGORITHM_DEADLINE_SECONDS=${CAUSAL_MCP_ALGORITHM_DEADLINE_SECONDS:-600}
       - CAUSAL_MCP_SLOW_LOG_SECONDS=${CAUSAL_MCP_SLOW_LOG_SECONDS:-60}
-      - CDFM_MODEL_PATH=${CDFM_MODEL_PATH:-DMIRLAB/CDFM}
+      - CDFM_MODEL_PATH=${CDFM_MODEL_PATH:-/opt/cdfm-weights-image}
     depends_on:
       mysql-primary:
         condition: service_healthy
@@ -344,6 +393,7 @@ services:
       causalagent_environment: "development"
     command: python -m Database.bootstrap
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_PORT=3306
@@ -381,6 +431,7 @@ services:
       causalagent_environment: "development"
     command: python -m Database.agent_persistence_cleanup_worker
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=mysql-replica
@@ -432,6 +483,7 @@ services:
       - path: .env
         required: false
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=mysql-replica
@@ -499,6 +551,7 @@ services:
       causalagent_environment: "development"
     command: python -m Database.monitor_worker
     environment:
+      - ENVIRONMENT=development
       - MYSQL_HOST=mysql-primary
       - MYSQL_WRITE_HOST=mysql-primary
       - MYSQL_READ_HOSTS=mysql-replica
@@ -561,6 +614,7 @@ services:
     container_name: causalagent_searxng
     restart: unless-stopped
     environment:
+      - ENVIRONMENT=development
       - SEARXNG_BASE_URL=http://searxng:8080/
     # SearXNG 官方镜像读取 SEARXNG_SECRET 环境变量；开发环境同样从密钥文件导出。
     entrypoint:
@@ -648,6 +702,7 @@ services:
     image: grafana/grafana:13.1.1
     container_name: causalagent_grafana
     environment:
+      ENVIRONMENT: development
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_USERS_DEFAULT_LANGUAGE: zh-Hans
@@ -678,12 +733,14 @@ services:
     restart: unless-stopped
 
 networks:
+  sandbox_upstream: {driver: bridge}
   causalagent_replica_network:
     driver: bridge
   observability_network:
     driver: bridge
 
 volumes:
+  opensandbox_state: {driver: local}
   mysql_primary_data:
     driver: local
   mysql_replica_data:
@@ -700,3 +757,7 @@ volumes:
     driver: local
   alloy_positions:
     driver: local
+
+configs:
+  opensandbox_config:
+    file: ${CAUSALAGENT_OPENSANDBOX_CONFIG_SOURCE:-./deploy/opensandbox/config.toml}

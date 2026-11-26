@@ -16,6 +16,8 @@ from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from Agent.deep_agent_tools.models import EdgePrediction
+
 
 REPORT_SCHEMA_VERSION = 1
 
@@ -218,6 +220,7 @@ class CausalGraphEdge(ReportModel):
         "partially_oriented",
     ] = "directed"
     weight: float | None = None
+    prediction: EdgePrediction | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     evidence_refs: list[str] = Field(default_factory=list)
 
@@ -291,6 +294,11 @@ class ReportDocument(ReportModel):
     schema_version: int = REPORT_SCHEMA_VERSION
     report_id: str
     title: str
+    # 报告完整性独立于分析结论：方向、置信度和算法取舍另行公开。
+    analysis_outcome: str | None = None
+    finalization_status: str | None = None
+    report_mode: Literal["analysis", "diagnostic"] = "analysis"
+    execution_summary: dict[str, Any] = Field(default_factory=dict)
     blocks: list[ReportBlock] = Field(default_factory=list)
     assets: dict[str, ChartAsset | CausalGraphModel] = Field(default_factory=dict)
     sources: list[ReportSource] = Field(default_factory=list)
@@ -348,6 +356,10 @@ def build_report_document(
     assets: dict[str, ChartAsset | CausalGraphModel] | None = None,
     sources: list[ReportSource] | None = None,
     evidence_refs: list[ReportEvidence] | None = None,
+    analysis_outcome: str | None = None,
+    finalization_status: str | None = None,
+    report_mode: str = "analysis",
+    execution_summary: dict[str, Any] | None = None,
 ) -> ReportDocument:
     """校验报告草稿和资源引用，装配出完整的 ``ReportDocument``。
 
@@ -370,6 +382,7 @@ def build_report_document(
             raise ReportSchemaError("证据引用了不存在的来源")
 
     seen_block_ids: set[str] = set()
+    graph_block_count = 0
     for block in iter_report_blocks(normalized_blocks):
         if block.id in seen_block_ids:
             raise ReportSchemaError(f"报告块 ID 重复: {block.id}")
@@ -380,6 +393,9 @@ def build_report_document(
             if not isinstance(asset, ChartAsset):
                 raise ReportSchemaError(f"未知的图表资源: {block.asset_key}")
         elif isinstance(block, CausalGraphBlock):
+            graph_block_count += 1
+            if graph_block_count > 1:
+                raise ReportSchemaError("一份报告只能展示一张主因果图")
             asset = available_assets.get(block.asset_key)
             if not isinstance(asset, CausalGraphModel):
                 raise ReportSchemaError(f"未知的因果图资源: {block.asset_key}")
@@ -392,9 +408,62 @@ def build_report_document(
                     "报告块引用了不存在的证据: " + ", ".join(unknown_evidence)
                 )
 
+    # 已有可信主图不能因模型遗漏资源块而在报告中消失。
+    if not graph_block_count and isinstance(available_assets.get("graph_main"), CausalGraphModel):
+        block_id = "primary_causal_graph"
+        while block_id in seen_block_ids:
+            block_id += "_"
+        seen_block_ids.add(block_id)
+        normalized_blocks = [*normalized_blocks, CausalGraphBlock(
+            id=block_id, title="候选因果结构", asset_key="graph_main",
+        )]
+        graph_block_count = 1
+
+    # 检查缺口和预算状态是程序事实，固定注入正文，供实时、历史和导出共同使用。
+    summary = execution_summary or {}
+    limitations = summary.get("analysis_limitations") or []
+    if limitations or summary.get("budget_exhausted"):
+        normalized_blocks = [block.model_copy(deep=True) for block in normalized_blocks]
+        lines = ["### 分析范围与限制"]
+        if graph_block_count:
+            lines.append("本报告展示的是候选因果结构；图的来源和结构通过校验，不表示因果方向或科学假设已经得到确认。")
+            for block in iter_report_blocks(normalized_blocks):
+                if isinstance(block, CausalGraphBlock):
+                    block.title = "候选因果结构"
+        if summary.get("budget_exhausted"):
+            lines.append("分析执行预算已耗尽，后续工具未执行；报告仅整理已有结果。预算跳过不代表检查通过或算法执行失败。")
+        if summary.get("preliminary_ols"):
+            lines.append("OLS 数值为线性假设下的初步估计；置信区间仅反映该模型假设下的不确定性，不能证明对非线性机制稳健。")
+        lines.extend(item["message"] for item in limitations)
+        block_id = "analysis_scope_limits"
+        while block_id in seen_block_ids:
+            block_id += "_"
+        seen_block_ids.add(block_id)
+        normalized_blocks = [MarkdownBlock(id=block_id, content="\n\n".join(lines)), *normalized_blocks]
+
+    # 超时是程序事实；即使模型正文省略限制，报告也必须保留这项说明。
+    timed_out_names = [
+        item.get("public_name") or item.get("capability_id") or "算法"
+        for item in (execution_summary or {}).get("algorithms", [])
+        if isinstance(item, Mapping) and item.get("status") == "timed_out"
+    ]
+    if timed_out_names:
+        block_id = "algorithm_execution_limits"
+        while block_id in seen_block_ids:
+            block_id += "_"
+        normalized_blocks = [*normalized_blocks, MarkdownBlock(
+            id=block_id,
+            content="### 分析限制\n\n" + "、".join(timed_out_names)
+            + " 调用超时，未完成分析，未提供可用因果图。报告仅采用已完成且通过校验的结果。",
+        )]
+
     return ReportDocument(
         report_id=new_report_id(),
         title=validated_draft.title,
+        analysis_outcome=analysis_outcome,
+        finalization_status=finalization_status,
+        report_mode=report_mode,
+        execution_summary=dict(execution_summary or {}),
         blocks=normalized_blocks,
         assets=available_assets,
         sources=available_sources,
@@ -432,12 +501,17 @@ def build_degraded_report_document(
     message: str,
     *,
     title: str = "因果分析报告",
+    degradation_code: str | None = None,
 ) -> ReportDocument:
     """构造只含失败说明的降级报告文档，供报告节点错误路径使用。"""
 
     return ReportDocument(
         report_id=new_report_id(),
         title=title,
+        report_mode="diagnostic",
+        execution_summary=(
+            {"degradation_code": degradation_code} if degradation_code else {}
+        ),
         blocks=[MarkdownBlock(id="markdown_degraded", content=message)],
         assets={},
         sources=[],

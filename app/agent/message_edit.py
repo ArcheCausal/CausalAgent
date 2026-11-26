@@ -7,7 +7,6 @@ import mysql.connector
 from mysql.connector import errorcode
 
 from app.agent import job_service as jobs
-from app.agent.checkpoint_recovery import get_pending_interrupt
 from app.chat.session_title import build_session_title
 from app.db import get_write_connection
 from Database.analysis_contexts import (
@@ -55,48 +54,14 @@ def _result(row, *, existing):
     }
 
 
-def _resolve_fork(cursor, *, target, previous_ai, reanalyze):
-    if target["input_type"] != "resume":
-        return None
-
-    # The previous AI message may belong to the original Job when editing
-    # the answer of an already-forked Job.
-    earlier_fork = jobs._json_loads(target["fork_from"]) or {}
-    expected_job = earlier_fork.get("source_job_id") or target["job_id"]
-    question_id = target["question_id"]
-    if (
-        previous_ai
-        and question_id
-        and previous_ai["checkpoint_id"]
-        and previous_ai["checkpoint_namespace"] == ""
-        and previous_ai["checkpoint_question_id"] == question_id
-        and previous_ai["analysis_job_id"] == expected_job
-        and previous_ai["event_type"] == "interrupt"
-        and previous_ai["phase_job_id"] == expected_job
-        and (
-            previous_ai["sequence"] == target["sequence"] - 1
-            if not earlier_fork
-            else earlier_fork["checkpoint_id"] == previous_ai["checkpoint_id"]
+def _require_supported_edit(target, *, reanalyze: bool) -> None:
+    # The active graph retired fold. Native data-processing interrupts also
+    # depend on the source Job's child state, input ledger and candidate identity.
+    if target["input_type"] == "resume" and not reanalyze:
+        raise EditConflict(
+            "edit_reanalysis_required",
+            "当前版本无法直接恢复此历史追问，请确认是否按保留历史重新分析",
         )
-        and target["context_before"] is not None
-        and target["file_at_submit"] is not None
-    ):
-        payload = jobs._json_loads(previous_ai["payload_json"]) or {}
-        if payload.get("question_id") == question_id:
-            pending = get_pending_interrupt(
-                job_id=expected_job,
-                checkpoint_id=previous_ai["checkpoint_id"],
-                timeout_ms=jobs.CHECKPOINT_RECOVERY_TIMEOUT_MS,
-            )
-            if pending and pending["question_id"] == question_id:
-                return {
-                    "source_job_id": expected_job,
-                    "checkpoint_id": previous_ai["checkpoint_id"],
-                    "question_id": question_id,
-                }
-    if not reanalyze:
-        raise EditConflict("edit_reanalysis_required", "无法确认追问恢复点，请确认是否按保留历史重新分析")
-    return None
 
 
 def _freeze_file(cursor, *, user_id, target):
@@ -194,8 +159,7 @@ def _edit_in_transaction(
         raise jobs.ActiveJobConflictError(activity)
     cursor.execute(
         """
-        SELECT m.content, i.job_id, i.input_type, i.sequence, i.question_id, i.context_before,
-               i.file_at_submit, i.fork_from, j.web_search_enabled
+        SELECT m.content, i.input_type, i.context_before, i.file_at_submit, j.web_search_enabled
         FROM chat_messages m
         LEFT JOIN analysis_jobs j ON j.job_id = m.analysis_job_id
             AND j.user_id = m.user_id AND j.session_id = m.session_id
@@ -212,7 +176,7 @@ def _edit_in_transaction(
     cursor.execute(
         """
         SELECT j.job_id AS analysis_job_id, m.checkpoint_id, m.checkpoint_namespace, m.checkpoint_question_id,
-               e.event_type, e.payload_json, i.job_id AS phase_job_id, i.sequence,
+               e.event_type, e.payload_json,
                input_message.id AS phase_message_id
         FROM chat_messages m
         LEFT JOIN analysis_jobs j ON j.job_id = m.analysis_job_id
@@ -232,7 +196,7 @@ def _edit_in_transaction(
     previous_ai = cursor.fetchone()
     if (previous_ai or {}).get("checkpoint_id") != checkpoint_id:
         raise EditConflict("edit_checkpoint_conflict", "上一条助手消息的恢复点已变化，请刷新会话")
-    if checkpoint_id and (
+    if checkpoint_id and target["input_type"] != "resume" and (
         not previous_ai["analysis_job_id"]
         or previous_ai["checkpoint_namespace"] != ""
         or not previous_ai["phase_message_id"]
@@ -243,17 +207,15 @@ def _edit_in_transaction(
             != (jobs._json_loads(previous_ai["payload_json"]) or {}).get("question_id")
         )
     ):
-        if target["input_type"] != "resume":
-            raise EditConflict("edit_checkpoint_conflict", "上一条助手消息的执行阶段无法验证")
-        previous_ai = None
-    fork = _resolve_fork(cursor, target=target, previous_ai=previous_ai, reanalyze=reanalyze)
+        raise EditConflict("edit_checkpoint_conflict", "上一条助手消息的执行阶段无法验证")
+    _require_supported_edit(target, reanalyze=reanalyze)
     snapshot = _freeze_file(cursor, user_id=user_id, target=target)
 
     job_id = str(uuid4())
     replaced_context = capture_context_version(cursor, user_id=user_id, session_id=session_id)
-    active = restore_context_version(cursor, user_id=user_id, session_id=session_id, version=target["context_before"])
+    restore_context_version(cursor, user_id=user_id, session_id=session_id, version=target["context_before"])
     context_before = capture_context_version(cursor, user_id=user_id, session_id=session_id)
-    context_id = active if fork else create_or_reuse_context_for_frozen_file(
+    context_id = create_or_reuse_context_for_frozen_file(
         cursor, user_id=user_id, session_id=session_id, snapshot=snapshot,
     )
     cursor.execute(
@@ -276,7 +238,7 @@ def _edit_in_transaction(
         cursor, job_id=job_id, user_id=user_id, session_id=session_id, request_id=request_id,
         normalized_message=message, idempotency_key=key, fingerprint=fingerprint,
         snapshot_values=snapshot, web_search_enabled=bool(target["web_search_enabled"]),
-        analysis_context_id=context_id, context_before=context_before, fork_from=fork,
+        analysis_context_id=context_id, context_before=context_before,
         update_initial_title=session["title"] == build_session_title(target["content"]),
     )
     new_version = version + 1
@@ -290,5 +252,5 @@ def _edit_in_transaction(
     )
     return _result({
         "job_id": job_id, "status": "queued", "chat_message_id": replacement,
-        "conversation_version": new_version, "fork_from": fork,
+        "conversation_version": new_version, "fork_from": None,
     }, existing=False)

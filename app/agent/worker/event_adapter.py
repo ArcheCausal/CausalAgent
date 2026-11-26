@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 import hashlib
 import json
@@ -9,13 +10,23 @@ import re
 import time
 from typing import Any
 
+from pydantic import ValidationError
+
 from Agent.deep_agent_tools.identity import build_deep_agent_step_id
+from Agent.deep_agent_tools.models import AlgorithmResult, InvocationRecord
+from Agent.deep_agent_tools.runtime_updates import (
+    _tool_result_summary,
+    normalize_tool_status,
+    tool_lifecycle_event_key,
+)
 
 
 NODE_DESCRIPTIONS = {
     "agent": "分析用户意图",
-    "fold": "加载文件并验证数据",
     "preprocess": "预处理数据",
+    "data_processing": "理解并处理数据",
+    "validate_dataset": "独立校验分析数据",
+    "bind_dataset": "绑定已校验数据",
     "deep_agent": "执行 Deep Agent 分析",
     "finalization_gate": "校验最终分析决策",
     "mcp": "执行因果分析",
@@ -37,16 +48,16 @@ TOOL_STAGE_NODES = {
     "rag_finalize": "rag",
 }
 DECISION_PROGRESS = {
-    "fold": "已识别为因果分析请求",
+    "data_processing": "已识别为因果分析请求",
     "normal_chat": "已识别为普通问答",
     "inquiry_answer": "已识别为报告追问",
     "postprocess": "已识别为已有结果的后续处理",
-    "preprocess": "文件与数据验证完成",
+    "preprocess": "分析数据摘要和图表已更新",
     "agent": "需要补充分析输入",
 }
 DECISION_FIELDS = {
     "agent": "route_decision",
-    "fold": "fold_decision",
+    "context_switch": "route_decision",
 }
 _SAFE_TOOL_NAME = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 _SAFE_ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
@@ -55,11 +66,14 @@ _ALGORITHM_TOOL_NAMES = {
     "causal.pc": "causal_pc",
     "causal.olc": "causal_olc",
     "causal.direct_lingam": "causal_direct_lingam",
+    "causal.cdfm": "causal_cdfm",
 }
 _DECISION_TOOL_KINDS = {
     "causal_pc": "algorithm",
     "causal_olc": "algorithm",
     "causal_direct_lingam": "algorithm",
+    "causal_cdfm": "algorithm",
+    "request_data_processing": "interaction",
     "rag_evidence_search": "evidence",
     "web_evidence_search": "evidence",
 }
@@ -77,6 +91,8 @@ def sanitize_public_error(error: Any) -> str:
     """把内部异常归类为有限的用户可见错误，避免泄露连接和路径信息。"""
     name = error if isinstance(error, str) else type(error).__name__
     normalized = str(name).lower()
+    if normalized == "unsupportedprocessingcheckpointerror":
+        return "此任务的处理流程版本已不支持恢复，请重新发起分析；历史记录和产物仍保留。"
     if "timeout" in normalized:
         return "调用超时"
     if any(token in normalized for token in ("connection", "connect", "network")):
@@ -125,6 +141,19 @@ _ERROR_NAME_RULES: tuple[tuple[tuple[str, ...], str, str], ...] = (
         "server_error",
     ),
 )
+_MAX_FAILURE_CHAIN_NODES = 32
+_STRUCTURED_CAUSE_RULES = {
+    "timeout": (ERROR_CATEGORY_PROVIDER, "timeout"),
+    "connection_error": (ERROR_CATEGORY_PROVIDER, "connection_unavailable"),
+    "rate_limited": (ERROR_CATEGORY_PROVIDER, "rate_limited"),
+    "request_rejected": (ERROR_CATEGORY_PROVIDER, "request_rejected"),
+    "provider_error": (ERROR_CATEGORY_PROVIDER, "server_error"),
+    "tool_call_invalid": (ERROR_CATEGORY_PROTOCOL, "tool_call_invalid"),
+    "schema_invalid": (ERROR_CATEGORY_PROTOCOL, "schema_invalid"),
+    "json_invalid": (ERROR_CATEGORY_PROTOCOL, "json_invalid"),
+    "output_parser_error": (ERROR_CATEGORY_PROTOCOL, "output_parser_error"),
+    "truncated": (ERROR_CATEGORY_PROTOCOL, "truncated"),
+}
 
 
 @dataclass(frozen=True)
@@ -152,20 +181,52 @@ def _safe_exc_info(error: Any) -> tuple[type[BaseException], BaseException, Any]
     return type(error), error, error.__traceback__
 
 
+def _failure_chain(error: Any) -> Iterator[Any]:
+    """按包装对象、显式原因、未被抑制的上下文遍历，限制对象数并防环。"""
+    pending = [error]
+    seen: set[int] = set()
+    while pending and len(seen) < _MAX_FAILURE_CHAIN_NODES:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        cause = getattr(current, "__cause__", None)
+        context = (
+            getattr(current, "__context__", None)
+            if cause is None and not getattr(current, "__suppress_context__", False)
+            else None
+        )
+        # 栈逆序入列，让 LangGraph 的 error 对象优先于通用异常链。
+        for candidate in (context, cause, getattr(current, "error", None)):
+            if isinstance(candidate, BaseException) and id(candidate) not in seen:
+                pending.append(candidate)
+
+
 def classify_graph_failure(error: Any) -> FailureDiagnostic:
     """把 graph 终态异常映射为稳定故障域与原因码，不读取异常文本。
 
-    只按异常类名（含基类）归类，因此不会把连接串、路径或用户数据带进分类结果。
+    有界检查包装异常及原因链的类名（含基类）和白名单原因码，保留外层 exc_info。
     未识别的异常保持既有的 ``node_error`` 语义。
     """
-    names = _exception_class_names(error)
-    for tokens, error_category, reason_code in _ERROR_NAME_RULES:
-        if any(token in names for token in tokens):
-            return FailureDiagnostic(error_category, reason_code, _safe_exc_info(error))
+    exc_info = _safe_exc_info(error)
+    for candidate in _failure_chain(error):
+        names = _exception_class_names(candidate)
+        for tokens, error_category, reason_code in _ERROR_NAME_RULES:
+            if any(token in names for token in tokens):
+                return FailureDiagnostic(error_category, reason_code, exc_info)
+        cause_code = getattr(candidate, "safe_cause_code", None)
+        classification = (
+            _STRUCTURED_CAUSE_RULES.get(cause_code)
+            if isinstance(candidate, BaseException) and isinstance(cause_code, str)
+            else None
+        )
+        if classification is not None:
+            return FailureDiagnostic(*classification, exc_info)
     return FailureDiagnostic(
         ERROR_CATEGORY_INTERNAL,
         "node_error",
-        _safe_exc_info(error),
+        exc_info,
     )
 
 
@@ -181,8 +242,7 @@ class LangGraphEventAdapter:
         self.failed_attempts: dict[str, str] = {}
         self.streams: dict[str, dict[str, Any]] = {}
         self.decision_streams: dict[str, dict[str, Any]] = {}
-        self._lifecycle_tools: set[str] = set()
-        self._lifecycle_started_tools: set[str] = set()
+        self._lifecycle_event_keys: set[str] = set()
 
     def _base(self, event_type: str, step: dict[str, Any]) -> dict[str, Any]:
         """构造所有阶段事件共享的持久化字段。"""
@@ -330,23 +390,29 @@ class LangGraphEventAdapter:
         if event_type in {"tool_call_start", "tool_call_result"}:
             step = self._lifecycle_step(data)
             tool_name = self._safe_public_tool_name(data.get("tool_name"))
-            if event_type == "tool_call_result":
-                # 结果事件可能在 graph stream 的 task 事件之后才到达；先记住
-                # 已完成的逻辑工具，避免后续聚合 update 再造一条结果事件。
-                if step is not None:
-                    self._lifecycle_tools.add(tool_name)
-            elif step is not None:
-                self._lifecycle_started_tools.add(tool_name)
             if not step:
+                return []
+            supplied_event_key = data.get("_event_key")
+            if (
+                not isinstance(supplied_event_key, str)
+                or not supplied_event_key
+                or len(supplied_event_key) > 255
+                or supplied_event_key in self._lifecycle_event_keys
+            ):
                 return []
             event = self._base(event_type, step)
             supplied_step_id = str(data.get("step_id") or "")
             if _SAFE_STEP_ID.fullmatch(supplied_step_id):
                 event["step_id"] = supplied_step_id
+            supplied_attempt = data.get("attempt")
+            if (
+                isinstance(supplied_attempt, int)
+                and not isinstance(supplied_attempt, bool)
+                and supplied_attempt >= 0
+            ):
+                event["attempt"] = supplied_attempt
             event["tool_name"] = tool_name
-            supplied_event_key = str(data.get("_event_key") or "")
-            if supplied_event_key and len(supplied_event_key) <= 255:
-                event["_event_key"] = supplied_event_key
+            event["_event_key"] = supplied_event_key
             if event_type == "tool_call_start":
                 event["argument_keys"] = []
             else:
@@ -355,6 +421,7 @@ class LangGraphEventAdapter:
                 safe_error_code = self._safe_error_code(data)
                 if safe_error_code:
                     event["safe_error_code"] = safe_error_code
+            self._lifecycle_event_keys.add(supplied_event_key)
             return [event]
         task_id = str(data.get("task_id") or "")
         node_name = data.get("node_name")
@@ -407,25 +474,10 @@ class LangGraphEventAdapter:
         else:
             status = getattr(result, "status", None)
             success = getattr(result, "success", None)
-        normalized = str(getattr(status, "value", status) or "").strip()
-        if normalized in {"valid", "available", "no_results", "succeeded"}:
-            return "succeeded"
-        if normalized in {"not_ready", "disabled"}:
-            return "not_ready"
-        if normalized in {"timed_out", "timeout"}:
-            return "timed_out"
-        if normalized in {"canceled", "cancelled"}:
-            return "canceled"
-        if normalized in {
-            "invalid_input",
-            "not_applicable",
-            "execution_failed",
-            "unavailable",
-            "protocol_error",
-            "failed",
-        }:
-            return "failed"
-        return "succeeded" if success is not False else "failed"
+        # 旧兼容结果可能只有 success；显式状态始终交给公共边界的统一转换。
+        if status is None and isinstance(success, bool):
+            status = "succeeded" if success else "failed"
+        return normalize_tool_status(status)
 
     @staticmethod
     def _safe_error_code(result: Any) -> str | None:
@@ -449,28 +501,7 @@ class LangGraphEventAdapter:
 
         status = cls._safe_result_status(result)
         safe_error_code = cls._safe_error_code(result)
-        raw_status = (
-            result.get("status")
-            if isinstance(result, dict)
-            else getattr(result, "status", None)
-        )
-        raw_status = str(getattr(raw_status, "value", raw_status) or "").lower()
-        if status == "succeeded":
-            return "调用完成"
-        if status == "canceled":
-            return "调用已取消"
-        if status == "timed_out":
-            return "调用超时"
-        if safe_error_code == "WEB_SEARCH_DISABLED":
-            return "未启用"
-        if (
-            raw_status == "unavailable"
-            or status == "not_ready"
-            or safe_error_code
-            in {"RAG_RETRIEVAL_UNAVAILABLE", "WEB_SEARCH_UNAVAILABLE"}
-        ):
-            return "暂不可用"
-        return "调用失败"
+        return _tool_result_summary(status, safe_error_code)
 
     @staticmethod
     def _safe_algorithm_tool_name(result: Any) -> str:
@@ -493,26 +524,70 @@ class LangGraphEventAdapter:
         step: dict[str, Any],
         output: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        """把 Deep Agent 聚合结果投影为不含引用/正文的工具完成事件。"""
+        """仅从结果与终态账本的共同身份恢复可重放的工具完成事件。"""
         results = output.get("deep_agent_algorithm_results")
-        if not isinstance(results, dict):
+        ledger = output.get("deep_agent_action_ledger")
+        if not isinstance(results, dict) or not isinstance(ledger, dict):
             return []
         events: list[dict[str, Any]] = []
-        for result in results.values():
+        for result_ref, raw_result in results.items():
+            try:
+                result = AlgorithmResult.model_validate(raw_result)
+                record = InvocationRecord.model_validate(
+                    ledger.get(result.invocation_id)
+                )
+            except ValidationError:
+                continue
+            if (
+                result_ref != result.result_ref
+                or record.invocation_id != result.invocation_id
+                or record.result_ref != result.result_ref
+                or record.provider_call_id != result.provider_call_id
+                or record.job_id != self.job_id
+                or record.job_id != result.provenance.job_id
+                or record.attempt_count != result.provenance.attempt_count
+                or record.lease_epoch != result.provenance.lease_epoch
+                or record.input_identity != result.input_identity
+                or record.final_status == "pending"
+                or record.event_step_id is None
+                or not record.attempts
+            ):
+                continue
+            retry_ordinal = max(record.attempts)
+            attempt = record.attempts[retry_ordinal]
+            status = self._safe_result_status(result)
+            if (
+                attempt.status in {"queued", "running"}
+                or attempt.status != record.final_status
+                or normalize_tool_status(record.final_status) != status
+            ):
+                continue
             tool_name = self._safe_algorithm_tool_name(result)
-            if tool_name in self._lifecycle_tools:
+            if record.tool_name != tool_name:
+                continue
+            event_key = tool_lifecycle_event_key(
+                invocation_id=result.invocation_id,
+                attempt_count=result.provenance.attempt_count,
+                retry_ordinal=retry_ordinal,
+                event_type="tool_call_result",
+            )
+            if event_key in self._lifecycle_event_keys:
                 continue
             event = self._base("tool_call_result", step)
             event.update(
                 {
                     "tool_name": tool_name,
                     "summary": self._tool_result_summary(result),
-                    "status": self._safe_result_status(result),
+                    "status": status,
+                    "_event_key": event_key,
+                    "step_id": record.event_step_id,
+                    "attempt": record.attempt_count,
                 }
             )
             safe_error_code = self._safe_error_code(result)
             if safe_error_code:
                 event["safe_error_code"] = safe_error_code
+            self._lifecycle_event_keys.add(event_key)
             events.append(event)
         return events
 
@@ -664,7 +739,7 @@ class LangGraphEventAdapter:
             messages = output.get("messages") or []
             latest = messages[-1] if messages else None
             tool_name, argument_keys = self._tool_call(latest)
-            if tool_name and tool_name not in self._lifecycle_started_tools:
+            if tool_name:
                 event = self._base("tool_call_start", tool_step)
                 event.update(
                     {

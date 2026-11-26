@@ -9,7 +9,9 @@
 | 层级 | 位置/入口 | 主要证明 |
 | --- | --- | --- |
 | 后端 unit | `tests/unit/` | 单模块状态机、权限、Job fencing、结构化输出和 monitor 逻辑 |
-| 后端 integration | `tests/integration/` | 跨模块静态契约、日志政策、部署边界和 migration 链 |
+| 后端 integration | `tests/integration/` | 多个实际组件之间的数据传递、生命周期和协作行为；真实数据库用例放在 `tests/e2e/` |
+| 效应真实计算组件 integration | `tests/integration/agent/test_effect_interventions_real.py`、`test_effect_decisions_real.py` | 正式数值内核、runner/进程池、定义与比较身份、Gate 和报告接受边界；不包含 HTTP、数据库、模型或完整 Job |
+| 静态契约 | `tests/contracts/` | Compose、Dockerfile、发布 workflow、migration 图与日志政策的跨文件一致性 |
 | RAG/多模态与隔离评测 | `tests/unit/agent/test_multimodal_*.py`、`tests/unit/rag_eval/`、`tests/acceptance/` | 来源/索引/release 契约、隔离队列与评测矩阵的分层检查 |
 | 管理员 Vue unit | `admin-frontend/tests/*.spec.ts` | API DTO、组件、看板/设置语义和 SQL digest 展示 |
 | 管理员 Mock E2E | `admin-frontend` `test:e2e:mock` | 无真实数据库的页面导航、鉴权和交互 |
@@ -18,43 +20,74 @@
 | 官网 Vue unit | `website-frontend/tests/unit` | 路由解析、登录回跳白名单、认证客户端和登录表单交互 |
 | RAG 评测台前端 | `app/rag_eval/frontend/test` | 审核工作流纯函数（`npm test`）、类型检查与生产构建 |
 | 共享设计系统组件 unit | `packages/design-system/tests` | 组件变体与状态类名、标签页键盘行为、输入控件的无障碍关联、空态/加载态/错误态的角色与进度声明 |
-| 前端页面入口 Flask 契约 | `tests/integration/deployment/test_frontend_entrypoints.py` | 四套入口与资源前缀、未登录跳转、权限拒绝、dist 缺失 fail-closed、缓存头、Docker builder/runtime、Compose 变量和忽略规则 |
+| 前端页面入口 Flask 行为 | `tests/integration/deployment/test_frontend_entries.py` | 四套入口的页面与资源路由、未登录跳转、权限拒绝、dist 缺失 fail-closed、缓存头和开发服务器接管 |
+| 前端构建与部署契约 | `tests/contracts/deployment/test_frontend_entrypoints.py`、`test_admin_deployment.py` | Docker builder/runtime、Compose 变量、产物目录、忽略规则和各工程资源前缀 |
 | Windows 桌面逻辑 | `windows-client/tests/test_config.py`、`test_navigation_policy.py`、`test_runtime.py`、`test_launcher.py` | 配置优先级、URL/origin 白名单、运行时错误和 Edge 事件策略，不创建真实窗口 |
 | Windows 壳层 smoke | `windows-client/tests/run_windows_smoke.py`、`test_windows_smoke.py` | 隔离 HTTP stub、真实 WebView2 Edge Chromium 页面加载和窗口退出；只在 Windows 桌面会话执行 |
 | 隔离 E2E | `tests/run_admin_31_e2e.ps1` / `run_admin_32_e2e.ps1` | 空库升级、migration 往返、主从、PostgreSQL checkpoint、受控写入/删除和普通用户回归 |
 
-`tests/README.md` 是后端测试目录和 Docker 单元测试环境的补充入口；新增测试时先判断是否需要真实跨模块依赖，再选择 unit 或 integration。
+`tests/README.md` 是后端测试目录和 Docker 单元测试环境的补充入口。测试层级说明这项测试证明什么，CI 执行组说明它在什么条件下运行，两者不要求一一对应。默认 pytest 范围由 `pytest.ini` 的 `testpaths` 限定为 `tests/unit`、`tests/integration` 和 `tests/contracts`，并排除 `smoke` 与 `db_integration`；`e2e/`、`acceptance/` 和 `smoke/` 使用各自的显式入口。
+
+## CDFM 边概率
+
+`tests/integration/agent/test_cdfm_prediction_projection.py` 直接调用正式矩阵解码、结果标准化、事实投影和报告资源转换，检查非字母列顺序、反向有向边、双箭头、完整精度、非法概率拒绝与旧字段缺失；不执行推理或数据库。前端专项命令 `npm run test:cdfm` 直接运行 Zod、绘图投影与 Vue SSR，使用独立配置，不替换图形库。
+
+人工入口 `tests/acceptance/p2_mcp/cdfm_prediction_acceptance.py --dataset <现有 CSV> --output-dir <隔离证据目录>` 在包含真实 CDFM 依赖和本地权重的环境中执行推理。`--transport mcp` 另外启动正式 Streamable HTTP 服务、算法进程池及 `McpAlgorithmExecutor`；输入 authority 明确为该本地冻结 CSV，不调用数据库 readiness，也不证明 MySQL 授权或租约。它核对所有已输出边的正反概率与原始矩阵位置、实际阈值、公开矩阵边界和 JSON 往返；输出原始结果、标准结果、事实与图资源文件，必须存放于不入库的验收目录。
+
+真实 MySQL 报告附件保存读取、浏览器 canvas 及完整新会话须分别验收，不能把本地 JSON 往返或组件 SSR 作为替代。完整新会话可使用现有 `tests/acceptance/p2_mcp/profile_dispatch_job_acceptance.py` 创建隔离环境；模型调用超时或数据处理等待确认时必须报告实际阻塞，不能自动批准或预设算法结果。
+
+## Agent 评测
+
+独立的因果发现评测工具位于 `agent-test/`，通过各自的命令运行。
+
+| 被测对象 | 入口 | 运行证据 |
+| --- | --- | --- |
+| 已部署的 CausalAgent | [causalagent/README.md](../../agent-test/causalagent/README.md) | 公共 HTTP/SSE、因果图指标、运行清单与逐次尝试记录 |
+| Docker 中的通用 Agent | [general-agent/README.md](../../agent-test/general-agent/README.md) | Claude Code 输出、邻接矩阵、图指标、工具轨迹与容器环境记录 |
+
+两份配置模板共用本地数据目录 `agent-test/datasets/`，也可直接引用仓库外的数据。评测脚本采集证据并计算图指标，由评审模型按 [Agent 评测规则](../../agent-test/AGENTS.md) 阅读产物并判断任务质量。两条入口有各自的指标实现和计分状态，跨入口比较前须核对案例内容和口径。
+
+已有运行产物可以在原位置读取。在新目录复用旧配置时，检查相对数据和输出路径。续跑时传入实际运行目录，并按各入口的要求核对运行身份和样本。
+
+评测工具由使用者单独安装和运行，属于独立入口。应用镜像的构建上下文排除 `agent-test/`。离线自检、样本预选和真实 Job 或模型运行各自提供不同的验证证据。
 
 ## GitHub Actions CI
 
-`lightweight-ci.yml` 的验证门禁只由面向 `main`、`develop` 的 Pull Request 触发，并按改动路径决定执行范围。`push` 到 `main` 或 `develop` 不运行门禁，只用一个预热任务重建 Docker unit 测试镜像并导出层缓存；该任务不产生检查结果，合入 Pull Request 后自动写入缓存，供后续 Pull Request 只读恢复。
+`lightweight-ci.yml` 的验证门禁由面向 `main`、`develop` 的 Pull Request 触发，并按改动路径决定执行范围。`push` 到 `main` 或 `develop` 保留镜像缓存预热，手动触发沿用同一缓存预热语义；预热任务不产生检查结果，合入 Pull Request 后自动写入缓存，供后续 Pull Request 只读恢复。
 
-Pull Request 上的执行范围由 `.github/filters/paths.yaml` 的三个过滤器决定：
+面向 `develop` 的 Pull Request 执行 Python 语法和 Pull Request 规范检查，并按 `.github/filters/paths.yaml` 选择受影响的后端、前端和契约执行组，多个组可以同时触发。面向 `main` 的 Pull Request 执行全部常规组，并保留只接受 `develop` 来源的分支规则。路径判断失败时汇总检查失败，不能解释为没有相关变更。
 
 | 过滤器 | 覆盖范围 | 触发任务 |
 | --- | --- | --- |
-| `backend` | CI 工作流、`app/`、`Agent/`、`Database/`、`config/`、`scripts/`、`tests/`、顶层入口脚本与依赖清单、`Dockerfile` | 后端 unit、Dockerfile 静态检查 |
-| `frontends` | `chat-frontend/`、`admin-frontend/`、`website-frontend/`、`app/rag_eval/frontend/`、`packages/design-system/` | 五个前端工程的自检与构建 |
-| `contracts` | `docker-compose*.yml`、`observability/`、`searxng/`、`deploy/`、发布与打包工作流、预发与观测契约测试、环境变量模板 | Compose 与预发部署合同、Alloy 配置验证 |
+| `backend` | CI 与路径规则、`pytest.ini`、公共测试工具、`tests/unit/`、后端组件 integration、`app/**/*.py` 与 `app/*.py`、`Agent/`、`Database/`、`config/`、顶层入口脚本、依赖清单、测试镜像与测试配置 | `backend` 执行组：全部后端 unit 与不依赖真实外部服务的组件 integration |
+| `frontends` | `chat-frontend/`、`admin-frontend/`、`website-frontend/`、`app/rag_eval/frontend/`、`app/rag_eval/frontend_dist/`、`packages/design-system/`、`Dockerfile`、`.dockerignore` | 现有五个前端矩阵项 |
+| `contracts` | `docker-compose*.yml`、Dockerfile、发布与打包工作流、`tests/contracts/`、`tests/unit/config/`、`tests/unit/deployment/`、迁移目录、可观测与入口路由、环境变量模板 | Compose 与部署契约、前端入口契约、Alloy 配置验证 |
+| `build` | `Dockerfile`、`Agent/CausalAgentMCP/Dockerfile`、`Database/mysql/Dockerfile.*`、Compose、`.dockerignore`、依赖清单和依赖锁 | Dockerfile 静态检查 |
 
-三个过滤器之外的改动（例如纯文档）只运行 Python 语法和 Pull Request 规范检查。结构化输出等单元测试统一由后端 unit 任务执行，不单独设置 `light-tests` 任务。修改 `.github/workflows/lightweight-ci.yml` 会触发后端 unit 与 Dockerfile 检查。面向 `main` 的 Pull Request 无条件运行以上全部任务，不受路径过滤影响。`pull-request-policy` 始终执行，校验标题格式与 `main` 只接受 `develop` 来源的分支流向。
+只改普通说明文档时，仅基础检查运行，其余组按路径结果跳过。结构化输出、流式配置和 schema 快照等用例统一由 `backend` 执行，没有独立的基础测试任务。`app/rag_eval/frontend/**` 只触发 `frontends` 和需要的契约检查，不因为位于 `app/` 下就启动后端组；`tests/contracts/**` 只触发 `contracts`。`ci-result` 汇总任务核对路径判断的预期结果和实际任务结果：应执行的失败、取消或意外跳过，以及路径判断失败都会使它失败。面向 `main` 的 Pull Request 要求常规组全部完成。
 
-**维护规则**：`.github/filters/paths.yaml` 的 glob 与顶层目录一一对应，重命名或移动顶层目录时必须同步修改该文件。旧 glob 匹配不到任何文件时，对应任务会静默跳过，该模块不再被覆盖而 CI 仍显示通过，因此没有自动化兜底，只能靠这条规则和代码评审守住。
+**维护规则**：新增测试必须先放对层级，再更新 `.github/filters/paths.yaml`。跨模块测试要由它读取的生产文件触发，例如部署契约检查 Dockerfile，就必须在 Dockerfile 改变时运行，不能只在契约测试自身改变时运行。`sandbox_controller/**` 变化触发 backend 与 contracts 执行组，Python 语法检查也覆盖该目录；处理镜像的 Dockerfile 与锁定依赖触发 BuildKit 检查。`loadtest/runner/**` 变化触发 backend 执行组，验证日志运行时与压测解析器之间的数据传递；共享 Shell 密钥读取器的行分隔符检查由部署契约组显式执行。共享 CI、路径规则和公共测试配置变化时，宁可触发全部常规组。`tests/contracts/deployment/test_staging_compose.py` 和 `test_searxng_compose.py` 需要 Docker CLI，缺少时只跳过并保留未执行结论。
+
+`main` 与 `develop` 的分支规则集 `mian and dev` 要求 `Python syntax`、`Pull request policy` 和 `CI result` 三个检查。删除或重命名工作流任务时，必须同时修改规则集的必需检查，否则 PR 会一直等待一个不会出现的检查。`CI result` 只在 Pull Request 上运行，push 与手动触发只做缓存预热。
 
 Docker unit 镜像按 `tests/README.md` 中的固定 lock 构建，由 `docker/bake-action@v6` 执行 Bake，以获得 GitHub Actions 提供的缓存运行时令牌和服务地址；无需把令牌写入工作流或服务器配置。两个构建步骤使用 GHA v2 层缓存和同一 `scope=unit-test`：Pull Request 只通过 `cache-from` 恢复并将镜像加载到 Docker，`push` 或手动启动的预热任务通过 `cache-to` 写入，使用 `mode=min` 和 `type=cacheonly`，不加载或推送镜像。构建记录附件上传关闭，构建日志与摘要保留。运行测试仍使用 `docker compose -f docker-compose.test.yml run --rm unit-test`，`docker-compose.test.yml` 保持本地与 CI 共用、不含仅 CI 可用的缓存参数，隔离契约（`network_mode: none`、只读挂载、`env_file`）不变。缓存上限与保留期由 GitHub 侧管理，公开仓库使用标准托管 runner 的用量不计费。
 
 验证缓存时，应先在目标基础分支成功运行一次预热任务，确认日志出现 GHA 缓存导出记录，再查看后续 Pull Request 日志的缓存导入和依赖层 `CACHED` 记录。第一次预热或依赖锁、Dockerfile、基础镜像发生变化时，依赖层可能重新构建；任务成功或配置中存在 `cache-from/cache-to` 不代表缓存已实际写入或命中。
 
-Compose 校验只展开配置，不启动服务。静态 Dockerfile 检查不会生成或推送镜像；实际 app、MCP、MySQL 主从镜像只由人工触发的发布工作流构建。
+Compose 校验只展开配置，不启动服务。静态 Dockerfile 按构建相关路径触发，不会生成或推送镜像；实际 app、MCP、MySQL 主从和数据处理镜像只由人工触发的发布工作流构建。
 
-发布工作流的静态契约及镜像解析器参数失败路径由 `tests/integration/deployment/test_release_workflow.py` 检查，包括四个构建全部成功后才打包、同一源码提交传递、可选手动输入、无效输入不写清单，以及拒绝无法验证 revision 的元数据。该文件不模拟 GHCR 成功响应；通过静态检查不代表仓库鉴权、真实镜像查询或 GitHub Actions 执行成功。真实发布需在 Actions 中检查四个 digest、完整源码提交、制品上传及服务器验收。
+部署契约检查当前的 `docker-compose.yml`、`docker-compose.staging.yml` 与 `docker-compose.prod.yml`，分别覆盖开发、预发与生产拓扑。RAG 验收矩阵的 Compose 检查和仓库元数据 readiness 只引用现存文件；[test_rag_eval_acceptance_metadata.py](../../tests/contracts/deployment/test_rag_eval_acceptance_metadata.py) 核对 Compose 白名单和实际元数据检查结果，不启动服务，也不代表生产服务或数据库就绪。
+
+发布工作流的静态契约及镜像解析器参数失败路径由 `tests/contracts/deployment/test_release_workflow.py` 检查，包括五个构建全部成功后才打包、同一源码提交传递、处理镜像的构建上下文与平台、本次构建 digest 的任务输出传递、独立打包的手动输入、无效输入不写清单，以及拒绝无法验证 revision 的元数据。该文件不模拟 GHCR 成功响应；通过静态检查不代表仓库鉴权、真实镜像查询或 GitHub Actions 执行成功。真实发布需在 Actions 中检查五个 digest、完整源码提交、处理镜像引用传递、制品上传及服务器验收。
 
 本地复现预发静态检查：
 
 ~~~bash
 docker compose --env-file .env.staging.example -f docker-compose.staging.yml config --quiet
-python -m pytest -p no:cacheprovider tests/integration/deployment/test_staging_compose.py
+python -m pytest -p no:cacheprovider tests/contracts/deployment/test_staging_compose.py
 ~~~
+
+轻量 contracts 执行组中的 `tests/unit/config/test_secret_file.py` 只验证密钥文件与基础配置，不导入完整服务。控制服务导入及数据库密钥隔离由 [test_controller_configuration.py](../../tests/integration/config/test_controller_configuration.py) 在 backend 镜像中验证；`.github/filters/paths.yaml` 显式覆盖 `tests/integration/config/**`，新增同类测试时保持这一归属。
 
 ## 普通用户 Vue 前端
 
@@ -77,11 +110,11 @@ Pop-Location
 
 `playwright.mock.config.ts` 在本地默认复用 5174 端口上已有的开发服务器（`reuseExistingServer`），运行前必须确认该端口服务的是当前工作区；若该端口被其他检出占用，应在确认后改用临时端口的等价配置，或停止占用该端口的进程。
 
-前端页面入口与运行镜像 builder/runtime 契约仍需本地或发布前额外核对；当前 CI 的 Dockerfile 检查仅验证 BuildKit 静态规则：
+页面入口的 Flask 行为与构建产物契约由 `tests/integration/deployment/` 和 `tests/contracts/deployment/` 共同覆盖；运行镜像 builder/runtime 仍需本地或发布前额外核对，CI 的 Dockerfile 检查仅验证 BuildKit 静态规则：
 
 ```powershell
-python -m pytest -p no:cacheprovider tests/integration/deployment/test_frontend_entrypoints.py
-python -m py_compile app/main/routes.py app/chat/page_routes.py app/rag_eval/page_routes.py config/settings.py tests/integration/deployment/test_frontend_entrypoints.py
+python -m pytest -p no:cacheprovider tests/integration/deployment/test_frontend_entries.py tests/contracts/deployment/test_frontend_entrypoints.py
+python -m py_compile app/main/routes.py app/chat/page_routes.py app/rag_eval/page_routes.py config/settings.py tests/integration/deployment/test_frontend_entries.py tests/contracts/deployment/test_frontend_entrypoints.py
 docker compose -f docker-compose.yml config --quiet
 docker compose --env-file .env.staging.example -f docker-compose.staging.yml config --quiet
 docker compose -f docker-compose.prod.yml config --quiet
@@ -95,9 +128,9 @@ docker compose -f docker-compose.prod.yml config --quiet
 
 先在隔离 PostgreSQL 使用项目固定依赖执行 `python -m tests.e2e.chat.verify_checkpoint_fork`，核对历史 interrupt、重复分叉、重启连接后继续和独立清理。隔离 MySQL 完成迁移后，在没有 Worker 自动领取的 `causalagent_edit*` 临时库执行 `python -m tests.e2e.chat.verify_edit_fencing`。测试会临时创建 MySQL trigger，在写入替换账本时制造数据库错误，验证此前的截断与上下文改动整体回滚。运行账号需要能创建和删除该测试 trigger。该入口也验证 CSRF、跨用户访问、重复请求、draining、预处理重试和旧租约写入。
 
-在隔离环境启动 Flask、Worker、MCP 与真实模型，并使用当前聊天前端构建。将 `CHAT_EDIT_TEST_URL` 指向其 HTTP 入口，在 `chat-frontend/` 运行 `node tests/acceptance/edit-resend.mjs` 和 `node tests/acceptance/edit-resend-interrupt.mjs`。前者在转发真实 HTTP 流时主动断开一次 SSE，检查浏览器发送的 `Last-Event-ID`，同时覆盖普通编辑、输入法事件、双标签页及幂等。后者使用仓库 CSV 触发真实追问，连续编辑两个不同目标的补充回答。随后在隔离环境运行 `python -m tests.e2e.chat.verify_edit_persistence <session_id>`，核对旧后缀的审计关联、产物版本、报告引用、模型输入及父子图身份。
+在隔离环境启动 Flask、Worker、MCP 与真实模型，并使用当前聊天前端构建。将 `CHAT_EDIT_TEST_URL` 指向其 HTTP 入口，在 `chat-frontend/` 运行 `node tests/acceptance/edit-resend.mjs` 。前者在转发真实 HTTP 流时主动断开一次 SSE，检查浏览器发送的 `Last-Event-ID`，同时覆盖普通编辑、输入法事件、双标签页及幂等。历史回复的验证覆盖未经确认返回 `409 edit_reanalysis_required`、草稿保持、确认后生成新 Job 与保留前缀。
 
-对该测试会话运行 `python -m tests.e2e.chat.verify_edit_compaction <session_id>`，用实际父图投影和真实模型触发摘要中间件，检查替代内容不会从旧分支进入新摘要。故障恢复验证在停止隔离 Worker 后运行 `python -m tests.e2e.chat.verify_edit_recovery stage <session_id>`，再启动 Worker 并运行 `python -m tests.e2e.chat.verify_edit_recovery check <job_id>`。旧锚点缺失时的确认和重分析使用该脚本的 `legacy <session_id>` 分支。
+现行数据处理等待和故障接管使用本页的数据处理验收入口。
 
 隔离 cleanup worker 启动后，可设置 `CHAT_EDIT_VERIFY_CLEANUP=1` 重跑普通浏览器验收。脚本会删除本次创建的测试会话。把输出的 Job ID 传给 `python -m tests.e2e.chat.verify_checkpoint_fork --cleanup <job_id> ...`，核对实际 outbox 收敛与 PostgreSQL 父子 thread 清理。
 
@@ -145,6 +178,172 @@ docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p
 
 ## Deep Agent 定向验证
 
+### OpenSandbox 数据处理验证
+
+分析列、派生测量语义与 PC 检验选择的纯规则入口是 [test_pc_test_semantics.py](../../tests/unit/agent/test_pc_test_semantics.py)，涵盖输出多列、漏列、顺序变化、非法二值值、继承冲突和方案版本。真实算法入口是 [pc_measurement_semantics_real.py](../../tests/acceptance/pc_measurement_semantics_real.py)：
+
+```bash
+python tests/acceptance/pc_measurement_semantics_real.py --output /tmp/pc-semantics-new --cdfm
+```
+
+该人工入口从真实 Alarm 原始数据重建 38,830×11 的窗口变量，经正式独立校验生成语义快照，使用真实 Streamable HTTP MCP、签名校验和进程池运行 PC；同时检查 Sachs 连续测量、将 Sachs 首列按中位数二值化后的混合类型、未知类型及显式不相容检验。`--cdfm` 通过正式 CDFM runner 全量运行同一冻结 CSV，不抽样，不改变生产 MCP 的超时。输出目录必须不存在；需要安装 MCP、causal-learn、CDFM、PyTorch 及本地权重，完整 CPU CDFM 可能需数十分钟。
+
+本地验收权限来自新建的文件清单，不连接 MySQL，也不证明生产 Job 归属、lease、OpenSandbox 或真实模型生成处理脚本的完整链路。PC 图若含有向环，应如实保留 `execution_failed` 和图校验原因，不能删边或改成成功。验收分别检查输入、检验执行与图契约；图恢复评分另行报告，不以 F1 必须提高作为修复条件。
+
+方案、确认快照与执行说明的纯规则测试在 [test_data_processing_lifecycle.py](../../tests/unit/agent/test_data_processing_lifecycle.py)，真实 ToolNode、StateGraph 和 InMemorySaver 的状态传递检查在 [test_data_processing_plan_state.py](../../tests/integration/agent/test_data_processing_plan_state.py)。它们检查相同方案保留确认、方案变化清空绑定、脚本变化要求重新执行、执行说明事实绑定及结束纠正预算，不使用模型或外部服务替身，也不证明 MySQL、PostgreSQL 或 OpenSandbox 已验证。
+
+[test_role_column_mapping.py](../../tests/integration/agent/test_role_column_mapping.py) 是中文研究角色到英文输出列的映射入口，涉及缺失列、角色冲突、未指定角色及研究参数身份保留。效应检查只适用于明确提交 `effect_request` 的研究，不能因存在 target/treatment 就要求估计。第 4 版请求、确认和恢复的纯函数验证使用下述 [效应定义与真实计算入口](#因果效应估计与函数形式检查)；映射测试本身不证明模型、数据库或 OpenSandbox 已验证。
+
+```bash
+docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_data_processing_lifecycle.py tests/integration/agent/test_data_processing_plan_state.py
+```
+
+真实 MySQL/PostgreSQL 入口 `data_processing_recovery.py` 额外覆盖候选保存后调用正式执行说明工具、确认保持有效、说明投影及后续独立校验与绑定。完整模型与 OpenSandbox 入口 `sandbox_upgrade_job.py --scenario execution-report --timeout-seconds 900` 要求真实模型在保存候选后调用说明工具，从子图 checkpoint 检查实际工具顺序，并检查仅确认一次、最终候选与说明一致以及独立校验成功。真实服务不可用时只能报告未执行，不能以离线结果代替。
+
+确认重试的真实数据库入口是 [data_processing_confirmation_retry.py](../../tests/acceptance/data_processing_confirmation_retry.py)，使用同一专用数据库配置及 `DATA_RECOVERY_RUN_ID`，首次只连接空库，后续使用 `--resume` 复用配置。它通过正式确认工具、ToolNode、PostgreSQL 重建连接池和真实 MySQL 输入账本检查确认答复消费、解释恢复、重复确认不再中断、脚本修复保留授权、真实方案变化、过期版本、新输入、旧租约及最新凭据冲突。报告在容器 `/tmp/data-processing-recovery/confirmation-retry-report.json`；该层不调用模型、沙盒或浏览器。
+
+`sandbox_upgrade_job.py --scenario script-repair --timeout-seconds 900` 在相同完整隔离服务上执行真实模型故障恢复：测试输入明确要求首次脚本执行注入的 `RuntimeError`，实际失败后删除故障语句、提供修复说明、重新执行并独立校验。故障语句不是处理方案要求。验收从真实子图 checkpoint 读取工具轨迹，要求确认成功后没有 `set_data_processing_plan`、只有一次确认、存在真实失败与后续成功，以及公开修复进度。缺少任一证据不能声称“模型修复时不重写方案”已通过；该脚本本身仍不包含浏览器验收。
+
+需要人工驱动真实浏览器时可增加 `--browser-confirmation`：入口保留权限为 0600 的测试账号文件，输出文件路径并等待外部提交方案确认，不自动提交该答复；浏览器的展示、刷新和断网重连证据需另行保存，不能仅凭该开关声称浏览器验收通过。`data_processing_confirmation_retry.py --resume --legacy-agent-source <Git 基线导出的 agent.py>` 先用真实旧版工具创建空参数等待调用，再用当前工具与新 PostgreSQL 连接池消费原答复，单独验证兼容性；报告记录旧源码 hash，不改写生产 checkpoint。
+
+数据处理验收必须连接真实 OpenSandbox API、真实沙盒主机和真实数据库，不能使用替代 Provider、模拟 API 响应或伪造外网阻断结果。先从真实沙盒验证 Python 3.11 镜像和固定依赖，再逐项检查创建、原始文件只读、脚本执行、输出回读、超时中断、销毁、MySQL 候选持久化/恢复、PostgreSQL 子图恢复以及真实 IPv4/IPv6 出站被拒绝。公网连接探测的超时本身不能作为防火墙配置证据；验收需同时检查沙盒主机上的 egress sidecar、Docker bridge 和转发规则。
+
+真实沙盒应使用独立 Compose project、网络、数据库和临时密钥文件，按 [沙盒部署说明](../../deploy/opensandbox/README.md) 准备固定镜像与代理路由。控制服务、OpenSandbox 和处理容器属于不同验证边界，必须分别检查实际连接和权限；数据库恢复、健康接口或静态检查不能代替完整沙盒验收。上线前还需在隔离环境执行完整模型、Worker 重启接管、MCP HTTP 和报告链路验收。
+
+统一密钥文件的代码与部署检查包括 `tests/unit/config/test_secret_file.py`、`tests/unit/config/test_sandbox_client.py`、`tests/integration/config/test_controller_configuration.py`、`tests/contracts/deployment/test_sandbox_compose.py` 和 `tests/contracts/deployment/test_release_preflight.py`。发布预检使用真实 Bash、Linux root 文件权限和 Docker Compose CLI，只解析配置，不启动服务。真实启动时，Worker、控制服务和 OpenSandbox 管理服务共享 `causalagent.env`，执行用户脚本的沙盒不得接收文件或密钥；两个认证值分别验证有凭据成功、无凭据及错误凭据拒绝。完整 Job 入口 `tests/acceptance/sandbox_upgrade_job.py` 通过 `FULL_JOB_SANDBOX_SECRET_FILE` 读取控制服务所用统一密钥文件中的两个认证值。
+
+方案确认还要验证确认版本与 Job 输入账本一致、用户修改或拒绝后旧方案不会执行、新语义答复或方案说明变化会使旧确认失效，以及已确认语义范围内的脚本修正可以安全恢复。只有真实 OpenSandbox、MySQL、PostgreSQL 和 Worker 的完整链路才能证明生产级恢复及网络隔离；当前工作区缺少这些验收服务时，必须明确保留未验证结论。
+
+无需外部服务的定向检查如下。生命周期测试直接运行真实 StateGraph、节点包装器和 InMemorySaver，覆盖连续提问、按中断 ID 恢复、重新编译图、校验重试及正常暂停不产生失败事件；语义快照测试使用真实校验器、ToolRuntime、本地 MCP 服务和算法进程，不证明数据库或 HTTP。
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps -T unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_sandbox_preview.py tests/unit/agent/test_processing_plan_public_events.py tests/unit/agent/test_cdfm_input_authority.py tests/unit/agent/test_deep_agent_state.py tests/integration/agent/test_data_processing_child_lifecycle.py tests/integration/agent/test_measurement_semantics_snapshot.py -q
+```
+
+参数提取证据与失败终态的回归检查如下。它使用真实 Pydantic、LangChain 工具调用解析器、提示词、确定性参数规则、StateGraph、worker 终态构造和公共事件白名单，检查缺失或空证据、说明性证据、完整确认、部分确认、修改部分提议、重复字段、非法测量类型、冲突声明、澄清问题缺失、结构错误与业务错误共享一次纠错重试，以及处理失败不产生成功终态；不把模型输出文字匹配作为校验条件，也不使用模型或数据库替身证明真实模型纠错、数据库事务或浏览器链路。
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps -T unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_parameter_extraction_feedback.py tests/unit/agent/test_research_parameter_revisions.py tests/integration/agent/test_data_processing_failure_terminal.py tests/integration/agent/test_data_processing_child_lifecycle.py -q
+```
+
+研究参数与控制服务的定向检查如下。修订测试直接调用真实参数规则；恢复测试使用实际 StateGraph 和 InMemorySaver。协议和客户端配置测试不创建远端沙盒；Compose 与 schema 项只证明静态契约。
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps -T unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_research_parameter_revisions.py tests/integration/agent/test_research_parameter_recovery.py tests/unit/agent/test_sandbox_controller_protocol.py tests/unit/config/test_sandbox_client.py tests/unit/config/test_secret_file.py tests/contracts/database/test_sandbox_lifecycle_schema.py tests/contracts/deployment/test_sandbox_compose.py -q
+```
+
+真实 MySQL 生命周期检查位于 [test_sandbox_sessions_mysql.py](../../tests/e2e/database/test_sandbox_sessions_mysql.py)。它只接受显式启用的隔离数据库，按文件顶部说明设置 `SANDBOX_DATABASE_ACCEPTANCE=1`、专用主机名、数据库名与容器内密钥路径，再执行该文件。首次要求空库；已有验收数据库仅在明确设置 `SANDBOX_DATABASE_REUSE=1` 时续跑。该入口检查真实事务、竞争、fencing、操作幂等和迁移，不创建远端沙盒。资源记录不依赖业务级联删除，核查须同时覆盖业务删除后遗留记录仍可清理。
+
+[父图数据库检查](../../tests/e2e/database/test_deep_agent_parent_mysql.py) 与 [会话数据集清理检查](../../tests/e2e/database/test_chat_dataset_cleanup_mysql.py) 复用上述隔离边界。先在持久测试容器中初始化空库，再在同一容器设置 `SANDBOX_DATABASE_REUSE=1` 执行两个模块，保留容器内临时密钥文件：
+
+```bash
+python -m pytest -p no:cacheprovider tests/e2e/database/test_sandbox_sessions_mysql.py -k empty_upgrade_explicit_downgrade_and_schema_inspection -q
+SANDBOX_DATABASE_REUSE=1 python -m pytest -p no:cacheprovider tests/e2e/database/test_deep_agent_parent_mysql.py tests/e2e/database/test_chat_dataset_cleanup_mysql.py -q
+```
+
+这些检查使用真实 MySQL 候选保存、独立校验与绑定、父图强读及 Flask 删除事务，覆盖数据集身份、原生子图恢复、重试事件、checkpoint 清理入队和文件引用保护；子图 checkpoint 使用内存存储，不证明 PostgreSQL、外部模型、MCP HTTP 或 OpenSandbox。默认 CI 的离线 backend 组不运行这些数据库用例。
+
+控制 API 故障验收入口为 [sandbox_controller_http.py](../../tests/acceptance/sandbox_controller_http.py)：在同一隔离 MySQL 边界下显式设置 `SANDBOX_CONTROLLER_HTTP_ACCEPTANCE=1`，执行 `python tests/acceptance/sandbox_controller_http.py`。它使用真实 TCP HTTP、MySQL 和独立控制进程，并连接不可达的 `127.0.0.1:9` 注入上游连接失败，检查认证、请求限制、容量保留、租约撤销及命名锁丢失。报告保存在容器内 `/tmp/sandbox-controller-http/`；失败创建的记录保留且不自动释放。该入口不运行沙盒脚本，不证明真实 OpenSandbox 成功路径。
+
+真实上游入口为 [sandbox_controller_remote.py](../../tests/acceptance/sandbox_controller_remote.py)。它要求同一隔离 MySQL、已就绪的真实 OpenSandbox、容器内独立上游 key 文件与实际处理镜像 digest，同时显式设置 `SANDBOX_CONTROLLER_HTTP_ACCEPTANCE=1`、`SANDBOX_CONTROLLER_REMOTE_ACCEPTANCE=1` 和 `SANDBOX_CONTROLLER_ACCEPTANCE_IMAGE`。`python tests/acceptance/sandbox_controller_remote.py --scenario chain` 检查正式 Worker 客户端、断连创建、初始化、执行、回执、撤销和清理；`--scenario resilience` 检查真实 SIGKILL 后的启动清理及最后一个容量名额的并发。加上 `--upstream-fault` 时，在脚本输出 `stop_upstream` 或 `restore_upstream` 后，操作该次隔离 OpenSandbox 容器，并在对应报告目录创建同名 `.done` 文件确认已经实际停止或恢复；不能只写确认文件代替故障。报告与控制进程日志保留在隔离容器内；故障测试仅作用于该次创建的 Job、操作和远端沙盒。该入口不运行完整 Worker 调度、模型、RAG、MCP 或生成报告的 Job。
+
+真实数据库入口是 [data_processing_recovery.py](../../tests/acceptance/data_processing_recovery.py)，必须在专用内部 Docker 网络中连接全新空库，设置 `TERMINAL_ACCEPTANCE_MYSQL_HOST=recovery-mysql`、`TERMINAL_ACCEPTANCE_POSTGRES_HOST=recovery-postgres` 和唯一的 `DATA_RECOVERY_RUN_ID`，按脚本顶部说明运行。它执行正式 bootstrap、真实 Flask 注册/登录及文件和 Job 服务、方案输入账本、候选重复保存、校验绑定、上下文切换、旧租约写入拒绝和 PostgreSQL 重建连接池恢复；MCP 使用进程内服务和真实 MySQL 强读，检查二值语义拒绝 DirectLiNGAM。额外的原生子图检查在三次新建 PostgreSQL 连接池之间恢复两次提问。报告保存在验收容器 `/tmp/data-processing-recovery/`；同一容器续跑必须使用 `--resume`，另起一轮必须使用新的空库，数据库和原始报告保留。该入口不访问业务数据库，也不执行模型、沙盒脚本、Worker 故障接管或浏览器/HTTP 完整链路。
+
+2026-10-23 的隔离 MySQL/PostgreSQL 执行中，上述 13 个检查项全部通过，包含候选元组/JSON 数组重放返回相同 ID 和 revision、同上下文保留与跨上下文清除数据指针、旧租约拒绝保存/校验/绑定，以及从数据库恢复二值语义后拒绝 DirectLiNGAM。原生子图使用实际编译的 StateGraph，在三次新建 PostgreSQL 连接池之间完成两轮 interrupt/resume。数据库最初以空库创建，修复后在同一隔离环境续跑；这些结果不证明真实模型、OpenSandbox、HTTP、Worker 崩溃接管或生产网络隔离。
+
+新增参数恢复入口为 [research_parameter_recovery.py](../../tests/acceptance/research_parameter_recovery.py)，需先运行原恢复验收，并复用同一次专用环境。它使用明确构造的图输入和真实 MySQL/PostgreSQL，覆盖连续修订、重建连接池、最终上下文重放、候选参数身份、历史上下文保护与旧 checkpoint 拒绝。配套 [research_parameter_tool_sources.py](../../tests/acceptance/research_parameter_tool_sources.py) 通过真实 ToolNode、graph runner、事件写入和 resume 读取答复来源；默认检查真实答复仅进入待处理状态、没有参数写入或隐藏模型调用，并通过统一参数工具检查真实初始账本来源、完整列集合、同源纠正、重复提交、过期草稿拒绝及 PostgreSQL 重连；显式提供真实模型时，经同一参数工具完成提交。
+
+[real_model_parameter_extraction.py](../../tests/acceptance/real_model_parameter_extraction.py) 在上述专用环境中验证统一研究参数契约。模型配置只从容器私有 JSON 读取，字段为 `model/base_url/api_key/use_responses_api/output_version/reasoning`；通过 `--model-config` 指定，默认路径 `/tmp/research-parameter-model.json`，可用 `--initial-model-config` 指定初始场景模型。初始场景复用生产系统提示词和参数工具 schema，由真实模型生成工具参数并执行确定性解析；答复场景由真实模型发起原提问或确认工具调用，再使用真实 MySQL/PostgreSQL、统一参数工具、graph runner 和事件写入。思考模式的历史推理必须来自原模型响应，不补造推理字段。执行 `python tests/acceptance/real_model_parameter_extraction.py --repetitions 2 --max-model-requests 144`。包含全部 11 列的集合声明、角色及范围、取消和完整或部分确认共 13 组场景，分别经过初始、提问答复、方案修改三个入口；两次重复共 78 项。可用可重复指定的 `--scenario` 选择场景。开关思考对照均使用 `auto` 工具选择、相同输出上限和超时；默认 `--max-output-tokens 8192`、`--request-timeout 90`，输出预算包含推理与可见输出。测试中的问题、期望调用和答复是明确输入，不证明自主规划、沙盒执行或完整 Job；未实际运行时不能声明模型理解或数据库恢复通过。入口拒绝业务数据库，不加载根 `.env`，报告不包含凭据、端点和答复正文，仅记录思考强度及预算。
+
+[real_model_reasoning_recovery.py](../../tests/acceptance/real_model_reasoning_recovery.py) 在同一专用环境中使用私有 `--model-config`，默认 `/tmp/research-parameter-model-high.json`。参数部分执行真实模型→统一参数工具→原生 interrupt→关闭 PostgreSQL 连接池→重连并 resume→模型续接；因果部分运行正式 Deep Agent 的文件工具及结构化收尾，重连后再次调用模型。请求钩子只统计思考配置、历史推理项、非空明文推理字符数和工具返回项，继续真实 HTTP 传输；只有实际回传明文推理及工具返回才能通过续接检查。该入口不提供分析数据或领域算法工具，不证明因果算法、MCP HTTP、搜索、沙盒或完整生产分析流程。
+
+[deepseek_responses_roundtrip.py](../../tests/acceptance/deepseek_responses_roundtrip.py) 是独立的 Responses 协议验收入口。运行容器与全新的 PostgreSQL 位于专用 Docker 网络，数据库别名固定为 `reasoning-postgres`，用户及数据库名均为 `reasoning_acceptance`，不发布数据库端口。模型从只读密钥文件读取 `DEEP_AGENT_API_KEY`，非敏感配置使用 `DEEP_AGENT_MODEL`、`DEEP_AGENT_BASE_URL`；Windows 开发挂载沿用 `ENVIRONMENT=development`。运行 `python tests/acceptance/deepseek_responses_roundtrip.py --report /tmp/唯一报告名.json`。该入口验证同步流式、非流式、关闭思考、`store=False` 明文保留、父图消息投影、真实文件工具续接，以及关闭连接后从 PostgreSQL 恢复的推理文本 hash。工具预算设为 1 次，真实读取文件达到上限后须完成结构化决策；收尾请求只暴露 `FinalAnalysisDecision`。重连使用生产 Gate 修正输入函数继续同一子图，工具计数不能增加，收尾次数也不能重置；剩余次数为零时不再调用模型、不复用被清空的决策。有剩余次数时继续结构化修正。另以执行模型预算为 1 的场景检查独立的三次收尾额度。请求与保存历史中每个调用只有一条回执。报告仅保存状态、计数、工具名与脱敏校验位置，不保存提示词、模型正文或凭据；保留专用数据库和报告。它不访问业务 MySQL，也不证明 MCP、RAG、沙盒或完整 Job 验收。
+
+`tests/unit/agent/test_analysis_budget.py` 直接检查预算阶段转换、整批跳过、隐藏工具拒绝、唯一回执与 checkpoint 修正输入，未执行调用不得生成效应查询和适用性检查。`test_final_analysis_decision.py` 检查科学缺口可展示候选图、来源和账本错误仍严格拒绝；`test_report_document.py` 检查可信主图遗漏补入、固定限制说明、模型草稿不被修改和文档序列化。`tests/integration/agent/test_ate_tool_checks.py` 使用正式 Adapter/MCP 服务和真实进程执行 OLS，检查未完成非线性复核时保留数字、候选图、限制与重新生成快照；已知源图和诊断记录是明确的测试输入，不代表真实模型已经自主发现或诊断。
+
+[test_parameter_validation_feedback.py](../../tests/integration/agent/test_parameter_validation_feedback.py) 直接组合真实完整研究草稿提交规则、CSV 校验器和重试消息组装，检查完整草稿保留既有角色、显式 null 清空，以及错误、实际角色值、列名和算法兼容性从原报告完整进入内部重试消息；它不调用模型，不证明语义提取正确。
+
+[sandbox_upgrade_job.py](../../tests/acceptance/sandbox_upgrade_job.py) 用于完整隔离 Job：上传合成 CSV，经正式 Worker 和模型生成澄清、脚本与方案，提交显式测试答复及带版本的确认，然后执行真实沙盒、独立校验、数据绑定、MCP HTTP 算法和结构化报告。它在两次研究参数答复已保存后结束原 slot，启动新的正式 Worker 进程，再提交方案确认并恢复同一 Job。入口复用专用 MySQL/PostgreSQL；模型客户端必须单独允许外联，不能修改原内部数据库验收客户端的网络限制。控制服务另行连接该专用主库与 OpenSandbox，Worker 仅挂控制 token。
+
+显式设置 `FULL_JOB_SANDBOX_ACCEPTANCE=1`、`FULL_JOB_SANDBOX_CONTROLLER_URL` 和指向控制服务统一密钥文件的 `FULL_JOB_SANDBOX_SECRET_FILE`，并在客户端准备仅含模型配置的 `/tmp/full-job-models.json`，再执行 `python tests/acceptance/sandbox_upgrade_job.py --timeout-seconds 900`。模型配置包含 `outer/deep/context_window_tokens`，前两项各含 `model/base_url/api_key`；入口将真实模型密钥与隔离数据库凭据写入本次私有文件，不修改根 `.env` 或原验收密钥文件。MCP 使用客户端回环地址的 8080 端口，控制服务使用独立容器；报告只保留状态、计数和源码 hash，原始诊断留在容器 `/tmp/sandbox-upgrade-job/`。本场景关闭 Web，RAG 使用独立空目录并报告不可用，不包含浏览器、CDFM 推理、生产网络或生产部署验收。
+
+同一入口的 `--scenario role-columns --timeout-seconds 900` 使用中文研究角色及英文 CSV 列名，要求真实模型在方案中保存映射。验收依次检查原始研究角色未被改写、候选映射与独立校验使用的列一致、真实 MCP 算法与 ATE 检查使用对应变量对、最终校验通过及报告存在。该场景直接确认已明确的方案，不插入额外研究修订或 Worker 重启；恢复场景继续由原入口单独验证。
+
+同一入口增加 `--scenario all-nodes`，默认仍运行原研究参数修订场景。新场景上传列名为 `0/1/2/3/4` 的合成连续数值 CSV，由真实模型提出字段范围问题，测试答复为“全部作为节点参与因果发现”，随后提交带版本的方案确认。验收要求该研究选择只问一次、最终角色均为空、实际列名保留，并通过正式 Worker、真实沙盒、独立校验、CSV 绑定、MCP PC 算法和结构化报告；该场景不要求参数修订次数或 Worker 重启。运行前须确认隔离控制服务及上游已就绪，并与提取验收顺序执行，避免两个 runner 竞争同一隔离 Job 队列。入口存在或提取矩阵通过均不能视为此完整 Job 验收通过。
+
+### 工具可见性与 Web 开关
+
+新增验证只使用真实规则函数、领域对象和框架组件，不生成模型、算法或搜索的替代返回：
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps unit-test python -B -m pytest -p no:cacheprovider tests/unit/agent/test_tool_visibility.py tests/unit/agent/test_deep_agent_state.py tests/integration/agent/test_tool_visibility_runtime.py -q
+```
+
+纯函数用例验证只有明确的 `True` 保留 Web 工具，`False`、`None` 和其他值隐藏，其他工具及原列表不变、顺序不变、不同 Context 独立，已移除工具不被重新加入。真实框架用例通过生产 `build_deep_agent()`、Registry、算法/RAG/Web/文件工具和 Responses API 序列化生成 HTTP 请求，在发送前由请求钩子显式中止，不返回模拟模型响应；分别核对并发开关、工具返回后下一轮、Gate 修正和 `FinalAnalysisDecision` schema 仍在载荷中。这只证明框架与载荷，不证明真实模型成功调用或完成结构化输出。
+
+生产 ToolNode 用例执行关闭搜索的真实入口，核对 `disabled`、`WEB_SEARCH_DISABLED` 和 terminal Ledger；算法空数据前置拒绝也来自真实工具检查，不运行 MCP 算法。使用这些实际拒绝记录验证 Gate 复用同 attempt 的完整记录、拒绝未完成/终态不一致记录，以及旧 attempt 的 Web 记录不能满足当前检查。该用例保持 Gate 现有终态规则，不能解释成搜索或算法已经执行，也不能代替真实 Worker 接管和 PostgreSQL 恢复。
+
+真实模型和搜索的显式入口见 [`tool_visibility_model_smoke.py`](../../tests/smoke/tool_visibility_model_smoke.py)，在已经配置生产格式非敏感环境变量及密钥文件的进程中运行：
+
+```powershell
+python -B tests/smoke/tool_visibility_model_smoke.py
+```
+
+该入口并发运行启用和关闭搜索的全新内存图调用，记录实际发出的工具名，并校验真实模型的 `FinalAnalysisDecision` 与 Web ToolMessage/终态 Ledger。仅 `available` 或 `no_results` 证明检索调用成功；`unavailable`、`protocol_error` 如实报告，不能算 SearXNG 成功。它不创建 MySQL Job，不连接 PostgreSQL；完整 Job、同 attempt Gate 修正、Worker 新 attempt 和 PostgreSQL 恢复仍需在更新后新建 Job 上逐项验收。模型、搜索、Job、恢复的证据必须分别报告，环境阻塞或未执行不可算通过。
+
+### 分析事实的一致性验收
+
+方法定义、混合图、画像、报告投影和保存后的恢复使用真实纯函数及领域模型检查，不替代算法或模型执行结果：
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps unit-test python -B -m pytest -p no:cacheprovider `
+  tests/unit/agent/test_algorithm_specs.py `
+  tests/unit/agent/test_analysis_facts_contracts.py `
+  tests/unit/agent/test_graph_semantics_contracts.py `
+  tests/unit/agent/test_cdfm_runner.py `
+  tests/unit/agent/test_data_profile_semantics.py `
+  tests/unit/agent/test_data_profile_projection.py `
+  tests/unit/agent/test_profile_chart_contracts.py `
+  tests/unit/agent/test_nonlinearity.py `
+  tests/unit/agent/test_report_facts_persistence.py `
+  tests/unit/agent/test_analysis_context_projection.py `
+  tests/unit/agent/test_report_document.py `
+  tests/unit/agent/test_shared_analysis_principles.py `
+  tests/unit/agent/test_deep_agent_schema_snapshots.py `
+  tests/unit/agent/test_shared_contract_imports.py `
+  tests/unit/agent/test_acceptance_json_comparison.py
+```
+
+四种 CDFM 变量对编码、真实有向环拒绝、无向闭合路径、双箭头图资产与文字语义、未知测量语义、输入视图差异，以及方向相反与单方缺边的区分，由这些确定性检查覆盖。它们不证明模型效果，也不说明真实运行一定产生了对应边型或冲突。schema 有计划地变化后使用 `tests/unit/agent/regenerate_schema_snapshots.py` 更新两份快照；生成时仅给 snapshots 子目录写权限，正式测试继续保持仓库只读、网络关闭。
+
+真实完整分析复用 [profile_dispatch_job_acceptance.py](../../tests/acceptance/p2_mcp/profile_dispatch_job_acceptance.py)。该人工入口从现有 worker 读取非敏感配置和密钥文件，只读挂载源码、输入文件与本地权重；创建独立网络、数据库及验收容器，不连接原业务数据库，不自动批准数据处理。先执行只读预检，再启动分析：
+
+```powershell
+python -B tests/acceptance/p2_mcp/profile_dispatch_job_acceptance.py launch --preflight-only --dataset <实际CSV路径> --cdfm-weights-volume <已有权重卷>
+python -B tests/acceptance/p2_mcp/profile_dispatch_job_acceptance.py launch --dataset <实际CSV路径> --data-mode generic --cdfm-weights-volume <已有权重卷> --port 5187
+```
+
+Alarm 窗口数据使用 `--data-mode alarm-windowed`，额外核对 11 个真实数值列及有效 PC 结果；其他数据使用 generic，不套用 Alarm 专项断言。`--prompt` 可指定真实分析问题，`--expect-capability` 可重复指定期望调用的能力；最终主结果仍由真实 DeepAgent 决策和门禁决定。预检只证明配置、文件和镜像可用，不能证明卷内权重或模型已经加载；实际运行另查权重摘要、raw artifact 与标准图对应关系。
+
+首次分析成功后，在本次仍运行的 worker 容器执行以下命令，以同一分析上下文重新生成报告，不重启已经退出的 run 容器：
+
+```powershell
+docker exec <本次前缀>-worker python -B tests/acceptance/p2_mcp/profile_dispatch_job_acceptance.py regenerate
+docker exec <本次前缀>-worker python -B tests/acceptance/p2_mcp/profile_dispatch_job_acceptance.py verify-regeneration
+```
+
+再生入口先保存幂等请求身份，复用现有 Job API；核对保存的方法快照、逐结果取舍、选择依据、输入视图、主图和报告资源，并检查再生没有新增算法调用。跨 MySQL JSON 与 checkpoint 的比较只允许 `1e-14` 的浮点序列化舍入差异，键、顺序、身份和其他字段保持严格比较，不修改生产事实以迁就验证。验收保留本次容器和证据，未自动删除数据库或卷。
+
+自动一致性检查不代替报告正文复核。还需逐项检查主辅身份、选择理由、逐边方向与类型、`edge_counts`、测量语义来源、假设和未检验事项；标题也不得将未知测量语义写成已确认业务量。记录时分别列出确定性检查、真实算法调用、完整模型/数据库/MCP/SSE 链路及新报告再生的实际结果与耗时；未执行或被环境中断的项目不能写为通过。前端改动另外执行相应静态、构建和真实页面检查。
+
+调度前拒绝的诊断路径另由真实 ToolNode 回归覆盖：
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps unit-test python -B -m pytest -p no:cacheprovider tests/integration/agent/test_algorithm_terminal_state.py::test_real_toolnode_rejection_preserves_method_snapshot
+```
+
+该检查使用生产工具、Registry 和调度器，覆盖行数不足及数值依赖未满足，核对结果、ToolMessage 和账本保留方法快照；不使用执行器替身，也不代表已运行被拒绝的算法。
+
 Deep Agent 新路径的定向测试覆盖静态 Algorithm Registry 与 `ToolNode` 依赖调度、父图
 `deep_agent → finalization_gate → report` 拓扑、父子 State 白名单投影、三类
 Finalization outcome/degraded 合同、RAG evidence 延迟初始化、可信 Web 开关、worker
@@ -168,13 +367,80 @@ RAG/SearXNG 或完整 MySQL Job 验收。通过数量由实际 pytest 输出记�
 
 公开决策和刷新恢复的定向覆盖还包括：Tool envelope 剥离 `public_decision` 后执行器只接收科学参数；RAG/Web 检索器入参不含该字段且公开工具名进入事件；无效公开说明不阻断工具；Gate 后内部结果引用映射为公开算法名；`decision/tool_call` 事件经会话历史白名单回放；前端对先于父阶段到达的明细执行一次性暂存和补绘，并对实时决策做渐进展示、对同阶段并行决策串行展示、对历史回放和 `prefers-reduced-motion` 直接展示完整文本。并行 RAG/Web ToolNode 回归还必须覆盖同一查询内排名 reference、跨查询重叠来源和 ToolMessage/State reference 一致性。浏览器缓存通过聊天页脚本与样式版本参数失效。
 
+算法调用登记、统一终态和生命周期事件可独立运行无替代依赖的定向回归：
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps unit-test python -m pytest -p no:cacheprovider `
+  tests/integration/agent/test_algorithm_terminal_state.py `
+  tests/integration/agent/test_tool_lifecycle_events.py `
+  tests/unit/agent/test_deep_agent_models.py `
+  tests/unit/agent/test_action_ledger_reducers.py `
+  tests/unit/agent/test_deep_agent_schema_snapshots.py
+```
+
+这些检查使用真实 LangGraph、ToolNode、内存 checkpoint、生产本地 PC runner 和纯领域契约，覆盖执行前 queued/running 登记、revision 单调恢复、失败 Command 的状态保留、deadline 清理及依赖阻断、Gate 完整性、报告超时限制和 sink/custom/聚合路径的稳定键。纯 asyncio deadline 工作负载只证明调度控制流，不等价于 CDFM、远端取消、真实模型、PostgreSQL/MySQL 或浏览器 SSE 验收。
+
+真实算法终态另有两个[人工验收入口](../../tests/acceptance/p2_mcp/algorithm_terminal_acceptance.py)，不加入默认 pytest。`algorithm_terminal_acceptance.py` 的 server/client 分别运行在本次新建的容器中，仓库只读挂载 `/app`；服务端关闭外网，客户端使用 `--network container:<本次服务端容器>`。镜像需要同时具备测试环境的 LangGraph/应用依赖和 MCP 镜像的真实 CDFM 包；CDFM 权重按 `Agent/CausalAgentMCP/cdfm_weights.py` 的固定 revision 与摘要准备，只读挂载 `/weights`，设置 `CDFM_MODEL_PATH=/weights`、`HF_HUB_OFFLINE=1` 和 `TRANSFORMERS_OFFLINE=1`。容器内命令如下：
+
+```bash
+python tests/acceptance/p2_mcp/algorithm_terminal_acceptance.py server
+python tests/acceptance/p2_mcp/algorithm_terminal_acceptance.py client --deadline 0.75 --report /tmp/algorithm-terminal-report.json
+```
+
+服务端显式生成并冻结合成 CSV，保留默认真实进程池和 runner；它没有连接部署数据库。验收先做真实 CDFM 离线推理预检，再检查两次 PC、CDFM deadline、外部取消、Command/结果/账本/公共事件和进程清理；同一可信 Job 身份下的真实 PC 成功与 CDFM 超时结果还会一起进入 Gate，验证 PC 可被采用，空的显式报告草稿经程序装配后会自动含有 CDFM 分析限制。这不包含模型生成决策或报告。deadline 包括进程初始化与模型加载，不能解释为模型已经推理指定时长。缺失权重时 CDFM 项标为 `BLOCKED`，PC 的工程替补结果不算 CDFM 证据。退出码分别为 PASS=0、FAIL=1、BLOCKED=2。
+
+[真实持久化入口](../../tests/acceptance/p2_mcp/terminal_persistence_acceptance.py) 使用独立内部网络中的全新 MySQL/PostgreSQL 容器，不公开数据库端口。MySQL 仅在初始化时允许空 root 密码并创建空的 `terminal_acceptance` 库；PostgreSQL 创建同名库和用户，临时内部服务使用 trust 认证。客户端设置 `TERMINAL_ACCEPTANCE_MYSQL_HOST` 和 `TERMINAL_ACCEPTANCE_POSTGRES_HOST` 为本次容器名后运行：
+
+```bash
+python tests/acceptance/p2_mcp/terminal_persistence_acceptance.py
+```
+
+该脚本拒绝非空 MySQL 库，在容器内生成一次性凭据并修改初始密码，然后执行正式 bootstrap migration、真实注册/登录和 Session/Job 服务；覆盖重新建立连接池后的 PostgreSQL checkpoint 恢复、revision 单调性、两次本地真实 PC、持久化事件幂等、Flask SSE 的 Last-Event-ID/刷新和取消后的迟到写入拒绝。报告保存在 `/tmp/terminal-persistence-report.json`。重跑必须使用新空库，结束后保留数据库与报告；这不证明 MCP/CDFM 与数据库的完整组合、worker 崩溃接管、真实浏览器或模型报告生成。
+
 终态引用契约的定向覆盖还必须包含：把 RAG/Web 证据引用写入 `result_assessments` 时 Gate 以 `assessment_ref_unknown_result` 拒绝，只修该处后继续以 `proposal_evidence_ref_unknown` 拒绝，两处都修正后才通过；失败规则被翻译成脱敏修正指令并进入重试输入；身份/账本类失败不带规则码且保持通用指令；Gate 拒绝、降级与第二次 Deep Agent 修正各自发布稳定 `event_key` 的 `progress` 阶段说明，并由事件适配器绑定到对应阶段的活跃实例；未登记节点名或空文本不被外带。这几项由 `tests/unit/agent/test_final_analysis_decision.py`、`tests/unit/agent/test_deep_agent_parent_graph.py` 和 `tests/unit/agent/test_stream_events.py` 覆盖，结构化字段描述变更必须同步 `tests/unit/agent/snapshots/` 两个快照。
 
 全量 `tests/unit` 与 `tests/integration` 应在交付前重新执行，并以本次命令输出报告
-passed/skipped/failed；历史通过数量不能代替当前工作树证据。日志序列化兜底事件本身也不能
-作为生产观测链路已验收的证据。
+passed/skipped/failed；历史通过数量不能代替当前工作树证据。`tests/contracts` 由
+`contracts` 执行组在具备 Python、Git 和 Docker CLI 的 runner 上运行，Compose 相关
+检查缺少 Docker CLI 时跳过并保留未执行结论。日志序列化兜底事件本身也不能作为生产观测
+链路已验收的证据。
+
+## 因果效应估计与函数形式检查
+
+本节入口分为预处理纯函数 unit 和真实计算组件 integration。当前契约为两个效应 MCP 能力 `3.0`、处理状态第 4 版、确认方案 schema `causalagent-data-processing-plan-v2` 和报告事实 `analysis-facts-v3`；行为定义见 [Agent 运行时](../architecture/agent-runtime.md#因果效应估计与最终门禁)。
+
+[test_effect_request_preprocessing.py](../../tests/unit/agent/test_effect_request_preprocessing.py) 直接调用正式 schema 和纯函数，检查固定对比与平移请求、额外总体限制、非法字段与数值拒绝、显式 null 和旧缺字段的区别、参数指纹与修订、确认失效、角色及转换 context 投影、候选快照恢复和公开事件投影。它不调用模型或数据库，不替代真实确认和恢复链路。
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps unit-test python -m pytest -p no:cacheprovider --noconftest tests/unit/agent/test_effect_request_preprocessing.py
+```
+
+两个真实计算入口使用已知生成过程的数值数据和明确输入图，不替换算法或 Gate；生成数据用于检验数值性质，不证明真实业务数据的因果发现正确。
+
+| 入口 | 实际执行与验证 | 证据边界 |
+| --- | --- | --- |
+| [test_effect_interventions_real.py](../../tests/integration/agent/test_effect_interventions_real.py) | 正式 OLS/g-formula 内核、runner、服务结果正规化及 `BoundedProcessPool`；对比幅度和反向区间、HGB 成对 bootstrap、同定义样本与调整集、固定对比及 shift 越界、affine 业务单位还原、未知转换/未请求/未验证子群拒绝、工具 schema、样本身份和候选确认快照 | 本地真实数值及组件协作；不运行 MCP HTTP 或 MySQL 权威读取 |
+| [test_effect_decisions_real.py](../../tests/integration/agent/test_effect_decisions_real.py) | 实际 OLS/g-formula 结果进入正式 Gate；独立主图、任选估计器或不采用主效应、不同图/样本/调整规则的不可比性、研究身份及诊断定义冲突、无主效应原因绑定主图与定义、accepted-only 报告、OLS 限制按主效应判断和历史未记录状态 | 账本及拒绝状态由测试直接构造为 Gate 输入，不是 worker 实际持久化事件；不证明数据库恢复或完整 Job |
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm --no-deps unit-test python -m pytest -p no:cacheprovider `
+  tests/integration/agent/test_effect_interventions_real.py `
+  tests/integration/agent/test_effect_decisions_real.py
+```
+
+比较身份包括来源、数据集、研究身份、实际样本及行数、源图、变量、完整效应定义、调整集和调整规则，排除估计器配置；完整执行查询仍校验各估计器配置。支持检查只证明干预在全局观测处理范围内，`conditional_overlap=not_assessed`，不能据此声称条件重叠或识别假设成立。诊断事实和方法差值不强制指定主估计器，报告只消费 Gate accepted 决策。
+
+进程池用例在独立进程运行两个正式估计器，g-formula 在该用例使用 `linear`；HGB 成对 bootstrap 用例直接调用正式内核，不能据此声称已验证 HGB 的进程池执行。Linux 默认 `forkserver`，Windows 使用默认 `spawn`。这些入口不包含 HTTP MCP、MySQL、PostgreSQL checkpoint、OpenSandbox、真实模型、SSE 或浏览器。完整验收需分别记录权威候选绑定、确认修订、恢复身份、远端执行、预算终态与最终报告的真实证据；上述入口或构建通过不能写成真实 E2E 已通过。
 
 ## causal-mcp 纵向验证
+
+算法工具和 Gate 的执行回归分别位于 `tests/unit/agent/test_runtime_tool_state_updates.py` 与 `tests/unit/agent/test_final_analysis_decision.py`。其中算法路径使用 `tests/support/local_algorithm_execution.py`，通过正式 MCP 服务、真实进程池和 causal-learn PC 执行进程内冻结 CSV；`ToolRuntime.state` 必须携带从该 CSV 转换的 `data_profile`。成功、两行样本导致的真实执行失败、处理方案绑定、工具结果及终态 Ledger 和 Gate 校验分别断言。这些文件中其他既有用例仍按其各自依赖边界解释，不能把整个文件的通过数量当作真实外部服务验收。
+
+`tests/unit/agent/test_direct_lingam_analysis.py::test_direct_lingam_returns_structured_success_result` 使用真实 DirectLiNGAM，校验方法快照、安装版本以及邻接矩阵与公开边的方向、权重。CDFM 诊断测试只调用实际诊断和失败封装函数，使用真实文件读取异常与字典访问异常检查来源字段及消息截断；不证明 CDFM 模块加载或模型推理。`tests/integration/agent/test_cdfm_load_failure.py` 在真实 CDFM 依赖存在时，用空本地权重目录和离线设置验证加载失败的公开封装；缺少依赖时明确跳过，也不证明成功推理。MCP 缺省 runner 版本由 `tests/unit/agent/test_runner_method_metadata.py` 检查元数据与来源模型之间的契约，必须保持未知，不能通过填写虚构版本满足校验。MCP 的成功结果与慢调用日志用例运行真实 PC 进程，日志用例通过正式 JSON formatter 读取事件和关联字段；慢调用包含排队耗时，因此不要求告警晚于取得执行槽的 accepted 事件。上述本地组件证据均不包含 HTTP、MySQL 权威读取、PostgreSQL 恢复、真实模型或完整 Job。
+
+```bash
+python -m pytest -p no:cacheprovider tests/unit/agent/test_final_analysis_decision.py tests/unit/agent/test_runtime_tool_state_updates.py tests/unit/agent/test_cdfm_failure_diagnostics.py tests/unit/agent/test_direct_lingam_analysis.py tests/unit/agent/test_agent_state_routing.py tests/unit/agent/test_job_recovery.py tests/unit/agent/test_mcp_v2_contract.py tests/unit/agent/test_runner_method_metadata.py tests/integration/agent/test_cdfm_load_failure.py
+```
 
 `causal-mcp` 的代码级验证覆盖固定 capability/spec digest、Bearer/HMAC 时窗与命令绑定、结果规范化、进程池容量/迟到结果、N×K 客户端池、owner task 清理和 `AlgorithmExecutor` 结构化结果。使用仓库测试镜像执行：
 
@@ -219,11 +485,11 @@ python tests/acceptance/run_rag_eval_production_acceptance.py --layer integratio
 python tests/acceptance/run_rag_eval_production_acceptance.py --layer production --confirm-production-readiness
 ```
 
-production 层不会摄取资料、调用外部 VLM/模型、运行完整评测、冻结题集、发布索引或切换 active pointer；contract、integration、静态 Compose、迁移 head 或 readiness 结果都不能写成真实生产验收通过。RAG 评测使用独立 `rag-eval-worker`、队列任务和产物目录，不等同于独立数据库或安全域。当前测试入口只保留新的 acceptance runner，不应重新添加已移除的旧入口。
+runner 通过 pytest 执行白名单内的测试文件，从而继承 `tests/conftest.py` 安装的离线密钥文件；不要改回 `unittest` 直接加载模块，否则会绕过收集期配置。生产层不会摄取资料、调用外部 VLM/模型、运行完整评测、冻结题集、发布索引或切换 active pointer；contract、integration、静态 Compose、迁移 head 或 readiness 结果都不能写成真实生产验收通过。RAG 评测使用独立 `rag-eval-worker`、队列任务和产物目录，不等同于独立数据库或安全域。当前测试入口只保留新的 acceptance runner，不应重新添加已移除的旧入口。
 
 ## 迁移链验证
 
-空库升级和 migration graph 检查必须确认唯一 head 为 `e2f3a4b5c6d7`：
+空库升级和 migration graph 检查必须确认唯一 head 为 `z2a3b4c5d6e7`：
 
 ```bash
 python -m alembic heads
@@ -239,7 +505,7 @@ checkpoint 清理不得触碰 `store`/`store_migrations` 表，用户长期记�
 
 ## SearXNG 部署验证
 
-SearXNG 不再有初始化脚本：开发与预发 Compose 都直接使用已提交的非密钥 `settings.yml`，密钥由 `deploy/scripts/secret-env.sh` 从服务器密钥文件导出。Compose 部署契约由 `tests/integration/deployment/test_searxng_compose.py` 静态检查，确认镜像不是 `latest`、存在 `/healthz` healthcheck、启动适配脚本导出 `SEARXNG_SECRET` 且配置目录只读挂载，同时默认 `app`/`worker` 不依赖 SearXNG。
+SearXNG 不再有初始化脚本：开发与预发 Compose 都直接使用已提交的非密钥 `settings.yml`，密钥由 `deploy/scripts/secret-env.sh` 从服务器密钥文件导出。Compose 部署契约由 `tests/contracts/deployment/test_searxng_compose.py` 静态检查，确认镜像不是 `latest`、存在 `/healthz` healthcheck、启动适配脚本导出 `SEARXNG_SECRET` 且配置目录只读挂载，同时默认 `app`/`worker` 不依赖 SearXNG。
 
 需要 Docker Engine 才能执行真实容器验证：
 
@@ -259,23 +525,25 @@ powershell -ExecutionPolicy Bypass -File tests/run_searxng_docker_validation.ps1
 
 ## 日志与可观测性验证
 
-日志第二阶段的重点回归位于 `tests/unit/test_event_catalog.py`、`tests/unit/test_request_logging.py`、`tests/unit/agent/`、`tests/unit/analytics/test_public_analytics_events.py` 和 `tests/integration/test_logging_policy.py`。它们覆盖事件目录和固定消息、请求/线程/异步任务/worker slot 上下文隔离、Job 终态、node 最终降级、RAG 计数日志、MCP 可信参数及 stdout/stderr、数据库/monitor/cleanup 转移、匿名访问事件的请求边界与访客标识脱敏，以及运行路径普通 logging 调用和敏感详情键的 AST 政策。
+日志第二阶段的重点回归位于 `tests/unit/test_event_catalog.py`、`tests/unit/test_request_logging.py`、`tests/unit/agent/`、`tests/unit/analytics/test_public_analytics_events.py` 和 `tests/contracts/observability/test_logging_policy.py`。它们覆盖事件目录和固定消息、请求/线程/异步任务/worker slot 上下文隔离、Job 终态、node 最终降级、RAG 计数日志、MCP 可信参数及 stdout/stderr、数据库/monitor/cleanup 转移、匿名访问事件的请求边界与访客标识脱敏，以及运行路径普通 logging 调用和敏感详情键的 AST 政策。
 
-MCP 日志、60 秒慢调用、Job/invocation 关联、控制面取消、目标进程终止和 sibling 隔离集中由 `tests/unit/agent/test_mcp_v2_contract.py`、`tests/unit/agent/test_execution_guard.py`、`tests/unit/test_event_catalog.py` 与 `tests/integration/test_observability_compose.py` 覆盖。可先运行定向回归：
+MCP 日志、60 秒慢调用、Job/invocation 关联、控制面取消、目标进程终止和 sibling 隔离集中由 `tests/unit/agent/test_mcp_v2_contract.py`、`tests/unit/agent/test_execution_guard.py`、`tests/unit/test_event_catalog.py` 与 `tests/contracts/observability/test_observability_compose.py` 覆盖。可先运行定向回归：
 
 ```bash
-docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_mcp_v2_contract.py tests/unit/agent/test_execution_guard.py tests/unit/test_event_catalog.py tests/integration/test_observability_compose.py
+docker compose -f docker-compose.test.yml run --rm unit-test python -m pytest -p no:cacheprovider tests/unit/agent/test_mcp_v2_contract.py tests/unit/agent/test_execution_guard.py tests/unit/test_event_catalog.py tests/contracts/observability/test_observability_compose.py
 ```
 
 其中 ProcessPool 测试只证明合成 runner 的 invocation 级终止和并行隔离，不代表 OLC 的生产数据性能；完整 Job 取消仍需真实 worker、MySQL heartbeat、HTTP MCP 和算法容器联调。
 
 日志改造必须运行完整 `unit-test` 服务，不能只运行新增文件。测试通过只证明代码级合同，不证明 Docker 日志驱动、Alloy、Loki、Grafana、positions、查询标签或真实模型/MCP 链路。
 
-环境受限时才使用本地回退：
+环境受限时才使用本地回退，并且必须先取得用户同意再安装项目依赖：
 
 ```bash
-python -m pytest tests/unit
+python -m pytest
 ```
+
+不带路径参数时按 `pytest.ini` 的 `testpaths` 收集 `tests/unit`、`tests/integration` 和 `tests/contracts`，并排除 `smoke` 与 `db_integration`。真实环境入口不会被这条命令收集。
 
 ## 前端共享设计系统
 
@@ -334,6 +602,8 @@ docker compose -f docker-compose.yml ps
 
 真实模型或知识库凭据不可用时，必须明确写为“未取得真实模型证据”，不能用 fake unit 测试替代。Docker daemon、Alloy validate、positions、上下文隔离、MCP stdout/可信参数或隐私检查任一失败时，不得标记第二阶段完成。
 
-MCP execute/control lane 改造的定向回归还应覆盖 `tests/unit/agent/test_mcp_v2_contract.py`、`tests/unit/agent/test_worker_runtime.py`、`tests/unit/test_event_catalog.py`、`tests/integration/deployment/test_mcp_compose.py` 和 `tests/integration/test_observability_compose.py`。真实 HTTP 验收使用 `tests/acceptance/p2_mcp/run_acceptance.py`，其中普通 execute 槽饱和时取消必须从独立 control lane 发出，并包含两个取消同时到达、同一 control 成员 `max_in_flight=2` 的场景。控制容量、响应、传输和协议异常分别记录为 `control_capacity_timeout`、`response_timeout`、`transport_error` 和 `invalid_response`；`unknown` 不能被解释为远端一定未取消。
+MCP execute/control lane 改造的定向回归还应覆盖 `tests/unit/agent/test_mcp_v2_contract.py`、`tests/unit/agent/test_worker_runtime.py`、`tests/unit/test_event_catalog.py`、`tests/contracts/deployment/test_mcp_compose.py` 和 `tests/contracts/observability/test_observability_compose.py`。真实 HTTP 验收使用 `tests/acceptance/p2_mcp/run_acceptance.py`，其中普通 execute 槽饱和时取消必须从独立 control lane 发出，并包含两个取消同时到达、同一 control 成员 `max_in_flight=2` 的场景。控制容量、响应、传输和协议异常分别记录为 `control_capacity_timeout`、`response_timeout`、`transport_error` 和 `invalid_response`；`unknown` 不能被解释为远端一定未取消。
 
 所有文档变更还必须检查相对链接、顶部职责声明、失效路径和旧 acceptance 入口引用，以及 `git diff --check`；如果任务涉及根 README 的入口或部署说明，还必须核对 README 中的命令、链接和目录导航。只有用户明确要求时才修改根 README；完整验收通过前不追加完成态 CHANGELOG。
+
+统一研究需求的目录入口包括 `tests/unit/agent/test_research_parameter_revisions.py`、`test_parameter_extraction_feedback.py`、`test_measurement_column_mapping.py` 与 `tests/integration/agent/test_processing_checkpoint_version.py`，分别涉及修订、集合解析、输出映射和 checkpoint。第 4 版新增效应定义的纯函数检查使用 [test_effect_request_preprocessing.py](../../tests/unit/agent/test_effect_request_preprocessing.py)；需要限制为无替身验证时使用本节给出的明确文件命令，不用目录级通过数量代替分层证据。

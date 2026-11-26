@@ -6,7 +6,16 @@ services:
       context: .
       dockerfile: Dockerfile
       target: test
-    command: ["python", "-m", "pytest", "-p", "no:cacheprovider", "tests/unit"]
+    # 默认范围只包含离线 unit 与不依赖真实外部服务的组件 integration；
+    # 契约组在宿主 runner 上执行，e2e、acceptance 和 smoke 使用显式入口。
+    command:
+      - python
+      - -m
+      - pytest
+      - -p
+      - no:cacheprovider
+      - tests/unit
+      - tests/integration
     env_file:
       - ./tests/unit-test-env
     environment:

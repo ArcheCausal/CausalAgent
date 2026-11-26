@@ -4,26 +4,49 @@ from __future__ import annotations
 
 import asyncio
 import csv
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import io
 import inspect
+import json
 import logging
+import math
 import re
 import time
 from typing import Any, Callable, Mapping
 
 from Agent.deep_agent_tools.error_codes import SafeErrorCode
+from Agent.CausalAgentMCP.inference.interventions import (
+    EFFECT_REASONS, validate_effect_request,
+)
+from Agent.deep_agent_tools.algorithm_specs import DEFAULT_ALGORITHM_SPECS
+from Agent.deep_agent_tools.ate_applicability import (
+    ATE_REASON_SUMMARIES,
+    check_ate_graph,
+    check_ate_profile,
+)
+from Agent.deep_agent_tools.normalization import (
+    result_from_runner_payload, runner_method_metadata, standardize_runner_graph,
+)
 from Agent.deep_agent_tools.identity import build_result_ref
 from Agent.deep_agent_tools.models import (
     AlgorithmExecutionCommand,
     AlgorithmResult,
     AlgorithmResultProvenance,
+    AteApplicabilityCheck,
+    CausalEffect,
+    DataViewSummary,
     Diagnostics,
-    GraphEdge,
     McpInvocationContext,
     StandardizedGraph,
-    build_diagnostics_from_runner_payload,
     canonical_json_bytes,
+    build_diagnostics_from_runner_payload,
+)
+from Agent.deep_agent_tools.graph_validation import validate_graph_structure
+from Agent.deep_agent_tools.preprocessing import build_data_profile_from_csv
+from Agent.measurement_semantics import (
+    ValidatedAlgorithmInput, normalize_semantic_kinds,
+    semantic_kinds_from_validation_report,
 )
 
 from .auth import McpAuthError, verify_invocation
@@ -37,77 +60,163 @@ from observability.logging_runtime import log_context, log_event
 LOGGER = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class EffectValidatedInput(ValidatedAlgorithmInput):
+    effect_parameters: dict[str, Any] | None = None
+
+
+def effect_parameters_from_snapshot(
+    metadata: Any, *, job_id: str, source_hash: str,
+) -> dict[str, Any] | None:
+    """从已绑定候选重建已确认参数，检查参数链和方案正文的身份。"""
+    from Agent.data_processing.parameters import (
+        PARAMETER_BINDING_KEY, execution_parameters, restore_parameter_binding, parameter_identity,
+    )
+    from Agent.data_processing.plans import build_processing_plan_version
+
+    if isinstance(metadata, (str, bytes, bytearray)):
+        metadata = json.loads(metadata)
+    if not isinstance(metadata, Mapping):
+        return None
+    binding = metadata.get(PARAMETER_BINDING_KEY)
+    if not isinstance(binding, dict) or "effect_request" not in binding.get("parameters", {}):
+        return None
+    parameters = restore_parameter_binding(metadata, job_id=job_id)["analysis_parameters"]
+    plan = dict(metadata)
+    plan.pop(PARAMETER_BINDING_KEY)
+    identity = plan.pop("processing_plan_identity", None)
+    if not isinstance(identity, Mapping) or identity.get("plan_version") != build_processing_plan_version(
+        job_id=job_id, source_hash=source_hash,
+        semantic_identity=identity["semantic_identity"], metadata=plan,
+    ):
+        raise ValueError("candidate confirmation identity does not match its snapshot")
+    result = execution_parameters(parameters, plan)
+    result["research_identity"] = parameter_identity(parameters)
+    result["confirmed_plan_version"] = identity["plan_version"]
+    return result
+
+
 class McpServiceError(RuntimeError):
     def __init__(self, code: SafeErrorCode) -> None:
         super().__init__(code.value)
         self.safe_error_code = code
 
 
-def load_frozen_csv_from_connection(
+def load_validated_input_from_connection(
     context: McpInvocationContext,
     connection: Any,
-) -> str:
-    """Read one frozen Job/file tuple from an already-selected strong connection."""
+) -> ValidatedAlgorithmInput:
+    """Read only the validated, Job-bound analysis dataset from the strong primary."""
+
+    if context.analysis_dataset_id is None or context.source_input_identity is None:
+        raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
 
     cursor = connection.cursor(dictionary=True)
     try:
         cursor.execute(
             """
-            SELECT j.user_id,
-                   j.session_id,
-                   j.worker_id,
-                   j.attempt_count,
-                   j.lease_epoch,
-                   fo.content_hash,
-                   fo.file_content
-            FROM analysis_jobs AS j
-            JOIN user_files AS uf
-              ON uf.id = j.input_user_file_id
-             AND uf.user_id = j.user_id
-            JOIN file_objects AS fo
-              ON fo.id = j.input_object_id
-             AND fo.owner_user_id = j.user_id
-             AND fo.id = uf.object_id
-            WHERE j.job_id = %s
-              AND j.user_id = %s
-              AND j.session_id = %s
-              AND j.worker_id = %s
-              AND j.attempt_count = %s
-              AND j.lease_epoch = %s
-              AND j.execution_state = 'leased'
-              AND j.input_user_file_id IS NOT NULL
-              AND j.input_object_id IS NOT NULL
+            SELECT job_id, user_id, session_id, worker_id, attempt_count, lease_epoch,
+                   execution_state, input_file_hash, prepared_dataset_id
+            FROM analysis_jobs
+            WHERE job_id = %s
             LIMIT 1
             """,
-            (
-                context.job_id,
-                context.user_id,
-                context.session_id,
-                context.worker_id,
-                context.attempt_count,
-                context.lease_epoch,
-            ),
+            (context.job_id,),
+        )
+        job = cursor.fetchone()
+        if (
+            not job
+            or int(job["user_id"]) != context.user_id
+            or job["session_id"] != context.session_id
+            or job["worker_id"] != context.worker_id
+            or int(job["attempt_count"]) != context.attempt_count
+            or int(job["lease_epoch"]) != context.lease_epoch
+            or job["execution_state"] != "leased"
+        ):
+            raise McpServiceError(SafeErrorCode.MCP_LEASE_STALE)
+        if (
+            job["input_file_hash"] != context.source_input_identity
+            or job["prepared_dataset_id"] is None
+            or int(job["prepared_dataset_id"]) != context.analysis_dataset_id
+        ):
+            raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
+        cursor.execute(
+            """
+            SELECT d.id, d.source_hash, d.data_hash, data.content_hash,
+                   data.file_content, d.validation_report, d.metadata
+            FROM analysis_job_datasets AS d
+            JOIN file_objects AS data
+              ON data.id = d.data_object_id
+             AND data.owner_user_id = %s
+             AND data.content_hash = d.data_hash
+            WHERE d.id = %s
+              AND d.job_id = %s
+              AND d.status = 'validated'
+            LIMIT 1
+            """,
+            (context.user_id, context.analysis_dataset_id, context.job_id),
         )
         row = cursor.fetchone()
+        effect_parameters = None
+        if row and row.get("source_hash") == context.source_input_identity:
+            try:
+                effect_parameters = effect_parameters_from_snapshot(
+                    row.get("metadata"), job_id=context.job_id,
+                    source_hash=context.source_input_identity,
+                )
+            except (ValueError, KeyError, TypeError) as exc:
+                raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID) from exc
+            if effect_parameters is not None:
+                if effect_parameters["research_identity"] != context.research_identity:
+                    raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
+                from Agent.data_processing.plans import plan_confirmation_version
+
+                cursor.execute(
+                    "SELECT input_type, input_text FROM analysis_job_inputs "
+                    "WHERE job_id = %s ORDER BY sequence DESC LIMIT 1", (context.job_id,),
+                )
+                confirmation = cursor.fetchone()
+                if (not confirmation or confirmation["input_type"] != "resume"
+                    or plan_confirmation_version(confirmation["input_text"]) != effect_parameters["confirmed_plan_version"]):
+                    raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
     finally:
         cursor.close()
-    if not row or not row.get("file_content"):
-        raise McpServiceError(SafeErrorCode.MCP_LEASE_STALE)
-    if row.get("content_hash") and row["content_hash"] != context.input_snapshot_digest:
+    if (
+        not row
+        or row.get("source_hash") != context.source_input_identity
+        or row.get("data_hash") != context.input_snapshot_digest
+        or row.get("content_hash") != context.input_snapshot_digest
+        or not row.get("file_content")
+    ):
         raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
     try:
-        return row["file_content"].decode("utf-8")
-    except (AttributeError, UnicodeDecodeError) as exc:
+        semantic_kinds = semantic_kinds_from_validation_report(row.get("validation_report"))
+        return EffectValidatedInput(
+            csv_data=row["file_content"].decode("utf-8"),
+            semantic_kinds=semantic_kinds,
+            effect_parameters=effect_parameters,
+        )
+    except (AttributeError, UnicodeError, ValueError, TypeError) as exc:
         raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID) from exc
 
 
-def load_frozen_csv(context: McpInvocationContext) -> str:
+def load_validated_input(context: McpInvocationContext) -> ValidatedAlgorithmInput:
     """Strong-read the current Job/lease/file tuple from MySQL primary."""
 
     from app.db import get_read_connection
 
     with get_read_connection(consistency="strong") as connection:
-        return load_frozen_csv_from_connection(context, connection)
+        return load_validated_input_from_connection(context, connection)
+
+
+def load_frozen_csv_from_connection(context: McpInvocationContext, connection: Any) -> str:
+    """兼容仅需 CSV 的旧调用，仍要求有效的校验报告。"""
+    return load_validated_input_from_connection(context, connection).csv_data
+
+
+def load_frozen_csv(context: McpInvocationContext) -> str:
+    """兼容仅需 CSV 的旧调用；生产执行使用完整可信输入。"""
+    return load_validated_input(context).csv_data
 
 
 def _validate_csv_limits(csv_data: str, config: McpServerConfig) -> None:
@@ -126,58 +235,13 @@ def _validate_csv_limits(csv_data: str, config: McpServerConfig) -> None:
             raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID)
 
 
-def _graph_semantics(capability_id: str) -> str:
-    return {
-        "causal.pc": "partially_directed_graph",
-        "causal.olc": "latent_partially_directed_graph",
-        "causal.direct_lingam": "dag",
-        "causal.cdfm": "directed_graph",
-    }.get(capability_id, "causal_graph")
-
-
 def _standardized_graph(raw_result: Mapping[str, Any], capability_id: str) -> StandardizedGraph:
-    data = raw_result.get("data")
-    if not isinstance(data, Mapping):
-        raise ValueError("result data is not a mapping")
-    raw_nodes = data.get("nodes")
-    raw_edges = data.get("edges")
-    if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
-        raise ValueError("result graph shape is invalid")
-    nodes: list[str] = []
-    for node in raw_nodes:
-        value = node.get("id") if isinstance(node, Mapping) else node
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError("result node is invalid")
-        nodes.append(value)
-    edges: list[GraphEdge] = []
-    for edge in raw_edges:
-        if not isinstance(edge, Mapping):
-            raise ValueError("result edge is invalid")
-        source = edge.get("from", edge.get("source"))
-        target = edge.get("to", edge.get("target"))
-        if not isinstance(source, str) or not isinstance(target, str):
-            raise ValueError("result edge endpoint is invalid")
-        arrows = edge.get("arrows")
-        edge_type = "undirected" if not arrows or edge.get("dashes") else "directed"
-        weight = edge.get("weight")
-        if weight is not None and not isinstance(weight, (int, float)):
-            raise ValueError("result edge weight is invalid")
-        edges.append(
-            GraphEdge(
-                source=source,
-                target=target,
-                edge_type=edge_type,
-                weight=float(weight) if weight is not None else None,
-            )
-        )
-    return StandardizedGraph(
-        graph_semantics=_graph_semantics(capability_id),
-        nodes=nodes,
-        edges=edges,
-    )
+    return standardize_runner_graph(raw_result, capability_id=capability_id)
 
 
 def _failure_status(code: SafeErrorCode) -> str:
+    if code == SafeErrorCode.ALGORITHM_NOT_APPLICABLE:
+        return "not_applicable"
     if code == SafeErrorCode.ALGORITHM_INPUT_INVALID:
         return "invalid_input"
     if code == SafeErrorCode.ALGORITHM_NOT_READY:
@@ -250,7 +314,9 @@ def _error_result(
     *,
     code: SafeErrorCode,
     capability_version: str,
+    ate_check: AteApplicabilityCheck | None = None,
 ) -> AlgorithmResult:
+    spec = next((spec for spec in DEFAULT_ALGORITHM_SPECS if spec.capability_id == command.capability_id), None)
     return AlgorithmResult(
         result_ref=build_result_ref(
             invocation_id=command.invocation_id,
@@ -261,8 +327,14 @@ def _error_result(
         capability_id=command.capability_id,
         capability_version=capability_version,
         status=_failure_status(code),
+        ate_check=ate_check if command.capability_id == "causal.backdoor_ols" else None,
+        method=spec.method_definition() if spec is not None and spec.version == capability_version else None,
         diagnostics=Diagnostics(
-            summary="算法调用未产出可用结果。",
+            summary=(
+                ATE_REASON_SUMMARIES[ate_check.reason_code]
+                if ate_check is not None and ate_check.reason_code in ATE_REASON_SUMMARIES
+                else "算法调用未产出可用结果。"
+            ),
             safe_error_code=code,
         ),
         provenance=AlgorithmResultProvenance(
@@ -270,11 +342,126 @@ def _error_result(
             attempt_count=context.attempt_count,
             lease_epoch=context.lease_epoch,
             input_identity=command.input_identity,
+            source_input_identity=context.source_input_identity,
+            analysis_dataset_id=context.analysis_dataset_id,
+            research_identity=context.research_identity,
             spec_digest=command.spec_digest,
             invocation_id=command.invocation_id,
             capability_id=command.capability_id,
             capability_version=capability_version,
-            algorithm_runner_version="causalachieve-v1",
+            algorithm_runner_version=None,
+        ),
+    )
+
+
+def _finite_metrics(payload: Any) -> dict[str, float | int]:
+    """只保留有限数值的 diagnostics metrics；其余值静默丢弃。"""
+
+    if not isinstance(payload, Mapping):
+        return {}
+    return {
+        key: value
+        for key, value in payload.items()
+        if isinstance(key, str)
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    }
+
+
+def _estimation_result(
+    raw_result: Mapping[str, Any],
+    *,
+    command: AlgorithmExecutionCommand,
+    context: McpInvocationContext,
+    capability_version: str,
+    graph: StandardizedGraph,
+    data_view: DataViewSummary | None,
+    ate_check: AteApplicabilityCheck | None = None,
+) -> AlgorithmResult:
+    """估计能力的成功结果：图取入参图，效应取 runner 返回值。"""
+
+    effect_payload = raw_result.get("causal_effect")
+    if not isinstance(effect_payload, Mapping):
+        raise ValueError("estimation runner did not return causal_effect")
+    diagnostics_metrics = _finite_metrics(effect_payload.get("diagnostics_metrics"))
+    if effect_payload.get("diagnostics_metrics", {}).get("difference_direction") == "linear_minus_g_formula":
+        diagnostics_metrics["difference_direction"] = "linear_minus_g_formula"
+    effect = CausalEffect.model_validate(
+        {
+            "graph_result_ref": command.parameters.get("graph_result_ref"),
+            **{
+                key: value
+                for key, value in effect_payload.items()
+                if key != "diagnostics_metrics"
+            },
+        }
+    )
+    if (
+        effect.treatment != command.parameters.get("treatment")
+        or effect.outcome != command.parameters.get("outcome")
+        or effect.graph_result_ref != command.parameters.get("graph_result_ref")
+        or effect.effect_request != command.parameters.get("effect_request")
+        or effect.support.get("status") != "supported"
+        or effect.sample_identity is None
+        or effect.adjustment_rule != "parents_of_treatment"
+    ):
+        raise ValueError("estimation result does not match the requested pair")
+    if ate_check is not None and (
+        ate_check.applicability != "ready"
+        or effect.graph_result_ref != ate_check.graph_result_ref
+        or effect.treatment != ate_check.treatment
+        or effect.outcome != ate_check.outcome
+        or effect.adjustment_set != ate_check.adjustment_set
+    ):
+        raise ValueError("estimation result does not match the completed ATE check")
+    if data_view is not None and effect.n_rows != data_view.row_count:
+        raise ValueError("estimation result changed the checked sample count")
+    validation = validate_graph_structure(graph, graph_semantics=graph.graph_semantics)
+    if not validation.valid:
+        raise ValueError("input graph failed structural validation")
+    metadata = runner_method_metadata(raw_result, command.capability_id)
+    return AlgorithmResult(
+        result_ref=build_result_ref(
+            invocation_id=command.invocation_id,
+            result_index=command.result_index,
+        ),
+        invocation_id=command.invocation_id,
+        provider_call_id=command.provider_call_id,
+        capability_id=command.capability_id,
+        capability_version=capability_version,
+        status="valid",
+        **metadata,
+        standardized_graph=graph,
+        graph_validation=validation,
+        causal_effect=effect,
+        ate_check=ate_check if command.capability_id == "causal.backdoor_ols" else None,
+        summary="算法调用完成。",
+        data_view=data_view,
+        diagnostics=Diagnostics(
+            summary="效应估计完成。",
+            sample_count=effect.n_rows,
+            metrics=diagnostics_metrics,
+            assumptions_checked=[
+                "all_edges_directed",
+                "acyclic",
+                "treatment_ancestor_of_outcome",
+            ],
+        ),
+        input_identity=command.input_identity,
+        provenance=AlgorithmResultProvenance(
+            job_id=context.job_id,
+            attempt_count=context.attempt_count,
+            lease_epoch=context.lease_epoch,
+            input_identity=command.input_identity,
+            source_input_identity=context.source_input_identity,
+            analysis_dataset_id=context.analysis_dataset_id,
+            research_identity=context.research_identity,
+            spec_digest=command.spec_digest,
+            invocation_id=command.invocation_id,
+            capability_id=command.capability_id,
+            capability_version=capability_version,
+            algorithm_runner_version=metadata["implementation"].runner_version,
         ),
     )
 
@@ -288,7 +475,7 @@ class CausalMcpService:
         config: McpServerConfig,
         registry: RunnerRegistry,
         executor_pool: BoundedProcessPool,
-        authority_reader: Callable[[McpInvocationContext], str | bytes] = load_frozen_csv,
+        authority_reader: Callable[[McpInvocationContext], Any] = load_validated_input,
         database_probe: Callable[[], bool] | None = None,
         service_instance_id: str = "causal-mcp",
     ) -> None:
@@ -315,8 +502,8 @@ class CausalMcpService:
             mysql_ready = False
         return config_ready, mysql_ready, self.executor_pool.ready()
 
-    async def _read_authority(self, context: McpInvocationContext) -> str:
-        """Read authority off the event loop and normalize the frozen CSV."""
+    async def _read_authority(self, context: McpInvocationContext) -> ValidatedAlgorithmInput:
+        """读取可信 CSV 和语义快照，拒绝只含 CSV 的旧 reader。"""
 
         try:
             if inspect.iscoroutinefunction(self.authority_reader):
@@ -330,14 +517,15 @@ class CausalMcpService:
         except Exception as exc:
             # Database/driver details must not cross the private MCP boundary.
             raise McpServiceError(SafeErrorCode.MCP_TRANSPORT_FAILED) from exc
-        if isinstance(csv_data, bytes):
-            try:
-                csv_data = csv_data.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID) from exc
-        if not isinstance(csv_data, str):
+        if not isinstance(csv_data, ValidatedAlgorithmInput):
             raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID)
         return csv_data
+
+    async def _confirm_authority(
+        self, context: McpInvocationContext, expected: ValidatedAlgorithmInput,
+    ) -> None:
+        if await self._read_authority(context) != expected:
+            raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
 
     async def execute_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         started_at = time.perf_counter()
@@ -358,7 +546,8 @@ class CausalMcpService:
             "invocation_id": context.invocation_id,
             "retry_ordinal": request.retry_ordinal,
         }
-        if command.invocation_id != context.invocation_id:
+        if (command.invocation_id != context.invocation_id
+            or command.research_identity != context.research_identity):
             log_event(
                 LOGGER,
                 "mcp.request.rejected",
@@ -441,8 +630,10 @@ class CausalMcpService:
     ) -> dict[str, Any]:
         command = request.command
         context = request.trusted_context
+        ate_check: AteApplicabilityCheck | None = None
         try:
-            csv_data = await self._read_authority(context)
+            trusted_input = await self._read_authority(context)
+            csv_data = trusted_input.csv_data
             _validate_csv_limits(csv_data, self.config)
             from Agent.deep_agent_tools.algorithm_specs import DEFAULT_ALGORITHM_SPECS
 
@@ -452,6 +643,80 @@ class CausalMcpService:
             )
             parameters = spec.model_input_schema.model_validate(command.parameters).model_dump(
                 mode="json"
+            )
+            artifacts = dict(command.artifacts)
+            allowed_artifacts = set(spec.requires)
+            if spec.kind == "causal_estimation":
+                allowed_artifacts.update({"effect_request", "effect_execution_context"})
+            if set(artifacts) - allowed_artifacts:
+                raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID)
+            if spec.kind == "causal_estimation":
+                confirmed = getattr(trusted_input, "effect_parameters", None)
+                if not isinstance(confirmed, Mapping) or not isinstance(confirmed.get("effect_request"), dict):
+                    raise McpServiceError(SafeErrorCode.ALGORITHM_NOT_APPLICABLE)
+                if (
+                    validate_effect_request(parameters["effect_request"]) != confirmed["effect_request"]
+                    or parameters["treatment"] != confirmed.get("treatment")
+                    or parameters["outcome"] != confirmed.get("target")
+                    or ("effect_request" in artifacts and artifacts["effect_request"] != confirmed["effect_request"])
+                    or ("effect_execution_context" in artifacts
+                        and artifacts["effect_execution_context"] != confirmed.get("effect_execution_context"))
+                    or context.research_identity != confirmed.get("research_identity")
+                ):
+                    raise McpServiceError(SafeErrorCode.MCP_CONTEXT_INVALID)
+                artifacts["effect_execution_context"] = confirmed.get("effect_execution_context")
+                artifacts["semantic_kinds"] = dict(trusted_input.semantic_kinds)
+            graph: StandardizedGraph | None = None
+            if "standardized_graph" in artifacts:
+                try:
+                    graph = StandardizedGraph.model_validate(
+                        artifacts["standardized_graph"]
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise McpServiceError(
+                        SafeErrorCode.ALGORITHM_INPUT_INVALID
+                    ) from exc
+            if spec.kind == "causal_estimation" and graph is None:
+                raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID)
+            if graph is not None and not validate_graph_structure(
+                graph, graph_semantics=graph.graph_semantics,
+            ).valid:
+                raise McpServiceError(SafeErrorCode.ALGORITHM_INPUT_INVALID)
+            processed_profile = build_data_profile_from_csv(csv_data)
+            semantic_kinds = normalize_semantic_kinds(
+                trusted_input.semantic_kinds, columns=processed_profile.column_names,
+            )
+            if command.capability_id == "causal.pc":
+                artifacts["semantic_kinds"] = semantic_kinds
+            if spec.kind == "causal_estimation":
+                graph_check = check_ate_graph(
+                    graph=graph,
+                    graph_result_ref=parameters["graph_result_ref"],
+                    treatment=parameters["treatment"],
+                    outcome=parameters["outcome"],
+                )
+                ate_check = check_ate_profile(
+                    graph_check, profile=processed_profile, semantic_kinds=semantic_kinds,
+                )
+                applicability = ate_check.applicability
+            else:
+                applicability, _reason = spec.assess_applicability(
+                    profile=processed_profile,
+                    semantic_kinds=semantic_kinds,
+                )
+            if applicability != "ready":
+                code = (
+                    SafeErrorCode.ALGORITHM_NOT_APPLICABLE
+                    if applicability == "not_applicable"
+                    else SafeErrorCode.ALGORITHM_INPUT_INVALID
+                )
+                raise McpServiceError(code)
+            if command.capability_id != "causal.backdoor_ols":
+                ate_check = None
+            data_view = DataViewSummary(
+                row_count=processed_profile.row_count,
+                column_count=processed_profile.column_count,
+                columns=processed_profile.column_names,
             )
         except McpServiceError as exc:
             log_event(
@@ -467,6 +732,11 @@ class CausalMcpService:
                 context,
                 code=exc.safe_error_code,
                 capability_version=entry.version,
+                ate_check=(
+                    ate_check
+                    if exc.safe_error_code == SafeErrorCode.ALGORITHM_NOT_APPLICABLE
+                    else None
+                ),
             )
             return {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
         except Exception:
@@ -495,7 +765,7 @@ class CausalMcpService:
         async def before_process_start(queue_wait_seconds: float) -> None:
             # A Job may lose its lease while waiting for process capacity.
             # Re-read the authoritative tuple immediately before submission.
-            await self._read_authority(context)
+            await self._confirm_authority(context, trusted_input)
             log_event(
                 LOGGER,
                 "mcp.request.accepted",
@@ -514,6 +784,7 @@ class CausalMcpService:
                     runner=entry.runner,
                     csv_data=csv_data,
                     parameters=parameters,
+                    artifacts=artifacts,
                     timeout_seconds=timeout_seconds,
                     concurrency=entry.concurrency,
                     before_start=before_process_start,
@@ -633,11 +904,21 @@ class CausalMcpService:
                 SafeErrorCode.ALGORITHM_TIMED_OUT,
                 SafeErrorCode.ALGORITHM_EXECUTION_FAILED,
             }:
+                # A completed check cannot authorize publishing under a stale lease.
+                try:
+                    await self._confirm_authority(context, trusted_input)
+                except McpServiceError as authority_error:
+                    result = _error_result(
+                        command, context, code=authority_error.safe_error_code,
+                        capability_version=entry.version,
+                    )
+                    return {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
                 result = _error_result(
                     command,
                     context,
                     code=exc.safe_error_code,
                     capability_version=entry.version,
+                    ate_check=ate_check,
                 )
                 return {
                     "ok": True,
@@ -656,7 +937,7 @@ class CausalMcpService:
         try:
             # Never return a result produced by a worker/attempt/lease that
             # became stale while the CPU-bound algorithm was running.
-            await self._read_authority(context)
+            await self._confirm_authority(context, trusted_input)
         except McpServiceError as exc:
             log_event(
                 LOGGER,
@@ -679,12 +960,14 @@ class CausalMcpService:
             )
             return {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
         raw_result = outcome.value
+        completed_ate_check = ate_check
         if len(canonical_json_bytes(raw_result)) > self.config.result_max_bytes:
             result = _error_result(
                 command,
                 context,
                 code=SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID,
                 capability_version=entry.version,
+                ate_check=ate_check,
             )
             return {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
         if not isinstance(raw_result, Mapping):
@@ -693,18 +976,49 @@ class CausalMcpService:
                 context,
                 code=SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID,
                 capability_version=entry.version,
+                ate_check=ate_check,
             )
         elif raw_result.get("success") is not True:
             error_type = str(raw_result.get("error_type", ""))
             code = (
                 SafeErrorCode.ALGORITHM_INPUT_INVALID
                 if error_type == "InputValidationError"
+                else SafeErrorCode.ALGORITHM_TIMED_OUT
+                if error_type == "TimeoutError"
                 else SafeErrorCode.ALGORITHM_NOT_READY
                 if error_type == "DependencyUnavailableError"
+                else SafeErrorCode.ALGORITHM_NOT_APPLICABLE
+                if error_type == "NotApplicable"
                 else SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID
                 if error_type == "ResultValidationError"
                 else SafeErrorCode.ALGORITHM_EXECUTION_FAILED
             )
+            support_reason = raw_result.get("reason_code")
+            if (error_type == "NotApplicable" and support_reason in EFFECT_REASONS
+                and isinstance(raw_result.get("support"), Mapping)):
+                # 干预支持不适用保留独立诊断，图/数据检查可以仍然通过。
+                code = SafeErrorCode.ALGORITHM_NOT_APPLICABLE
+                ate_check = None
+            elif command.capability_id == "causal.backdoor_ols" and error_type == "NotApplicable":
+                reason = raw_result.get("reason_code")
+                if isinstance(reason, str) and reason in ATE_REASON_SUMMARIES and ate_check is not None:
+                    try:
+                        ate_check = AteApplicabilityCheck.model_validate({
+                            **ate_check.model_dump(),
+                            "applicability": "not_applicable",
+                            "reason_code": reason,
+                        })
+                    except ValueError:
+                        code = SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID
+                else:
+                    # Unknown exception text never becomes an applicability conclusion.
+                    code = SafeErrorCode.ALGORITHM_EXECUTION_FAILED
+            if ate_check is not None and code in {
+                SafeErrorCode.ALGORITHM_INPUT_INVALID,
+                SafeErrorCode.ALGORITHM_NOT_READY,
+            }:
+                # The trusted input already passed; a runner rejection is a later failure.
+                code = SafeErrorCode.ALGORITHM_EXECUTION_FAILED
             log_event(
                 LOGGER,
                 "mcp.runner.failed",
@@ -720,44 +1034,96 @@ class CausalMcpService:
                 context,
                 code=code,
                 capability_version=entry.version,
+                ate_check=ate_check,
             )
+            if command.capability_id == "causal.pc" and error_type == "NotApplicable":
+                diagnostics = build_diagnostics_from_runner_payload(raw_result)
+                diagnostics.safe_error_code = code
+                diagnostics.summary = diagnostics.metrics.get("selection_reason")
+                result.diagnostics = diagnostics
+            if error_type == "NotApplicable" and support_reason in EFFECT_REASONS:
+                support = raw_result["support"]
+                result.diagnostics = Diagnostics(
+                    summary=EFFECT_REASONS[support_reason], safe_error_code=code,
+                    metrics={
+                        "support_status": "not_applicable",
+                        "support_reason": support_reason,
+                        **{key: value for key, value in support.items()
+                           if isinstance(value, (str, int, float, bool)) or value is None},
+                    },
+                )
+            try:
+                result = AlgorithmResult.model_validate({
+                    **result.model_dump(),
+                    **runner_method_metadata(raw_result, command.capability_id),
+                })
+            except ValueError:
+                result = _error_result(
+                    command, context,
+                    code=SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID,
+                    capability_version=entry.version,
+                    ate_check=completed_ate_check,
+                )
         else:
             try:
-                graph = _standardized_graph(raw_result, command.capability_id)
-                result = AlgorithmResult(
-                    result_ref=build_result_ref(
+                metadata = runner_method_metadata(raw_result, command.capability_id)
+                if spec.kind == "causal_estimation":
+                    if graph is None:
+                        raise ValueError("estimation requires a graph artifact")
+                    result = _estimation_result(
+                        raw_result,
+                        command=command,
+                        context=context,
+                        capability_version=entry.version,
+                        graph=graph,
+                        data_view=data_view,
+                        ate_check=ate_check,
+                    )
+                else:
+                    normalized = result_from_runner_payload(
+                        raw_result, command=command, context=context,
+                        capability_version=entry.version,
+                        runner_version=metadata["implementation"].runner_version,
+                    )
+                    result = AlgorithmResult(
+                        result_ref=build_result_ref(
+                            invocation_id=command.invocation_id,
+                            result_index=command.result_index,
+                        ),
                         invocation_id=command.invocation_id,
-                        result_index=command.result_index,
-                    ),
-                    invocation_id=command.invocation_id,
-                    provider_call_id=command.provider_call_id,
-                    capability_id=command.capability_id,
-                    capability_version=entry.version,
-                    status="valid",
-                    standardized_graph=graph,
-                    summary="算法调用完成。",
-                    diagnostics=build_diagnostics_from_runner_payload(raw_result),
-                    input_identity=command.input_identity,
-                    provenance=AlgorithmResultProvenance(
-                        job_id=context.job_id,
-                        attempt_count=context.attempt_count,
-                        lease_epoch=context.lease_epoch,
-                        input_identity=command.input_identity,
-                        spec_digest=command.spec_digest,
-                        invocation_id=command.invocation_id,
+                        provider_call_id=command.provider_call_id,
                         capability_id=command.capability_id,
                         capability_version=entry.version,
-                        algorithm_runner_version=str(
-                            raw_result.get("runner_version") or "causalachieve-v1"
+                        status=normalized.status,
+                        **metadata,
+                        standardized_graph=normalized.standardized_graph,
+                        graph_validation=normalized.graph_validation,
+                        summary="算法调用完成。",
+                        data_view=data_view,
+                        diagnostics=normalized.diagnostics,
+                        input_identity=command.input_identity,
+                        provenance=AlgorithmResultProvenance(
+                            job_id=context.job_id,
+                            attempt_count=context.attempt_count,
+                            lease_epoch=context.lease_epoch,
+                            input_identity=command.input_identity,
+                            source_input_identity=context.source_input_identity,
+                            analysis_dataset_id=context.analysis_dataset_id,
+                            research_identity=context.research_identity,
+                            spec_digest=command.spec_digest,
+                            invocation_id=command.invocation_id,
+                            capability_id=command.capability_id,
+                            capability_version=entry.version,
+                            algorithm_runner_version=normalized.provenance.algorithm_runner_version,
                         ),
-                    ),
-                )
+                    )
             except Exception:
                 result = _error_result(
                     command,
                     context,
                     code=SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID,
                     capability_version=entry.version,
+                    ate_check=ate_check,
                 )
 
         duration_ms = int((time.perf_counter() - started_at) * 1000)
@@ -789,7 +1155,7 @@ class CausalMcpService:
                 },
             )
         response = {"ok": True, "result": result.model_dump(mode="json"), "trace": trace}
-        if result.status == "valid":
+        if isinstance(raw_result, Mapping) and result.status != "timed_out":
             response["raw_payload"] = dict(raw_result)
         return response
 

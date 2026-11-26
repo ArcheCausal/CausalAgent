@@ -1,0 +1,7 @@
+local/
+cdfm_bench_*/
+config.yaml
+config.*.yaml
+!config.example.yaml
+__pycache__/
+*.pyc

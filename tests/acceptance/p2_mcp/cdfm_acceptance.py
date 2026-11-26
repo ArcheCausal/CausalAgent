@@ -45,6 +45,7 @@ from Agent.deep_agent_tools.models import (
     McpInvocationContext,
 )
 from app.agent.worker.mcp_client_pool import McpClientPool, McpClientPoolConfig
+from tests.support.local_algorithm_execution import LocalAlgorithmExecutor
 
 
 TOKEN = "cdfm-engineering-smoke-token"
@@ -134,10 +135,11 @@ async def _start_server(
     port: int,
     registry: RunnerRegistry | None = None,
 ) -> tuple[uvicorn.Server, asyncio.Task[Any]]:
+    local_input = LocalAlgorithmExecutor(csv_data).validated_input
     app = create_app(
         _config(),
         registry=registry,
-        authority_reader=lambda _context: csv_data,
+        authority_reader=lambda _context: local_input,
         database_probe=lambda: True,
     )
     server = uvicorn.Server(
@@ -275,7 +277,7 @@ async def _valid_cdfm_call(csv_data: str) -> dict[str, Any]:
                     numeric_columns=("A", "B", "C"),
                 ),
                 input_identity=identity_digest,
-                dataset_csv=csv_data,
+                semantic_kinds=LocalAlgorithmExecutor(csv_data).validated_input.semantic_kinds,
                 dataset_authority_available=True,
             ),
             trusted_context=identity,
@@ -285,8 +287,8 @@ async def _valid_cdfm_call(csv_data: str) -> dict[str, Any]:
         )
         if result.status != "valid" or result.standardized_graph is None:
             raise AssertionError(f"CDFM result status was {result.status}")
-        if result.standardized_graph.graph_semantics != "directed_graph":
-            raise AssertionError("CDFM graph semantics were not directed_graph")
+        if result.standardized_graph.graph_semantics != CDFM_SPEC.graph_semantics:
+            raise AssertionError("CDFM graph semantics differ from the method contract")
         if any(edge.weight is not None for edge in result.standardized_graph.edges):
             raise AssertionError("CDFM edges unexpectedly exposed weights")
         if result.raw_result_ref is None:
@@ -300,6 +302,14 @@ async def _valid_cdfm_call(csv_data: str) -> dict[str, Any]:
             "threshold",
         }.issubset(raw_results):
             raise AssertionError("CDFM raw artifact is missing private fields")
+        positions = {name: index for index, name in enumerate(raw_results["variable_order"])}
+        for edge in result.standardized_graph.edges:
+            source, target = positions[edge.source], positions[edge.target]
+            if edge.prediction is None or (
+                edge.prediction.forward_probability != raw_results["probabilities"][source][target]
+                or edge.prediction.reverse_probability != raw_results["probabilities"][target][source]
+            ):
+                raise AssertionError("CDFM edge probability differs from its raw matrix position")
         private_payload = recording_pool.last_payload or {}
         if not isinstance(private_payload.get("raw_payload"), dict):
             raise AssertionError("MCP private raw envelope is missing")
@@ -334,7 +344,7 @@ async def _valid_cdfm_call(csv_data: str) -> dict[str, Any]:
         await _stop_server(server, server_task)
 
 
-def _slow_cdfm_runner(_csv_data: str, _parameters: dict[str, Any]) -> dict[str, Any]:
+def _slow_cdfm_runner(_csv_data: str, _parameters: dict[str, Any], _artifacts: dict[str, Any]) -> dict[str, Any]:
     time.sleep(2.0)
     return {"success": True, "data": {"nodes": [], "edges": []}}
 

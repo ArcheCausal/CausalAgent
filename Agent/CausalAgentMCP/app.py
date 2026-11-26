@@ -15,7 +15,7 @@ from .config import McpServerConfig
 from .executor_pool import BoundedProcessPool
 from .health import health_payload, readiness_payload
 from .runner_registry import RunnerRegistry, build_default_registry
-from .service import CausalMcpService, load_frozen_csv
+from .service import CausalMcpService, load_validated_input
 
 
 LOGGER = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ def create_app(
         config=config,
         registry=registry,
         executor_pool=executor_pool,
-        authority_reader=authority_reader or load_frozen_csv,
+        authority_reader=authority_reader or load_validated_input,
         database_probe=database_probe or _database_probe,
         service_instance_id=os.getenv("HOSTNAME", "causal-mcp"),
     )

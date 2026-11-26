@@ -4,7 +4,9 @@ COPY conf/primary.cnf /etc/mysql/conf.d/primary.cnf
 COPY init/primary/ /docker-entrypoint-initdb.d/
 COPY scripts/mysql-secret-entrypoint.sh /usr/local/bin/mysql-secret-entrypoint.sh
 
-RUN chmod 644 /etc/mysql/conf.d/primary.cnf \
+RUN groupadd --gid 3000 causalagent-secrets \
+    && usermod --append --groups causalagent-secrets mysql \
+    && chmod 644 /etc/mysql/conf.d/primary.cnf \
     && chmod 755 /usr/local/bin/mysql-secret-entrypoint.sh \
     && find /docker-entrypoint-initdb.d -type f -name "*.sh" -exec chmod 755 {} \; \
     && find /docker-entrypoint-initdb.d -type f -name "*.sql" -exec chmod 644 {} \;

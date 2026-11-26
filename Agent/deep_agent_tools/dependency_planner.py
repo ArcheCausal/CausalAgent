@@ -8,6 +8,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
+from langgraph.types import Command
+
 from Agent.execution_control import JobExecutionRevoked
 
 from .error_codes import SafeErrorCode
@@ -16,7 +18,7 @@ from .registry import AlgorithmRegistry, UnknownCapabilityError
 
 
 class DependencyPlanningError(ValueError):
-    """未知 Tool、重复 call id、缺失 artifact 或环。"""
+    """未知 Tool、调用身份冲突或非法依赖图等计划契约错误。"""
 
     def __init__(self, message: str, *, safe_error_code: SafeErrorCode | str) -> None:
         super().__init__(message)
@@ -59,6 +61,7 @@ class DependencyPlan:
     dependencies: Mapping[str, frozenset[str]]
     initial_artifacts: frozenset[str]
     concurrency_limits: Mapping[str, int] = field(default_factory=dict)
+    missing_artifacts_by_call: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
     @property
     def calls(self) -> tuple[PlannedToolCall, ...]:
@@ -135,16 +138,15 @@ def build_dependency_plan(
             producers[artifact].append(call.request.call_id)
 
     dependencies: dict[str, set[str]] = {call_id: set() for call_id in by_id}
+    missing_artifacts_by_call: dict[str, set[str]] = {call_id: set() for call_id in by_id}
     for call_id, call in by_id.items():
         for artifact in call.requires:
             if artifact in available:
                 continue
             candidates = [candidate for candidate in producers.get(artifact, []) if candidate != call_id]
             if not candidates:
-                raise DependencyPlanningError(
-                    f"artifact is not ready: {artifact}",
-                    safe_error_code=SafeErrorCode.ALGORITHM_NOT_READY,
-                )
+                missing_artifacts_by_call[call_id].add(artifact)
+                continue
             dependencies[call_id].update(candidates)
 
     remaining = set(by_id)
@@ -171,6 +173,9 @@ def build_dependency_plan(
         dependencies={key: frozenset(value) for key, value in dependencies.items()},
         initial_artifacts=frozenset(initial_artifacts),
         concurrency_limits=concurrency_limits,
+        missing_artifacts_by_call={
+            key: frozenset(value) for key, value in missing_artifacts_by_call.items()
+        },
     )
 
 
@@ -228,7 +233,9 @@ async def execute_dependency_plan(
         for call in batch:
             prerequisites = plan.dependencies.get(call.request.call_id, frozenset())
             failed: list[str] = []
-            missing_artifacts: set[str] = set()
+            missing_artifacts = set(
+                plan.missing_artifacts_by_call.get(call.request.call_id, frozenset())
+            )
             for dependency in prerequisites:
                 dependency_outcome = outcomes.get(dependency)
                 if dependency_outcome is None or dependency_outcome.status != "succeeded":
@@ -256,10 +263,23 @@ async def execute_dependency_plan(
             )
             try:
                 async with job_semaphore, key_semaphore:
-                    value = await asyncio.wait_for(
-                        execute(call.request),
-                        timeout=min(call.timeout_seconds, timeout_seconds),
-                    )
+                    task = asyncio.create_task(execute(call.request))
+                    try:
+                        done, _ = await asyncio.wait(
+                            {task}, timeout=min(call.timeout_seconds, timeout_seconds),
+                        )
+                        if not done:
+                            task.cancel()
+                            cleanup = await asyncio.gather(task, return_exceptions=True)
+                            if isinstance(cleanup[0], JobExecutionRevoked):
+                                raise cleanup[0]
+                            # 即使内部清理吞掉取消并返回，也不能变成迟到的成功。
+                            raise TimeoutError
+                        value = await task
+                    finally:
+                        if not task.done():
+                            task.cancel()
+                            await asyncio.gather(task, return_exceptions=True)
             except asyncio.CancelledError:
                 raise
             except JobExecutionRevoked:
@@ -318,15 +338,34 @@ def _classify_execution_result(
 ) -> tuple[str, SafeErrorCode | str | None, frozenset[str]]:
     """将 executor 返回值转换成调度器状态和已发布 artifact 快照。
 
-    旧 executor 返回任意值时继续沿用“正常返回即成功且发布 Spec 声明的
-    artifact”的兼容语义。新的结构化返回可以通过 ``status`` 和可选的
-    ``published_artifacts`` 明确表达失败或未发布结果；这样 producer 正常
-    返回但没有发布下游所需 artifact 时，不会错误放行依赖节点。
+    Command 必须携带本次调用的受控结果。只有明确的成功状态才允许发布
+    Spec artifact，无法识别的返回值按契约失败处理。
     """
+
+    if isinstance(value, Command):
+        update = value.update
+        results = update.get("algorithm_results") if isinstance(update, Mapping) else None
+        if not isinstance(results, Mapping) or len(results) != 1:
+            return "failed", SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID, frozenset()
+        try:
+            result = AlgorithmResult.model_validate(next(iter(results.values())))
+        except (TypeError, ValueError):
+            return "failed", SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID, frozenset()
+        if result.provider_call_id != call.request.call_id or result.capability_id != call.capability_id:
+            return "failed", SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID, frozenset()
+        return _classify_execution_result(call, result)
 
     if isinstance(value, AlgorithmResult):
         if value.status == "valid":
             return "succeeded", None, frozenset(call.produces)
+        if value.status in {"not_applicable", "skipped"}:
+            # 这类结束状态保留在 Ledger 与结果中，但没有发布下游算法所需的
+            # artifact；不能把尚未生成的数据登记为已存在。
+            return (
+                _outcome_status(value.status),
+                value.diagnostics.safe_error_code or _default_error_code(value.status),
+                frozenset(),
+            )
         return (
             _outcome_status(value.status),
             value.diagnostics.safe_error_code or _default_error_code(value.status),
@@ -334,7 +373,7 @@ def _classify_execution_result(
         )
 
     if not isinstance(value, Mapping) or "status" not in value:
-        return "succeeded", None, frozenset(call.produces)
+        return "failed", SafeErrorCode.ALGORITHM_RESULT_CONTRACT_INVALID, frozenset()
 
     raw_status = value.get("status")
     status = getattr(raw_status, "value", raw_status)
@@ -362,6 +401,7 @@ def _classify_execution_result(
         "not_ready",
         "timed_out",
         "canceled",
+        "skipped",
     }:
         raw_error_code = value.get("safe_error_code")
         return (
@@ -404,10 +444,16 @@ def _published_artifacts(
 
 
 def _outcome_status(status: str) -> str:
+    if status == "canceled":
+        return "canceled"
     if status == "timed_out":
         return "timed_out"
     if status == "not_ready":
         return "not_ready"
+    if status == "not_applicable":
+        return "not_applicable"
+    if status == "skipped":
+        return "skipped"
     return "failed"
 
 
@@ -416,4 +462,6 @@ def _default_error_code(status: str) -> SafeErrorCode:
         return SafeErrorCode.ALGORITHM_TIMED_OUT
     if status == "not_ready":
         return SafeErrorCode.ALGORITHM_NOT_READY
+    if status in {"not_applicable", "skipped"}:
+        return SafeErrorCode.ALGORITHM_NOT_APPLICABLE
     return SafeErrorCode.ALGORITHM_EXECUTION_FAILED

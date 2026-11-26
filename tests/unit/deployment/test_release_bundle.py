@@ -17,6 +17,7 @@ APP_IMAGE = "ghcr.io/example/causalagent-app@sha256:" + "a" * 64
 MCP_IMAGE = "ghcr.io/example/causalagent-mcp@sha256:" + "b" * 64
 MYSQL_PRIMARY_IMAGE = "ghcr.io/example/causalagent-mysql-primary@sha256:" + "c" * 64
 MYSQL_REPLICA_IMAGE = "ghcr.io/example/causalagent-mysql-replica@sha256:" + "d" * 64
+SANDBOX_IMAGE = "ghcr.io/example/causalagent-data-preparation@sha256:" + "e" * 64
 OFFICIAL_IMAGES = {
     "postgres": "postgres:16-alpine@sha256:" + "1" * 64,
     "nginx": "nginx:1.27-alpine@sha256:" + "2" * 64,
@@ -48,6 +49,8 @@ def _build(tmp_path: Path, images_file: Path) -> Path:
             MYSQL_PRIMARY_IMAGE,
             "--mysql-replica-image",
             MYSQL_REPLICA_IMAGE,
+            "--sandbox-image",
+            SANDBOX_IMAGE,
             "--images-file",
             str(images_file),
         ],
@@ -78,14 +81,25 @@ def test_manifest_pins_every_image_and_lists_required_secret_keys(tmp_path, imag
     assert set(manifest["images"]) == {
         "app", "mcp", "mysql_primary", "mysql_replica",
         "postgres", "nginx", "searxng", "valkey", "loki", "alloy", "grafana",
+        "sandbox_processing", "opensandbox_server", "opensandbox_execd",
+        "opensandbox_egress", "opensandbox_interpreter_base",
     }
     # 清单只列必需键名，不包含任何密钥值。
     assert "MYSQL_PASSWORD" in manifest["secrets"]["required_keys"]
     assert "API_KEY" in manifest["secrets"]["required_keys"]
-    assert manifest["secrets"]["schema_version"] == "v1"
+    assert manifest["secrets"]["schema_version"] == "v2"
     serialized = json.dumps(manifest)
     assert "unit-test" not in serialized
     assert "REPLACE_WITH" not in serialized
+    upstream = json.loads((REPO_ROOT / "deploy/opensandbox/release-lock.json").read_text(encoding="utf-8"))
+    for key, reference in upstream["images"].items():
+        assert manifest["images"]["opensandbox_" + key] == reference
+    assert manifest["images"]["sandbox_processing"] == SANDBOX_IMAGE
+    assert "independent" not in manifest["secrets"]
+    for key in ("CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN", "CAUSALAGENT_SANDBOX_API_KEY"):
+        assert key in manifest["secrets"]["allowed_keys"]
+        assert key in manifest["secrets"]["required_keys"]
+    assert "config/secret_file.py" in manifest["deployment"]["sandbox_files_sha256"]
 
 
 def test_bundle_excludes_source_and_secrets(tmp_path, images_file):
@@ -98,10 +112,12 @@ def test_bundle_excludes_source_and_secrets(tmp_path, images_file):
     assert "docker-compose.prod.yml" in names
     assert "release.manifest.json" in names
     assert "images.lock.json" in names
-    # 不包含 Python 源码、前端源码或真实密钥。
-    assert not any(name.endswith(".py") for name in names)
+    # 只放行实际挂载的入口与同一份轻量密钥加载器。
+    assert {name for name in names if name.endswith(".py")} == {"deploy/opensandbox/server_entrypoint.py", "config/secret_file.py"}
+    assert {"deploy/opensandbox/services.yml", "deploy/opensandbox/config.toml", "deploy/opensandbox/release-lock.json"} <= names
     assert not any("frontend" in name for name in names)
     assert not any(name.endswith("causalagent.env") for name in names)
+    assert not any(name.endswith((".env", ".token", ".key")) or name.endswith("/opensandbox-api-key") for name in names)
 
 
 def test_images_lock_matches_manifest_images(tmp_path, images_file):
@@ -137,6 +153,8 @@ def test_non_digest_pinned_image_is_rejected(tmp_path):
             MYSQL_PRIMARY_IMAGE,
             "--mysql-replica-image",
             MYSQL_REPLICA_IMAGE,
+            "--sandbox-image",
+            SANDBOX_IMAGE,
             "--images-file",
             str(path),
         ],
@@ -147,6 +165,64 @@ def test_non_digest_pinned_image_is_rejected(tmp_path):
 
     assert proc.returncode != 0
     assert "not digest-pinned" in proc.stderr
+
+
+def test_sandbox_deployment_files_have_verifiable_manifest_hashes(tmp_path, images_file):
+    import hashlib
+
+    output_dir = _build(tmp_path, images_file)
+    manifest = json.loads((output_dir / "release.manifest.json").read_text(encoding="utf-8"))
+    archive = next(output_dir.glob("causalagent-release-*.tar.gz"))
+    with tarfile.open(archive) as tar:
+        for section in ("compose_files_sha256", "sandbox_files_sha256"):
+            for name, expected in manifest["deployment"][section].items():
+                assert hashlib.sha256(tar.extractfile(name).read()).hexdigest() == expected
+
+
+@pytest.mark.parametrize("reference", ["processing:latest", "processing@sha256:short", "processing@sha256:" + "g" * 64])
+def test_processing_image_requires_a_complete_digest_before_writing_bundle(tmp_path, images_file, reference):
+    output = tmp_path / "release"
+    proc = subprocess.run([
+        sys.executable, str(BUILD_SCRIPT), "--output-dir", str(output),
+        "--release-id", "processing-check", "--source-commit", "abc1234",
+        "--app-image", APP_IMAGE, "--mcp-image", MCP_IMAGE,
+        "--mysql-primary-image", MYSQL_PRIMARY_IMAGE, "--mysql-replica-image", MYSQL_REPLICA_IMAGE,
+        "--sandbox-image", reference, "--images-file", str(images_file),
+    ], cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
+
+    assert proc.returncode != 0
+    assert "sandbox_processing is not digest-pinned" in proc.stderr
+    assert not output.exists()
+
+
+def test_processing_image_cannot_be_the_official_interpreter_base(tmp_path, images_file):
+    lock = json.loads((REPO_ROOT / "deploy/opensandbox/release-lock.json").read_text(encoding="utf-8"))
+    output = tmp_path / "release"
+    proc = subprocess.run([
+        sys.executable, str(BUILD_SCRIPT), "--output-dir", str(output),
+        "--release-id", "processing-check", "--source-commit", "abc1234",
+        "--app-image", APP_IMAGE, "--mcp-image", MCP_IMAGE,
+        "--mysql-primary-image", MYSQL_PRIMARY_IMAGE, "--mysql-replica-image", MYSQL_REPLICA_IMAGE,
+        "--sandbox-image", lock["images"]["interpreter_base"], "--images-file", str(images_file),
+    ], cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
+    assert proc.returncode != 0
+    assert "not an upstream base" in proc.stderr
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("release_id", ["../outside", "/absolute", "a\nb"])
+def test_release_id_cannot_escape_the_release_directory(tmp_path, release_id):
+    output = tmp_path / "release"
+    proc = subprocess.run([
+        sys.executable, str(BUILD_SCRIPT), "--output-dir", str(output),
+        "--release-id", release_id, "--source-commit", "abc1234",
+        "--app-image", APP_IMAGE, "--mcp-image", MCP_IMAGE,
+        "--mysql-primary-image", MYSQL_PRIMARY_IMAGE, "--mysql-replica-image", MYSQL_REPLICA_IMAGE,
+        "--sandbox-image", SANDBOX_IMAGE,
+    ], cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 2
+    assert "release_id must be" in proc.stderr
+    assert not output.exists()
 
 
 def test_official_image_references_match_compose_files():

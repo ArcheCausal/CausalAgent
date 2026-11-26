@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 from datetime import datetime
 from enum import Enum
@@ -86,6 +87,7 @@ AlgorithmResultStatus: TypeAlias = Literal[
     "invalid_input",
     "not_applicable",
     "not_ready",
+    "skipped",
     "execution_failed",
     "timed_out",
 ]
@@ -95,6 +97,8 @@ ActionAttemptStatus: TypeAlias = Literal[
     "running",
     "succeeded",
     "failed",
+    "not_applicable",
+    "skipped",
     "timed_out",
     "not_ready",
     "canceled",
@@ -105,6 +109,8 @@ InvocationStatus: TypeAlias = Literal[
     "pending",
     "succeeded",
     "failed",
+    "not_applicable",
+    "skipped",
     "timed_out",
     "not_ready",
     "canceled",
@@ -119,13 +125,21 @@ ResponseIdentitySource: TypeAlias = Literal[
 FinalizationStatus: TypeAlias = Literal["valid", "degraded"]
 
 
+class EdgePrediction(ContractModel):
+    """输出边两个矩阵位置的模型预测概率，不表示效应量或统计置信度。"""
+
+    forward_probability: float = Field(ge=0, le=1, allow_inf_nan=False, strict=True)
+    reverse_probability: float = Field(ge=0, le=1, allow_inf_nan=False, strict=True)
+
+
 class GraphEdge(ContractModel):
-    """标准化图中的一条有向或部分定向边。"""
+    """标准化图中的一条边；预测概率与结构系数分别保存。"""
 
     source: str
     target: str
     edge_type: str = "directed"
     weight: float | None = None
+    prediction: EdgePrediction | None = None
 
     _validate_source = field_validator("source", "target")(
         lambda value, info: _non_blank(value, field_name=info.field_name)
@@ -142,6 +156,8 @@ class StandardizedGraph(ContractModel):
     graph_semantics: str
     nodes: list[str] = Field(default_factory=list)
     edges: list[GraphEdge] = Field(default_factory=list)
+    edge_score_matrix: list[list[float]] | None = None
+    score_type: str | None = None
 
     @field_validator("graph_semantics")
     @classmethod
@@ -169,6 +185,24 @@ class StandardizedGraph(ContractModel):
             raise ValueError(
                 "graph edges reference unknown nodes: " + ", ".join(sorted(missing))
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_edge_scores(self) -> "StandardizedGraph":
+        if (self.edge_score_matrix is None) != (self.score_type is None):
+            raise ValueError("edge_score_matrix and score_type must be provided together")
+        if self.edge_score_matrix is None:
+            return self
+        if self.score_type != "probability":
+            raise ValueError("unsupported score_type")
+        size = len(self.nodes)
+        matrix = self.edge_score_matrix
+        if len(matrix) != size or any(len(row) != size for row in matrix):
+            raise ValueError("edge_score_matrix must be square and match nodes")
+        for row in matrix:
+            for value in row:
+                if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                    raise ValueError("edge_score_matrix values must be probabilities in [0, 1]")
         return self
 
 
@@ -202,15 +236,18 @@ class SafeWarning(ContractModel):
 class AlgorithmResultProvenance(ContractModel):
     """结果归属、输入身份和 spec 版本的可信证明字段。"""
 
+    research_identity: str | None = None
+
     job_id: str
     attempt_count: int = Field(ge=0)
     lease_epoch: int = Field(ge=0)
     input_identity: str
+    source_input_identity: str | None = None
+    analysis_dataset_id: int | None = Field(default=None, gt=0)
     spec_digest: str
     invocation_id: str | None = None
     capability_id: str | None = None
     capability_version: str | None = None
-    preprocessing_recipe_digest: str | None = None
     algorithm_runner_version: str | None = None
 
     @model_validator(mode="after")
@@ -218,17 +255,169 @@ class AlgorithmResultProvenance(ContractModel):
         for field_name in (
             "job_id",
             "input_identity",
+            "source_input_identity",
             "spec_digest",
             "invocation_id",
             "capability_id",
             "capability_version",
-            "preprocessing_recipe_digest",
             "algorithm_runner_version",
         ):
             value = getattr(self, field_name)
             if value is not None:
                 _non_blank(value, field_name=field_name)
         return self
+
+
+class DataViewSummary(ContractModel):
+    """一次算法实际使用的数据视图；不同算法可以不同。"""
+
+    row_count: int = Field(ge=0)
+    column_count: int = Field(ge=0)
+    columns: tuple[str, ...] = ()
+    operations: tuple[str, ...] = ()
+    plan_digest: str | None = None
+    dropped_row_count: int = 0
+    imputed_columns: tuple[str, ...] = ()
+    encoded_columns: tuple[str, ...] = ()
+
+    @field_validator("columns", "operations", "imputed_columns", "encoded_columns")
+    @classmethod
+    def validate_view_lists(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for item in value:
+            _non_blank(item, field_name="data_view")
+        return value
+
+
+class GraphValidation(ContractModel):
+    """图结构检查结果；通过不代表因果方向已获验证。"""
+
+    valid: bool
+    violations: list[str] = Field(default_factory=list)
+    checks_performed: list[str] = Field(default_factory=list)
+    not_checked: list[str] = Field(default_factory=list)
+
+
+class AteApplicabilityCheck(ContractModel):
+    """程序生成的后门 OLS 检查记录；未知调整集与空调整集严格区分。"""
+
+    model_config = ContractModel.model_config | {"frozen": True}
+
+    graph_result_ref: str
+    treatment: str
+    outcome: str
+    adjustment_set: tuple[str, ...] | None
+    execution_columns: tuple[str, ...] | None
+    applicability: Literal["ready", "not_applicable"]
+    reason_code: str | None = None
+
+    @field_validator("graph_result_ref", "treatment", "outcome")
+    @classmethod
+    def validate_check_strings(cls, value: str, info: Any) -> str:
+        return _non_blank(value, field_name=info.field_name)
+
+    @model_validator(mode="after")
+    def validate_check_contract(self) -> "AteApplicabilityCheck":
+        from .ate_applicability import ATE_GRAPH_REASON_CODES, ATE_REASON_CODES
+
+        if self.applicability == "ready":
+            if self.reason_code is not None:
+                raise ValueError("ready ate_check cannot include a reason_code")
+        elif self.reason_code not in ATE_REASON_CODES:
+            raise ValueError("not-applicable ate_check requires a known reason_code")
+        if self.reason_code in ATE_GRAPH_REASON_CODES:
+            if self.adjustment_set is not None or self.execution_columns is not None:
+                raise ValueError("unresolved graph requires null adjustment_set and execution_columns")
+            return self
+        if self.adjustment_set is None or self.execution_columns is None:
+            raise ValueError("resolved graph requires complete adjustment_set and execution_columns")
+        if self.treatment == self.outcome:
+            raise ValueError("resolved ate_check requires distinct treatment and outcome")
+        for column in (*self.adjustment_set, *self.execution_columns):
+            _non_blank(column, field_name="ate_check column")
+        if self.adjustment_set != tuple(sorted(set(self.adjustment_set))):
+            raise ValueError("adjustment_set must be sorted and unique")
+        if {self.treatment, self.outcome} & set(self.adjustment_set):
+            raise ValueError("adjustment_set cannot include treatment or outcome")
+        if self.execution_columns != (self.treatment, self.outcome, *self.adjustment_set):
+            raise ValueError("execution_columns must include the complete ordered estimation columns")
+        return self
+
+
+class CausalEffect(ContractModel):
+    """后门调整下的线性总效应；数值可追溯到所用图与数据版本。"""
+
+    estimand: Literal["ATE"]
+    graph_result_ref: str
+    treatment: str
+    outcome: str
+    adjustment_set: tuple[str, ...] = ()
+    estimate: float
+    standard_error: float | None = None
+    ci95: tuple[float, float] | None = None
+    estimator: str
+    n_rows: int = Field(ge=1)
+    contrast: tuple[float, float] | None = None
+    outcome_model: str | None = None
+    bootstrap_n: int | None = Field(default=None, ge=0)
+    effect_request: dict[str, Any] | None = None
+    sample_identity: str | None = None
+    adjustment_rule: str | None = None
+    support: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("graph_result_ref", "treatment", "outcome", "estimator")
+    @classmethod
+    def validate_effect_strings(cls, value: str, info: Any) -> str:
+        return _non_blank(value, field_name=info.field_name)
+
+    @model_validator(mode="after")
+    def validate_effect_numbers(self) -> "CausalEffect":
+        if self.effect_request is not None:
+            from Agent.effect_request import normalize_effect_request
+            object.__setattr__(self, "effect_request", normalize_effect_request(self.effect_request))
+        if not math.isfinite(self.estimate):
+            raise ValueError("estimate must be finite")
+        if self.standard_error is not None and (
+            not math.isfinite(self.standard_error) or self.standard_error < 0
+        ):
+            raise ValueError("standard_error must be finite and non-negative")
+        if self.ci95 is not None:
+            low, high = self.ci95
+            if not (math.isfinite(low) and math.isfinite(high)):
+                raise ValueError("ci95 bounds must be finite")
+            if low > high:
+                raise ValueError("ci95 lower bound must not exceed upper bound")
+        if self.contrast is not None:
+            low, high = self.contrast
+            if not (math.isfinite(low) and math.isfinite(high)):
+                raise ValueError("contrast bounds must be finite")
+            if low == high:
+                raise ValueError("contrast bounds must differ")
+        return self
+
+
+class MethodDefinition(ContractModel):
+    """本次执行采用的方法契约快照，不随报告重新生成而更新。"""
+
+    capability_id: str
+    public_name: str
+    contract_version: str
+    description: str
+    input_requirements: tuple[str, ...] = ()
+    assumptions: tuple[str, ...] = ()
+    graph_semantics: str
+    matrix_convention: str
+    edge_meanings: dict[str, str] = Field(default_factory=dict)
+    limitations: tuple[str, ...] = ()
+
+
+class MethodImplementation(ContractModel):
+    """实际实现与权重身份；不包含宿主路径或模型凭据。"""
+
+    runner_version: str | None = None
+    package: str | None = None
+    package_version: str | None = None
+    embedded_version: str | None = None
+    weights: dict[str, str | None] = Field(default_factory=dict)
 
 
 class AlgorithmResult(ContractModel):
@@ -250,6 +439,12 @@ class AlgorithmResult(ContractModel):
     raw_result_size_bytes: int | None = Field(default=None, ge=0)
     raw_result_serialization_version: str | None = None
     input_identity: str | None = None
+    data_view: DataViewSummary | None = None
+    method: MethodDefinition | None = None
+    implementation: MethodImplementation | None = None
+    graph_validation: GraphValidation | None = None
+    causal_effect: CausalEffect | None = None
+    ate_check: AteApplicabilityCheck | None = None
     provenance: AlgorithmResultProvenance
 
     @field_validator(
@@ -271,8 +466,55 @@ class AlgorithmResult(ContractModel):
     @model_validator(mode="after")
     def validate_result_contract(self) -> "AlgorithmResult":
         validate_result_ref_for_invocation(self.result_ref, self.invocation_id)
+        if self.ate_check is not None:
+            if self.capability_id != "causal.backdoor_ols":
+                raise ValueError("ate_check is only valid for causal.backdoor_ols")
+            check = self.ate_check
+            if check.applicability == "not_applicable":
+                if (
+                    self.status != "not_applicable"
+                    or self.diagnostics.safe_error_code != SafeErrorCode.ALGORITHM_NOT_APPLICABLE
+                ):
+                    raise ValueError("not-applicable ate_check requires matching result status and safe_error_code")
+            elif self.status not in {"valid", "execution_failed", "timed_out"}:
+                raise ValueError("ready ate_check requires valid, execution_failed or timed_out result")
+            elif self.diagnostics.safe_error_code in {
+                SafeErrorCode.ALGORITHM_CANCELED,
+                SafeErrorCode.ALGORITHM_NOT_READY,
+                SafeErrorCode.ALGORITHM_NOT_APPLICABLE,
+            }:
+                raise ValueError("ready ate_check cannot claim cancellation, not-ready or not-applicable")
+            if self.status != "valid" and self.causal_effect is not None:
+                raise ValueError("unsuccessful ATE cannot carry a causal_effect")
+            if self.status == "valid":
+                effect = self.causal_effect
+                if effect is None:
+                    raise ValueError("successful checked ATE requires causal_effect")
+                if any(
+                    getattr(effect, field) != getattr(check, field)
+                    for field in ("graph_result_ref", "treatment", "outcome", "adjustment_set")
+                ):
+                    raise ValueError("causal_effect does not match ate_check")
+                if self.diagnostics.safe_error_code is not None:
+                    raise ValueError("successful checked ATE cannot include safe_error_code")
+        if self.method is not None and (
+            self.method.capability_id != self.capability_id
+            or self.method.contract_version != self.capability_version
+        ):
+            raise ValueError("method snapshot does not match result identity")
         if self.status == "valid" and self.standardized_graph is None:
             raise ValueError("valid AlgorithmResult must include standardized_graph")
+        if self.causal_effect is not None and self.standardized_graph is None:
+            raise ValueError("causal_effect requires standardized_graph")
+        if self.status == "timed_out" and (
+            self.standardized_graph is not None or self.raw_result_ref is not None
+        ):
+            raise ValueError("timed-out AlgorithmResult cannot carry a graph or raw artifact")
+        if self.status in {"skipped", "not_applicable"}:
+            if self.standardized_graph is not None:
+                raise ValueError(
+                    "a skipped or not-applicable result cannot carry a graph"
+                )
 
         raw_fields = (
             self.raw_result_ref,
@@ -326,6 +568,57 @@ class AlgorithmResult(ContractModel):
         return self.standardized_graph
 
 
+class EffectQuery(ContractModel):
+    """一次效应调用实际请求的变量对、对比区间与结局模型。
+
+    值只来自工具参数的程序解析，不接受模型事后补写；诊断只需源图与变量对，
+    估计比较完整请求。缺少该字段的旧 checkpoint 仍可读取，但不能满足新门禁。
+    """
+
+    graph_result_ref: str
+    treatment: str
+    outcome: str
+    contrast: tuple[float, float] | None = None
+    outcome_model: str | None = None
+    effect_request: dict[str, Any] | None = None
+    estimator_config: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("graph_result_ref", "treatment", "outcome")
+    @classmethod
+    def validate_query_strings(cls, value: str, info: Any) -> str:
+        return _non_blank(value, field_name=info.field_name)
+
+    @field_validator("contrast")
+    @classmethod
+    def validate_contrast(
+        cls, value: tuple[float, float] | None,
+    ) -> tuple[float, float] | None:
+        if value is None:
+            return None
+        low, high = value
+        if not (math.isfinite(low) and math.isfinite(high)):
+            raise ValueError("contrast bounds must be finite")
+        if low == high:
+            raise ValueError("contrast bounds must differ")
+        return value
+
+    def matches_diagnosis(self, *, graph_result_ref: str, treatment: str, outcome: str) -> bool:
+        return (self.graph_result_ref, self.treatment, self.outcome) == (
+            graph_result_ref, treatment, outcome,
+        )
+
+    def matches_estimation(self, other: "EffectQuery") -> bool:
+        """估计比较完整请求；对比区间与结局模型也参与匹配。"""
+
+        return self == other
+
+    @field_validator("effect_request")
+    @classmethod
+    def validate_query_definition(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        from Agent.effect_request import normalize_effect_request
+        return normalize_effect_request(value)
+
+
 class ActionAttempt(ContractModel):
     """一次实际执行 attempt 的单调 revision 快照。"""
 
@@ -346,6 +639,8 @@ class ActionAttempt(ContractModel):
 class InvocationRecord(ContractModel):
     """一个逻辑 function call 及其全部 retry/revision 历史。"""
 
+    research_identity: str | None = None
+
     invocation_id: str
     response_identity: str
     response_identity_source: ResponseIdentitySource
@@ -355,6 +650,10 @@ class InvocationRecord(ContractModel):
     tool_name: str
     final_status: InvocationStatus
     result_ref: str | None = None
+    subject_ref: str | None = None
+    # 只有可从已校验工具参数解析出效应请求的调用才带该字段；旧 checkpoint
+    # 允许缺失，但缺少它的记录不能替代当前查询的证明。
+    effect_query: EffectQuery | None = None
     # 这些字段允许旧 checkpoint 被读取，但 FinalizationGate 对缺失值
     # fail-closed。新产生的 Ledger 记录必须完整填写它们。
     job_id: str | None = None
@@ -362,6 +661,9 @@ class InvocationRecord(ContractModel):
     lease_epoch: int | None = Field(default=None, ge=0)
     worker_id: str | None = None
     input_identity: str | None = None
+    source_input_identity: str | None = None
+    analysis_dataset_id: int | None = Field(default=None, gt=0)
+    event_step_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{24}$")
     attempts: dict[int, ActionAttempt] = Field(default_factory=dict)
 
     @field_validator(
@@ -378,9 +680,11 @@ class InvocationRecord(ContractModel):
         "provider_response_id",
         "provider_item_id",
         "result_ref",
+        "subject_ref",
         "job_id",
         "worker_id",
         "input_identity",
+        "source_input_identity",
     )
     @classmethod
     def validate_optional_strings(cls, value: str | None, info: Any) -> str | None:
@@ -450,14 +754,50 @@ class WebEvidenceResult(EvidenceResult):
         return _non_blank(value, field_name="provider_status")
 
 
+class DataIssue(ContractModel):
+    """预检测发现的一条事实；blocking 与 warning 分开表达。"""
+
+    code: str
+    message: str
+    columns: tuple[str, ...] = ()
+    blocking: bool = False
+
+    @field_validator("code", "message")
+    @classmethod
+    def validate_issue_strings(cls, value: str, info: Any) -> str:
+        return _non_blank(value, field_name=info.field_name)
+
+
 class DataProfile(ContractModel):
-    """外层准入阶段生成、供 Agent 选择算法使用的数据画像。"""
+    """外层预检测生成、供 Agent 选择算法和处理方案的数据画像。
+
+    列级事实来自冻结文件的真实内容。算法适用的最终判断仍由各算法
+    Spec 与 MCP 复检完成，这里只保留选择所需的确定性事实。
+    """
 
     row_count: int = Field(ge=0)
     column_count: int = Field(ge=0)
     column_names: tuple[str, ...] = ()
     numeric_columns: tuple[str, ...] = ()
     categorical_columns: tuple[str, ...] = ()
+    missing_columns: tuple[str, ...] = ()
+    non_finite_columns: tuple[str, ...] = ()
+    empty_columns: tuple[str, ...] = ()
+    constant_columns: tuple[str, ...] = ()
+    suspected_id_columns: tuple[str, ...] = ()
+    issues: tuple[DataIssue, ...] = ()
+
+    @property
+    def blocking_issues(self) -> tuple[DataIssue, ...]:
+        return tuple(issue for issue in self.issues if issue.blocking)
+
+    @property
+    def warnings(self) -> tuple[DataIssue, ...]:
+        return tuple(issue for issue in self.issues if not issue.blocking)
+
+    @property
+    def has_missing_values(self) -> bool:
+        return bool(self.missing_columns)
 
 
 class ScientificConflict(ContractModel):
@@ -512,7 +852,7 @@ class ResultAssessment(ContractModel):
             "检索证据不要写进这个字段。"
         ),
     )
-    disposition: Literal["primary", "supporting", "discarded"]
+    disposition: Literal["primary_graph", "primary_effect", "supporting", "discarded"]
     rationale: str
 
     @field_validator("result_ref", "rationale")
@@ -525,6 +865,10 @@ class FinalAnalysisDecision(ContractModel):
     """ToolStrategy 的静态终态契约；动态归属由后续 FinalizationGate 校验。"""
 
     outcome: Literal["evidence_only", "algorithm_supported", "no_valid_algorithm"]
+    primary_graph_result_ref: str | None = Field(default=None, description="独立选定的主图，必须引用本次因果发现结果。")
+    primary_effect_result_ref: str | None = Field(default=None, description="采用的主效应；没有采用效应时为 null，不能由旧主结果字段推断。")
+    effect_status: Literal["not_recorded", "not_requested", "not_applicable", "not_identifiable", "incomplete", "not_adopted", "adopted"] = "not_recorded"
+    effect_reason: str | None = None
     primary_result_ref: str | None = Field(
         default=None,
         description="主结果 result_ref；必须是本次运行返回且状态有效的算法结果。",
@@ -543,7 +887,7 @@ class FinalAnalysisDecision(ContractModel):
     confidence: Literal["low", "medium", "high"]
     confidence_basis: list[str] = Field(default_factory=list)
 
-    @field_validator("primary_result_ref")
+    @field_validator("primary_result_ref", "primary_graph_result_ref", "primary_effect_result_ref", "effect_reason")
     @classmethod
     def validate_primary_ref(cls, value: str | None) -> str | None:
         return None if value is None else _non_blank(value, field_name="primary_result_ref")
@@ -559,20 +903,25 @@ class FinalAnalysisDecision(ContractModel):
         if len(refs) != len(set(refs)):
             raise ValueError("result_assessments must not repeat result_ref")
 
-        primary_assessments = [
-            assessment
-            for assessment in self.result_assessments
-            if assessment.disposition == "primary"
-        ]
-        if len(primary_assessments) > 1:
-            raise ValueError("at most one result assessment may be primary")
-        if self.primary_result_ref is not None:
-            if not primary_assessments or (
-                primary_assessments[0].result_ref != self.primary_result_ref
-            ):
-                raise ValueError(
-                    "primary_result_ref must point to the sole primary assessment"
-                )
+        roles = {"primary_graph": self.primary_graph_result_ref, "primary_effect": self.primary_effect_result_ref}
+        for role, ref in roles.items():
+            selected = [item.result_ref for item in self.result_assessments if item.disposition == role]
+            if selected != ([ref] if ref is not None else []):
+                raise ValueError(f"{role} assessment must match its explicit reference")
+        primary_assessments = [item for item in self.result_assessments if item.disposition in roles]
+        projection = self.primary_effect_result_ref or self.primary_graph_result_ref
+        if projection is not None:
+            if self.primary_result_ref not in (None, projection):
+                raise ValueError("primary_result_ref conflicts with the compatibility projection")
+            object.__setattr__(self, "primary_result_ref", projection)
+        elif self.primary_result_ref is not None:
+            raise ValueError("explicit primary graph/effect references are required")
+        if self.primary_effect_result_ref is not None and self.primary_graph_result_ref is None:
+            raise ValueError("an adopted effect requires its source graph")
+        if self.primary_effect_result_ref is not None and self.effect_status != "adopted":
+            raise ValueError("primary effect requires effect_status=adopted")
+        if self.primary_effect_result_ref is None and self.effect_status == "adopted":
+            raise ValueError("adopted requires a primary effect")
         if self.outcome in {"evidence_only", "no_valid_algorithm"}:
             if self.primary_result_ref is not None or primary_assessments:
                 raise ValueError(
@@ -588,6 +937,8 @@ class FinalAnalysisDecision(ContractModel):
 class McpInvocationContext(ContractModel):
     """worker 注入、MCP 验签并再次查库的可信调用上下文。"""
 
+    research_identity: str | None = None
+
     invocation_id: str
     job_id: str
     session_id: str
@@ -596,6 +947,8 @@ class McpInvocationContext(ContractModel):
     lease_epoch: int = Field(ge=0)
     worker_id: str
     input_snapshot_digest: str
+    source_input_identity: str | None = None
+    analysis_dataset_id: int | None = Field(default=None, gt=0)
     issued_at: datetime
     expires_at: datetime
     key_id: str
@@ -609,6 +962,11 @@ class McpInvocationContext(ContractModel):
     @classmethod
     def validate_context_strings(cls, value: str, info: Any) -> str:
         return _non_blank(value, field_name=info.field_name)
+
+    @field_validator("source_input_identity")
+    @classmethod
+    def validate_source_input_identity(cls, value: str | None) -> str | None:
+        return None if value is None else _non_blank(value, field_name="source_input_identity")
 
     @field_validator("issued_at", "expires_at")
     @classmethod
@@ -633,9 +991,11 @@ class AlgorithmExecutionCommand(ContractModel):
     spec_digest: str
     provider_call_id: str
     input_identity: str
+    research_identity: str | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
     result_index: int = Field(default=0, ge=0)
     timeout_seconds: int | None = Field(default=None, gt=0)
+    artifacts: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator(
         "invocation_id",
@@ -648,7 +1008,6 @@ class AlgorithmExecutionCommand(ContractModel):
     @classmethod
     def validate_command_strings(cls, value: str, info: Any) -> str:
         return _non_blank(value, field_name=info.field_name)
-
 
 class RawResultMetadata(ContractModel):
     """canonical raw JSON 的可审计元数据。"""
@@ -826,7 +1185,8 @@ def _record_progress(record: InvocationRecord) -> tuple[int, int]:
 
 def _immutable_record_dump(record: InvocationRecord) -> dict[str, Any]:
     return record.model_dump(
-        mode="json", exclude={"attempts", "final_status", "result_ref"}
+        mode="json",
+        exclude={"attempts", "final_status", "result_ref", "effect_query"},
     )
 
 
@@ -837,6 +1197,19 @@ def _merge_invocation_records(
         raise ReducerConflictError(
             f"invocation {current.invocation_id!r} identity changed during replay"
         )
+
+    # 效应请求由终态工具参数生成：pending 记录没有该字段，终态只能补写一次，
+    # 两次非空且内容不同的记录视为账本冲突。
+    if current.effect_query is None:
+        effect_query = incoming.effect_query
+    elif incoming.effect_query is None:
+        effect_query = current.effect_query
+    elif current.effect_query != incoming.effect_query:
+        raise ReducerConflictError(
+            f"invocation {current.invocation_id!r} effect query changed during replay"
+        )
+    else:
+        effect_query = current.effect_query
 
     merged_attempts: dict[int, ActionAttempt] = {
         ordinal: attempt.model_copy(deep=True)
@@ -886,6 +1259,7 @@ def _merge_invocation_records(
             },
             "final_status": final_status,
             "result_ref": result_ref,
+            "effect_query": effect_query,
         },
     )
 

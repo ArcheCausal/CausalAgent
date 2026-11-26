@@ -1,34 +1,38 @@
-"""按档位执行一档负载，并在同一窗口内采集服务器资源与逐 Job 主库核对。
+"""编排真实负载、300/1800 秒主库检查点和持续资源观察。
 
-用法：python ops/stage_sampling.py <档位>
-
-本脚本把四件事串成一档：在服务器上启动主机资源采样、在本地跑负载、等采样收尾并把结果
-写入运行摘要、再导出本轮 job_id 清单并执行逐 Job 主库核对。采样时长大于负载时长，因为
-停止提交后 Job 还会继续执行。
-
-连接与凭据：SSH 私钥取自 ~/.ssh/causalagent_staging，目标为 ubuntu@203.195.194.205；
-远端脚本需要预先上传到 /tmp/_lt/（内容即 loadtest/ 下的三个只读脚本）。
+服务器脚本及 ops/server_evidence.py 每轮上传到独立目录，不复用其他轮的产物。
+停止提交边界取 phases.json 或本轮 summary 的明确时间字段；线程观察结束、数据库检查完成单独记录。
+没有可证明的停止边界或采集失败时，orchestration.json 保持 unknown。
 """
 from __future__ import annotations
 
 import json
+import math
 import os
 import pathlib
+import shlex
 import subprocess
 import sys
 import time
 
-KEY = str(pathlib.Path.home() / ".ssh" / "causalagent_staging")
 LOADTEST = pathlib.Path(__file__).resolve().parent.parent
-RUNS = LOADTEST / "local" / "runs"
-JOB_IDS = RUNS / "job-ids"
-LOG = RUNS / "_orch.log"
-HOST = "ubuntu@203.195.194.205"
-REMOTE_DIR = "/tmp/_lt"
+sys.path.insert(0, str(LOADTEST))
+from runner import config, resource
+from runner.evidence import export_request_manifest, merge_job_db_check
+from ops.server_evidence import epoch
 
-# 每档：(负载命令参数, 采样秒数)。采样秒数要大于负载持续时间。
+KEY = str(pathlib.Path.home() / ".ssh" / "causalagent_staging")
+HOST = os.environ.get("LOADTEST_SSH_HOST", "ubuntu@203.195.194.205")
+REMOTE_DIR = "/tmp/_lt"
+FINAL_LIMIT = config.DRAIN_DEADLINE_SECONDS
+CHECKPOINTS = tuple(sorted({300, FINAL_LIMIT}))
+
 SPECS: dict[str, tuple[list[str], int]] = {
-    "baseline": (["stage", "--stage", "baseline", "--users", "1", "--duration", "240"], 330),
+    # smoke 是单用户单流程检查，不覆盖持续时间，保持 full_flow 语义。
+    "smoke": (["stage", "--stage", "smoke"], 900),
+    # baseline 在档位表里是 full_flow 4 轮；传入 --duration 会把它改成 mixed，
+    # 因此这里不覆盖持续时间，只按档位定义运行。
+    "baseline": (["stage", "--stage", "baseline"], 900),
     "low": (["stage", "--stage", "low", "--duration", "300"], 390),
     "mid_low": (["stage", "--stage", "mid_low", "--duration", "600"], 690),
     "mid": (["stage", "--stage", "mid", "--duration", "600"], 690),
@@ -45,207 +49,390 @@ SPECS: dict[str, tuple[list[str], int]] = {
         ["stage", "--stage", "multi_session_pressure", "--duration", "600"],
         1500,
     ),
+    "cdfm_fixed": (["stage", "--stage", "cdfm_fixed"], 7500),
+    "cdfm_rate": (["stage", "--stage", "cdfm_rate"], 500),
+    # 沙盒专项按档位定义运行；单任务与重复档位不覆盖持续时间。
+    "sandbox_baseline": (["stage", "--stage", "sandbox_baseline"], 900),
+    "sandbox_repeat": (["stage", "--stage", "sandbox_repeat"], 3600),
+    "sandbox_ladder": (["stage", "--stage", "sandbox_ladder", "--duration", "180"], 3600),
+    "sandbox_rate": (["stage", "--stage", "sandbox_rate"], 1800),
+    "sandbox_mixed": (["stage", "--stage", "sandbox_mixed", "--duration", "300"], 1200),
+    "sandbox_stability": (["stage", "--stage", "sandbox_stability", "--duration", "1800"], 2700),
 }
 
 
-def log(message: str) -> None:
-    with LOG.open("a", encoding="utf-8") as handle:
+def log(message: str, run_id: str | None = None) -> None:
+    """编排日志跟随本次运行的日期目录，和其他产物一起归档。"""
+    if run_id:
+        runs_dir, _evidence_dir = config.run_dir_for(run_id)
+    else:
+        runs_dir, _evidence_dir = config.run_artifacts_dir(time.time())
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    with (runs_dir / "_orch.log").open("a", encoding="utf-8") as handle:
         handle.write(message + "\n")
 
 
-def ssh(command: str, timeout: int = 300) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [
-            "ssh",
-            "-i",
-            KEY,
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=20",
-            HOST,
-            command,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+def write_json(path: pathlib.Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
 
 
-def run_load(arguments: list[str], budget: int) -> subprocess.CompletedProcess:
-    environment = dict(os.environ, PYTHONIOENCODING="utf-8")
-    return subprocess.run(
-        [sys.executable, "-m", "runner", *arguments],
-        cwd=str(LOADTEST),
-        capture_output=True,
-        text=True,
-        timeout=budget + 300,
-        env=environment,
-    )
-
-
-def _run_id_of(stage: str) -> str:
-    """从该档最近一次运行摘要读取 run_id；读取失败时返回空串。"""
-    summaries = sorted(RUNS.glob(f"*-{stage}/summary.json"))
-    if not summaries:
-        return ""
+def read_json(path: pathlib.Path) -> dict | None:
     try:
-        return str(json.loads(summaries[-1].read_text(encoding="utf-8")).get("run_id") or "")
-    except json.JSONDecodeError:
-        return ""
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
-def collect_server_snapshot(stage: str, phase: str) -> bool:
-    """在服务器上执行一次单次只读采集并写回本地。"""
-    run_id = _run_id_of(stage)
-    if not run_id:
-        log(f"[{stage}] 找不到运行摘要，跳过 {phase} 服务器采集")
+def ssh(command: str, timeout: int = 45, attempts: int = 2) -> subprocess.CompletedProcess:
+    for attempt in range(attempts):
+        try:
+            result = subprocess.run(
+                ["ssh", "-i", KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                 "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2", HOST, command],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+            )
+            if result.returncode == 0 or attempt == attempts - 1:
+                return result
+        except (subprocess.TimeoutExpired, OSError):
+            if attempt == attempts - 1:
+                raise
+        time.sleep(1)
+    raise RuntimeError("ssh_failed")
+
+
+def upload(local: pathlib.Path, remote: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["scp", "-i", KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+             str(local), f"{HOST}:{remote}"], capture_output=True, timeout=45,
+        )
+    except (OSError, subprocess.TimeoutExpired):
         return False
-    remote = f"{REMOTE_DIR}/server-{phase}-{run_id}.json"
-    result = ssh(
-        f"sudo -n bash {REMOTE_DIR}/server_side_collect.sh {run_id} {phase} > {remote} "
-        f"2>{REMOTE_DIR}/server-{phase}-{run_id}.err; echo exit=$?"
-    )
-    log(f"[{stage}] {phase} 采集: {result.stdout.strip()}")
-    pull = ssh(f"cat {remote}")
-    if not pull.stdout.strip().startswith("{"):
-        log(f"[{stage}] {phase} 采集没有输出 JSON，跳过写入")
+    return result.returncode == 0
+
+
+def remote_dir(run_id: str) -> str:
+    return f"{REMOTE_DIR}/{run_id}"
+
+
+def run_dir(run_id: str) -> pathlib.Path:
+    """按 run_id 日期前缀定位本次运行目录，避免不同日期的同名档位混在一起。"""
+    runs_dir, _evidence_dir = config.run_dir_for(run_id)
+    return runs_dir / run_id
+
+
+def make_run_id(stage: str) -> str:
+    return f"{time.strftime('%Y%m%dT%H%M%S')}-{stage}"
+
+
+def deploy_collectors(run_id: str) -> bool:
+    remote = remote_dir(run_id)
+    # mkdir 原子守卫，同一 run_id 不覆盖已有远端产物。
+    result = ssh(f"mkdir -p {shlex.quote(REMOTE_DIR)} && mkdir {shlex.quote(remote)} && mkdir {shlex.quote(remote + '/ops')}")
+    if result.returncode:
         return False
-    target = RUNS / f"server-side-{run_id}-{phase}.json"
-    target.write_text(pull.stdout, encoding="utf-8")
-    log(f"[{stage}] {phase} 采集写入 {target.name}")
+    for relative in ("job_db_check.sh", "stage_resource_sample.sh", "server_side_collect.sh", "ops/server_evidence.py"):
+        if not upload(LOADTEST / relative, f"{remote}/{relative}"):
+            return False
     return True
 
 
-def check_jobs_in_db(stage: str) -> bool:
-    """导出本轮 job_id 清单，上传后在服务器上逐 Job 核对主库。"""
-    run_id = _run_id_of(stage)
-    if not run_id:
-        log(f"[{stage}] 找不到运行摘要，跳过逐 Job 主库核对")
-        return False
-    summary = RUNS / f"{run_id}" / "summary.json"
-    ids = _job_ids(json.loads(summary.read_text(encoding="utf-8")))
-    if not ids:
-        log(f"[{stage}] 本轮没有 job_id，逐 Job 主库核对记为未执行")
-        return False
-    JOB_IDS.mkdir(parents=True, exist_ok=True)
-    local_ids = JOB_IDS / f"job-ids-{stage}.txt"
-    local_ids.write_text("\n".join(ids) + "\n", encoding="utf-8")
-    upload = subprocess.run(
-        [
-            "scp",
-            "-i",
-            KEY,
-            "-o",
-            "BatchMode=yes",
-            str(local_ids),
-            f"{HOST}:{REMOTE_DIR}/job-ids-{stage}.txt",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if upload.returncode:
-        log(f"[{stage}] 清单上传失败: {upload.stderr.strip()[:200]}")
-        return False
-    remote = f"{REMOTE_DIR}/job-db-{run_id}.json"
-    ssh(
-        f"sudo -n bash {REMOTE_DIR}/job_db_check.sh {run_id} "
-        f"{REMOTE_DIR}/job-ids-{stage}.txt > {remote} 2>{REMOTE_DIR}/job-db-{run_id}.err"
-    )
-    pull = ssh(f"cat {remote}")
-    if not pull.stdout.strip().startswith("{"):
-        log(f"[{stage}] 逐 Job 主库核对没有输出 JSON")
-        return False
-    target = LOADTEST / "local" / f"job-db-{run_id}.json"
-    target.write_text(pull.stdout, encoding="utf-8")
-    attach = subprocess.run(
-        [sys.executable, "-m", "runner", "attach-job-db", "--from", str(target)],
-        cwd=str(LOADTEST),
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    log(f"[{stage}] 逐 Job 主库核对: {attach.stdout.strip()[:300]}")
-    return attach.returncode == 0
+def collect_server_snapshot(stage: str, phase: str, run_id: str) -> pathlib.Path | None:
+    remote = remote_dir(run_id)
+    try:
+        result = ssh(f"sudo -n bash {shlex.quote(remote + '/server_side_collect.sh')} "
+                     f"{shlex.quote(run_id)} {shlex.quote(phase)}", timeout=60, attempts=2)
+        data = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return None
+    if result.returncode or not isinstance(data, dict) or data.get("run_id") != run_id:
+        return None
+    target = run_dir(run_id) / f"server-{phase}.json"
+    write_json(target, data)
+    log(f"[{stage}] {phase} snapshot saved", run_id)
+    return target
 
 
-def _job_ids(summary: dict) -> list[str]:
-    """从一份运行摘要取出本轮创建过的唯一 job_id。"""
-    ids: list[str] = []
-    for sample in summary.get("sse", {}).get("samples", []):
-        if sample.get("job_id"):
-            ids.append(str(sample["job_id"]))
-    for sample in summary.get("job", {}).get("samples", []):
-        if sample.get("job_id"):
-            ids.append(str(sample["job_id"]))
-    return list(dict.fromkeys(ids))
+def sampler_running(run_id: str) -> bool:
+    """核验采样器保存的真实 PID 及精确 argv，避免匹配到探测 shell。"""
+    remote = remote_dir(run_id)
+    probe = ("import pathlib,sys; "
+             "pid=pathlib.Path(sys.argv[1]).read_text().strip(); "
+             "assert pid.isdigit() and int(pid)>0; "
+             "args=pathlib.Path('/proc',pid,'cmdline').read_bytes().split(b'\\0'); "
+             "assert args[1:4]==[sys.argv[2].encode(),b'sample',sys.argv[3].encode()]")
+    command = " ".join(shlex.quote(value) for value in (
+        "python3", "-c", probe, remote + "/sample.pid", remote + "/ops/server_evidence.py", run_id
+    ))
+    try:
+        return ssh(command, timeout=15, attempts=1).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def start_sampler(run_id: str, stage: str, duration: int) -> bool:
+    remote = remote_dir(run_id)
+    sampler = (f"bash {shlex.quote(remote + '/stage_resource_sample.sh')} {shlex.quote(run_id)} "
+               f"{duration} 10 {shlex.quote(stage)} "
+               f"{shlex.quote(remote + '/phases.json')} {FINAL_LIMIT} "
+               f">{shlex.quote(remote + '/sample.json')} 2>{shlex.quote(remote + '/sample.err')} & "
+               f"sampler_pid=$!; printf '%s' \"$sampler_pid\" >{shlex.quote(remote + '/sample.pid')}; "
+               f"wait \"$sampler_pid\"; printf '%s' $? >{shlex.quote(remote + '/sample.exit')}")
+    # 只启动一次；无论 SSH 回执是否成功，都用真实进程身份确认启动。
+    try:
+        ssh(f"nohup bash -c {shlex.quote(sampler)} </dev/null >/dev/null 2>&1 &", attempts=1)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if sampler_running(run_id):
+            return True
+        time.sleep(2)
+    return False
+
+
+def collect_sampler_result(run_id: str, timeout: float = 150) -> tuple[dict | None, str | None]:
+    """在同一等待窗口内重试回收，传输失败不使其他收尾取证中断。"""
+    remote = remote_dir(run_id)
+    deadline = time.monotonic() + timeout
+    exit_code = None
+    while time.monotonic() < deadline:
+        try:
+            budget = max(1, min(30, int(deadline - time.monotonic())))
+            done = ssh(f"cat {shlex.quote(remote + '/sample.exit')}", timeout=budget, attempts=1)
+            if done.returncode == 0:
+                exit_code = done.stdout.strip()
+                budget = max(1, min(30, int(deadline - time.monotonic())))
+                pulled = ssh(f"cat {shlex.quote(remote + '/sample.json')}", timeout=budget, attempts=1)
+                if pulled.returncode == 0:
+                    data = json.loads(pulled.stdout)
+                    if (isinstance(data, dict) and data.get("run_id") == run_id
+                            and data.get("finished_at")):
+                        return data, exit_code
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+            pass
+        time.sleep(min(5, max(0, deadline - time.monotonic())))
+    return None, exit_code
+
+
+def current_summary(run_id: str, stage: str) -> dict:
+    """运行中从真实追加账本重建请求身份，兼容尚未生成 summary 的检查点。"""
+    path = run_dir(run_id)
+    summary = read_json(path / "summary.json")
+    if summary is not None:
+        if summary.get("run_id") != run_id:
+            raise ValueError("summary_run_id_mismatch")
+        return summary
+    requests, ids = {}, []
+    ledger = path / "jobs.jsonl"
+    if ledger.exists():
+        with ledger.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    # 正在追加的最后一行可能尚未写完；未登记的身份不补造。
+                    continue
+                if row.get("run_id") != run_id:
+                    continue
+                if row.get("logical_request_id"):
+                    requests[row["logical_request_id"]] = row
+                if row.get("job_id"):
+                    ids.append(str(row["job_id"]))
+    return {"run_id": run_id, "stage": stage, "requests": list(requests.values()),
+            "job": {"created_ids": list(dict.fromkeys(ids))}}
+
+
+def check_jobs_in_db(stage: str, run_id: str, phase: str = "final") -> dict:
+    run = run_dir(run_id)
+    listing = export_request_manifest(current_summary(run_id, stage), run / f"requests-{phase}.json")
+    inventory = read_json(listing) or {}
+    query_budget = min(600, max(60, 30 + 5 * (len(inventory.get("requests", [])) + len(inventory.get("job_ids", [])))))
+    remote = remote_dir(run_id)
+    missing = {"schema_version": "loadtest-job-db-check-v2", "run_id": run_id, "scope": "run",
+               "status": "unknown", "reason": "collector_failed", "jobs": [], "requests": [],
+               "db_checked_at": None, "collected_at": None,
+               "query_started_at": time.time(), "query_budget_seconds": query_budget}
+    if not upload(listing, f"{remote}/requests-{phase}.json"):
+        payload = missing
+    else:
+        try:
+            result = ssh(f"sudo -n timeout {query_budget}s bash {shlex.quote(remote + '/job_db_check.sh')} "
+                         f"{shlex.quote(run_id)} {shlex.quote(remote + '/requests-' + phase + '.json')}",
+                         timeout=query_budget + 15, attempts=1)
+        except (OSError, subprocess.SubprocessError):
+            payload = {**missing, "reason": "query_timeout_or_transport_failure", "collection_failed_at": time.time()}
+            write_json(run / f"job-db-{phase}.json", payload)
+            return payload
+        try:
+            payload = json.loads(result.stdout)
+        except (ValueError, TypeError):
+            payload = missing
+        if not isinstance(payload, dict) or payload.get("run_id") != run_id:
+            payload = missing
+        if result.returncode and payload.get("status") == "collected":
+            payload["status"] = "unknown"
+        payload["collector_exit_code"] = result.returncode
+    payload["query_budget_seconds"] = query_budget
+    if payload.get("status") == "unknown":
+        payload["collection_failed_at"] = time.time()
+    write_json(run / f"job-db-{phase}.json", payload)
+    return payload
+
+
+def load_runtime_budget(stage: str, sampling_budget: int) -> float:
+    """full_flow 按每个账号内串行轮数计算；账号之间并发，不乘账号数。"""
+    spec = config.STAGES.get(stage, {})
+    serial = (int(spec.get("flows") or 1)
+              if spec.get("mode") in {"full_flow", "sandbox_flow"} else 1)
+    if stage == "cdfm_fixed":
+        serial = int(spec.get("tasks") or 1)
+    if stage == "sandbox_rate":
+        serial = int(spec.get("tasks") or 1)
+    if stage == "sandbox_ladder":
+        # 每个并发档位都按单档持续时间与一个观察期限计算，档位之间不共享预算。
+        serial = len(spec.get("ladder") or [1])
+    if stage == "recovery":
+        # 专项检查顺序执行多个真实 Job，不使用 mixed 档的持续时间推算。
+        serial = 12
+    return max(sampling_budget, float(spec.get("duration") or 0)) + serial * config.JOB_OBSERVE_DEADLINE_SECONDS + FINAL_LIMIT + 300
 
 
 def main(stage: str) -> int:
     if stage not in SPECS:
         print(f"未知档位：{stage}")
         return 2
-    load_arguments, budget = SPECS[stage]
-    remote = f"{REMOTE_DIR}/sample-{stage}.json"
-    log(f"=== {stage} start budget={budget} args={' '.join(load_arguments)}")
-    running = ssh(f"pgrep -f 'stage_resource_sample.sh' | grep -v pgrep || true")
-    if running.stdout.strip():
-        log(f"[{stage}] 已有采样进程在运行，先结束它们再启动本次采样")
-        return 1
-    collect_server_snapshot(stage, "before")
-    ssh(
-        f"rm -f {remote}; nohup bash {REMOTE_DIR}/stage_resource_sample.sh "
-        f"{stage}-$(date -u +%Y%m%dT%H%M%S) {budget} 10 {stage} "
-        f"> {remote} 2>{REMOTE_DIR}/sample-{stage}.err & echo started"
-    )
-    time.sleep(3)
-    load_ok = True
+    arguments, budget = SPECS[stage]
+    if not math.isfinite(FINAL_LIMIT) or FINAL_LIMIT <= 0:
+        print("最终观察上限必须是有限正数")
+        return 2
+    run_id = make_run_id(stage)
+    run = run_dir(run_id)
+    run.mkdir(parents=True, exist_ok=False)
+    state = {"schema_version": "loadtest-orchestration-v2", "run_id": run_id, "stage": stage,
+             "status": "unknown", "checkpoints": {}, "stop_submitting_at": None,
+             "observation_limit_seconds": FINAL_LIMIT,
+             "observation_ended_at": None, "load_exit_code": None}
+    state_file = run / "orchestration.json"
+    write_json(state_file, state)
+    process = None
+    if FINAL_LIMIT < 300:
+        state["checkpoints"]["300"] = {"status": "missing", "reason": "observation_limit_before_checkpoint"}
     try:
-        process = run_load(load_arguments, budget)
-        load_ok = process.returncode == 0
-        log(f"[{stage}] load exit={process.returncode}")
-        for line in (process.stdout or "").strip().splitlines()[-8:]:
-            log("   " + line[:200])
-    except subprocess.TimeoutExpired:
-        load_ok = False
-        log(f"[{stage}] load TIMEOUT after {budget + 300}s")
-    deadline = time.time() + 300
-    while time.time() < deadline:
-        check = ssh(f"pgrep -f 'stage_resource_sample.sh' >/dev/null && echo RUNNING || echo DONE")
-        if "DONE" in check.stdout:
-            break
-        time.sleep(5)
-    pull = ssh(f"cat {remote}")
-    if not pull.stdout.strip().startswith("{"):
-        log(f"=== {stage} FAILED (采样没有输出 JSON)")
+        if not deploy_collectors(run_id):
+            raise RuntimeError("collector_deployment_failed")
+        before = collect_server_snapshot(stage, "before", run_id)
+        remote = remote_dir(run_id)
+        if not start_sampler(run_id, stage, math.ceil(load_runtime_budget(stage, budget) + FINAL_LIMIT + 300)):
+            raise RuntimeError("sampler_start_unknown")
+        environment = dict(os.environ, PYTHONIOENCODING="utf-8")
+        with (run / "load.stdout.txt").open("w", encoding="utf-8") as stdout, (run / "load.stderr.txt").open("w", encoding="utf-8") as stderr:
+            process = subprocess.Popen([sys.executable, "-m", "runner", *arguments, "--run-id", run_id],
+                                       cwd=str(LOADTEST), stdout=stdout, stderr=stderr, env=environment)
+            load_deadline = time.monotonic() + load_runtime_budget(stage, budget)
+            stop_sent = False
+            while True:
+                phases = read_json(run / "phases.json") or read_json(run / "summary.json") or {}
+                stopped = epoch(phases.get("stop_submitting_at"))
+                phase_run = phases.get("run_id", run_id)
+                if stopped is not None and phase_run == run_id and stopped <= time.time():
+                    state["stop_submitting_at"] = stopped
+                    state["observation_ended_at"] = epoch(phases.get("observation_ended_at"))
+                    if not stop_sent:
+                        boundary = json.dumps({"run_id": run_id, "started_at": phases.get("started_at"), "stop_submitting_at": stopped})
+                        for attempt in range(3):
+                            try:
+                                sent = ssh(f"printf '%s' {shlex.quote(boundary)} >{shlex.quote(remote + '/phases.tmp')} && "
+                                           f"mv {shlex.quote(remote + '/phases.tmp')} {shlex.quote(remote + '/phases.json')}", attempts=1)
+                                stop_sent = sent.returncode == 0
+                            except (OSError, subprocess.SubprocessError):
+                                stop_sent = False
+                            if stop_sent:
+                                break
+                            time.sleep(2)
+                        state["sampler_boundary_status"] = "collected" if stop_sent else "unknown"
+                    for seconds in CHECKPOINTS:
+                        key = format(seconds, "g")
+                        if key not in state["checkpoints"] and time.time() >= stopped + seconds:
+                            started = time.time()
+                            payload = check_jobs_in_db(stage, run_id, f"stop-plus-{key}s")
+                            state["checkpoints"][key] = {"target_at": stopped + seconds,
+                                "check_started_at": started, "db_checked_at": payload.get("db_checked_at"),
+                                "delay_seconds": started - stopped - seconds, "status": payload.get("status", "unknown"),
+                                "drained": payload.get("drained"),
+                                "business_drained": payload.get("business_drained"),
+                                "execution_drained": payload.get("execution_drained"),
+                                "path": f"job-db-stop-plus-{key}s.json"}
+                state["load_exit_code"] = process.poll()
+                write_json(state_file, state)
+                if process.poll() is None and time.monotonic() >= load_deadline:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=15)
+                    state["load_exit_code"] = process.returncode
+                    state["load_status"] = "unknown"
+                if process.poll() is not None:
+                    if state["stop_submitting_at"] is None:
+                        raise RuntimeError("missing_stop_submitting_boundary")
+                    if all(format(seconds, "g") in state["checkpoints"] for seconds in CHECKPOINTS):
+                        break
+                time.sleep(2)
+        data, state["sampler_exit_code"] = collect_sampler_result(run_id)
+        state["sampler_result_status"] = "collected" if data is not None else "unknown"
+        if data is not None:
+            data["observation_ended_at"] = state["observation_ended_at"]
+            write_json(run / "stage-sample.json", data)
+        after = collect_server_snapshot(stage, "after", run_id)
+        final = check_jobs_in_db(stage, run_id)
+        summary = read_json(run / "summary.json")
+        if summary is None:
+            raise RuntimeError("missing_final_summary")
+        if data is not None:
+            summary["resource_curve"] = resource.summarize(data)
+        summary["server_checkpoints"] = {seconds: read_json(run / item["path"]) if item.get("path") else item
+                                         for seconds, item in state["checkpoints"].items()}
+        for key, target in (("server_baseline", before), ("server_after", after)):
+            if target is not None:
+                snapshot = read_json(target)
+                if key == "server_after":
+                    snapshot["drain_seconds"] = (summary.get("server_after") or {}).get("drain_seconds")
+                summary[key] = snapshot
+        healthy = (process.returncode == 0 and final.get("status") == "collected" and final.get("drained") is True
+                   and data is not None and data.get("status") == "collected" and state.get("sampler_exit_code") == "0"
+                   and stop_sent
+                   and before is not None and after is not None
+                   and all(item.get("status") == "collected" for item in state["checkpoints"].values()))
+        state.update(status="collected" if healthy else "unknown", db_checked_at=final.get("db_checked_at"),
+                     server_drained=final.get("drained"), business_drained=final.get("business_drained"),
+                     execution_drained=final.get("execution_drained"),
+                     server_observation_ended_at=data.get("finished_at") if data is not None else None)
+        summary["orchestration"] = state
+        summary = merge_job_db_check(summary, final)
+        write_json(run / "summary.json", summary)
+        log(f"[{stage}] run_id={run_id} status={state['status']}", run_id)
+        print(f"{stage}: {state['status']} ({run_id})")
+        return 0 if healthy else 1
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        state.update(status="unknown", reason=str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__)
+        log(f"[{stage}] run_id={run_id} status=unknown reason={type(exc).__name__}", run_id)
         return 1
-    body = pull.stdout[pull.stdout.index("{") :]
-    sample_path = RUNS / f"stage-sample-{stage}.json"
-    sample_path.write_text(body, encoding="utf-8")
-    data = json.loads(body)
-    log(f"[{stage}] sample samples={len(data.get('samples') or [])}")
-    if not data.get("finished_at"):
-        log(f"=== {stage} INCOMPLETE (采样未收尾)")
-        return 1
-    attach = subprocess.run(
-        [sys.executable, "-m", "runner", "attach-sample", "--stage", stage, "--from", str(sample_path)],
-        cwd=str(LOADTEST),
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if attach.returncode:
-        log(f"[{stage}] 资源采样写入摘要失败: {attach.stderr.strip()[:200]}")
-        return 1
-    collect_server_snapshot(stage, "after")
-    db_ok = check_jobs_in_db(stage)
-    if not load_ok or not db_ok:
-        log(f"=== {stage} FAILED (load_ok={load_ok} db_ok={db_ok})")
-        return 1
-    log(f"=== {stage} done")
-    print(stage + " complete")
-    return 0
+    finally:
+        # 异常不能让已启动的客户端继续提交；服务器采样保持有界观察，不停止业务服务。
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=15)
+        write_json(state_file, state)
 
 
 if __name__ == "__main__":

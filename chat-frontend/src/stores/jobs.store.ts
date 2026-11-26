@@ -1,13 +1,15 @@
 import { defineStore } from 'pinia'
 import type { DecodedSseEvent } from '../api/events.schemas'
 import type { ActiveJobResponse } from '../api/jobs.schemas'
-import type { BackendJobStatus, ExecutionPhase, JobConnectionState, JobRecord, ThinkingProjection } from '../types/domain'
+import type { BackendJobStatus, ExecutionPhase, InteractionIdentity, JobConnectionState, JobRecord, ThinkingProjection } from '../types/domain'
+import { canSubmitInteraction, matchesInteraction } from '../runtime/jobs/interaction'
 import {
   createJobRecord,
   reduceJobEvent,
   seedJobFromPhase,
   settleDecision as settleDecisionState,
   startResumePhase,
+  waitingInputFromInteraction,
 } from '../runtime/jobs/event-reducer'
 import { observeActiveEventId } from '../runtime/jobs/event-cursor'
 
@@ -54,12 +56,12 @@ export const useJobsStore = defineStore('jobs', {
       this.records[jobId] = record
       return record
     },
-    seedPhase(sessionId: string, phase: ExecutionPhase): void {
+    seedPhase(sessionId: string, phase: ExecutionPhase, restore = false): void {
       const jobId = phase.analysisJobId
       if (!jobId) return
       const inputId = phase.analysisJobInputId ?? null
       const existing = this.records[jobId]
-      if (!existing) {
+      if (!existing || restore) {
         this.records[jobId] = seedJobFromPhase(jobId, sessionId, phase)
         return
       }
@@ -80,15 +82,52 @@ export const useJobsStore = defineStore('jobs', {
       this.records[jobId] = next.state
       return next.snapshot
     },
+    beginResume(identity: InteractionIdentity): boolean {
+      const record = this.records[identity.jobId]
+      if (!record || !canSubmitInteraction(record, identity)) return false
+      record.uiState = 'resuming'
+      return true
+    },
+    failResume(identity: InteractionIdentity): void {
+      const record = this.records[identity.jobId]
+      if (record && matchesInteraction(record, identity) && record.uiState === 'resuming') record.uiState = 'waiting_input'
+    },
+    acceptResume(identity: InteractionIdentity, status: BackendJobStatus): ThinkingProjection | null {
+      const record = this.records[identity.jobId]
+      if (!record || !matchesInteraction(record, identity)
+        || !['waiting', 'answered'].includes(record.thinking.waitingInput?.status ?? '')
+        || ['completed', 'failed', 'canceled'].includes(record.uiState)) return null
+      const next = startResumePhase(record)
+      next.state.backendStatus = status
+      // 响应可能已是终态，仍需从原游标回放结果事件后才能停止订阅。
+      next.state.uiState = status === 'queued' ? 'queued' : 'running'
+      this.records[identity.jobId] = next.state
+      return next.snapshot
+    },
+    reconcileSessionJobs(sessionId: string, activeJobIds: string[]): void {
+      const active = new Set(activeJobIds)
+      for (const record of Object.values(this.records)) {
+        if (record.sessionId === sessionId && !active.has(record.jobId)) delete this.records[record.jobId]
+      }
+    },
     observeActive(job: ActiveJobResponse): JobRecord {
       const status = isBackendStatus(job.status) ? job.status : 'queued'
+      const interaction = (job.current_interaction ?? {}) as Record<string, unknown>
+      const waitingInput = status === 'waiting_input' && job.current_question_id
+        ? waitingInputFromInteraction(
+            interaction,
+            job.current_question_id,
+            job.current_waiting_prompt ?? '',
+          )
+        : null
+      if (waitingInput && job.input_wait_expires_at) waitingInput.expiresAt = job.input_wait_expires_at
       const existing = this.records[job.job_id]
       if (!existing) {
         const record = createJobRecord(job.job_id, job.session_id, status, 0)
         record.observedLastEventId = job.last_event_id ?? null
-        if (status === 'waiting_input' && job.current_question_id) {
+        if (waitingInput) {
           record.thinking.status = 'waiting_input'
-          record.thinking.waitingInput = { questionId: job.current_question_id, prompt: job.current_waiting_prompt ?? '' }
+          record.thinking.waitingInput = waitingInput
         }
         this.records[job.job_id] = record
         return record
@@ -97,14 +136,22 @@ export const useJobsStore = defineStore('jobs', {
       existing.uiState = uiStateFor(status)
       const cursor = observeActiveEventId(existing, job.last_event_id)
       existing.observedLastEventId = cursor.observedLastEventId
-      if (status === 'waiting_input' && job.current_question_id) {
+      if (waitingInput) {
         existing.thinking = {
           ...existing.thinking,
           status: 'waiting_input',
-          waitingInput: { questionId: job.current_question_id, prompt: job.current_waiting_prompt ?? '' },
+          waitingInput,
         }
+      } else if (existing.thinking.waitingInput?.status === 'waiting') {
+        existing.thinking.waitingInput.status = status === 'queued' || status === 'running' || status === 'succeeded' ? 'answered' : 'closed'
+        existing.thinking.status = status === 'succeeded' ? 'completed' : status === 'failed' ? 'failed' : status === 'canceled' ? 'canceled' : 'active'
       }
       return existing
+    },
+    chooseProcessingOption(jobId: string, optionId: string): void {
+      const record = this.records[jobId]
+      if (!record?.thinking.waitingInput) return
+      record.thinking.waitingInput.selectedOptionId = optionId
     },
     applyEvent(jobId: string, event: DecodedSseEvent, generation: number): ReturnType<typeof reduceJobEvent> | null {
       const existing = this.records[jobId]

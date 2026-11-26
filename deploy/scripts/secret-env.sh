@@ -18,6 +18,8 @@ secret_value() {
         return 1
     fi
     value="$(sed -n "s/^${key}=//p" "$SECRET_FILE" | head -n 1)"
+    # CRLF 的回车属于行分隔符，不能作为密码内容传给上游进程。
+    value="${value%"$(printf '\r')"}"
     if [ -z "$value" ]; then
         echo "secret key missing or empty: $key" >&2
         return 1
@@ -37,6 +39,12 @@ require_secret_file_permissions() {
     # 除专用 GID 3000 外，拒绝组或其他用户读取密钥文件。
     if [ ! -f "$SECRET_FILE" ]; then
         echo "secret file not found: $SECRET_FILE" >&2
+        return 1
+    fi
+    # 开发 Compose 直接挂载 Windows 文件，不以其映射出的 POSIX 权限位拒绝启动。
+    if [ "${ENVIRONMENT:-}" = "development" ]; then
+        if [ -r "$SECRET_FILE" ]; then return 0; fi
+        echo "secret file is unreadable: $SECRET_FILE" >&2
         return 1
     fi
     metadata="$(stat -c '%a:%u:%g' "$SECRET_FILE" 2>/dev/null || stat -f '%Lp:%u:%g' "$SECRET_FILE")"

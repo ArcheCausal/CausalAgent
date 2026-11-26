@@ -1,0 +1,99 @@
+{
+  "status": "PASS",
+  "started_at": "2026-10-29T08:00:49.089869+00:00",
+  "source_sha256": {
+    "tests/acceptance/research_parameter_recovery.py": "2b614e3a4bbbedff31d8047ba77f67e0f9a2a85b05b4d5d9ea7ffb30ec413a93",
+    "tests/acceptance/research_parameter_tool_sources.py": "157c7b957418e54b4886a9061dafeda5fa20f277e7db0ab803e0dbefb591dec4",
+    "Agent/data_processing/parameters.py": "9adf4c533e2e4697195e3262e97834f9e20da5ae19a03395cae951d8d904850e",
+    "Agent/data_processing/persistence.py": "4ec04e9b5aad8c36cacb4dcbcc6eefb71eb8878dff8319b14747c9a57ea36c99",
+    "Agent/data_processing/graph.py": "9858f13dd433c7850752008e77a1b77536cabf6ebc274c86a9d0ebaf2c3b46a7",
+    "Database/analysis_contexts.py": "4d278f359aa9af3a83eff5499a7462dad81577a203381958fb4da4631ac6971b"
+  },
+  "limitations": [
+    "synthetic graph questions, answers and parameter patches; no model extraction",
+    "real MySQL ledger and PostgreSQL checkpoints; controlled resumes, no crash takeover",
+    "no controller HTTP, OpenSandbox or script execution",
+    "Flask routes in process; no browser"
+  ],
+  "active_test": "original_tool_answer_sources",
+  "continuous_clarifications": {
+    "status": "PASS",
+    "postgres_pool_reopens": 5,
+    "actual_job_attempts": [
+      1,
+      2,
+      3
+    ],
+    "revisions": [
+      1,
+      2
+    ],
+    "parent_replay_and_retry": true,
+    "synthetic_graph_inputs": true,
+    "model_execution": false,
+    "production_graph_runner_and_event_writer": true,
+    "distinct_outer_interrupt_and_inner_tool_ids": true
+  },
+  "candidate_parameters_and_fencing": {
+    "status": "PASS",
+    "real_ledger_sources": true,
+    "stale_context_write_rejected": true,
+    "candidate_mismatch_rejected": true,
+    "bound_parameters_restored": true
+  },
+  "context_commit_before_parent_checkpoint": {
+    "status": "PASS",
+    "real_postgres_parent_checkpoint": true,
+    "explicit_stale_parent_state": true,
+    "current_job_context_and_history_index_restored": true,
+    "context_count_unchanged": true
+  },
+  "bound_parent_context_recovery": {
+    "status": "PASS",
+    "real_postgres_parent_checkpoint": true,
+    "explicit_stale_parent_state": true,
+    "current_job_context_and_history_index_restored": true,
+    "context_count_unchanged": true
+  },
+  "historical_context_protection": {
+    "status": "PASS",
+    "completed_null_role_history_immutable": true,
+    "changed_window_creates_one_context": true,
+    "replay_preserves_prepared_pointer": true,
+    "identical_final_parameters_reuse_history": true,
+    "foreign_job_source_rejected": true,
+    "successful_followup_without_prepared_does_not_hide_analysis_snapshot": true
+  },
+  "legacy_postgres_checkpoints": {
+    "status": "PASS",
+    "current_namespace_rejected": true,
+    "old_goal_namespace_rejected": true,
+    "processing_checkpoints_preserved": true
+  },
+  "research_spec_tool_commits": {
+    "status": "PASS",
+    "actual_initial_ledger_source": true,
+    "actual_frozen_column_scope": true,
+    "same_source_correction": true,
+    "identical_replay_no_revision": true,
+    "stale_spec_rejected": true,
+    "postgres_reconnect_preserves_revisions": true,
+    "model_invoked": false
+  },
+  "original_tool_answer_sources": {
+    "status": "PASS",
+    "original_tools": [
+      "ask_data_processing_question",
+      "request_data_processing_plan_confirmation"
+    ],
+    "production_runner_and_writer": true,
+    "native_outer_interrupt_id_in_resume_ledger": true,
+    "answer_delivery_without_hidden_model_call": true,
+    "unrelated_tool_and_answer_rejected": true,
+    "model_extraction_verified": false,
+    "earlier_source_rejected_while_answer_pending": true,
+    "model_output_substitute_used": false
+  },
+  "source_unchanged_during_run": true,
+  "finished_at": "2026-10-29T08:00:56.935787+00:00"
+}

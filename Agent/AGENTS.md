@@ -12,7 +12,7 @@
 
 ## Graph、输出与工具规则
 
-- 条件路由必须读取显式 State 字段，例如 `route_decision`、`fold_decision`；禁止用展示消息文本猜测控制流。
+- 条件路由必须读取显式 State 字段，例如 `route_decision`、`dataset_validation_status`；禁止用展示消息文本猜测控制流。
 - 涉及到修改agent链路的，需要告诉用户修改后的逻辑和目前的逻辑区别。
 - 结构化输出必须使用统一的 `Agent/llm_structured_output.py` 入口和当前 function calling 约定；修改 thinking、tool choice 或 schema 时必须同步检查调用器和测试。
 - MCP planner 使用原生 Tool Calls

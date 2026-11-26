@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any, AsyncIterator
 
 from langchain_core.messages import HumanMessage
@@ -22,6 +23,9 @@ from app.agent.worker.result_presenter import process_final_result
 from config.settings import settings
 from Agent.causal_agent.analysis_context import build_context_commit, build_context_index
 from Agent.causal_agent.context import AgentRunContext
+from Agent.data_processing.parameters import (
+    PROCESSING_GRAPH_NAME, PROCESSING_STATE_VERSION, UnsupportedProcessingCheckpointError,
+)
 from Database.analysis_contexts import load_active_context, load_context_index
 
 
@@ -31,6 +35,15 @@ ERROR_HANDLER_STREAM_PREFIX = "__error_handler__"
 
 def _build_final_result(state_values: dict[str, Any], *, job_attempt: int) -> dict[str, Any]:
     """构造稳定终态事件；上下文写回事实只作为内部字段交给 event writer。"""
+    if state_values.get("data_processing_failure_code"):
+        return {
+            "type": "error",
+            "message": (
+                str(state_values.get("data_processing_failure_message") or "数据处理阶段未能完成")
+                + "。本次未启动因果分析。"
+            ),
+            "attempt": job_attempt,
+        }
     return {
         "type": "final_result",
         "data": process_final_result(state_values),
@@ -114,6 +127,7 @@ def _graph_config(
     user_id: int,
     session_id: str,
     job_id: str,
+    callbacks: list[Any] | None = None,
 ) -> dict[str, Any]:
     """构造 Job 根图配置；业务 session 只作为 State/metadata 上下文。"""
     thread_id, _ = checkpoint_identity(job_id)
@@ -121,13 +135,16 @@ def _graph_config(
         "thread_id": thread_id,
         "user_id": user_id,
     }
-    return {
+    config: dict[str, Any] = {
         "configurable": configurable,
         "metadata": {
             "job_id": thread_id,
             "session_id": str(session_id),
         },
     }
+    if callbacks:
+        config["callbacks"] = list(callbacks)
+    return config
 
 
 def _snapshot_has_checkpoint(snapshot: Any) -> bool:
@@ -239,6 +256,7 @@ async def ai_call_stream(
     execution_guard: JobExecutionGuard | None = None,
     web_search_enabled: bool = False,
     agent_runtime_context: AgentRunContext | None = None,
+    usage_collector: Any | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """在显式传入的 graph 上执行一次调用并产出公开事件。"""
     if graph is None:
@@ -258,7 +276,25 @@ async def ai_call_stream(
         user_id=user_id,
         session_id=session_id,
         job_id=job_id,
+        callbacks=[usage_collector] if usage_collector is not None else None,
     )
+
+    last_usage: tuple[int, int, int] | None = None
+
+    def flush_usage() -> dict[str, Any] | None:
+        nonlocal last_usage
+        if usage_collector is None:
+            return None
+        current = usage_collector.snapshot()
+        marker = (
+            current.get("input_tokens", 0),
+            current.get("output_tokens", 0),
+            current.get("total_tokens", 0),
+        )
+        if marker == last_usage or not any(marker):
+            return None
+        last_usage = marker
+        return {"type": "usage", "attempt": job_attempt, **current}
 
     state = await graph.aget_state(config)
     fork = initial_input.get("fork_from")
@@ -296,6 +332,11 @@ async def ai_call_stream(
         await execution_guard.check_after_call()
     interrupts = _snapshot_interrupts(state)
     has_checkpoint = _snapshot_has_checkpoint(state)
+    current_processing_graph = getattr(graph, "name", None) == PROCESSING_GRAPH_NAME
+    if current_processing_graph and has_checkpoint and (
+        (getattr(state, "values", None) or {}).get("data_processing_state_version") != PROCESSING_STATE_VERSION
+    ):
+        raise UnsupportedProcessingCheckpointError("processing checkpoint requires a new Job")
     if interrupts:
         if input_type != "resume":
             raise RuntimeError("checkpoint 存在 pending interrupt，但当前输入不是 resume")
@@ -340,6 +381,8 @@ async def ai_call_stream(
     if execution_guard is not None:
         await execution_guard.check_after_call()
 
+    if current_processing_graph and isinstance(input_data, dict):
+        input_data["data_processing_state_version"] = PROCESSING_STATE_VERSION
     adapter = LangGraphEventAdapter(job_id, job_attempt)
     streamed_interrupts: list[Any] = []
     handler_recovered = False
@@ -378,6 +421,9 @@ async def ai_call_stream(
                 if execution_guard is not None:
                     await execution_guard.check_after_call()
                 yield event_data
+            usage_event = flush_usage()
+            if usage_event is not None:
+                yield usage_event
 
         if execution_guard is not None:
             await execution_guard.ensure_active()
@@ -392,15 +438,27 @@ async def ai_call_stream(
                 if hasattr(interrupt_obj, "value")
                 else str(interrupt_obj)
             )
+            interaction = None
+            if isinstance(question, Mapping):
+                interaction = dict(question)
+                message = str(interaction.get("message") or interaction.get("prompt") or "")
+            else:
+                message = str(question) if question is not None else ""
             if execution_guard is not None:
                 await execution_guard.check_after_call()
-            yield {
+            payload = {
                 "type": "interrupt",
-                "message": question,
+                "message": message,
                 "question_id": _interrupt_id(interrupt_obj),
                 "attempt": job_attempt,
                 "_checkpoint_id": _checkpoint_id(state),
             }
+            if interaction is not None:
+                payload["interaction"] = interaction
+            usage_event = flush_usage()
+            if usage_event is not None:
+                yield usage_event
+            yield payload
             return
 
         if execution_guard is not None:
@@ -409,6 +467,9 @@ async def ai_call_stream(
         final_result["_checkpoint_id"] = _checkpoint_id(state)
         if execution_guard is not None:
             await execution_guard.check_after_call()
+        usage_event = flush_usage()
+        if usage_event is not None:
+            yield usage_event
         yield final_result
     except JobExecutionRevoked:
         raise
@@ -425,10 +486,16 @@ async def ai_call_stream(
         if recovered is not None:
             if execution_guard is not None:
                 await execution_guard.check_after_call()
+            usage_event = flush_usage()
+            if usage_event is not None:
+                yield usage_event
             yield recovered
             return
         # 公开事件只保留脱敏文案；真实异常通过下划线前缀的内部字段传给
         # OrderedEventWriter，后者只把 message 落库，诊断只用于 worker 日志。
+        usage_event = flush_usage()
+        if usage_event is not None:
+            yield usage_event
         yield {
             "type": "error",
             "message": sanitize_public_error(exc),

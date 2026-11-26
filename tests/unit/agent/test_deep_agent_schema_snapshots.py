@@ -2,92 +2,43 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
-import Agent.deep_agent_tools.models as models
-from Agent.deep_agent_tools.algorithm_specs import build_tool_schema_snapshot
+from tests.unit.agent.schema_manifest import build_full_snapshot, derive_manifest
+from Agent.deep_agent_tools.algorithm_specs import get_algorithm_spec
+from Agent.deep_agent_tools.models import FinalAnalysisDecision, ResultAssessment
 
 
 SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "deep_agent_schema_snapshot.json"
 FULL_SNAPSHOT_PATH = (
     Path(__file__).parent / "snapshots" / "deep_agent_full_schema_snapshot.json"
 )
-MODEL_NAMES = (
-    "ActionAttempt",
-    "AlgorithmExecutionCommand",
-    "AlgorithmResult",
-    "AlgorithmResultProvenance",
-    "DataProfile",
-    "Diagnostics",
-    "EvidenceResult",
-    "FinalAnalysisDecision",
-    "GraphEdge",
-    "InvocationRecord",
-    "McpInvocationContext",
-    "PublicDecision",
-    "RawResultMetadata",
-    "ResultAssessment",
-    "RevisionProposal",
-    "SafeWarning",
-    "ScientificConflict",
-    "StandardizedGraph",
-    "WebEvidenceResult",
-)
-
-
-def _canonical_json(value: object) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-
-def _schema_manifest() -> dict[str, object]:
-    model_manifest: dict[str, object] = {}
-    for name in MODEL_NAMES:
-        schema = getattr(models, name).model_json_schema()
-        model_manifest[name] = {
-            "properties": sorted(schema.get("properties", {})),
-            "required": schema.get("required", []),
-            "sha256": hashlib.sha256(_canonical_json(schema)).hexdigest(),
-            "title": schema.get("title"),
-        }
-
-    tool_manifest = []
-    for item in build_tool_schema_snapshot():
-        tool_manifest.append(
-            {
-                "capability_id": item["capability_id"],
-                "schema_sha256": hashlib.sha256(
-                    _canonical_json(item["tool"])
-                ).hexdigest(),
-                "spec_digest": item["spec_digest"],
-                "tool_name": item["tool"]["name"],
-            }
-        )
-    return {
-        "pydantic_models": model_manifest,
-        "schema_version": "p1-v1",
-        "tools": tool_manifest,
-    }
 
 
 def test_pydantic_and_tool_schema_snapshots_are_stable() -> None:
     expected = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
-    assert _schema_manifest() == expected
+    assert derive_manifest(build_full_snapshot()) == expected
 
 
 def test_full_pydantic_and_tool_schema_snapshot_matches() -> None:
     expected = json.loads(FULL_SNAPSHOT_PATH.read_text(encoding="utf-8"))
-    actual = {
-        "models": {
-            name: getattr(models, name).model_json_schema() for name in MODEL_NAMES
-        },
-        "schema_version": "p1-v1",
-        "tools": build_tool_schema_snapshot(),
-    }
-    assert actual == expected
+    assert build_full_snapshot() == expected
+
+
+def test_effect_tool_schemas_require_explicit_definition_under_v3() -> None:
+    for capability in ("causal.backdoor_ols", "causal.g_formula"):
+        spec = get_algorithm_spec(capability)
+        schema = spec.model_input_schema.model_json_schema()
+        assert spec.version == "3.0"
+        assert "effect_request" in schema["required"]
+        assert "contrast" not in schema["properties"]
+        assert "default" not in schema["properties"]["effect_request"]
+
+
+def test_decision_schema_has_only_independent_primary_roles() -> None:
+    assert ResultAssessment.model_json_schema()["properties"]["disposition"]["enum"] == [
+        "primary_graph", "primary_effect", "supporting", "discarded"]
+    properties = FinalAnalysisDecision.model_json_schema()["properties"]
+    assert {"primary_graph_result_ref", "primary_effect_result_ref", "primary_result_ref",
+            "effect_status", "effect_reason"} <= properties.keys()

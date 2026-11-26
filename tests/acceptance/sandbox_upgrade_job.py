@@ -1,0 +1,427 @@
+"""真实模型、正式 Worker、MCP HTTP 和沙盒控制服务的隔离 Job 验收。
+
+文档职责：执行上传、模型澄清与确认、真实处理、独立校验、算法及报告。
+适用范围：仅复用 data_processing_recovery 的专用数据库，模型客户端须允许外联。
+控制服务另行启动；FULL_JOB_SANDBOX_SECRET_FILE 指向其统一密钥文件，不修改业务配置。
+验收答复是显式测试输入，脚本、模型输出、算法和报告均由正式组件生成。
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+from contextlib import AsyncExitStack
+from datetime import datetime, timezone
+import hashlib
+from io import BytesIO
+import json
+import logging
+import os
+from pathlib import Path
+import random
+import secrets
+import subprocess
+import sys
+from uuid import uuid4
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+ARTIFACTS = Path("/tmp/sandbox-upgrade-job")
+
+
+def require(condition, code):
+    if not condition:
+        raise AssertionError(code)
+
+
+def open_private_log(path):
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    return os.fdopen(descriptor, "wb")
+
+
+def configure(model_file):
+    from tests.acceptance.data_processing_recovery import configure as restore
+    from config.secret_file import SANDBOX_SECRET_KEYS, load_secrets
+
+    sandbox_secrets = load_secrets(
+        path=Path(os.environ["FULL_JOB_SANDBOX_SECRET_FILE"]), required_keys=SANDBOX_SECRET_KEYS,
+    )
+
+    restore(resume=True)
+    require(os.environ.get("MYSQL_WRITE_HOST") == "recovery-mysql"
+            and os.environ.get("CHECKPOINT_POSTGRES_HOST") == "recovery-postgres"
+            and not os.environ.get("MYSQL_READ_HOSTS"), "dedicated_databases_required")
+    models = json.loads(model_file.read_text())
+    require(set(models) == {"outer", "deep", "context_window_tokens"}, "model_only_configuration_required")
+    secret_path = ARTIFACTS / "worker-secrets.env"
+    source = Path(os.environ["CAUSALAGENT_SECRET_FILE"]).read_text()
+    values = dict(line.split("=", 1) for line in source.splitlines() if line and not line.startswith("#"))
+    values.update({key: sandbox_secrets[key] for key in SANDBOX_SECRET_KEYS})
+    values.update(API_KEY=models["outer"]["api_key"], DEEP_AGENT_API_KEY=models["deep"]["api_key"])
+    descriptor = os.open(secret_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as output:
+        output.write("".join(f"{key}={value}\n" for key, value in values.items()))
+    os.environ.update({
+        "CAUSALAGENT_SECRET_FILE": str(secret_path),
+        "MODEL": models["outer"]["model"], "BASE_URL": models["outer"]["base_url"],
+        "DEEP_AGENT_MODEL": models["deep"]["model"], "DEEP_AGENT_BASE_URL": models["deep"]["base_url"],
+        "DEEP_AGENT_CONTEXT_WINDOW_TOKENS": str(models["context_window_tokens"]),
+        "MULTIMODAL_ACTIVE_INDEX_CONFIG": str(ARTIFACTS / "rag" / "active_index.json"),
+        "MULTIMODAL_INDEX_ROOT": str(ARTIFACTS / "rag" / "indexes"),
+        "CAUSAL_MCP_URL": "http://127.0.0.1:8080/mcp",
+        "CAUSAL_MCP_PROCESS_WORKERS": "1", "JOB_WORKER_SLOTS": "1",
+        "CAUSALAGENT_SANDBOX_CONTROLLER_URL": os.environ["FULL_JOB_SANDBOX_CONTROLLER_URL"],
+    })
+
+
+def serve_mcp():
+    import uvicorn
+    from Agent.CausalAgentMCP.app import create_app
+
+    uvicorn.run(create_app(), host="127.0.0.1", port=8080, access_log=False, log_level="critical")
+
+
+async def verify(report, timeout, *, scenario="research-revisions", browser_confirmation=False):
+    import httpx
+    from Agent.causal_agent.postgres_checkpointer import open_checkpoint_pool
+    from app.agent import job_service
+    from app.agent.worker.bootstrap import run_slot
+    from app.agent.worker.runtime import initialize_production_runtime
+    from app.db import get_read_connection
+    from tests.acceptance.data_processing_recovery import application
+
+    async with httpx.AsyncClient(trust_env=False, timeout=3) as client:
+        for _ in range(40):
+            try:
+                response = await client.get("http://127.0.0.1:8080/ready")
+                if response.status_code == 200:
+                    break
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0.5)
+        else:
+            raise AssertionError("actual_mcp_http_not_ready")
+        response = await client.get(os.environ["CAUSALAGENT_SANDBOX_CONTROLLER_URL"] + "/healthz")
+        require(response.status_code == 200, "actual_sandbox_controller_not_ready")
+    report["dependencies_ready"] = True
+    client = application().test_client()
+    name, password = "full_job_" + uuid4().hex[:10], secrets.token_urlsafe(24) + "9"
+    require(client.post("/api/register", json={"username": name, "password": password}).status_code == 200, "registration_failed")
+    require(client.post("/api/login", json={"username": name, "password": password}).status_code == 200, "login_failed")
+    from app.auth.service import find_user
+    user_id = find_user(name)["id"]
+    session_id = client.post("/api/new_chat").json["new_session_id"]
+    rng = random.Random(20261025)
+    rows = []
+    all_nodes = scenario in {"all-nodes", "execution-report", "script-repair"}
+    role_mapping = scenario == "role-columns"
+    for _ in range(240):
+        x = rng.expovariate(1)
+        row = f"{x},{1.8*x+rng.gauss(0,0.3)},{rng.gauss(0,1)}"
+        if all_nodes:
+            row += f",{rng.gauss(0,1)},{rng.gauss(0,1)}"
+        rows.append(row)
+    header = ("0,1,2,3,4\n" if all_nodes else
+              "coolant_flow_l_min,surface_roughness_ra_um,vibration_rms_mm_s\n" if role_mapping else "x,y,z\n")
+    source = (header + "\n".join(rows) + "\n").encode()
+    upload = client.post("/api/upload_file", data={"file": (BytesIO(source), "device-measurements.csv", "text/csv")})
+    require(upload.status_code == 200 and upload.json["success"], "actual_upload_failed")
+    prompt = ("请对上传数据做真实因果分析并生成完整报告，先使用 PC（fisherz）算法。"
+              "x、y、z 均为连续测量值，研究 x 对 y 的作用，z 为另一连续测量变量。"
+              "请先向我澄清每一行的观察单位，再记录保留全部行和三个原始列的数据处理方案并请求确认。"
+              "不聚合、不标准化、不增加字段；请依据真实算法结果保守说明因果识别限制。")
+    if all_nodes:
+        prompt = ("请对上传数据做因果结构发现并生成报告，先使用PC（fisherz）算法。"
+                  "列0、1、2、3、4都是连续测量值，每行是一台不同设备的一次独立测量。"
+                  "请先向我确认参与因果发现的字段范围，再记录处理方案并请求确认。"
+                  "不聚合、不标准化、不筛选行、不增加字段；依据真实算法结果保守说明识别限制。")
+    if scenario in {"execution-report", "script-repair"}:
+        prompt += ("执行并保存候选成功后，必须调用 save_data_processing_execution_report 补充执行解释。"
+                   "请保留原处理方案，说明工具完成后再结束数据处理。")
+    if scenario == "script-repair":
+        prompt += ("本次同时进行真实脚本故障恢复验收：请在首次保存的脚本中、写出 CSV 前显式执行 "
+                   "raise RuntimeError('acceptance_initial_script_failure')，让首次执行实际失败。"
+                   "失败后删除这条验收故障语句并提供 repair_summary，沿用已确认方案重新执行及校验。"
+                   "故障语句不是处理要求，不写入方案 metadata，不改写方案，不要求再次确认。")
+    if role_mapping:
+        prompt = ("请对上传数据做真实因果分析并生成完整报告，先使用 PC（fisherz）算法。"
+                  "目标变量是表面粗糙度，处理变量是冷却液流量；对应列分别为 surface_roughness_ra_um 和 coolant_flow_l_min，"
+                  "vibration_rms_mm_s 是振动测量。所有列均为连续测量值，每行是一台不同设备的一次独立测量。"
+                  "保留全部行和英文原始列名，不聚合、不标准化、不筛选、不增加字段。"
+                  "研究角色名称保留表面粗糙度和冷却液流量，列名关联单独记录在处理方案中。"
+                  "请记录角色到输出列的映射和处理方案并请求确认；取得因果图后检查冷却液流量对表面粗糙度的效应可估计性，保守说明限制。")
+    job, replay = job_service.create_job(user_id, session_id, prompt, str(uuid4()),
+        input_user_file_id=upload.json["user_file_id"], request_id=str(uuid4()), web_search_enabled=False)
+    require(not replay, "unexpected_job_replay")
+    job_id = job["job_id"]
+    if browser_confirmation:
+        descriptor = os.open(ARTIFACTS / "browser-access.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as output:
+            json.dump({"username": name, "password": password, "session_id": session_id, "job_id": job_id}, output)
+        report["browser_confirmation_required"] = True
+    report.update(job_id=job_id, upload_sha256=hashlib.sha256(source).hexdigest(), interactions=[])
+    stop = asyncio.Event()
+    slot = None
+    worker_process = None
+    try:
+        async with open_checkpoint_pool() as pool, AsyncExitStack() as stack:
+            runtime = await initialize_production_runtime(pool, stack)
+            report["production_runtime_initialized"] = True
+            report["rag_status"] = runtime.rag_status
+            slot = asyncio.create_task(run_slot(0, pool, runtime, stop))
+            deadline = asyncio.get_running_loop().time() + timeout
+            modified_plan = False
+            browser_questions = set()
+            while asyncio.get_running_loop().time() < deadline:
+                if slot is not None and slot.done():
+                    await slot
+                    raise AssertionError("worker_slot_ended_before_job")
+                if worker_process is not None:
+                    require(worker_process.poll() is None, "restarted_worker_exited_early")
+                job = job_service.get_job_by_id(job_id)
+                if job["status"] in {"succeeded", "failed", "canceled"}:
+                    break
+                if job["status"] == "waiting_input":
+                    require(len(report["interactions"]) < 6, "interaction_budget_exhausted")
+                    interaction = job["current_interaction"]
+                    kind = interaction["interaction_type"]
+                    if kind == "data_processing_question":
+                        if role_mapping:
+                            answer = ("每行是一台不同设备的一次独立连续测量。目标表面粗糙度对应 surface_roughness_ra_um，"
+                                      "处理变量冷却液流量对应 coolant_flow_l_min；保留全部原始英文列名和数值，不改变研究参数。")
+                        elif all_nodes:
+                            require(not any(item["type"] == kind for item in report["interactions"]),
+                                "repeated_research_choice_question")
+                            answer = "全部作为节点参与因果发现"
+                        else:
+                            answer = "每一行是一台不同设备的一次独立测量。保留所有设备和原始连续测量值，不聚合。"
+                    elif kind == "data_processing_plan_confirmation":
+                        if browser_confirmation:
+                            if job["current_question_id"] not in browser_questions:
+                                browser_questions.add(job["current_question_id"])
+                                report["interactions"].append({"type": kind, "answer_kind": "confirmation", "external_confirmation": True})
+                                print(json.dumps({"phase": "awaiting_browser_confirmation", "private_access_file":
+                                                  str(ARTIFACTS / "browser-access.json")}), flush=True)
+                            await asyncio.sleep(0.5)
+                            continue
+                        if not all_nodes and not role_mapping and not modified_plan:
+                            answer = "补充研究参数：时间窗口为2026年10月1日至7日，文件已包含完整范围，不筛选任何行；请保留原处理范围并重新确认。"
+                            modified_plan = True
+                        else:
+                            answer = json.dumps({"action": "confirm", "plan_version": interaction["plan_version"]})
+                    else:
+                        raise AssertionError("unexpected_interaction_type")
+                    if not all_nodes and not role_mapping and len(report["interactions"]) == 2:
+                        stop.set()
+                        await asyncio.wait_for(slot, timeout=30)
+                        slot = None
+                        with open_private_log(ARTIFACTS / "restarted-worker.log") as log:
+                            worker_process = subprocess.Popen([sys.executable, "-m", "app.agent.worker"],
+                                cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+                        report["actual_worker_process_restart"] = True
+                    job_service.resume_job(user_id, job_id, job["current_question_id"], answer, str(uuid4()))
+                    report["interactions"].append({"type": kind, "answer_kind": "confirmation" if answer.startswith("{") else "research_parameters"})
+                    print(json.dumps({"phase": "resumed", "interaction_count": len(report["interactions"])}), flush=True)
+                await asyncio.sleep(0.5)
+            else:
+                job_service.cancel_job(user_id, job_id, str(uuid4()))
+                stop.set()
+                if slot is not None:
+                    await asyncio.wait_for(slot, timeout=30)
+                raise AssertionError("full_job_deadline_exceeded")
+            stop.set()
+            if slot is not None:
+                await asyncio.wait_for(slot, timeout=30)
+            report["job_status"] = job["status"]
+            events = job_service.read_events_after(job_id, limit=10000)
+            report["event_count"] = len(events)
+            report["event_types"] = sorted(set(event["event_type"] for event in events))
+            require(job["status"] == "succeeded", "full_job_not_succeeded")
+            require(job.get("prepared_dataset_id"), "actual_dataset_not_bound")
+            snapshot = await runtime.graph.aget_state({"configurable": {"thread_id": job_id}})
+            values = snapshot.values
+            if scenario in {"execution-report", "script-repair"}:
+                from langchain_core.messages import AIMessage, ToolMessage
+                from langgraph._internal._constants import CONFIG_KEY_CHECKPOINTER
+                from Agent.deep_agent_tools.identity import build_data_processing_run_id
+                from Agent.data_processing.graph import DATA_PROCESSING_CHECKPOINT_NAMESPACE
+                run_id = build_data_processing_run_id(job_id=job_id, source_input_identity=hashlib.sha256(source).hexdigest())
+                child = runtime.data_processing_agent
+                child_snapshot = await child.aget_state({"configurable": {
+                    "thread_id": job_id, CONFIG_KEY_CHECKPOINTER: child.checkpointer,
+                    "checkpoint_ns": f"{DATA_PROCESSING_CHECKPOINT_NAMESPACE}:{run_id.partition(':')[2]}",
+                }})
+                outputs = [message for message in child_snapshot.values["messages"] if isinstance(message, ToolMessage)]
+                saves = [index for index, message in enumerate(outputs)
+                         if message.name == "execute_processing_script" and '"candidate_saved"' in message.content]
+                explanations = [index for index, message in enumerate(outputs)
+                                if message.name == "save_data_processing_execution_report"
+                                and "执行说明已保存" in message.content]
+                require(saves and explanations and max(explanations) > max(saves), "save_then_explain_order_not_exercised")
+                require(sum(item["type"] == "data_processing_plan_confirmation" for item in report["interactions"]) == 1,
+                        "execution_explanation_required_reconfirmation")
+                require(values["data_processing_execution_report"]["explanation"], "execution_explanation_missing")
+                require(values["data_processing_execution_report"]["candidate_id"] == job["prepared_dataset_id"],
+                        "execution_explanation_bound_to_old_candidate")
+                report["save_then_explain_with_one_confirmation"] = True
+                if scenario == "script-repair":
+                    failures = [index for index, message in enumerate(outputs)
+                                if message.name == "execute_processing_script" and '"script_failed"' in message.content]
+                    confirmations = [index for index, message in enumerate(outputs)
+                                     if message.name == "request_data_processing_plan_confirmation"
+                                     and json.loads(message.content).get("status") == "confirmed"]
+                    require(failures and confirmations and min(confirmations) < min(failures) < max(saves),
+                            "real_failure_then_success_not_observed")
+                    require(not any(message.name == "set_data_processing_plan" for message in outputs[min(confirmations) + 1:]),
+                            "model_rewrote_confirmed_plan")
+                    calls = [call for message in child_snapshot.values["messages"] if isinstance(message, AIMessage)
+                             for call in message.tool_calls]
+                    repairs = [call for call in calls if call["name"] == "write_processing_script"
+                               and call["args"].get("repair_summary")]
+                    require(repairs, "real_model_repair_summary_missing")
+                    require(values["dataset_validation_status"] == "accepted", "repaired_candidate_not_validated")
+                    progress = [event for event in events if event["event_type"] == "progress"
+                                and event["payload_json"].get("summary") in {call["args"]["repair_summary"] for call in repairs}]
+                    require(progress and len({event["id"] for event in progress}) == len(progress), "repair_public_progress_missing")
+                    report["script_repair_trace"] = {
+                        "actual_failed_executions": len(failures), "confirmed_plan_rewrites": 0,
+                        "repair_script_calls": len(repairs), "confirmations": len(confirmations),
+                        "independent_validation": "accepted",
+                        "tool_sequence": [message.name for message in outputs],
+                    }
+            report["parameter_revision_count"] = len(values.get("analysis_parameter_changes") or [])
+            if all_nodes:
+                parameters = values.get("analysis_parameters") or {}
+                report["role_parameters_empty"] = parameters.get("target") is None and parameters.get("treatment") is None
+                require(report["role_parameters_empty"], "scope_was_saved_as_role")
+                if scenario != "script-repair":
+                    require(sum(item["type"] == "data_processing_question" for item in report["interactions"]) == 1,
+                        "original_scope_question_not_exercised_once")
+                require(any(item["answer_kind"] == "confirmation" for item in report["interactions"]),
+                    "plan_confirmation_not_exercised")
+                require(values["dataset_validation_report"]["columns"] == ["0", "1", "2", "3", "4"],
+                    "prepared_columns_changed")
+                report["validation_retry_count"] = int(values.get("data_processing_retry_count") or 0)
+            elif not role_mapping:
+                require(report["parameter_revision_count"] >= 2, "research_revisions_not_retained")
+            if role_mapping:
+                parameters = values["analysis_parameters"]
+                mapping = {"target": "surface_roughness_ra_um", "treatment": "coolant_flow_l_min"}
+                require(parameters["target"] == "表面粗糙度" and parameters["treatment"] == "冷却液流量",
+                        "research_roles_were_rewritten")
+                require(values["prepared_dataset_metadata"]["role_columns"] == mapping, "candidate_role_mapping_missing")
+                require(all(values["dataset_validation_report"][role] == column for role, column in mapping.items()),
+                        "validator_did_not_use_mapped_columns")
+                require(any(item.ate_check and item.ate_check.treatment == mapping["treatment"]
+                    and item.ate_check.outcome == mapping["target"]
+                    for item in values["deep_agent_algorithm_results"].values()), "mapped_ate_check_missing")
+                require(values["finalization_status"] == "valid", "mapped_finalization_failed")
+                report["role_columns_validated_through_finalization"] = True
+                report["validation_retry_count"] = int(values.get("data_processing_retry_count") or 0)
+            report["dataset_validated"] = values.get("dataset_validation_status") == "accepted"
+            report["report_present"] = bool(values.get("report_document"))
+            results = list((values.get("deep_agent_algorithm_results") or {}).values())
+            report["algorithm_results"] = [{"capability_id": item.capability_id, "status": item.status}
+                                           for item in results]
+            require(any(item.capability_id == "causal.pc" and item.status == "valid" for item in results),
+                    "no_valid_real_pc_result")
+            require(report["report_present"], "structured_report_not_present")
+            with get_read_connection(consistency="strong") as connection:
+                cursor = connection.cursor(dictionary=True)
+                cursor.execute("SELECT status, operation_status FROM analysis_sandbox_sessions WHERE job_id=%s", (job_id,))
+                sessions = cursor.fetchall()
+                report["sandbox_sessions"] = [{"status": row["status"], "operation_status": row["operation_status"]} for row in sessions]
+            require(sessions and any(row["operation_status"] == "succeeded" for row in sessions), "no_actual_sandbox_execution")
+            require(all(row["status"] == "closed" for row in sessions), "remote_resources_not_closed")
+            require(report["dataset_validated"], "independent_validation_not_accepted")
+            report["checkpoint_keys"] = sorted(values)
+            report["status"] = "PASS"
+    finally:
+        current = job_service.get_job_by_id(job_id)
+        if current and current["status"] in {"queued", "running", "waiting_input"}:
+            job_service.cancel_job(user_id, job_id, str(uuid4()))
+        if worker_process is not None and worker_process.poll() is None:
+            worker_process.terminate()
+            try:
+                await asyncio.to_thread(worker_process.wait, 35)
+            except subprocess.TimeoutExpired:
+                worker_process.kill()
+                await asyncio.to_thread(worker_process.wait, 10)
+        stop.set()
+        if slot is not None:
+            try:
+                await asyncio.wait_for(slot, timeout=30)
+            except (TimeoutError, asyncio.CancelledError):
+                slot.cancel()
+                await asyncio.gather(slot, return_exceptions=True)
+
+
+def main():
+    global ARTIFACTS
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--role", choices=("run", "mcp"), default="run")
+    parser.add_argument("--model-config", type=Path, default=Path("/tmp/full-job-models.json"))
+    parser.add_argument("--timeout-seconds", type=int, default=900)
+    parser.add_argument("--scenario", choices=("research-revisions", "all-nodes", "execution-report", "script-repair", "role-columns"), default="research-revisions")
+    parser.add_argument("--browser-confirmation", action="store_true", help="保留私有测试账号，等待浏览器提交方案确认")
+    args = parser.parse_args()
+    require(os.environ.get("FULL_JOB_SANDBOX_ACCEPTANCE") == "1", "explicit_isolated_acceptance_required")
+    logging.disable(logging.CRITICAL)
+    if args.role == "mcp":
+        serve_mcp()
+        return
+    ARTIFACTS = ARTIFACTS / uuid4().hex
+    ARTIFACTS.mkdir(parents=True)
+    private_log = ARTIFACTS / "worker.log"
+    descriptor = os.open(private_log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(descriptor)
+    logging.getLogger().handlers = [logging.FileHandler(private_log)]
+    logging.getLogger().setLevel(logging.INFO)
+    logging.disable(logging.NOTSET)
+    report = {"status": "FAIL", "started_at": datetime.now(timezone.utc).isoformat(), "scenario": args.scenario,
+        "limitations": ["synthetic data and explicit tester answers", "Flask upload routes and Job service; no browser",
+                        "real production Worker, models, controller and MCP HTTP", "RAG unavailable and Web disabled"]}
+    if args.browser_confirmation:
+        report["limitations"][1] = "External confirmation driver; browser assertions recorded separately."
+    sources = ("Agent/causal_agent/nodes.py", "Agent/data_processing/graph.py",
+               "Agent/data_processing/parameters.py", "Agent/data_processing/agent.py",
+               "Agent/data_processing/validation.py", "Agent/deep_agent/state.py", "Agent/causal_agent/graph.py",
+               "app/agent/worker/runtime.py", "tests/acceptance/sandbox_upgrade_job.py")
+    report["source_sha256"] = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in sources}
+    process = None
+    try:
+        configure(args.model_config)
+        with open_private_log(ARTIFACTS / "mcp.log") as log:
+            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--role", "mcp"],
+                cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+        asyncio.run(verify(report, args.timeout_seconds, scenario=args.scenario, browser_confirmation=args.browser_confirmation))
+    except BaseException as exc:
+        report["failure_types"] = [type(exc).__name__]
+        report["failure_code"] = str(exc) if isinstance(exc, AssertionError) else "see_private_logs"
+        with (ARTIFACTS / "failure.log").open("w") as log:
+            import traceback
+            traceback.print_exception(exc, file=log)
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(10)
+        report["finished_at"] = datetime.now(timezone.utc).isoformat()
+        report["source_unchanged_during_run"] = all(
+            hashlib.sha256((ROOT / name).read_bytes()).hexdigest() == digest
+            for name, digest in report["source_sha256"].items())
+        if not report["source_unchanged_during_run"]:
+            report["status"] = "FAIL"
+            report["failure_code"] = "source_changed_during_run"
+        path = ARTIFACTS / ("report-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + ".json")
+        report["report_path"] = str(path)
+        path.write_text(json.dumps(report, indent=2))
+        print(json.dumps(report), flush=True)
+    raise SystemExit(0 if report["status"] == "PASS" else 1)
+
+
+if __name__ == "__main__":
+    main()

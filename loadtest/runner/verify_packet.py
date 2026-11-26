@@ -8,11 +8,25 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from datetime import datetime
 from pathlib import Path
 
 from runner import config
-from runner.evidence import STAGE_ORDER, latest_runs
+from runner.evidence import STAGE_ORDER, latest_runs, select_run
+
+
+def _current_date_dirs() -> tuple[Path, Path]:
+    """按本次 run_id 或当天日期取运行摘要与证据目录。"""
+    run_id = os.environ.get("LOADTEST_RUN_ID")
+    if run_id:
+        _run_dir, day_dir = select_run(run_id)
+        return day_dir, config.EVIDENCE_DIR / day_dir.name
+    day = config.latest_run_date()
+    if day is None:
+        return config.run_artifacts_dir(time.time())
+    return config.RUNS_DIR / day, config.EVIDENCE_DIR / day
 
 
 def build_verify_packet(runs_dir: Path, evidence_dir: Path) -> Path:
@@ -120,7 +134,8 @@ def _value(value) -> str:
 
 
 def main() -> int:
-    target = build_verify_packet(config.RUNS_DIR, config.EVIDENCE_DIR)
+    runs_dir, evidence_dir = _current_date_dirs()
+    target = build_verify_packet(runs_dir, evidence_dir)
     print(f"已写入 {target}")
     return 0
 

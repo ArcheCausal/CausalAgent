@@ -1,5 +1,24 @@
+from typing import Any
+
+from langgraph.types import Command
+
 from langgraph.graph import StateGraph, END
 from .state import CausalAgentState
+
+
+def _snapshot_interrupts(snapshot: Any) -> list[Any]:
+    """读取父/子图 StateSnapshot 中尚待恢复的 interrupt。"""
+
+    if snapshot is None:
+        return []
+    public_interrupts = getattr(snapshot, "interrupts", None)
+    if public_interrupts:
+        return list(public_interrupts)
+    return [
+        item
+        for task in (getattr(snapshot, "tasks", None) or ())
+        for item in (getattr(task, "interrupts", None) or ())
+    ]
 from . import nodes, edges
 from .graph_utils import (
     bind_node,
@@ -15,7 +34,6 @@ from .fault_tolerance import (
     recover_report,
     recover_terminal_message,
     recover_tools_to_agent,
-    recover_fold_to_agent,
     recover_preprocess_to_agent,
     degrade_rag_adapter_result,
     degrade_web_search_adapter_result,
@@ -47,9 +65,18 @@ from Agent.deep_agent.state import (
 )
 from Agent.deep_agent_tools.identity import (
     build_deep_agent_execution_scope,
+    build_deep_agent_analysis_scope,
     build_deep_agent_run_id,
     build_deep_agent_step_id,
 )
+from Agent.data_processing.graph import (
+    bind_dataset_node,
+    data_processing_parent_node,
+    dataset_failure_node,
+    validate_dataset_node,
+    validation_router,
+)
+from Agent.data_processing.parameters import execution_parameters, parameter_identity, PROCESSING_GRAPH_NAME
 from Agent.deep_agent_tools.models import (
     AlgorithmResult,
     EvidenceResult,
@@ -58,12 +85,69 @@ from Agent.deep_agent_tools.models import (
 )
 
 
+DEEP_AGENT_CHECKPOINT_NAMESPACE = ""
+
+
+def _add_data_processing_stage(workflow: StateGraph, *, agent: Any, registry: Any) -> None:
+    """注册统一的数据处理、独立校验和绑定阶段。"""
+    workflow.add_node(
+        "data_processing",
+        bind_subgraph_node(
+            data_processing_parent_node,
+            event_node_name="data_processing",
+            agent=agent,
+            registry=registry,
+        ),
+        timeout=timeout(run_timeout=1800, idle_timeout=300),
+    )
+    workflow.add_node(
+        "validate_dataset",
+        bind_node(
+            validate_dataset_node,
+            event_node_name="validate_dataset",
+            registry=registry,
+        ),
+        timeout=timeout(run_timeout=180, idle_timeout=80),
+    )
+    workflow.add_node(
+        "bind_dataset",
+        bind_node(
+            bind_dataset_node,
+            event_node_name="bind_dataset",
+        ),
+        timeout=timeout(run_timeout=120, idle_timeout=60),
+    )
+    workflow.add_node(
+        "data_processing_failed",
+        dataset_failure_node,
+    )
+    workflow.add_conditional_edges(
+        "data_processing",
+        guarded_router(_data_processing_router),
+        {"validate": "validate_dataset", "failed": "data_processing_failed"},
+    )
+    workflow.add_conditional_edges(
+        "validate_dataset",
+        guarded_router(validation_router),
+        {
+            "bind": "bind_dataset",
+            "retry": "data_processing",
+            "failed": "data_processing_failed",
+        },
+    )
+    workflow.add_edge("bind_dataset", "preprocess")
+    workflow.add_edge("data_processing_failed", END)
+
+
 def build_graph(
     llm: "ChatOpenAI",
     mcp_tools: list,
     rag_tools: list,
     checkpointer,
     rag_available: bool = True,
+    *,
+    data_processing_agent: Any,
+    registry: Any,
 ):
     """
     构建父图。
@@ -74,7 +158,6 @@ def build_graph(
 
     streaming_llm = llm.model_copy(update={"streaming": True})
     agent_node_with_llm = bind_node(nodes.agent_node, event_node_name="agent", llm=llm)#将普通节点函数绑定llm，这些普通节点函数内部要调用大模型，但 LangGraph 执行节点时主要只传一个参数：state
-    fold_node_with_llm = bind_node(nodes.fold_node, event_node_name="fold", llm=llm)
     preprocess_node_with_llm = bind_node(nodes.preprocess_node, event_node_name="preprocess", llm=llm)
     mcp_subgraph = build_mcp_subgraph(llm=llm, mcp_tools=mcp_tools)#创建mcp子图
     rag_subgraph = build_rag_subgraph(
@@ -119,17 +202,6 @@ def build_graph(
             event_node_name="agent",
             timeout_ms=45_000,
         ),#最后失败怎么兜底
-    )
-    workflow.add_node(
-        "fold",
-        fold_node_with_llm,
-        retry_policy=short_retry(),
-        timeout=timeout(run_timeout=120, idle_timeout=45),
-        error_handler=guarded_error_handler(
-            recover_fold_to_agent,
-            event_node_name="fold",
-            timeout_ms=120_000,
-        ),
     )
     workflow.add_node(
         "preprocess",
@@ -219,12 +291,16 @@ def build_graph(
         ),
     )
 
+    _add_data_processing_stage(
+        workflow, agent=data_processing_agent, registry=registry,
+    )
+
     workflow.set_entry_point("agent")#节点入口
     workflow.add_conditional_edges(#节点的边
         "agent",#从agent节点出发
         guarded_router(edges.decision_router),#由decision_router函数决定路由？
         {
-            "fold": "fold",#"路由函数返回值": "要跳转到的节点名"
+            "data_processing": "data_processing",#"路由函数返回值": "要跳转到的节点名"
             "normal_chat": "normal_chat",
             "postprocess": "postprocess",
             "report": "report",
@@ -236,25 +312,17 @@ def build_graph(
         "context_switch",
         guarded_router(edges.decision_router),
         {
-            "fold": "fold",
+            "data_processing": "data_processing",
             "normal_chat": "normal_chat",
             "report": "report",
             "inquiry_answer": "inquiry_answer",
-            # context_switch 正常只写入 fold/report/inquiry_answer/normal_chat；
+            # context_switch 正常只写入 data_processing/report/inquiry_answer/normal_chat；
             # 这里为异常状态保留一个确定性的终点，避免自环。
             "context_switch": "normal_chat",
             "postprocess": "report",
         },
     )
-    workflow.add_conditional_edges(
-        "fold",
-        guarded_router(edges.fold_router),#由fold_router函数决定路由
-        {
-            "preprocess": "preprocess",
-            "agent": "agent",
-            "normal_chat": "normal_chat",
-        }
-    )
+
 
     workflow.add_edge("preprocess", "mcp")#从preprocess节点到mcp子图节点的边
 
@@ -292,7 +360,7 @@ def build_graph(
     if checkpointer is None or checkpointer is False:
         raise RuntimeError("必须提供 PostgreSQL Checkpointer，禁止无持久化降级")
 
-    return workflow.compile(checkpointer=checkpointer)
+    return workflow.compile(checkpointer=checkpointer, name=PROCESSING_GRAPH_NAME)
 
 
 
@@ -301,6 +369,9 @@ def create_graph_from_tools(
     mcp_tools: list,
     checkpointer,
     rag_available: bool = True,
+    *,
+    data_processing_agent: Any,
+    registry: Any,
 ):
     """使用已加载的 MCP tools 构建父图，返回可直接执行的 compiled graph。"""
     from Agent.tool_node.rag_tool_registry import build_rag_tools
@@ -312,6 +383,8 @@ def create_graph_from_tools(
         rag_tools=rag_tools,
         checkpointer=checkpointer,
         rag_available=rag_available,
+        data_processing_agent=data_processing_agent,
+        registry=registry,
     )
 
 
@@ -327,6 +400,11 @@ def _safe_algorithm_result_summary(result: AlgorithmResult) -> dict[str, Any]:
         "summary": result.summary,
         "diagnostics": result.diagnostics.model_dump(mode="json"),
         "warnings": [warning.model_dump(mode="json") for warning in result.warnings],
+        "method": result.method.model_dump(mode="json") if result.method else None,
+        "implementation": result.implementation.model_dump(mode="json") if result.implementation else None,
+        "data_view": result.data_view.model_dump(mode="json") if result.data_view else None,
+        "graph": result.standardized_graph.model_dump(mode="json") if result.standardized_graph else None,
+        "graph_validation": result.graph_validation.model_dump(mode="json") if result.graph_validation else None,
     }
 
 
@@ -458,8 +536,10 @@ def _legacy_analysis_result(
                 ),
             }
         )
+    if decision is not None:
+        payload["decision"] = decision.model_dump(mode="json")
 
-    primary_ref = getattr(decision, "primary_result_ref", None)
+    primary_ref = getattr(decision, "primary_graph_result_ref", None)
     primary = normalized_results.get(primary_ref) if primary_ref else None
     if (
         finalization_status == "valid"
@@ -470,7 +550,13 @@ def _legacy_analysis_result(
     ):
         payload["success"] = True
         payload["data"] = primary.standardized_graph.model_dump(mode="json")
-        payload["primary_result_ref"] = primary.result_ref
+        payload["primary_result_ref"] = decision.primary_result_ref
+        payload["primary_graph_result_ref"] = primary.result_ref
+        payload["primary_effect_result_ref"] = decision.primary_effect_result_ref
+        payload["effect_status"] = decision.effect_status
+        payload["effect_reason"] = decision.effect_reason
+        payload["algorithm"] = primary.capability_id
+        payload["method"] = primary.method.model_dump(mode="json") if primary.method else None
     elif finalization_status == "valid" and getattr(decision, "outcome", None) == "evidence_only":
         payload["message"] = "本次分析未采用算法结果，仅返回证据型信息。"
     elif finalization_status == "valid" and getattr(decision, "outcome", None) == "no_valid_algorithm":
@@ -487,7 +573,7 @@ async def _stream_deep_agent(
     child_context: AgentRunContext,
     runtime: Any,
 ) -> Mapping[str, Any]:
-    """消费内层 messages 流，并保留 values 流提供的完整 State。"""
+    """消费 messages/values，并只转发公开工具生命周期 custom。"""
 
     stream = getattr(deep_agent, "astream", None)
     if not callable(stream):
@@ -506,9 +592,10 @@ async def _stream_deep_agent(
         child_input,
         config=child_config,
         context=child_context,
-        stream_mode=["messages", "values"],
+        stream_mode=["messages", "values", "custom"],
         subgraphs=True,
         version="v2",
+        durability="sync",
     ):
         if child_context is not None and hasattr(child_context, "ensure_active"):
             await child_context.ensure_active()
@@ -530,6 +617,26 @@ async def _stream_deep_agent(
                     "data": chunk.get("data"),
                 }
             )
+        if (
+            isinstance(chunk, Mapping)
+            and chunk.get("type") == "custom"
+            and isinstance(chunk.get("data"), Mapping)
+            and chunk["data"].get("type")
+            in {"tool_call_start", "tool_call_result"}
+            and callable(writer)
+        ):
+            # custom 中的其他内部进度、状态和工具正文不跨越父图边界。
+            # 内部事件键必须原样保留，才能与直接 sink 写入和聚合兜底幂等。
+            allowed_fields = {
+                "type", "step_id", "node_name", "title", "attempt",
+                "tool_name", "argument_keys", "summary", "status",
+                "safe_error_code", "_event_key",
+            }
+            writer({
+                key: value
+                for key, value in chunk["data"].items()
+                if key in allowed_fields
+            })
     if final_values is None:
         snapshot = await deep_agent.aget_state(child_config)
         final_values = getattr(snapshot, "values", None)
@@ -537,6 +644,24 @@ async def _stream_deep_agent(
     if not isinstance(result, Mapping):
         raise RuntimeError("Deep Agent returned an invalid State")
     return result
+
+
+def _publish_child_interrupt(interrupts: list[Any]) -> Any:
+    """把子图暂停值投影为公开载荷，并把用户答复交回父图中断位置。"""
+
+    from langgraph.types import interrupt
+
+    first = interrupts[0]
+    raw_value = first.value if hasattr(first, "value") else first
+    if isinstance(raw_value, str):
+        try:
+            decoded = json.loads(raw_value)
+        except (TypeError, ValueError):
+            decoded = None
+        if isinstance(decoded, Mapping):
+            raw_value = decoded
+    return interrupt(raw_value)
+
 
 
 async def _deep_agent_parent_node(
@@ -547,20 +672,47 @@ async def _deep_agent_parent_node(
     deep_agent,
     store,
     memory_init_lock,
+    registry=None,
 ):
     """显式投影父 State 到 Deep Agent，并只接收白名单输出。"""
 
     context = getattr(runtime, "context", None)
     if context is not None and hasattr(context, "ensure_active"):
         await context.ensure_active()
+    trusted_identity = getattr(context, "trusted_identity", None)
+    if trusted_identity is None:
+        raise RuntimeError("Deep Agent child requires a trusted Job identity")
+    from Agent.data_processing.persistence import read_bound_dataset_identity
+
+    bound_dataset = await asyncio.to_thread(
+        read_bound_dataset_identity,
+        trusted_identity,
+    )
+    if bound_dataset is None:
+        raise RuntimeError("因果分析前必须绑定经过独立校验的数据集。")
+    if context is not None and hasattr(context, "check_after_call"):
+        await context.check_after_call()
+    analysis_input = getattr(trusted_identity, "analysis_input", None)
+    if analysis_input is None:
+        raise RuntimeError("trusted Job identity has no analysis input reference")
+    expected_dataset_id = state.get("prepared_dataset_id")
+    if expected_dataset_id is not None and int(expected_dataset_id) != int(
+        bound_dataset["dataset_id"]
+    ):
+        raise RuntimeError("parent checkpoint dataset identity differs from MySQL binding")
+    analysis_input.bind(
+        dataset_id=int(bound_dataset["dataset_id"]),
+        object_id=int(bound_dataset["data_object_id"]),
+        content_hash=str(bound_dataset["data_hash"]),
+        filename=str(bound_dataset["filename"]),
+        semantic_kinds=bound_dataset["semantic_kinds"],
+        research_identity=parameter_identity(bound_dataset["analysis_parameters"]),
+    )
     await _ensure_official_memory_files(
         store=store,
         context=context,
         lock=memory_init_lock,
     )
-    trusted_identity = getattr(context, "trusted_identity", None)
-    if trusted_identity is None:
-        raise RuntimeError("Deep Agent child requires a trusted Job identity")
     job_id = str(trusted_identity.job_id)
     expected_child_run_id = build_deep_agent_run_id(job_id=trusted_identity.job_id)
     supplied_child_run_id = state.get("deep_agent_run_id")
@@ -568,10 +720,9 @@ async def _deep_agent_parent_node(
         raise RuntimeError("Deep Agent child run identity is invalid")
     child_run_id = expected_child_run_id
     parent_config = config or {}
-    # The child runs as an independent graph. The same root identity must be
-    # used for aget_state and astream, without the parent's checkpoint cursor.
+    # 独立子图在同一个根 namespace 读写，不继承父图的 checkpoint 位置。
     child_config = {
-        "configurable": {"thread_id": child_run_id, "checkpoint_ns": ""},
+        "configurable": {"thread_id": child_run_id, "checkpoint_ns": DEEP_AGENT_CHECKPOINT_NAMESPACE},
         "metadata": {**(parent_config.get("metadata") or {}), "deep_agent_run_id": child_run_id},
     }
     checkpointer = (parent_config.get("configurable") or {}).get("__pregel_checkpointer")
@@ -593,13 +744,19 @@ async def _deep_agent_parent_node(
             ),
         )
 
+    # 分析身份只由稳定事实构成；attempt/lease 变化只代表新的执行权限，
+    # 不能在恢复时让整个子图 checkpoint 失配。
     current_scope = None
     if trusted_identity is not None:
-        current_scope = build_deep_agent_execution_scope(
+        current_scope = build_deep_agent_analysis_scope(
             job_id=trusted_identity.job_id,
-            attempt_count=int(trusted_identity.attempt_count),
-            lease_epoch=int(trusted_identity.lease_epoch),
             input_identity=trusted_identity.current_input_identity(),
+            research_identity=analysis_input.research_identity,
+            spec_digests=(
+                registry.spec_digests()
+                if registry is not None and hasattr(registry, "spec_digests")
+                else getattr(registry, "spec_digests", lambda: {})()
+            ),
         )
 
     # 子图 checkpoint 是内部 messages/官方 State 的真相源。父图重跑这个
@@ -621,6 +778,8 @@ async def _deep_agent_parent_node(
         and current_scope
         and checkpoint_values.get("execution_scope") == current_scope
     )
+    if isinstance(checkpoint_values, Mapping) and checkpoint_values and not checkpoint_matches:
+        raise RuntimeError("已保存的因果分析状态与当前研究定义或算法版本不一致，请重新发起任务；原记录保留。")
     if checkpoint_matches:
         assert_checkpoint_state_safe(checkpoint_values)
         if isinstance(retry_instruction, str) and retry_instruction.strip():
@@ -644,6 +803,13 @@ async def _deep_agent_parent_node(
             },
             reset_execution_artifacts=True,
         )
+    # 子图暂停时，父图必须以同一公开载荷暂停，而不是把子图当成完成。
+    # 恢复时再次进入本节点，interrupt() 返回用户答复，再把它传给子图原位置。
+    child_interrupts = _snapshot_interrupts(child_snapshot)
+    if child_interrupts:
+        resume_answer = _publish_child_interrupt(child_interrupts)
+        child_input = Command(resume=resume_answer)
+
     if isinstance(child_input, Mapping) and current_scope:
         child_input["execution_scope"] = current_scope
     if child_input is not None and context is not None and hasattr(context, "assert_state_safe"):
@@ -655,6 +821,21 @@ async def _deep_agent_parent_node(
         child_context=child_context,
         runtime=runtime,
     )
+    # 内层可能在本轮中途暂停；接口返回的 values 不是完成信号。
+    if callable(get_child_state):
+        child_snapshot = await get_child_state(child_config)
+        pending = _snapshot_interrupts(child_snapshot)
+        if pending:
+
+            resume_answer = _publish_child_interrupt(pending)
+            child_state = await _stream_deep_agent(
+                deep_agent,
+                Command(resume=resume_answer),
+                child_config=child_config,
+                child_context=child_context,
+                runtime=runtime,
+            )
+
     if context is not None and hasattr(context, "check_after_call"):
         await context.check_after_call()
     elif context is not None and hasattr(context, "ensure_active"):
@@ -669,7 +850,7 @@ async def _deep_agent_parent_node(
     update = dict(from_deep_agent_output(child_state))
     update["deep_agent_run_id"] = child_run_id
     update["deep_agent_status"] = "completed"
-    # data_profile 是外层 admission 的只读摘要副本，不是 runtime dependency。
+    # 保存父子 State 边界选定的完整画像副本，保留类型和质量字段。
     data_profile = (
         child_input.get("data_profile")
         if isinstance(child_input, Mapping)
@@ -799,7 +980,7 @@ def _emit_deep_agent_retry_notice(
         runtime,
         node_name="deep_agent",
         step_id=step_id,
-        summary="正在按校验要求修正最终决策：沿用已有工具结果，不重复调用工具。",
+        summary="正在按校验要求修正最终决策：复用已有结果，并补齐校验要求的步骤。",
         event_key=f"deep-agent-retry:{attempt_count}:{step_id or ''}",
     )
 
@@ -817,10 +998,10 @@ async def _finalization_gate_node(
     identity = getattr(context, "trusted_identity", None)
     if identity is None:
         raise RuntimeError("trusted runtime identity is required for finalization")
+    limitations = []
     try:
         decision = gate.validate(
-            decision=state.get("deep_agent_structured_response")
-            or state.get("deep_agent_decision"),
+            decision=state.get("deep_agent_structured_response"),
             algorithm_results=state.get("deep_agent_algorithm_results"),
             action_ledger=state.get("deep_agent_action_ledger"),
             trusted_identity=identity,
@@ -828,8 +1009,17 @@ async def _finalization_gate_node(
             web_evidence=state.get("deep_agent_web_evidence"),
             route_decision=state.get("route_decision"),
             web_search_enabled=getattr(context, "web_search_enabled", None),
+            analysis_parameters=execution_parameters(
+                state.get("analysis_parameters") or {}, state.get("prepared_dataset_metadata") or {},
+            ),
+            analysis_question=nodes._latest_human_text(state),
+            scientific_limitations=limitations,
         )
     except StructuredResponseError as exc:
+        if exc.rule is None:
+            # 调用登记、终态或归属不完整属于程序事实错误，不能交给模型修正，
+            # 也不能在重试后继续生成报告。
+            raise
         retry_count = int(state.get("finalization_retry_count") or 0)
         if retry_count < 1:
             _emit_finalization_progress_notice(
@@ -853,7 +1043,10 @@ async def _finalization_gate_node(
         safe_error = "FINALIZATION_CONTRACT_INVALID"
         return {
             "finalization_status": "degraded",
+            "deep_agent_accepted_decision": None,
+            "deep_agent_decision": None,
             "finalization_error": safe_error,
+            "analysis_limitations": [],
             "deep_agent_retry_instruction": "",
             "causal_analysis_result": _legacy_analysis_result(
                 decision=None,
@@ -873,9 +1066,10 @@ async def _finalization_gate_node(
     )
     return {
         "deep_agent_decision": decision,
-        "deep_agent_structured_response": decision,
+        "deep_agent_accepted_decision": decision,
         "deep_agent_retry_instruction": "",
         "finalization_status": "valid",
+        "analysis_limitations": limitations,
         "causal_analysis_result": _legacy_analysis_result(
             decision=decision,
             algorithm_results=state.get("deep_agent_algorithm_results") or {},
@@ -906,6 +1100,8 @@ def _emit_public_final_decision(
 
     disposition_labels = {
         "primary": "主结果",
+        "primary_graph": "主图",
+        "primary_effect": "主效应",
         "supporting": "辅助结果",
         "discarded": "未采用",
     }
@@ -953,18 +1149,22 @@ def _finalization_router(state) -> str:
     )
 
 
+def _data_processing_router(state: Mapping[str, Any]) -> str:
+    return "failed" if state.get("data_processing_failure_code") else "validate"
+
+
 def build_deep_agent_parent_graph(
     *,
     llm: "ChatOpenAI",
     deep_agent: Any,
     registry: Any,
+    data_processing_agent: Any,
     checkpointer: Any,
     store: Any | None = None,
 ) -> Any:
-    """构建新 Job 路径：admission/preprocess → Deep Agent → Gate → report。
+    """构建新 Job 路径：原始输入 → 数据处理校验/绑定 → Deep Agent → Gate → report。
 
-    旧 ``build_graph`` 保留给兼容链路；worker 新运行时显式使用本构造器，
-    因而不会再加载 slot stdio MCP 或固定 mcp→rag→web 流水线。
+    worker 使用本构造器；研究参数由数据处理 Agent 管理，入口不预先提取参数。
     """
 
     if checkpointer is None or checkpointer is False:
@@ -984,17 +1184,6 @@ def build_deep_agent_parent_graph(
         ),
     )
     workflow.add_node(
-        "fold",
-        bind_node(nodes.fold_node, event_node_name="fold", llm=llm),
-        retry_policy=short_retry(),
-        timeout=timeout(run_timeout=120, idle_timeout=45),
-        error_handler=guarded_error_handler(
-            recover_fold_to_agent,
-            event_node_name="fold",
-            timeout_ms=120_000,
-        ),
-    )
-    workflow.add_node(
         "preprocess",
         bind_node(nodes.preprocess_node, event_node_name="preprocess", llm=llm),
         retry_policy=short_retry(),
@@ -1005,6 +1194,9 @@ def build_deep_agent_parent_graph(
             timeout_ms=180_000,
         ),
     )
+    _add_data_processing_stage(
+        workflow, agent=data_processing_agent, registry=registry,
+    )
     workflow.add_node(
         "deep_agent",
         bind_subgraph_node(
@@ -1013,6 +1205,7 @@ def build_deep_agent_parent_graph(
             deep_agent=deep_agent,
             store=store,
             memory_init_lock=memory_init_lock,
+            registry=registry,
         ),
     )
     workflow.add_node(
@@ -1082,7 +1275,7 @@ def build_deep_agent_parent_graph(
         "agent",
         guarded_router(edges.decision_router),
         {
-            "fold": "fold",
+            "data_processing": "data_processing",
             "normal_chat": "normal_chat",
             "postprocess": "report",
             "report": "report",
@@ -1094,7 +1287,7 @@ def build_deep_agent_parent_graph(
         "context_switch",
         guarded_router(edges.decision_router),
         {
-            "fold": "fold",
+            "data_processing": "data_processing",
             "normal_chat": "normal_chat",
             "report": "report",
             "inquiry_answer": "inquiry_answer",
@@ -1102,15 +1295,7 @@ def build_deep_agent_parent_graph(
             "postprocess": "report",
         },
     )
-    workflow.add_conditional_edges(
-        "fold",
-        guarded_router(edges.fold_router),
-        {
-            "preprocess": "preprocess",
-            "agent": "agent",
-            "normal_chat": "normal_chat",
-        },
-    )
+
     workflow.add_edge("preprocess", "deep_agent")
     workflow.add_edge("deep_agent", "finalization_gate")
     workflow.add_conditional_edges(
@@ -1121,7 +1306,7 @@ def build_deep_agent_parent_graph(
     workflow.add_edge("report", END)
     workflow.add_edge("normal_chat", END)
     workflow.add_edge("inquiry_answer", END)
-    return workflow.compile(checkpointer=checkpointer, store=store)
+    return workflow.compile(checkpointer=checkpointer, store=store, name=PROCESSING_GRAPH_NAME)
 
 
 agent_graph = None

@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import os
+import secrets
 import stat
 from pathlib import Path
 
 import pytest
 
 from config import secret_file
+from tests.support.configuration_import import run_configuration_import
 from config.secret_file import (
     REQUIRED_SECRET_KEYS,
     SECRET_KEYS,
     SecretFileError,
+    get_secret,
     load_secrets,
     require_secret,
     reset_secret_cache,
@@ -28,6 +31,7 @@ def _write(path: Path, lines: list[str]) -> Path:
 
 def _complete_lines(**overrides: str) -> list[str]:
     values = {name: f"value-{index}" for index, name in enumerate(REQUIRED_SECRET_KEYS)}
+    values.update({name: secrets.token_hex(32) for name in secret_file.SANDBOX_SECRET_KEYS})
     values.update(overrides)
     return [f"{name}={value}" for name, value in values.items()]
 
@@ -101,6 +105,47 @@ def test_unknown_key_is_rejected(tmp_path):
         load_secrets(path=path)
 
     assert "NOT_A_DECLARED_SECRET" in str(excinfo.value)
+
+
+def test_shared_schema_accepts_distinct_sandbox_tokens(tmp_path):
+    controller, upstream = secrets.token_hex(32), secrets.token_hex(32)
+    path = _write(
+        tmp_path / "causalagent.env",
+        _complete_lines(CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN=controller, CAUSALAGENT_SANDBOX_API_KEY=upstream),
+    )
+
+    values = load_secrets(path=path)
+    assert values["CAUSALAGENT_SANDBOX_CONTROLLER_TOKEN"] == controller
+    assert values["CAUSALAGENT_SANDBOX_API_KEY"] == upstream
+    assert set(secret_file.SANDBOX_SECRET_KEYS) <= set(REQUIRED_SECRET_KEYS)
+
+
+@pytest.mark.parametrize("key", secret_file.SANDBOX_SECRET_KEYS)
+@pytest.mark.parametrize("value", ["short", "x" * 4097, "x" * 32 + " " + "y" * 32])
+def test_shared_schema_rejects_invalid_sandbox_tokens(tmp_path, key, value):
+    path = _write(tmp_path / "causalagent.env", _complete_lines(**{key: value}))
+    with pytest.raises(SecretFileError, match=key) as caught:
+        load_secrets(path=path)
+    assert value not in str(caught.value)
+
+
+def test_shared_schema_rejects_reused_sandbox_token(tmp_path):
+    token = secrets.token_hex(32)
+    path = _write(tmp_path / "causalagent.env", _complete_lines(**dict.fromkeys(secret_file.SANDBOX_SECRET_KEYS, token)))
+    with pytest.raises(SecretFileError, match="不同的值") as caught:
+        load_secrets(path=path)
+    assert token not in str(caught.value)
+
+
+@pytest.mark.parametrize("key", secret_file.SANDBOX_SECRET_KEYS)
+def test_sandbox_environment_key_is_removed_even_with_cached_file(tmp_path, monkeypatch, key):
+    path = _write(tmp_path / "causalagent.env", _complete_lines())
+    load_secrets(path=path)
+    monkeypatch.setenv(key, secrets.token_hex(32))
+
+    load_secrets(path=path)
+
+    assert key not in os.environ
 
 
 def test_duplicate_key_is_rejected(tmp_path):
@@ -188,3 +233,73 @@ def test_require_secret_rejects_undeclared_key(tmp_path):
 
     with pytest.raises(SecretFileError):
         require_secret("NOT_DECLARED")
+
+
+_DATABASE_SECRET_KEYS = ("MYSQL_PASSWORD", "MYSQL_WRITE_PASSWORD", "MYSQL_READ_PASSWORD")
+
+
+def _database_file(tmp_path):
+    return _write(tmp_path / "database.env", [f"{name}=database-{index}" for index, name in enumerate(_DATABASE_SECRET_KEYS)])
+
+
+def test_database_secret_subset_does_not_satisfy_default_app_requirements(tmp_path):
+    path = _database_file(tmp_path)
+
+    assert set(load_secrets(path=path, required_keys=_DATABASE_SECRET_KEYS)) == set(_DATABASE_SECRET_KEYS)
+
+    with pytest.raises(SecretFileError, match="API_KEY"):
+        load_secrets(path=path)
+
+
+def test_cached_database_secrets_are_rechecked_for_explicit_required_key(tmp_path):
+    path = _database_file(tmp_path)
+    load_secrets(path=path, required_keys=())
+
+    with pytest.raises(SecretFileError, match="SECRET_KEY"):
+        load_secrets(path=path, required_keys=("SECRET_KEY",))
+
+
+@pytest.mark.parametrize("warm_cache", [False, True])
+def test_required_keys_reject_unknown_schema_keys(tmp_path, warm_cache):
+    path = _database_file(tmp_path)
+    if warm_cache:
+        load_secrets(path=path, required_keys=())
+
+    with pytest.raises(SecretFileError, match="未声明的键"):
+        load_secrets(path=path, required_keys=("NOT_DECLARED",))
+
+
+def test_get_secret_reads_only_requested_key_without_weakening_app_validation(tmp_path, monkeypatch):
+    path = _database_file(tmp_path)
+    monkeypatch.setenv("CAUSALAGENT_SECRET_FILE", str(path))
+
+    assert get_secret("MYSQL_PASSWORD") == "database-0"
+    assert get_secret("MYSQL_REPLICA_STATUS_PASSWORD") is None
+    assert get_secret("MYSQL_REPLICA_STATUS_PASSWORD", default="optional-default") == "optional-default"
+    with pytest.raises(SecretFileError, match="API_KEY"):
+        require_secret("API_KEY")
+    with pytest.raises(SecretFileError, match="API_KEY"):
+        load_secrets()
+
+
+@pytest.mark.parametrize("required_keys", [(), _DATABASE_SECRET_KEYS])
+def test_partial_load_accepts_upstream_key_without_requiring_application_keys(tmp_path, required_keys):
+    path = _database_file(tmp_path)
+    token = secrets.token_hex(32)
+    with path.open("a", encoding="utf-8") as output:
+        output.write("CAUSALAGENT_SANDBOX_API_KEY=" + token + "\n")
+
+    assert load_secrets(path=path, required_keys=required_keys)["CAUSALAGENT_SANDBOX_API_KEY"] == token
+
+
+@pytest.mark.parametrize("missing", ["BASE_URL", "MODEL"])
+def test_app_import_still_rejects_missing_model_configuration_with_complete_secrets(tmp_path, missing):
+    path = _write(tmp_path / "application.env", _complete_lines())
+    options = {"BASE_URL": "https://model.example.invalid", "MODEL": "configuration-model"}
+    options.pop(missing)
+
+    result = run_configuration_import(path, "import config.settings", **options)
+
+    assert result.returncode != 0
+    assert "ValueError" in result.stderr
+    assert missing in result.stderr

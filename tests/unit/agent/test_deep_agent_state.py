@@ -5,17 +5,18 @@ from __future__ import annotations
 import json
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from Agent.deep_agent.state import (
     assert_checkpoint_state_safe,
     from_deep_agent_output,
     initial_deep_agent_state,
+    retry_deep_agent_from_checkpoint,
     to_deep_agent_input,
 )
 from Agent.deep_agent_tools.models import DataProfile
 from Agent.deep_agent.prompts import (
     MANDATORY_ALGORITHM_INSTRUCTION,
-    MANDATORY_WEB_INSTRUCTION,
 )
 
 
@@ -30,7 +31,7 @@ ANALYSIS_PARENT = {
 def test_analysis_route_requires_algorithm_but_leaves_rag_optional() -> None:
     """分析运行强制算法调用，但知识库检索仍由 Agent 自主判断。"""
 
-    projected = to_deep_agent_input({**ANALYSIS_PARENT, "route_decision": "fold"})
+    projected = to_deep_agent_input({**ANALYSIS_PARENT, "route_decision": "data_processing"})
 
     assert MANDATORY_ALGORITHM_INSTRUCTION in [
         message["content"] for message in projected["messages"]
@@ -53,28 +54,17 @@ def test_non_analysis_route_has_no_algorithm_requirement() -> None:
     ]
 
 
-def test_enabled_web_search_requires_a_web_evidence_call() -> None:
-    """开启联网搜索的分析运行必须把 Web 检索合同注入 Deep Agent。"""
+def test_web_switch_does_not_change_projected_messages() -> None:
+    """Web 规则固定在系统提示中，父 State 的开关不再追加运行提示。"""
 
-    projected = to_deep_agent_input(
-        {**ANALYSIS_PARENT, "route_decision": "fold", "web_search_enabled": True}
-    )
-
-    assert MANDATORY_WEB_INSTRUCTION in [
-        message["content"] for message in projected["messages"]
+    projections = [
+        to_deep_agent_input(
+            {**ANALYSIS_PARENT, "route_decision": "data_processing", "web_search_enabled": enabled}
+        )
+        for enabled in (True, False, None)
     ]
-
-
-def test_disabled_web_search_has_no_web_requirement() -> None:
-    """关闭联网搜索时不向模型注入必须联网的约束。"""
-
-    projected = to_deep_agent_input(
-        {**ANALYSIS_PARENT, "route_decision": "fold", "web_search_enabled": False}
-    )
-
-    assert MANDATORY_WEB_INSTRUCTION not in [
-        message["content"] for message in projected["messages"]
-    ]
+    assert projections[0]["messages"] == projections[1]["messages"]
+    assert projections[1]["messages"] == projections[2]["messages"]
 
 
 def test_state_always_has_empty_ledger_and_independent_reducers() -> None:
@@ -116,6 +106,41 @@ def test_parent_projection_does_not_copy_job_or_runtime_fields() -> None:
     }
 
 
+def test_parent_projection_keeps_user_inputs_and_domain_context_without_parent_transcript() -> None:
+    question = HumanMessage(content="分析 x 对 y 的影响。")
+    answer = {"role": "user", "content": "使用已确认的数据处理方案。"}
+    messages = [
+        question,
+        AIMessage(content="决策：进入因果分析流程。", name="agent"),
+        AIMessage(content="决策：数据预处理完成，进入工具处理路由", name="preprocess"),
+        SystemMessage(content="父图内部状态"),
+        ToolMessage(content="父图工具返回", tool_call_id="parent-tool"),
+        {"role": "assistant", "content": "父图流程说明"},
+        answer,
+    ]
+    parent = {**ANALYSIS_PARENT, "messages": messages, "preprocess_summary": "已完成数据准备。"}
+    projected = to_deep_agent_input(parent)
+    assert projected["messages"][:2] == [question, answer]
+    assert len(projected["messages"]) == 3
+    assert json.loads(projected["messages"][-1]["content"])["preprocess_summary"] == "已完成数据准备。"
+    assert parent["messages"] is messages and len(messages) == 7
+
+
+def test_child_retry_preserves_its_own_model_and_tool_history() -> None:
+    model_message = AIMessage(content="", tool_calls=[{
+        "id": "read-context", "name": "read_file", "args": {"file_path": "/context.txt"},
+    }])
+    tool_message = ToolMessage(content="上下文文件已读取。", tool_call_id="read-context")
+    child = initial_deep_agent_state(
+        data_profile=DataProfile(row_count=0, column_count=0),
+        messages=[HumanMessage(content="读取上下文。"), model_message, tool_message],
+    )
+    retried = retry_deep_agent_from_checkpoint(child, retry_instruction="继续完成分析。")
+    assert retried["messages"][:-1] == child["messages"]
+    assert retried["messages"][-1] == {"role": "user", "content": "继续完成分析。"}
+    assert len(child["messages"]) == 3
+
+
 def test_runtime_only_state_keys_are_rejected() -> None:
     with pytest.raises(TypeError, match="runtime-only"):
         assert_checkpoint_state_safe({"algorithm_executor": object()})
@@ -140,7 +165,7 @@ def test_linearity_signal_and_preprocess_report_reach_the_algorithm_prompt() -> 
     projected = to_deep_agent_input(
         {
             **ANALYSIS_PARENT,
-            "route_decision": "fold",
+            "route_decision": "data_processing",
             "preprocess_summary": "非线性度 ratio 3.19，以非线性机制为主。",
             "analysis_parameters": {"target": "y", "nonlinearity": nonlinearity},
         }
@@ -150,4 +175,5 @@ def test_linearity_signal_and_preprocess_report_reach_the_algorithm_prompt() -> 
     assert payload["preprocess_summary"].startswith("非线性度")
     assert payload["analysis_parameters"]["nonlinearity"] == nonlinearity
     assert "nonlinearity.ratio" in MANDATORY_ALGORITHM_INSTRUCTION
+    assert "effect_diagnose" in MANDATORY_ALGORITHM_INSTRUCTION
 

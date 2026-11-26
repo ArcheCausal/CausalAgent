@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import importlib.metadata
+import importlib.util
 import io
+import json
 import os
+from pathlib import Path
 from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
 
+from Agent.deep_agent_tools.algorithm_specs import CDFM_SPEC
 
-CDFM_RUNNER_VERSION = "cdfm-runner-v1"
+
+CDFM_RUNNER_VERSION = "cdfm-runner-v3"
 CDFM_ALGORITHM = "cdfm"
 
 
@@ -95,7 +101,7 @@ def _parse_csv(csv_data_string: str) -> tuple[np.ndarray, list[str], np.ndarray]
             try:
                 parsed_row.append(float(value))
             except (TypeError, ValueError) as exc:
-                raise _CdfmInputError("CDFM 只接受连续数值列，不接受分类变量。") from exc
+                raise _CdfmInputError("CDFM 输入列必须能够转换为数值，不直接接受非数值分类列。") from exc
         values.append(parsed_row)
 
     data = np.asarray(values, dtype=np.float64)
@@ -119,8 +125,10 @@ def _validate_threshold(threshold: Any) -> float | None:
 def adjacency_to_edges(
     adjacency: np.ndarray,
     column_names: Sequence[str],
-) -> list[dict[str, str]]:
-    """按 CDFM 约定把 ``adjacency[i, j]`` 转换为 ``column_i → column_j``。"""
+    *,
+    probabilities: np.ndarray | None = None,
+) -> list[dict[str, Any]]:
+    """按行→列的成对二值编码解码；对称两个 1 表示一条双箭头边。"""
 
     matrix = np.asarray(adjacency, dtype=np.float64)
     if matrix.shape != (len(column_names), len(column_names)):
@@ -130,14 +138,38 @@ def adjacency_to_edges(
     if not np.isin(matrix, (0, 1)).all():
         raise _CdfmResultError("adjacency 必须是 0/1 矩阵。")
 
-    return [
-        {
-            "from": str(column_names[source]),
-            "to": str(column_names[target]),
-            "arrows": "to",
-        }
-        for source, target in np.argwhere(matrix == 1)
-    ]
+    scores = None if probabilities is None else np.asarray(probabilities, dtype=np.float64)
+    if scores is not None and (
+        scores.shape != matrix.shape or not np.isfinite(scores).all()
+        or np.any(scores < 0) or np.any(scores > 1)
+    ):
+        raise _CdfmResultError("probabilities 必须是与邻接矩阵同形的有限概率矩阵。")
+
+    edges: list[dict[str, Any]] = []
+    for first in range(len(column_names)):
+        # 非零对角线也保留，交由共享结构校验报告 self_loop。
+        if matrix[first, first] == 1:
+            edges.append({"from": str(column_names[first]), "to": str(column_names[first]), "arrows": "to"})
+        for second in range(first + 1, len(column_names)):
+            forward, backward = matrix[first, second], matrix[second, first]
+            if not forward and not backward:
+                continue
+            if forward and backward:
+                source, target, arrows = first, second, "to,from"
+            elif forward:
+                source, target, arrows = first, second, "to"
+            else:
+                source, target, arrows = second, first, "to"
+            edges.append({"from": str(column_names[source]), "to": str(column_names[target]), "arrows": arrows})
+    if scores is not None:
+        positions = {str(name): index for index, name in enumerate(column_names)}
+        for edge in edges:
+            source, target = positions[edge["from"]], positions[edge["to"]]
+            edge["prediction"] = {
+                "forward_probability": float(scores[source, target]),
+                "reverse_probability": float(scores[target, source]),
+            }
+    return edges
 
 
 def _validate_result(
@@ -178,6 +210,32 @@ def _package_version() -> str:
         return "unknown"
 
 
+def _weights_identity(model_path: str) -> dict[str, str | None]:
+    """记录本次本地权重的实际摘要；未验证的 revision 保持未知。"""
+    directory = Path(model_path)
+    if not directory.is_dir():
+        return {"source": model_path, "revision": None, "sha256": None}
+    weights = directory / "model.safetensors"
+    if not weights.is_file():
+        return {"source": "local_checkpoint", "revision": None, "sha256": None}
+    with weights.open("rb") as handle:
+        digest = hashlib.file_digest(handle, "sha256").hexdigest()
+    identity = {"source": "local_checkpoint", "revision": None, "sha256": digest}
+    version_file = directory / "version.json"
+    if version_file.is_file():
+        try:
+            version = json.loads(version_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return identity
+        if not isinstance(version, dict) or not isinstance(version.get("files"), list):
+            return identity
+        recorded = next((item for item in version["files"] if isinstance(item, dict) and item.get("name") == weights.name), {})
+        if recorded.get("sha256") == digest:
+            identity["source"] = version.get("repo_id") or "local_checkpoint"
+            identity["revision"] = version.get("revision")
+    return identity
+
+
 def run_cdfm_analysis(
     csv_data_string: str,
     *,
@@ -191,10 +249,9 @@ def run_cdfm_analysis(
     except _CdfmInputError as exc:
         return _failure("InputValidationError", str(exc))
 
-    try:
-        from cdfm import CDFM
-    except (ImportError, ModuleNotFoundError):
+    if importlib.util.find_spec("cdfm") is None:
         return _failure("DependencyUnavailableError", "CDFM 依赖不可用。")
+    from cdfm import CDFM
 
     model_path = os.getenv("CDFM_MODEL_PATH", "DMIRLAB/CDFM").strip() or "DMIRLAB/CDFM"
     try:
@@ -216,7 +273,7 @@ def run_cdfm_analysis(
         logits, probabilities, adjacency, actual_threshold, runtime_seconds = _validate_result(
             result, len(column_names)
         )
-        edges = adjacency_to_edges(adjacency, column_names)
+        edges = adjacency_to_edges(adjacency, column_names, probabilities=probabilities)
     except _CdfmResultError as exc:
         return _failure("ResultValidationError", str(exc))
     except Exception as exc:
@@ -235,14 +292,18 @@ def run_cdfm_analysis(
             "package": "cdfm-base",
             "version": _package_version(),
             "module": "cdfm",
+            "weights": _weights_identity(model_path),
         },
         "parameters": {"threshold": threshold},
-        "matrix_convention": "row_to_column",
+        "method": CDFM_SPEC.method_definition().model_dump(mode="json"),
+        "matrix_convention": CDFM_SPEC.matrix_convention,
         "data": {
             "nodes": [{"id": name, "label": name} for name in column_names],
             "edges": edges,
         },
         "raw_results": {
+            "adjacency_matrix": adjacency.tolist(),
+            "variable_order": list(column_names),
             "logits": logits.tolist(),
             "probabilities": probabilities.tolist(),
             "threshold": actual_threshold,
@@ -252,6 +313,9 @@ def run_cdfm_analysis(
             "n_features": int(data.shape[1]),
             "missing_values": int(missing_mask.sum()),
             "runtime_sec": runtime_seconds,
+            "threshold": actual_threshold,
+            "standardize": True,
+            "missing_handling": "native_mask" if bool(missing_mask.any()) else "no_missing_values",
         },
         "message": "CDFM 因果发现完成。",
     }

@@ -79,6 +79,19 @@ class StreamEventAdapterTests(unittest.TestCase):
         self.assertEqual((first["sequence"], second["sequence"]), (1, 2))
         self.assertEqual(first["stream_id"], second["stream_id"])
 
+    def test_responses_reasoning_blocks_are_not_public_text(self):
+        """Responses 推理块及其附加字段不能进入正文流。"""
+        self.adapter.convert(task_start("task-deep", "deep_agent"))
+        self.adapter.convert(task_start("task-report", "report"))
+        for node in ("deep_agent", "data_processing", "report"):
+            for chunk in (
+                AIMessageChunk(content=[{"type": "reasoning", "content": [
+                    {"type": "reasoning_text", "text": "private reasoning"}]}]),
+                AIMessageChunk(content="", additional_kwargs={"reasoning_content": "private reasoning"}),
+            ):
+                self.assertEqual(self.adapter.convert({"type": "messages", "ns": (),
+                    "data": (chunk, {"langgraph_node": node})}), [])
+
     def test_public_decision_tool_call_chunks_emit_decision_chunks(self):
         """工具参数流只提取公开决策摘要，不把半截 JSON 或隐藏内容外带。"""
         self.adapter.convert(task_start("task-deep", "deep_agent"))
@@ -168,14 +181,14 @@ class StreamEventAdapterTests(unittest.TestCase):
             "data": {
                 "agent": {
                     "messages": [AIMessage(content="route: report")],
-                    "route_decision": "fold",
+                    "route_decision": "data_processing",
                 }
             },
         })
 
         self.assertEqual([event["type"] for event in events], ["progress", "decision"])
         self.assertIn("因果分析", events[0]["summary"])
-        self.assertIn("加载文件", events[1]["summary"])
+        self.assertIn("理解并处理数据", events[1]["summary"])
 
     def test_inherited_decision_is_not_reemitted_on_tool_stage(self):
         """后续 MCP/RAG 阶段不能把继承的旧路由字段再次展示为新决策。"""
@@ -186,8 +199,8 @@ class StreamEventAdapterTests(unittest.TestCase):
                 "ns": (),
                 "data": {
                     stage: {
-                        "route_decision": "fold",
-                        "fold_decision": "preprocess",
+                        "route_decision": "data_processing",
+                        "dataset_validation_status": "accepted",
                     }
                 },
             })
@@ -251,8 +264,8 @@ class StreamEventAdapterTests(unittest.TestCase):
         self.assertEqual(finished["summary"], "调用完成")
         self.assertNotIn("private file body", repr(finished))
 
-    def test_deep_agent_results_expose_controlled_status_only(self):
-        """新 Deep Agent 结果只投影工具名、状态和安全错误码。"""
+    def test_deep_agent_result_without_ledger_identity_cannot_emit_terminal(self):
+        """缺少调用账本的聚合片段不能凭工具名合成终态。"""
         self.adapter.convert(task_start("task-deep", "deep_agent"))
         events = self.adapter.convert({
             "type": "updates",
@@ -274,22 +287,7 @@ class StreamEventAdapterTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(len(events), 1)
-        self.assertEqual(
-            events[0],
-            {
-                "type": "tool_call_result",
-                "step_id": events[0]["step_id"],
-                "node_name": "deep_agent",
-                "title": "执行 Deep Agent 分析",
-                "attempt": 3,
-                "tool_name": "causal_pc",
-                "summary": "调用失败",
-                "status": "failed",
-                "safe_error_code": "ALGORITHM_EXECUTION_FAILED",
-            },
-        )
-        self.assertNotIn("private", repr(events[0]))
+        self.assertEqual(events, [])
 
     def test_public_algorithm_and_final_decisions_bind_to_their_parent_steps(self):
         deep_step = self.adapter.convert(task_start("task-deep", "deep_agent"))[0]
@@ -371,7 +369,7 @@ class StreamEventAdapterTests(unittest.TestCase):
                     "type": "progress",
                     "node_name": "deep_agent",
                     "step_id": retry_step["step_id"],
-                    "summary": "正在按校验要求修正最终决策：沿用已有工具结果，不重复调用工具。",
+                    "summary": "正在按校验要求修正最终决策：复用已有结果，并补齐校验要求的步骤。",
                     "_event_key": f"deep-agent-retry:0:{retry_step['step_id']}",
                 },
             }
@@ -476,6 +474,43 @@ class StreamEventAdapterTests(unittest.TestCase):
         self.assertNotIn("attempt", public)
         self.assertNotIn("raw_arguments", public)
 
+    def test_sse_public_payload_exposes_usage_event_and_terminal_usage(self):
+        usage = _public_event_payload(
+            {
+                "type": "usage",
+                "attempt": 2,
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "total_tokens": 12,
+                "prompt": "private",
+            }
+        )
+
+        self.assertEqual(
+            usage,
+            {
+                "type": "usage",
+                "attempt": 2,
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "total_tokens": 12,
+            },
+        )
+
+        final = _public_event_payload(
+            {
+                "type": "final_result",
+                "data": {"type": "text"},
+                "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+                "_context_commit": {"private": True},
+            }
+        )
+        self.assertEqual(
+            final["usage"],
+            {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+        )
+        self.assertNotIn("_context_commit", final)
+
     def test_canceled_tool_lifecycle_is_not_reported_as_succeeded(self):
         self.adapter.convert(task_start("task-deep", "deep_agent"))
         events = self.adapter.convert({
@@ -485,6 +520,7 @@ class StreamEventAdapterTests(unittest.TestCase):
                 "type": "tool_call_result",
                 "tool_name": "causal_pc",
                 "status": "canceled",
+                "_event_key": "controlled-canceled-call",
             },
         })
 
@@ -502,6 +538,7 @@ class StreamEventAdapterTests(unittest.TestCase):
                 "tool_name": "web_evidence_search",
                 "status": "not_ready",
                 "safe_error_code": "WEB_SEARCH_DISABLED",
+                "_event_key": "controlled-disabled-call",
             },
         })[0]
         unavailable = self.adapter.convert({
@@ -512,6 +549,7 @@ class StreamEventAdapterTests(unittest.TestCase):
                 "tool_name": "rag_evidence_search",
                 "status": "failed",
                 "safe_error_code": "RAG_RETRIEVAL_UNAVAILABLE",
+                "_event_key": "controlled-unavailable-call",
             },
         })[0]
 

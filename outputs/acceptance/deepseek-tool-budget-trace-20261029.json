@@ -1,0 +1,13 @@
+{
+  "status": "PASS",
+  "source_trace": "01a1873b-0d07-7752-9086-f81fb7771a0a",
+  "source_failed_run": "01a1873d-ebba-7683-a21c-5d69e5597e8e",
+  "scope": "Exact trace before erroneous budget update plus original gate instruction; real provider only; no domain tool or Job replay",
+  "tool_budget": 8,
+  "budget_update_is_none": true,
+  "provider_output_received": true,
+  "outgoing_tool_outputs": 9,
+  "returned_tool_names": [
+    "FinalAnalysisDecision"
+  ]
+}

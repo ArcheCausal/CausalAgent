@@ -3,16 +3,13 @@ import pandas as pd
 import csv
 import importlib
 import importlib.metadata
+import importlib.util
 import io
 
-# CDMIR: OLC algorithm 
-# 使用延迟导入 + 优雅降级，避免未安装时启动报错
-_CDMIR_AVAILABLE = False
-try:
-    from cdmir.discovery.funtional_based.one_component.olc import olc
-    _CDMIR_AVAILABLE = True
-except ImportError:
-    olc = None  # 占位，防止后续代码引用报错
+from Agent.deep_agent_tools.algorithm_specs import PC_SPEC, DIRECT_LINGAM_SPEC
+from Agent.pc_test import resolve_pc_test
+
+_CDMIR_AVAILABLE = importlib.util.find_spec("cdmir") is not None
 
 DIRECT_LINGAM_SCHEMA_VERSION = "causal_discovery_v1"
 DIRECT_LINGAM_ALGORITHM = "direct_lingam"
@@ -98,7 +95,7 @@ def _load_pc_dependencies():
     """延迟导入 PC 算法及其独立性检验依赖。"""
     pc_module = importlib.import_module("causallearn.search.ConstraintBased.PC")
     cit_module = importlib.import_module("causallearn.utils.cit")
-    return pc_module.pc, cit_module.fisherz
+    return pc_module.pc, cit_module.fisherz, cit_module.chisq
 
 
 def _load_endpoint_class():
@@ -264,6 +261,8 @@ def _direct_lingam_success(
             "embedded_version": str(getattr(lingam_module, "__version__", "unknown")),
         },
         "parameters": {"measure": DIRECT_LINGAM_MEASURE},
+        "method": DIRECT_LINGAM_SPEC.method_definition().model_dump(mode="json"),
+        "runner_version": "causalachieve-v2",
         "matrix_convention": "target_to_source",
         "data": {
             "nodes": nodes_for_vis,
@@ -370,7 +369,12 @@ def _format_edges(causallearn_edges):
     return formatted_edges
 
 
-def run_pc_analysis(csv_data_string: str, alpha: float = 0.05) -> dict:
+def run_pc_analysis(
+    csv_data_string: str,
+    alpha: float = 0.05,
+    test: str = "auto",
+    semantic_kinds: dict[str, str] | None = None,
+) -> dict:
     """
     对CSV格式的字符串数据运行PC因果发现算法。
     
@@ -379,7 +383,6 @@ def run_pc_analysis(csv_data_string: str, alpha: float = 0.05) -> dict:
         用于在前端动态生成图表。
     """
     try:
-        pc, fisherz = _load_pc_dependencies()
         string_io = io.StringIO(csv_data_string)
         df = pd.read_csv(string_io)
         
@@ -387,10 +390,25 @@ def run_pc_analysis(csv_data_string: str, alpha: float = 0.05) -> dict:
             msg = "错误：CSV数据为空或列数少于2，无法进行因果分析。"
             return {"success": False, "message": msg}
 
+        if test not in {"auto", "fisherz", "chisq"}:
+            return {"success": False, "message": "错误：不支持的独立性检验方式。"}
+        resolution = resolve_pc_test(
+            columns=df.columns.tolist(), semantic_kinds=semantic_kinds, test=test,
+            count_cardinalities={column: int(df[column].nunique()) for column in df.columns},
+        )
+        if resolution.independence_test is None:
+            return {"success": False, "algorithm": "pc", "error_type": "NotApplicable",
+                    "message": resolution.selection_reason, "diagnostics": resolution.diagnostics()}
+        pc, fisherz, chisq = _load_pc_dependencies()
+        indep_test = chisq if resolution.independence_test == "chisq" else fisherz
+        if resolution.independence_test == "chisq":
+            # 每列按类别确定性编码，仅供离散检验使用，变量名和观测不变。
+            for column in df.columns:
+                df[column] = pd.factorize(df[column], sort=True)[0]
         data = df.to_numpy()
         node_names = df.columns.tolist()
 
-        cg = pc(data=data, alpha=alpha, indep_test=fisherz, node_names=node_names)
+        cg = pc(data=data, alpha=alpha, indep_test=indep_test, node_names=node_names, show_progress=False)
 
         # 提取结果
         edges = cg.G.get_graph_edges()
@@ -401,6 +419,13 @@ def run_pc_analysis(csv_data_string: str, alpha: float = 0.05) -> dict:
         
         return {
             "success": True,
+            "algorithm": "pc",
+            "runner_version": "causalachieve-v3",
+            "method": PC_SPEC.method_definition().model_dump(mode="json"),
+            "implementation": {"package": "causal-learn", "version": importlib.metadata.version("causal-learn")},
+            "matrix_convention": PC_SPEC.matrix_convention,
+            "diagnostics": {"n_samples": int(data.shape[0]), "n_features": int(data.shape[1]),
+                            "alpha": alpha, **resolution.diagnostics()},
             "message": "因果分析成功完成。",
             "data": {
                 "nodes": nodes_for_vis,
@@ -408,7 +433,10 @@ def run_pc_analysis(csv_data_string: str, alpha: float = 0.05) -> dict:
             },
             "raw_results": {
                 "edges": [str(edge).strip() for edge in edges],
-                "adjacency_matrix": cg.G.graph.tolist()
+                "adjacency_matrix": cg.G.graph.tolist(),
+                "independence_test": (
+                    "chisq" if indep_test is chisq else "fisherz"
+                ),
             },
             "analyzed_filename": None
         }
@@ -503,6 +531,7 @@ def run_olc_analysis(csv_data_string: str, alpha: float = 0.05, beta: float = 0.
     if not _CDMIR_AVAILABLE:
         msg = "OLC 算法不可用：CDMIR 库未安装。请运行 'pip install git+https://github.com/DMIRLAB-Group/CDMIR.git' 安装。"
         return {"success": False, "message": msg, "algorithm": "olc"}
+    from cdmir.discovery.funtional_based.one_component.olc import olc
 
     try:
         string_io = io.StringIO(csv_data_string)

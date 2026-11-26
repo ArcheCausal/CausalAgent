@@ -14,7 +14,12 @@ from typing import Any
 from langchain_openai import ChatOpenAI
 
 from Agent.causal_agent.postgres_checkpointer import build_checkpointer
-from Agent.deep_agent.context import AgentRunContext, FrozenInputRef, TrustedJobIdentity
+from Agent.deep_agent.context import (
+    AgentRunContext,
+    AnalysisInputRef,
+    FrozenInputRef,
+    TrustedJobIdentity,
+)
 from Agent.deep_agent.graph import (
     DeepAgentGraphConfig,
     build_deep_agent,
@@ -23,10 +28,18 @@ from Agent.deep_agent.memory import build_official_backend, trusted_memory_names
 from Agent.deep_agent.postgres_store import open_async_postgres_store
 from Agent.deep_agent_tools.algorithm_tools import build_algorithm_tools
 from Agent.deep_agent_tools.adapters import build_default_adapters
+from Agent.deep_agent_tools.effect_diagnose_tool import (
+    build_default_effect_diagnose_tool,
+)
 from Agent.deep_agent_tools.mcp_algorithm_executor import McpAlgorithmExecutor
 from Agent.deep_agent_tools.rag_evidence_tool import build_default_rag_evidence_tool
 from Agent.deep_agent_tools.registry import build_default_registry
 from Agent.deep_agent_tools.web_evidence_tool import build_default_web_evidence_tool
+from Agent.data_processing.agent import build_data_processing_agent
+from Agent.data_processing.sandbox_client import (
+    SandboxControllerProvider,
+    SandboxControllerSettings,
+)
 from app.agent.worker.mcp_client_pool import McpClientPool, McpClientPoolConfig
 from config.secret_file import load_secrets, require_secret
 from config.settings import settings
@@ -69,6 +82,8 @@ class ProcessRuntime:
     store: Any | None = None
     checkpointer: Any | None = None
     graph: Any | None = None
+    sandbox_provider: Any | None = None
+    data_processing_agent: Any | None = None
 
     def __post_init__(self) -> None:
         """为旧的显式构造调用补齐稳定的 RAG 状态名称。"""
@@ -135,6 +150,7 @@ class SlotRuntime:
             input_identity=input_identity,
             input_snapshot_digest=str(job.get("input_file_hash") or input_identity),
             frozen_input=frozen_input,
+            analysis_input=AnalysisInputRef(),
         )
         return AgentRunContext(
             execution_guard=execution_guard,
@@ -146,6 +162,9 @@ class SlotRuntime:
             rag_release_id=process_runtime.rag_release_id,
             rag_error_code=process_runtime.rag_error_code,
             event_sink=event_sink,
+            sandbox_provider=process_runtime.sandbox_provider,
+            data_processing_agent=process_runtime.data_processing_agent,
+            algorithm_registry=process_runtime.algorithm_registry,
         )
 
 
@@ -159,6 +178,7 @@ def create_llm() -> ChatOpenAI:
         base_url=settings.BASE_URL,
         api_key=settings.API_KEY,
         streaming=False,
+        extra_body={"thinking": {"type": "disabled"}},
     )
     return llm
 
@@ -270,14 +290,20 @@ def create_deep_agent_model() -> ChatOpenAI:
     api_key = require_secret("DEEP_AGENT_API_KEY").strip()
     if not model_name or not base_url or not api_key:
         raise RuntimeError("Deep Agent 模型配置不完整，无法初始化")
-    return ChatOpenAI(
+    reasoning_effort = os.getenv("DEEP_AGENT_REASONING_EFFORT", "high").strip()
+    if reasoning_effort not in {"none", "low", "high", "max"}:
+        raise RuntimeError("DEEP_AGENT_REASONING_EFFORT must be none, low, high or max")
+    from Agent.deep_agent.model import DeepSeekResponsesChatOpenAI
+
+    model_class = DeepSeekResponsesChatOpenAI if model_name.startswith("deepseek-") else ChatOpenAI
+    return model_class(
         model=model_name,
         base_url=base_url,
         api_key=api_key,
         streaming=True,
         use_responses_api=True,
         output_version="responses/v1",
-        reasoning={"effort": "none"},
+        reasoning={"effort": reasoning_effort},
     )
 
 
@@ -287,7 +313,7 @@ async def initialize_production_runtime(
 ) -> ProcessRuntime:
     """按计划的 fail-fast 顺序创建进程级 Store、MCP pool 和 compiled graphs。"""
 
-    # 外层旧图仍负责 fold/report；新内层使用独立、显式的 Deep Agent model。
+    # 外层模型负责会话路由和报告；数据处理与因果分析使用独立的 Deep Agent model。
     outer_llm = create_llm()
     store = await process_stack.enter_async_context(open_async_postgres_store())
 
@@ -312,6 +338,7 @@ async def initialize_production_runtime(
     readiness = inspect_rag_readiness()
     domain_tools = (
         *build_algorithm_tools(registry),
+        build_default_effect_diagnose_tool().to_langchain_tool(),
         build_default_rag_evidence_tool(readiness=readiness),
         build_default_web_evidence_tool(web_search_enabled=True),
     )
@@ -322,6 +349,17 @@ async def initialize_production_runtime(
     )
     filesystem_backend = adapters[next(iter(adapters))].raw_backend
     checkpointer = build_checkpointer(checkpoint_pool)
+    data_agent_config = DeepAgentGraphConfig(
+        model_name=os.getenv("DEEP_AGENT_MODEL", "deepseek-v4-flash"),
+        context_window_tokens=context_window_tokens,
+    )
+    sandbox_settings = SandboxControllerSettings.from_environment()
+    sandbox_provider = SandboxControllerProvider(sandbox_settings)
+    data_processing_agent = build_data_processing_agent(
+        model=deep_model,
+        checkpointer=checkpointer,
+        config=data_agent_config,
+    )
     deep_graph = build_deep_agent(
         model=deep_model,
         domain_tools=domain_tools,
@@ -342,6 +380,7 @@ async def initialize_production_runtime(
         llm=outer_llm,
         deep_agent=deep_graph,
         registry=registry,
+        data_processing_agent=data_processing_agent,
         checkpointer=checkpointer,
         store=store,
     )
@@ -359,6 +398,8 @@ async def initialize_production_runtime(
         store=store,
         checkpointer=checkpointer,
         graph=parent_graph,
+        sandbox_provider=sandbox_provider,
+        data_processing_agent=data_processing_agent,
     )
 
 
@@ -412,6 +453,8 @@ async def create_slot_runtime(
         mcp_resources.tools,
         checkpointer,
         rag_available=process_runtime.rag_available,
+        data_processing_agent=process_runtime.data_processing_agent,
+        registry=process_runtime.algorithm_registry,
     )
     return SlotRuntime(
         llm=process_runtime.llm,

@@ -68,6 +68,22 @@ class MultimodalProductionDefaultsTests(unittest.TestCase):
         )
         self.assertEqual(len(config["sources"]), 2)
         self.assertTrue(all(source["required"] for source in config["sources"]))
+
+    def test_frozen_sources_report_metadata_and_hash_verify_when_installed(self) -> None:
+        """核对冻结来源元数据，正式文件已安装时再校验哈希与格式。"""
+        config = load_production_defaults()
+        metadata = defaults_module.resolve_production_source_metadata(config)
+
+        self.assertEqual(
+            [entry["configured_path"] for entry in metadata],
+            [Path(source["path"]).as_posix() for source in config["sources"]],
+        )
+        self.assertEqual(
+            [entry["content_hash"] for entry in metadata],
+            [source["sha256"] for source in config["sources"]],
+        )
+        if not all(entry["available"] for entry in metadata):
+            self.skipTest("正式来源未安装，未执行文件哈希与格式校验")
         self.assertTrue(all(path.is_file() for path in production_source_paths(config)))
 
     def test_manual_evaluation_set_has_24_complete_reviewed_cases(self) -> None:

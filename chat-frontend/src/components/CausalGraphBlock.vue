@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { projectCausalGraphForVis } from '../renderers/graph-renderer'
+import { computed, ref, watch } from 'vue'
+import { causalGraphCaption, describeCausalGraphEdge, projectCausalGraphForVis } from '../renderers/graph-renderer'
 import type { CausalGraphModel } from '../types/domain'
 import CausalGraph from './CausalGraph.vue'
 
@@ -18,6 +18,9 @@ const emit = defineEmits<{
 const selection = ref<string | null>(null)
 // 组件只处理因果图业务模型；vis-network 字段在投影函数里生成。
 const graphData = computed(() => (props.graph ? projectCausalGraphForVis(props.graph) : null))
+const caption = computed(() => (props.graph ? causalGraphCaption(props.graph) : null))
+
+watch(() => props.graph, () => { selection.value = null })
 
 function onSelectNode(payload: { id: string; label: string }): void {
   selection.value = `节点：${payload.label}`
@@ -25,7 +28,7 @@ function onSelectNode(payload: { id: string; label: string }): void {
 }
 
 function onSelectEdge(payload: { id: string; from: string; to: string; label: string }): void {
-  selection.value = `边：${payload.from} → ${payload.to}${payload.label ? `（${payload.label}）` : ''}`
+  selection.value = props.graph ? describeCausalGraphEdge(props.graph, payload.id) : null
   emit('selectEdge', payload)
 }
 </script>
@@ -41,6 +44,7 @@ function onSelectEdge(payload: { id: string; from: string; to: string; label: st
         @select-node="onSelectNode"
         @select-edge="onSelectEdge"
       />
+      <p v-if="caption" class="report-graph-caption" role="note">{{ caption }}</p>
       <p v-if="selection" class="report-graph-selection">{{ selection }}</p>
     </template>
     <p v-else class="report-chart-state" role="note">暂无可展示的因果图。</p>
@@ -65,6 +69,7 @@ function onSelectEdge(payload: { id: string; from: string; to: string; label: st
 }
 
 .report-chart-state,
+.report-graph-caption,
 .report-graph-selection {
   margin: 0;
   font-size: 13px;

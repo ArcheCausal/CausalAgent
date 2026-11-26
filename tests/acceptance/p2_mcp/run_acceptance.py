@@ -50,6 +50,7 @@ from Agent.deep_agent_tools.algorithm_specs import (
 from Agent.deep_agent_tools.models import AlgorithmExecutionCommand, McpInvocationContext
 from Agent.CausalAgentMCP.auth import sign_invocation
 from app.agent.worker.mcp_client_pool import McpClientPool, McpClientPoolConfig
+from tests.support.local_algorithm_execution import LocalAlgorithmExecutor
 
 
 TOKEN = "p2-acceptance-token"
@@ -57,16 +58,16 @@ SIGNING_KEY = "p2-acceptance-signing-key"
 PORT = 8793
 
 
-def _sleep_runner(_csv_data: str, parameters: dict[str, Any]) -> dict[str, Any]:
+def _sleep_runner(_csv_data: str, parameters: dict[str, Any], _artifacts: dict[str, Any]) -> dict[str, Any]:
     time.sleep(float(parameters["seconds"]))
     return {"success": True, "data": {"nodes": [], "edges": []}}
 
 
-def _quick_runner(_csv_data: str, _parameters: dict[str, Any]) -> dict[str, Any]:
+def _quick_runner(_csv_data: str, _parameters: dict[str, Any], _artifacts: dict[str, Any]) -> dict[str, Any]:
     return {"success": True, "data": {"nodes": [], "edges": []}}
 
 
-def _slow_pc_runner(_csv_data: str, _parameters: dict[str, Any]) -> dict[str, Any]:
+def _slow_pc_runner(_csv_data: str, _parameters: dict[str, Any], _artifacts: dict[str, Any]) -> dict[str, Any]:
     time.sleep(2.0)
     return {"success": True, "data": {"nodes": [], "edges": []}}
 
@@ -126,7 +127,7 @@ def _request() -> tuple[AlgorithmExecutionCommand, McpInvocationContext, str]:
         spec_digest=PC_SPEC.spec_digest,
         provider_call_id="p2-acceptance-call",
         input_identity=context.input_snapshot_digest,
-        parameters={"alpha": 0.05},
+        parameters={"alpha": 0.05, "test": "auto"},
         timeout_seconds=30,
     )
     return command, context, sign_invocation(context, command, SIGNING_KEY)
@@ -391,10 +392,11 @@ async def start_server(
     registry: RunnerRegistry | None = None,
     process_workers: int = 1,
 ) -> tuple[uvicorn.Server, asyncio.Task[Any]]:
+    local_input = LocalAlgorithmExecutor(csv_data).validated_input
     app = create_app(
         _config(process_workers=process_workers, queue_capacity=4),
         registry=registry,
-        authority_reader=lambda _context: csv_data,
+        authority_reader=lambda _context: local_input,
         database_probe=lambda: True,
     )
     server = uvicorn.Server(

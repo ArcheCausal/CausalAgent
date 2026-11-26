@@ -23,6 +23,12 @@ async def _complete_terminal_event(
 ) -> bool:
     """在一个事务内完成终态事件、聊天保存和 job 成功更新。"""
     event_type = payload.get("type")
+    interaction_payload = payload.get("interaction")
+    expires_at = None
+    if isinstance(interaction_payload, dict):
+        expires_at = interaction_payload.get("expires_at")
+    if event_type == "interrupt" and isinstance(expires_at, str):
+        payload = {**payload, "expires_at": expires_at}
     if event_type == "final_result":
         response_data = payload.get("data", {})
     elif event_type == "interrupt":
@@ -30,6 +36,10 @@ async def _complete_terminal_event(
             "type": "human_input_required",
             "summary": payload.get("message", ""),
         }
+        if isinstance(payload.get("interaction"), dict):
+            response_data["interaction"] = payload["interaction"]
+        if isinstance(payload.get("expires_at"), str):
+            response_data["expires_at"] = payload["expires_at"]
     else:
         return False
 
@@ -57,6 +67,7 @@ class OrderedEventWriter:
         job: dict[str, Any],
         worker_id: str,
         execution_guard: JobExecutionGuard | None = None,
+        usage_collector: Any | None = None,
     ):
         """为一个 job 创建独占队列和单一消费协程。"""
         self.job = job
@@ -70,6 +81,7 @@ class OrderedEventWriter:
         # 与 terminal_type == "error" 同步置位的内部诊断；只提供只读日志用途，
         # 其中的原始异常不会进入 fail_job 或 analysis_job_events。
         self.terminal_diagnostic: FailureDiagnostic | None = None
+        self.usage_collector = usage_collector
         self.error: BaseException | None = None
         self.aborted = False
         self.abort_error: BaseException | None = None
@@ -149,6 +161,13 @@ class OrderedEventWriter:
                 if key not in {"_context_commit", "_checkpoint_id"}
             }
         event_type = payload.get("type", "message")
+        usage = (
+            self.usage_collector.snapshot()
+            if self.usage_collector is not None
+            else None
+        )
+        if usage is not None and event_type in {"final_result", "interrupt"}:
+            payload = {**payload, "usage": usage}
         attempt_count = int(self.job["attempt_count"])
         if event_type in {"final_result", "interrupt"}:
             accepted = await _complete_terminal_event(
@@ -173,6 +192,7 @@ class OrderedEventWriter:
                 attempt_count,
                 payload.get("message", "任务执行失败"),
                 lease_epoch=int(self.job.get("lease_epoch") or 0),
+                usage=usage,
             )
             if isinstance(outcome, job_service.FailJobResult):
                 accepted = outcome is job_service.FailJobResult.APPLIED

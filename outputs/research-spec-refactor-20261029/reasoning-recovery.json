@@ -1,0 +1,40 @@
+{
+  "status": "PASS",
+  "started_at": "2026-10-29T08:00:59.667027+00:00",
+  "limitations": [
+    "explicit test inputs; no autonomous sandbox execution",
+    "causal agent has no dataset or domain tools; no algorithm, MCP HTTP, search or full analysis validation",
+    "parameter tool uses actual Job ledger and PostgreSQL interrupt/reconnect; no model substitute"
+  ],
+  "requests": [
+    {
+      "reasoning_effort": "high",
+      "reasoning_history_items": 0,
+      "tool_output_items": 0
+    },
+    {
+      "reasoning_effort": "high",
+      "reasoning_history_items": 1,
+      "tool_output_items": 1
+    },
+    {
+      "reasoning_effort": "high",
+      "reasoning_history_items": 0,
+      "tool_output_items": 0
+    },
+    {
+      "reasoning_effort": "high",
+      "reasoning_history_items": 0,
+      "tool_output_items": 1
+    },
+    {
+      "reasoning_effort": "high",
+      "reasoning_history_items": 1,
+      "tool_output_items": 2
+    }
+  ],
+  "parameter_tool_checkpoint_roundtrip": "PASS",
+  "causal_agent_tools_and_reconnected_followup": "PASS",
+  "reasoning_history_with_tool_results": "PASS",
+  "finished_at": "2026-10-29T08:01:16.599050+00:00"
+}

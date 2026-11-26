@@ -12,7 +12,7 @@ from Agent.deep_agent_tools.algorithm_specs import (
 from Agent.deep_agent_tools.error_codes import SafeErrorCode
 
 
-Runner = Callable[[str, Mapping[str, Any]], dict[str, Any]]
+Runner = Callable[[str, Mapping[str, Any], Mapping[str, Any]], dict[str, Any]]
 
 
 class RunnerRegistryError(ValueError):
@@ -31,13 +31,22 @@ class RunnerSpec:
     runner: Runner
 
 
-def _pc(csv_data: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
+def _pc(
+    csv_data: str, parameters: Mapping[str, Any], artifacts: Mapping[str, Any]
+) -> dict[str, Any]:
     from Agent.causal.causalachieve import run_pc_analysis
 
-    return run_pc_analysis(csv_data, alpha=float(parameters.get("alpha", 0.05)))
+    return run_pc_analysis(
+        csv_data,
+        alpha=float(parameters.get("alpha", 0.05)),
+        test=str(parameters.get("test") or "auto"),
+        semantic_kinds=artifacts.get("semantic_kinds"),
+    )
 
 
-def _olc(csv_data: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
+def _olc(
+    csv_data: str, parameters: Mapping[str, Any], _artifacts: Mapping[str, Any]
+) -> dict[str, Any]:
     from Agent.causal.causalachieve import run_olc_analysis
 
     return run_olc_analysis(
@@ -46,16 +55,134 @@ def _olc(csv_data: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
         beta=float(parameters.get("beta", 0.01)),
     )
 
-def _direct_lingam(csv_data: str, _parameters: Mapping[str, Any]) -> dict[str, Any]:
+def _direct_lingam(
+    csv_data: str, _parameters: Mapping[str, Any], _artifacts: Mapping[str, Any]
+) -> dict[str, Any]:
     from Agent.causal.causalachieve import run_direct_lingam_analysis
 
     return run_direct_lingam_analysis(csv_data)
 
 
-def _cdfm(csv_data: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
+def _cdfm(
+    csv_data: str, parameters: Mapping[str, Any], _artifacts: Mapping[str, Any]
+) -> dict[str, Any]:
     from Agent.causal.cdfm_runner import run_cdfm_analysis
 
     return run_cdfm_analysis(csv_data, threshold=parameters.get("threshold"))
+
+
+BACKDOOR_OLS_RUNNER_VERSION = "backdoor-ols-runner-v4"
+
+
+def _backdoor_ols(
+    csv_data: str,
+    parameters: Mapping[str, Any],
+    artifacts: Mapping[str, Any],
+) -> dict[str, Any]:
+    import io
+
+    import pandas as pd
+
+    from Agent.CausalAgentMCP.inference.ate import AteNotApplicable, estimate_ate
+    from Agent.deep_agent_tools.ate_applicability import ATE_REASON_SUMMARIES
+    from Agent.deep_agent_tools.models import StandardizedGraph
+    from Agent.CausalAgentMCP.inference.interventions import InterventionNotApplicable
+
+    graph = StandardizedGraph.model_validate(artifacts["standardized_graph"])
+    frame = pd.read_csv(io.StringIO(csv_data))
+    try:
+        effect = estimate_ate(
+            graph=graph,
+            data=frame,
+            treatment=str(parameters["treatment"]),
+            outcome=str(parameters["outcome"]),
+            effect_request=parameters["effect_request"],
+            execution_context=artifacts.get("effect_execution_context"),
+            semantic_kinds=artifacts.get("semantic_kinds"),
+        )
+    except InterventionNotApplicable as exc:
+        return {
+            "schema_version": "causal_estimation_v2", "success": False,
+            "algorithm": "backdoor_ols", "runner_version": BACKDOOR_OLS_RUNNER_VERSION,
+            "error_type": "NotApplicable", "reason_code": exc.reason_code,
+            "support": exc.support, "effect_request": parameters["effect_request"],
+        }
+    except AteNotApplicable as exc:
+        return {
+            "schema_version": "causal_estimation_v2",
+            "success": False,
+            "algorithm": "backdoor_ols",
+            "runner_version": BACKDOOR_OLS_RUNNER_VERSION,
+            "error_type": "NotApplicable",
+            "reason_code": (
+                exc.reason_code if exc.reason_code in ATE_REASON_SUMMARIES else None
+            ),
+        }
+    return {
+        "schema_version": "causal_estimation_v2",
+        "success": True,
+        "algorithm": "backdoor_ols",
+        "runner_version": BACKDOOR_OLS_RUNNER_VERSION,
+        "causal_effect": effect,
+    }
+
+
+G_FORMULA_RUNNER_VERSION = "g-formula-runner-v3"
+
+
+def _g_formula(
+    csv_data: str,
+    parameters: Mapping[str, Any],
+    artifacts: Mapping[str, Any],
+) -> dict[str, Any]:
+    import io
+
+    import pandas as pd
+
+    from Agent.CausalAgentMCP.inference.g_formula import (
+        GFormulaNotApplicable,
+        estimate_g_formula,
+    )
+    from Agent.deep_agent_tools.models import StandardizedGraph
+    from Agent.CausalAgentMCP.inference.interventions import InterventionNotApplicable
+
+    graph = StandardizedGraph.model_validate(artifacts["standardized_graph"])
+    frame = pd.read_csv(io.StringIO(csv_data))
+    try:
+        effect = estimate_g_formula(
+            graph=graph,
+            data=frame,
+            treatment=str(parameters["treatment"]),
+            outcome=str(parameters["outcome"]),
+            effect_request=parameters["effect_request"],
+            execution_context=artifacts.get("effect_execution_context"),
+            semantic_kinds=artifacts.get("semantic_kinds"),
+            outcome_model=str(parameters.get("outcome_model") or "linear"),
+            bootstrap=int(parameters.get("bootstrap", 200)),
+        )
+    except InterventionNotApplicable as exc:
+        return {
+            "schema_version": "causal_estimation_v2", "success": False,
+            "algorithm": "g_formula", "runner_version": G_FORMULA_RUNNER_VERSION,
+            "error_type": "NotApplicable", "reason_code": exc.reason_code,
+            "support": exc.support, "effect_request": parameters["effect_request"],
+        }
+    except GFormulaNotApplicable as exc:
+        return {
+            "schema_version": "causal_estimation_v2",
+            "success": False,
+            "algorithm": "g_formula",
+            "runner_version": G_FORMULA_RUNNER_VERSION,
+            "error_type": "NotApplicable",
+            "message": str(exc),
+        }
+    return {
+        "schema_version": "causal_estimation_v2",
+        "success": True,
+        "algorithm": "g_formula",
+        "runner_version": G_FORMULA_RUNNER_VERSION,
+        "causal_effect": effect,
+    }
 
 
 class RunnerRegistry:
@@ -92,6 +219,8 @@ def build_default_registry() -> RunnerRegistry:
         "causal.olc": _olc,
         "causal.direct_lingam": _direct_lingam,
         "causal.cdfm": _cdfm,
+        "causal.backdoor_ols": _backdoor_ols,
+        "causal.g_formula": _g_formula,
     }
     entries = [
         (spec, runners[spec.capability_id]) for spec in DEFAULT_ALGORITHM_SPECS

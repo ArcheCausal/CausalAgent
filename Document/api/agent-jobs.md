@@ -32,7 +32,7 @@
 
 `input_user_file_id` 和 `web_search_enabled` 都可省略；`web_search_enabled` 缺省为 `false`。消息必须是非空文本，长度受服务端限制。请求必须带标准 UUID v4 `Idempotency-Key`。`web_search_enabled` 只接受 JSON 布尔值；字符串 `"true"`、`"false"`、数字、`null` 等非布尔值在接口层返回 `400`，服务层在创建 Job 前再次严格校验。该开关参与请求指纹，因此同一个幂等键不能把搜索开关从开启改为关闭或反之。
 
-服务端在一个 MySQL 事务中检查会话归属、活动 Job、文件归属，冻结文件快照，按该文件复用当前 Session 的默认分析上下文或新建一个，然后写入 Job（含 `analysis_context_id`）、initial input（含 `analysis_context_id`）、用户聊天消息和包含 `web_search_enabled` 的请求指纹。target 与 treatment 由后续 fold 节点确定后回填上下文；响应不返回上下文 ID，前端不需要传入。
+服务端在一个 MySQL 事务中检查会话归属、活动 Job、文件归属，冻结文件快照，按该文件复用当前 Session 的默认分析上下文或新建一个，然后写入 Job（含 `analysis_context_id`）、initial input（含 `analysis_context_id`）、用户聊天消息和包含 `web_search_enabled` 的请求指纹。数据处理 Agent 通过统一参数工具提交研究参数，数据处理完成后由现有父节点使用最终研究参数幂等绑定上下文；响应不返回上下文 ID，前端不需要传入。
 
 请求上下文中的 `X-Request-ID` 会在入口校验或生成，并作为创建 Job 的原始关联 ID 保存到 `analysis_jobs.request_id`；历史 Job 该字段可以为 `NULL`。同一 `Idempotency-Key` 重放时只返回首次创建的 Job，不会用后续请求的 `X-Request-ID` 覆盖首次值；该内部关联字段不进入普通用户响应。
 
@@ -44,7 +44,7 @@
 
 ## 活动 Job
 
-`GET /api/agent/jobs/active` 返回当前用户的活动 Job 摘要，并附带当前公开事件最大 ID `last_event_id`。可传 `session_id` 只恢复指定会话。摘要包含状态、worker/lease 观测、尝试和恢复次数、冻结文件名以及等待输入的问题 ID/公开提示，但不返回内部 checkpoint 状态或文件正文。前端刷新时以会话历史实际回放到的 `rendered_event_id` 作为 SSE 游标，活动摘要中的最新 ID 不能覆盖它。
+`GET /api/agent/jobs/active` 返回当前用户的活动 Job 摘要，并附带当前公开事件最大 ID `last_event_id`。可传 `session_id` 只恢复指定会话。摘要包含状态、worker/lease 观测、尝试和恢复次数、冻结文件名，以及等待输入的问题 ID、公开提示、结构化 `current_interaction` 和数据库截止时间 `input_wait_expires_at`，但不返回内部 checkpoint 状态或文件正文。前端刷新时以会话历史实际回放到的 `rendered_event_id` 作为 SSE 游标，活动摘要中的最新 ID 不能覆盖它。
 
 ## SSE 订阅
 
@@ -56,13 +56,61 @@ Last-Event-ID: 42
 
 也兼容 `last_event_id=42` 查询参数。服务端从 `analysis_job_events.id > 42` 读取事件，返回标准 SSE 的 `id`、`event`、`data` 字段；没有新事件时按配置轮询并发送 heartbeat。事件 payload 按事件类型执行字段白名单清洗，worker 的 `attempt`、未知附加字段和内部对象不会对外可见。
 
-收到 `interrupt` 后，前端应展示公开问题并等待恢复；收到 `final_result`、`error` 或 `canceled` 后连接结束。若 Job 已经进入终态，即使数据库查询时没有新的事件，服务端也会结束连接。
+`interrupt` 事件可带公开的 `interaction` 结构。通用结构允许 `interaction_type`、`question_id`、`message`、`algorithm_name`、`expires_at`、`allow_other` 和最多 3 个 `options`。若交互包含选项，每项包含稳定 `option_id`、算法 `capability_id`、处理步骤、影响说明和风险；`algorithm_name` 是用户可见的公开算法名称，前端用它替代内部标识。前端根据结构化步骤生成确定性的执行说明，模型生成的影响说明在确认前没有执行预览时标注“未计算”，不提供虚假精确值。
+
+收到 `interrupt` 后，前端应展示公开问题或方案并等待恢复；收到 `final_result`、`error` 或 `canceled` 后连接结束。若 Job 已经进入终态，即使数据库查询时没有新的事件，服务端也会结束连接。
+
+数据处理语义澄清使用同一 `interrupt`、SSE 和 `resume` 契约，`interaction_type` 为 `data_processing_question`；交互载荷包含 `question_id`、公开问题文本、`expires_at` 和 `allow_other=true`，不包含算法选项。用户通过 `resume` 提交文本答复后，同一个 Job 从数据处理 Agent 的原中断位置继续；现有等待时限与幂等规则不变。
+
+方案确认使用 `interaction_type=data_processing_plan_confirmation`，并公开 `plan_version` 与 `plan`。版本为 64 位小写 SHA-256；方案包含 `summary`、`observation_unit`、`transformations`、`variable_semantics`、`role_columns`、`measurement_columns`、`limitations`、`effect_request` 和可空的 `effect_execution_context`。`role_columns` 是可省略的角色列映射，只允许 `target`、`treatment`，值为实际输出列名或 `null`；列名最多 255 字符，未指定角色保持为空。事件输出逐字段限制类型、数量与长度，不透传脚本或内部运行时字段。SSE 重连及聊天历史恢复使用相同公开投影，前端据此显示方案、角色、效应定义和转换尺度。
+
+方案确认中的 `measurement_columns` 是原始测量列到输出列的公开映射；null 表示不传递原始测量类型，缺席表示同名保留。`effect_request` 由程序从当前研究参数投影：null 表示本次未请求效应，对象表示明确请求，历史载荷缺字段表示未记录，前端不能将其显示成未请求或允许直接确认。请求严格接受 `effect=average_total_effect`，干预为 `fixed_contrast` 的 `from/to/unit` 或 `additive_shift` 的 `delta/unit`。可选 `target_population` 仅表示额外子群限制，全样本时省略或为 null，不代表分析列范围；当前估计器不能验证指定子群成员资格时返回不适用，不能以全样本替代。
+
+确认工具的 `explanation` 写入同一次交互的 `message`（内部 `prompt`），完整方案仍写入 `plan`。首次说明准备执行的内容；真实方案变化时先说明原因及变化，再显示完整方案卡。前端继续使用现有“说明 → 方案卡”的顺序，刷新、历史和 SSE 重连从同一交互恢复，不增加展示区域。确认有效时重复请求直接返回已确认，不产生新的公开确认事件。新用户输入、过期版本或租约/凭据冲突均不能复用执行资格。
+
+同范围脚本修复的 `repair_summary` 使用既有 `progress.summary`，最多 1200 字符；内部事件键绑定 Job 与工具调用 ID，同一调用重放保持稳定。说明只表达真实失败与准备采取的修复，不提前声明成功，后续实际执行和独立校验决定结果。`repair_summary` 和 `explanation` 是单行公开文本并经过凭据脱敏，不包含脚本、原始错误输出或文件正文，不进入方案 metadata 或版本计算。修改方案原有文字仍会使确认失效；仅修复脚本时不新增确认卡。
+
+`effect_execution_context` 与角色映射一起展示实际 `treatment_column`、`outcome_column`、原始业务 `treatment_unit`、`treatment_transform` 和 `outcome_transform`。处理转换包含源列、输出列及两侧单位，`affine` 还包含有限且非零的 `scale` 与有限 `offset`，按 `output = scale × source + offset` 解释；原始值保留使用显式 `identity`，未知转换为 null，不能由同名列推定。schema 可表达带说明的非线性或结果转换，但当前估计执行只支持处理 identity/affine 和结果 identity，其他转换不授予执行适用性。非法请求或 context 不会被截断或降为 null，公开适配器不发布这份无效方案。
+
+例如，确认卡 `plan` 中的效应字段可为：
+
+```json
+{
+  "effect_request": {
+    "effect": "average_total_effect",
+    "intervention": {"type": "fixed_contrast", "from": 6, "to": 9, "unit": "L/min"}
+  },
+  "effect_execution_context": {
+    "treatment_column": "flow",
+    "outcome_column": "yield",
+    "treatment_unit": "L/min",
+    "treatment_transform": {
+      "type": "identity",
+      "source_column": "flow",
+      "output_column": "flow",
+      "source_unit": "L/min",
+      "output_unit": "L/min"
+    },
+    "outcome_transform": {"type": "identity"}
+  }
+}
+```
+
+平移干预将 `intervention` 替换为带 `type=additive_shift`、`delta=1`、`unit=L/min` 的对象。存在估计意图但干预、数值或单位不明确时，仍使用 `data_processing_question` 提出自然语言方案，接受后通过参数工具保存，再进入现有方案确认，不新增 API 或确认层。自由文本答复不触发隐藏模型提取，也不形成执行授权；它先成为待处理输入，参数工具处理后重新制定或提交方案。处理状态为第 4 版，方案散列 schema 为 `causalagent-data-processing-plan-v2`；不受支持的旧 checkpoint 不迁移，恢复失败提示重新发起，历史数据保留。
 
 `decision` 事件除既有路由说明外，还可包含 `decision_kind=algorithm|evidence|final`。`algorithm` 表示模型在同一次算法 Tool Call 中显式提交的公开选择依据，`evidence` 表示同一位置的 `rag_evidence_search`/`web_evidence_search` 检索依据，两者都可同时带公开工具名；`final` 只在 FinalizationGate 验证成功后产生，可带 `low|medium|high` 置信度。模型工具参数流中的公开摘要会先以 `decision_delta` 增量事件发送，工具开始/结果仍分别由可信工具边界发布；完整 `decision` 仍作为历史回放和无增量回退。公开说明是展示文本而非隐藏思维链，不包含内部结果引用；缺失或格式无效的工具说明不会阻止工具执行。相关事件都持久化到 `analysis_job_events`，SSE 重连按原 Event ID 续传，历史回放直接展示完整 `decision` 文本。
 
-FinalizationGate 拒绝时额外发布 `progress` 阶段说明，只含 `summary` 文本：第一次失败挂在 `finalization_gate` 阶段，说明未通过校验并给出脱敏后的具体修正要求；若该次修正仍未通过，则在同一阶段说明本次降级为仅基于已验证输入的报告。第二次 Deep Agent 启动修正时，`progress` 说明挂在新创建的 `deep_agent` 阶段，指出该阶段沿用已有工具结果、不重复调用工具。这两类说明与 `decision` 一样按稳定 `event_key` 幂等落库，SSE 重连和会话刷新按原 Event ID 回放。
+FinalizationGate 对模型可修正的决策拒绝额外发布 `progress` 阶段说明，只含 `summary` 文本：第一次失败挂在 `finalization_gate` 阶段，说明未通过校验并给出脱敏后的具体修正要求；若该次修正仍未通过，则在同一阶段说明本次降级为仅基于已验证输入的报告。第二次 Deep Agent 启动修正时，`progress` 说明挂在新创建的 `deep_agent` 阶段，指出该阶段沿用已有工具结果、不重复调用工具。这两类说明与 `decision` 一样按稳定 `event_key` 幂等落库，SSE 重连和会话刷新按原 Event ID 回放。调用登记未结束、终态结果缺失或归属不一致时直接终止，不进入报告降级。
 
-新 Deep Agent 报告的 `final_result.data` 可包含程序生成的 `finalization_status`：`valid` 表示最终结构化决策已通过当前 Job/attempt/lease、AlgorithmResult 与 Action Ledger 校验；`degraded` 表示一次修正仍未通过，但系统生成了安全报告并将 Job 置为 `succeeded`。`degraded` 结果不展示未经 Gate 验证的主图，也不把内部校验错误、provider ID、raw result 或工具参数返回给用户。该字段是结果质量元数据，不是模型的 `outcome`，旧 Job 没有该字段时按兼容语义处理。
+算法结果 `valid` 对外统一为 `tool_call_result.status=succeeded` 和“调用完成”；`timed_out`、`canceled`、`not_applicable`、`skipped` 分别显示“调用超时”“调用已取消”“不适用”“未执行”。实时写入、子图转发与聚合恢复按同一调用及执行 attempt、retry、事件类型生成内部幂等键；相同事件重放复用原 Event ID，同一算法的第二次合法调用保留独立结果。内部身份和事件键不会进入公共 payload。
+
+恢复兜底从调用账本取回原始阶段和执行 attempt，保证同键事件的内容保持一致；缺少完整身份的旧记录不合成新的完成事件。用户取消与 lease 撤销会停止分析，不发布普通算法完成事件或继续生成报告。
+
+新 Deep Agent 报告的 `final_result.data` 可包含程序生成的 `finalization_status`：`valid` 表示最终结构化决策已通过当前 Job/attempt/lease、AlgorithmResult 与 Action Ledger 校验；`degraded` 表示一次修正仍未通过，但系统生成了安全报告并将 Job 置为 `succeeded`。报告文档新增 `analysis_outcome`、`finalization_status`、`report_mode` 和 `execution_summary`。`report_mode=diagnostic` 表示本次没有有效算法结果、报告是诊断说明；`execution_summary` 公开算法状态、实际样本量、变量范围和是否使用了不同数据视图。分析结果类别、报告完整性和最终校验状态分别公开，不能把诊断报告表述为算法失败结论。
+
+`degraded` 结果不展示未经 Gate 验证的主图，也不把内部校验错误、provider ID、raw result 或工具参数返回给用户。该字段是结果质量元数据，不是模型的 `outcome`，旧 Job 没有该字段时按兼容语义处理。算法超时若已完整记录，可以采用其他有效结果完成报告；报告正文固定保留超时算法未完成、未提供可用因果图的分析限制说明。
+
+数据处理失败在因果分析开始前终止任务，使用既有 `error` 事件和 Job `failed` 状态，不生成 `final_result`。参数草稿不合法时，同一 Agent 在现有调用预算内纠正，未解决时任务失败；不公开模型原始响应、参数值或校验异常正文。实时 SSE 与历史事件回放使用同一错误终态。
 
 新报告终态是结构化报告文档，`final_result.data` 的形状如下：
 
@@ -168,6 +216,8 @@ Agent 在每轮开始时判断用户意图，再由图路由执行；用户不�
 
 ## Resume 与 Cancel
 
+数据处理方案的明确确认通过结构化 answer 提交：{"action":"confirm","plan_version":"<当前方案的 SHA-256>"}。该版本来自服务端发布并保存的交互载荷。服务端在锁定的 waiting_input Job 上核对问题 ID 和方案版本，并把确认写入 analysis_job_inputs；执行脚本、保存候选、独立校验和绑定产物时，还会核对冻结文件、完整研究语义（含 `effect_request`）、方案 metadata（含 `effect_execution_context`）、最新确认输入和当前 Job 租约。自由文本修改或拒绝不会授权执行；新的语义答复、效应定义、角色映射或转换说明变化会产生新版本并使旧确认失效。已确认语义范围内的脚本修正可以继续使用该确认，方案含义变化时必须重新确认。浏览器不通过 resume 自行替换效应定义或执行 context；既有算法处理选项继续提交 option_id。
+
 恢复请求示例：
 
 ```json
@@ -177,7 +227,7 @@ Agent 在每轮开始时判断用户意图，再由图路由执行；用户不�
 }
 ```
 
-`answer` 也兼容 `message` 字段，可以是文本或受限 JSON。恢复请求必须使用新的、可复用的 UUID v4 `Idempotency-Key`；服务端追加 `analysis_job_inputs.input_type='resume'`，然后重新排队同一个 Job。相同键重放返回原结果，不同问题或答案返回冲突。
+`answer` 也兼容 `message` 字段，可以是文本或受限 JSON；选择已有处理方案时提交 `{"option_id": "opt_..."}`，其他文本作为重新规划说明。服务端只核对当前问题和方案版本，不接受浏览器传入任意可执行操作。等待问题从发布时刻起有效 300 秒，以数据库时间为准；期限届满后 Job 转为 `failed`，错误原因为 `human_input_timeout`，旧选项不能继续恢复。刷新、重放和重复修复不延长该期限，只有发布新的确认问题才重新计时。恢复请求必须使用新的、可复用的 UUID v4 `Idempotency-Key`；服务端追加 `analysis_job_inputs.input_type='resume'`，然后重新排队同一个 Job。相同键重放返回原结果，不同问题或答案返回冲突。
 
 取消请求支持 `queued`、`running` 和 `waiting_input`。事务提交后业务状态立即成为不可逆 `canceled`，同时写入稳定取消事件、assistant 投影并释放 Session 活动锁；`running` Job 的执行占用会暂时显示为内部 `draining`，普通用户不会看到该字段。请求同样需要 UUID v4 幂等键：首次取消返回 `202`，相同键重放返回 `200`，已由另一幂等键取消、或已经 `succeeded/failed` 时返回 `409 job_state_conflict`。取消不承诺终止已发出的远端调用；其结果不会进入 parser、router、error handler、重试或后续节点。
 

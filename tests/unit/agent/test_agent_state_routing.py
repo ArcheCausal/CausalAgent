@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import sys
 import types
 
 import pytest
@@ -21,17 +20,8 @@ for key, value in {
     os.environ.setdefault(key, value)
 
 
-def _install_import_stubs():
-    """隔离路由测试不需要的数据库和向量库依赖。"""
-    agent_connect = types.ModuleType("Database.agent_connect")
-    agent_connect.require_frozen_file_for_job = lambda *args, **kwargs: None
-    sys.modules.setdefault("Database.agent_connect", agent_connect)
-
-_install_import_stubs()
-
 from Agent.causal_agent import edges, nodes
 from Agent.causal_agent.fault_tolerance import (
-    recover_fold_to_agent,
     recover_preprocess_to_agent,
     route_to_normal_chat,
 )
@@ -45,7 +35,7 @@ from Agent.tool_node.mcp_tool_call_adapter import normalize_mcp_tool_call_messag
 
 
 def _state(message="普通问题", **updates):
-    """构造 Agent/Fold 路由所需的最小状态。"""
+    """构造入口和数据处理路由所需的最小状态。"""
     state = {
         "messages": [HumanMessage(content=message)],
         "user_id": 1,
@@ -82,7 +72,7 @@ def _mcp_tool(name="causal_pc"):
     "intent,expected_route",
     [
         ("normal_chat", "normal_chat"),
-        ("start_analysis", "fold"),
+        ("start_analysis", "data_processing"),
         ("answer_report", "inquiry_answer"),
         ("switch_analysis_context", "context_switch"),
     ],
@@ -125,7 +115,7 @@ def test_agent_deterministic_and_failure_routes_overwrite_old_state(monkeypatch)
     tool_failure = asyncio.run(
         nodes.agent_node(
             _state(
-                route_decision="fold",
+                route_decision="data_processing",
                 causal_analysis_result={"success": False, "error": "tool failed"},
             ),
             object(),
@@ -142,17 +132,17 @@ def test_agent_deterministic_and_failure_routes_overwrite_old_state(monkeypatch)
     monkeypatch.setattr(nodes, "ainvoke_structured", fail_structured)
     structured_failure = asyncio.run(
         nodes.agent_node(
-            _state(route_decision="fold"),
+            _state(route_decision="data_processing"),
             object(),
         )
     )
 
-    assert explicit["route_decision"] == "fold"
+    assert explicit["route_decision"] == "data_processing"
     assert tool_failure["route_decision"] == "normal_chat"
     assert structured_failure["route_decision"] == "normal_chat"
 
 
-def test_mcp_protocol_failure_returns_to_agent_without_restarting_fold():
+def test_mcp_protocol_failure_returns_to_agent_without_restarting_data_processing():
     """MCP 协议失败必须成为显式失败，使 Agent 结束本轮分析而不是重新加载文件。"""
     tool_call = AIMessage(
         content="",
@@ -174,89 +164,17 @@ def test_mcp_protocol_failure_returns_to_agent_without_restarting_fold():
     assert decision["route_decision"] == "normal_chat"
 
 
-def test_fold_extraction_failure_uses_frozen_file_and_can_validate(monkeypatch):
-    """参数提取失败视为空值，仍使用 Job 冻结文件进行确定性校验。"""
-    async def fail_structured(**kwargs):
-        raise StructuredOutputError(
-            node_name="fold",
-            schema_name="foldQuery",
-            cause=ValueError("invalid"),
-        )
-
-    monkeypatch.setattr(nodes, "ainvoke_structured", fail_structured)
-    monkeypatch.setattr(
-        nodes,
-        "require_frozen_file_for_job",
-        lambda *args: {"file_content": b"A,B\n1,2\n"},
-    )
-    monkeypatch.setattr(
-        nodes,
-        "get_data_summary",
-        lambda df: {"n_rows": 2, "columns": ["A", "B"]},
-    )
-    monkeypatch.setattr(nodes, "validate_analysis", lambda *args, **kwargs: (1, [], []))
-
-    result = asyncio.run(nodes.fold_node(_state(), object()))
-
-    assert result["fold_decision"] == "preprocess"
-    assert result["analysis_parameters"]["target"] is None
-    assert result["analysis_parameters"]["treatment"] is None
-    assert result["file_summary"]["rows"] == 2
-
-
-@pytest.mark.parametrize("failure_stage", ["file", "validation"])
-def test_fold_resume_paths_return_to_agent(monkeypatch, failure_stage):
-    """文件错误恢复与参数补充恢复都写 fold_decision=agent。"""
-    async def extracted(**kwargs):
-        return nodes.foldQuery(target=None, treatment=None)
-
-    monkeypatch.setattr(nodes, "ainvoke_structured", extracted)
-    monkeypatch.setattr(nodes, "interrupt", lambda question: "用户补充信息")
-    if failure_stage == "file":
-        monkeypatch.setattr(
-            nodes,
-            "require_frozen_file_for_job",
-            lambda *args: (_ for _ in ()).throw(FileNotFoundError("missing")),
-        )
-    else:
-        monkeypatch.setattr(
-            nodes,
-            "require_frozen_file_for_job",
-            lambda *args: {"file_content": b"A,B\n1,2\n"},
-        )
-        monkeypatch.setattr(nodes, "get_data_summary", lambda df: {"columns": ["A", "B"]})
-        monkeypatch.setattr(
-            nodes,
-            "validate_analysis",
-            lambda *args, **kwargs: (2, ["目标变量缺失"], []),
-        )
-
-    result = asyncio.run(nodes.fold_node(_state(), object()))
-
-    assert result["fold_decision"] == "agent"
-    assert "awaiting_input" not in result
-
-
-@pytest.mark.parametrize("route", ["fold", "postprocess", "normal_chat", "inquiry_answer"])
+@pytest.mark.parametrize("route", ["data_processing", "postprocess", "normal_chat", "inquiry_answer"])
 def test_decision_router_reads_only_explicit_state(route):
     """中文展示消息不能覆盖显式 agent 路由。"""
     state = {"route_decision": route, "messages": [AIMessage(content="决策：信息不全，报告已获取")]}
     assert edges.decision_router(state) == route
 
 
-@pytest.mark.parametrize("route", ["preprocess", "agent"])
-def test_fold_router_reads_only_explicit_state(route):
-    """中文展示消息不能覆盖显式 fold 路由。"""
-    state = {"fold_decision": route, "messages": [AIMessage(content="信息完备，返回 agent")]}
-    assert edges.fold_router(state) == route
-
-
 def test_routers_use_safe_defaults_for_missing_or_invalid_state():
     """缺失或非法 checkpoint 字段走稳定保守分支。"""
     assert edges.decision_router({"messages": [AIMessage(content="信息完备")]}) == "normal_chat"
     assert edges.decision_router({"route_decision": "invalid", "messages": []}) == "normal_chat"
-    assert edges.fold_router({"messages": [AIMessage(content="信息完备")]}) == "agent"
-    assert edges.fold_router({"fold_decision": "invalid", "messages": []}) == "agent"
 
 
 def test_mcp_subgraph_routes_only_valid_tool_calls_and_results():
@@ -305,17 +223,14 @@ def test_mcp_parser_preserves_subgraph_failure_without_tool_message():
 
 
 def test_recovery_handlers_keep_route_audit_fields_separate():
-    """Agent、Fold、Preprocess 恢复只写各自拥有的路由审计字段。"""
+    """Agent、Preprocess 恢复只写各自拥有的路由审计字段。"""
     error = types.SimpleNamespace(node="test_node", error=RuntimeError("failed"))
 
     agent_command = route_to_normal_chat({}, error)
-    fold_command = recover_fold_to_agent({}, error)
     preprocess_command = recover_preprocess_to_agent({}, error)
 
     assert agent_command.goto == "normal_chat"
     assert agent_command.update["route_decision"] == "normal_chat"
-    assert fold_command.goto == "agent"
-    assert fold_command.update["fold_decision"] == "agent"
     assert preprocess_command.goto == "agent"
     assert "fold_decision" not in preprocess_command.update
 
@@ -522,29 +437,29 @@ def test_explicit_direct_lingam_mcp_stage_parses_and_routes_to_rag():
 
 
 def test_direct_lingam_report_context_includes_assumptions_and_versions():
-    """报告上下文必须明确 DirectLiNGAM 的版本、参数、方向和解释边界。"""
+    """报告按 results 读取执行快照，并保留各方法的版本、方向和解释边界。"""
+    from Agent.deep_agent_tools.algorithm_specs import DIRECT_LINGAM_SPEC
+    from Agent.deep_agent_tools.models import MethodImplementation
+
+    method = DIRECT_LINGAM_SPEC.method_definition().model_dump(mode="json")
+    implementation = MethodImplementation(
+        runner_version="causalachieve-v2", package="causal-learn",
+        package_version="0.1.4.7", embedded_version="1.5.4",
+    ).model_dump(mode="json")
     context = nodes._causal_method_context_for_report(
-        {
-            "success": True,
-            "algorithm": "direct_lingam",
-            "implementation": {
-                "version": "0.1.4.7",
-                "embedded_version": "1.5.4",
-            },
-            "parameters": {"measure": "pwling"},
-            "matrix_convention": "target_to_source",
-            "raw_results": {"causal_order_names": ["A", "B"]},
-            "diagnostics": {"n_samples": 200, "n_features": 2},
-        }
+        {"results": [{
+            "algorithm": "direct_lingam", "method": method,
+            "implementation": implementation, "data_view": None,
+        }]}
     )
 
-    assert "causal-learn 0.1.4.7" in context
-    assert "measure=pwling" in context
-    assert "B[target, source]" in context
-    assert "linear structural equation model" in context
-    assert "non-Gaussian" in context
-    assert "latent confounders" in context
-    assert "candidate causal relations" in context
+    snapshot = json.loads(context)[0]
+    assert snapshot["method"] == method
+    assert snapshot["implementation"] == implementation
+    assert snapshot["method"]["matrix_convention"] == "target_to_source"
+    assert "因果机制近似线性且噪声非高斯" in snapshot["method"]["assumptions"]
+    assert "误差独立并且不存在潜在混杂" in snapshot["method"]["assumptions"]
+    assert "图中系数不是已识别的干预效应" in snapshot["method"]["limitations"]
 
 
 @pytest.mark.parametrize(

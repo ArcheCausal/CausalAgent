@@ -71,9 +71,9 @@ assistant 消息的 `text` 在报告场景下是结构化报告载荷，与 SSE 
 
 ## 编辑并重新发送
 
-请求使用当前登录身份、`X-CSRF-Token` 和 UUID v4 `Idempotency-Key`。提交字段为 `message`、最近一次历史响应的 `conversation_version`、目标之前最近助手消息的 `checkpoint_id`。没有锚点时可以省略该字段或传 `null`。首次接受返回 `202`，同键同参重试返回 `200` 和原有 `job_id`、替换后的 `message_id`、提交后的 `conversation_version`、当前 Job `status` 和 `execution_mode`。`execution_mode` 为 `resume_checkpoint` 或 `reanalyze`。
+请求使用当前登录身份、`X-CSRF-Token` 和 UUID v4 `Idempotency-Key`。提交字段为 `message`、最近一次历史响应的 `conversation_version`、目标之前最近助手消息的 `checkpoint_id`。没有锚点时可以省略该字段或传 `null`。首次接受返回 `202`，同键同参重试返回 `200` 和原有 `job_id`、替换后的 `message_id`、提交后的 `conversation_version`、当前 Job `status` 和 `execution_mode`。当前新建任务返回 `reanalyze`。对旧版已接受请求的幂等重放仍可能返回 `resume_checkpoint`。
 
-旧版本、过期或不匹配的锚点、幂等键参数冲突、活动 Job 和 draining 均返回 `409` 及稳定 `code`。活动任务先通过现有取消接口处理，释放后重新加载历史版本。历史补充回答缺少可信 interrupt 时返回 `edit_reanalysis_required`。用户明确选择按保留对话重新分析后，客户端以新的幂等键提交 `allow_reanalysis: true`。PostgreSQL 恢复点检查暂时不可用时返回 `503 checkpoint_unavailable`。业务切换范围见 [Job 与文件生命周期](../architecture/job-file-lifecycle.md)。
+旧版本、过期或不匹配的锚点、幂等键参数冲突、活动 Job 和 draining 均返回 `409` 及稳定 `code`。活动任务先通过现有取消接口处理，释放后重新加载历史版本。当前数据处理图的历史补充回答编辑返回 `edit_reanalysis_required`。用户明确选择按保留对话重新分析后，客户端以新的幂等键提交 `allow_reanalysis: true`。业务切换范围见 [Job 与文件生命周期](../architecture/job-file-lifecycle.md)。
 
 ## 文件接口
 
@@ -85,7 +85,7 @@ assistant 消息的 `text` 在报告场景下是结构化报告载荷，与 SSE 
 
 上传只进入文件库，不创建 Session 关联或 Job。服务端按 SHA-256 在同一用户范围内复用不可变 `file_objects`，文件名通过 `user_files` 逻辑记录保存。响应只返回文件元数据和 `user_file_id`，不把 BLOB 内容作为列表结果返回。
 
-删除文件时，仍被活动 Job 的 `input_user_file_id` 使用会返回 `409`；否则先删除 `user_files`，只有对象没有其他逻辑引用时才删除 `file_objects`。删除没有回收站。文件预览、下载和 Agent 真实读取更新访问次数与最近访问时间，重复上传命中已有对象不计为访问。
+删除文件时，仍被活动 Job 的 `input_user_file_id` 使用会返回 `409`；否则先删除 `user_files`，只有对象没有其他逻辑引用时才删除 `file_objects`。分析产生的候选数据和脚本属于 Job 内部产物，保存在 `analysis_job_datasets` 引用的文件对象中，不创建用户文件记录，也没有单独的下载接口。删除没有回收站。文件预览、下载和 Agent 真实读取更新访问次数与最近访问时间，重复上传命中已有对象不计为访问。
 
 ## 数据边界
 

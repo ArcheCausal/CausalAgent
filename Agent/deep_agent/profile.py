@@ -132,7 +132,7 @@ class DeepAgentBudget:
 
         return cls(
             model_call_limit=read("DEEP_AGENT_MODEL_CALL_LIMIT", 12),
-            tool_call_limit=read("DEEP_AGENT_TOOL_CALL_LIMIT", 8),
+            tool_call_limit=read("DEEP_AGENT_TOOL_CALL_LIMIT", 15),
             recursion_limit=read("DEEP_AGENT_RECURSION_LIMIT", 32),
             tool_node_timeout_seconds=read("DEEP_AGENT_TOOL_NODE_TIMEOUT_SECONDS", 720),
             finalization_retry_limit=read("DEEP_AGENT_FINALIZATION_RETRY_LIMIT", 1),

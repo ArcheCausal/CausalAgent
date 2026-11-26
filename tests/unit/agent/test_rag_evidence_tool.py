@@ -5,7 +5,7 @@ import builtins
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from Agent.deep_agent_tools import RagEvidenceTool, build_default_rag_evidence_tool
+from Agent.deep_agent_tools.rag_evidence_tool import RagEvidenceTool, build_default_rag_evidence_tool
 from Agent.knowledge_base.embedding_runtime import EmbeddingApiError
 from Agent.knowledge_base.query_rag import RagRetrievalConfig
 from Agent.knowledge_base.rag_service import RagService
