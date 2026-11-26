@@ -1,6 +1,7 @@
 """真实 Tool/Adapter/MCP/OLS 协作；源图是已知输入，不证明发现图准确性或数据库绑定。"""
 
 import asyncio
+from io import StringIO
 import json
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
@@ -38,10 +39,12 @@ from Agent.deep_agent_tools.runtime_updates import (
 )
 from tests.support.bound_analysis_input import bind_analysis_input
 from tests.support.local_algorithm_execution import LocalAlgorithmExecutor
+from tests.support.research_specs import fixed_effect_request, identity_effect_context
 
 
 CSV = "z,x,y,other\n0,1,3,0\n1,3,8,1\n2,2,7,0\n3,5,14,1\n4,4,13,0\n5,7,20,1\n"
-PARAMETERS = {"target": "y", "treatment": "x", "columns": ["z", "x", "y", "other"]}
+EFFECT_REQUEST = fixed_effect_request(1.0, 2.0)
+PARAMETERS = {"target": "y", "treatment": "x", "columns": ["z", "x", "y", "other"], "effect_request": EFFECT_REQUEST}
 
 
 def _wait_for_process_start(start_gate):
@@ -49,12 +52,17 @@ def _wait_for_process_start(start_gate):
 
 
 def _setup(*, kinds=None, edge_type="directed", csv_data=CSV, executor_pool=None):
-    executor = LocalAlgorithmExecutor(csv_data, semantic_kinds=kinds, executor_pool=executor_pool)
+    kinds = {"x": "continuous", "y": "continuous", **(kinds or {})}
+    effect_context = identity_effect_context("x", "y")
+    executor = LocalAlgorithmExecutor(
+        csv_data, semantic_kinds=kinds, executor_pool=executor_pool,
+        analysis_parameters=PARAMETERS, effect_execution_context=effect_context,
+    )
     identity = bind_analysis_input(TrustedJobIdentity(
         job_id="00000000-0000-0000-0000-000000000501",
         session_id="00000000-0000-0000-0000-000000000502", user_id=7,
         attempt_count=1, lease_epoch=3, worker_id="worker-ate", input_identity="source-input",
-    ), csv_data, semantic_kinds=kinds, dataset_id=51)
+    ), csv_data, semantic_kinds=kinds, dataset_id=51, analysis_parameters=executor.analysis_parameters)
     context = AgentRunContext(
         execution_guard=None, trusted_identity=identity, algorithm_executor=executor,
         filesystem_backend=build_in_memory_backend(user_id=7),
@@ -84,6 +92,7 @@ def _setup(*, kinds=None, edge_type="directed", csv_data=CSV, executor_pool=None
             job_id=str(identity.job_id), attempt_count=identity.attempt_count, lease_epoch=identity.lease_epoch,
             input_identity=identity.current_input_identity(), source_input_identity=identity.source_input_identity(),
             analysis_dataset_id=51, spec_digest=PC_SPEC.spec_digest,
+            research_identity=identity.analysis_input.research_identity,
         ),
     )
     source_record = build_terminal_invocation(
@@ -103,13 +112,14 @@ def _call(
         tool_call_id=call_id, state={"message_execution_id": execution_id,
         "data_profile": context.algorithm_executor.data_profile,
         "algorithm_results": {source.result_ref: source},
+        "analysis_parameters": PARAMETERS,
         "action_ledger": {
             source_record.invocation_id: source_record, **(ledger or {}),
         }},
         context=context, config={}, stream_writer=[].append, store=None,
     )
     command = asyncio.run(tool.coroutine(runtime=runtime, graph_result_ref=ref or source.result_ref,
-        treatment=treatment, outcome=outcome))
+        treatment=treatment, outcome=outcome, effect_request=EFFECT_REQUEST))
     result = next(iter(command.update["algorithm_results"].values()))
     record = next(iter(command.update["action_ledger"].values()))
     message = json.loads(command.update["messages"][0].content)
@@ -138,7 +148,7 @@ def _diagnose_record(
         final_status=status, subject_ref=subject_ref, job_id=str(identity.job_id),
         effect_query=(
             build_effect_request(
-                graph_result_ref=subject_ref, treatment=treatment, outcome=outcome,
+                graph_result_ref=subject_ref, treatment=treatment, outcome=outcome, effect_request=EFFECT_REQUEST,
             )
             if effect_query else None
         ),
@@ -146,6 +156,7 @@ def _diagnose_record(
         worker_id=identity.worker_id, input_identity=identity.current_input_identity(),
         source_input_identity=identity.source_input_identity(),
         analysis_dataset_id=identity.analysis_input.dataset_id,
+        research_identity=identity.analysis_input.research_identity,
         attempts={0: ActionAttempt(retry_ordinal=0, revision=1, status=status,
             started_at=now, finished_at=now)},
     )
@@ -158,7 +169,6 @@ def _validate(
     """按真实工具留下的效应请求校验当前查询；不在这里补造缺失的查询证明。"""
 
     valid = [item for item in (source, result) if item.status == "valid"]
-    primary = result.result_ref if result.status == "valid" else source.result_ref
     query = record.effect_query
     if query is None:
         diagnose = None
@@ -169,9 +179,12 @@ def _validate(
         )
     decision = {
         "outcome": "evidence_only" if evidence_only else "algorithm_supported",
-        "primary_result_ref": None if evidence_only else primary,
+        "primary_graph_result_ref": None if evidence_only else source.result_ref,
+        "primary_effect_result_ref": result.result_ref if not evidence_only and result.status == "valid" else None,
+        "effect_status": "adopted" if not evidence_only and result.status == "valid" else "incomplete",
+        "effect_reason": "本次未采用可用效应估计。",
         "result_assessments": [{"result_ref": item.result_ref,
-            "disposition": "discarded" if evidence_only else "primary" if item.result_ref == primary else "supporting",
+            "disposition": "discarded" if evidence_only else "primary_graph" if item is source else "primary_effect",
             "rationale": "依据输入图和实际工具结果评估。"} for item in valid],
         "conflict_status": "none", "conflicts": [], "revision_proposals": [],
         "selection_rationale": "保留方法边界。", "confidence": "low", "confidence_basis": ["tool contract"],
@@ -199,10 +212,11 @@ def test_incomplete_nonlinearity_review_keeps_real_ols_and_candidate_in_saved_re
     diagnosis = _diagnose_record(context.trusted_identity, subject_ref=source.result_ref)
     state = {
         "deep_agent_structured_response": {
-            "outcome": "algorithm_supported", "primary_result_ref": estimate.result_ref,
+            "outcome": "algorithm_supported", "primary_graph_result_ref": source.result_ref,
+            "primary_effect_result_ref": estimate.result_ref, "effect_status": "adopted",
             "result_assessments": [
-                {"result_ref": estimate.result_ref, "disposition": "primary", "rationale": "实际 OLS 估计"},
-                {"result_ref": source.result_ref, "disposition": "supporting", "rationale": "估计所用源图"},
+                {"result_ref": estimate.result_ref, "disposition": "primary_effect", "rationale": "实际 OLS 估计"},
+                {"result_ref": source.result_ref, "disposition": "primary_graph", "rationale": "估计所用源图"},
             ],
             "conflict_status": "none", "selection_rationale": "仅保留初步估计。",
             "confidence": "low", "confidence_basis": ["灵活检查未完成"],
@@ -218,7 +232,7 @@ def test_incomplete_nonlinearity_review_keeps_real_ols_and_candidate_in_saved_re
         gate=FinalizationGate(registry=registry),
     ))
     assert update["finalization_status"] == "valid"
-    assert update["analysis_limitations"][0]["code"] == "form_check_not_attempted"
+    assert update["deep_agent_accepted_decision"].primary_effect_result_ref == estimate.result_ref
     state.update(update)
     facts = build_report_analysis_context(state)
     assert facts["primary_result_ref"] == estimate.result_ref
@@ -232,10 +246,7 @@ def test_incomplete_nonlinearity_review_keeps_real_ols_and_candidate_in_saved_re
         finalization_status="valid", execution_summary=_report_execution_summary(state))
     restored = ReportDocument.model_validate_json(document.model_dump_json())
     assert restored.finalization_status == "valid"
-    assert restored.blocks[0].id == "analysis_scope_limits"
-    assert "线性假设下的初步估计" in restored.blocks[0].content
-    assert "非线性" in restored.blocks[0].content
-    assert restored.blocks[2].title == "候选因果结构"
+    assert any(getattr(block, "asset_key", None) == "graph_main" for block in restored.blocks)
     assert restored.assets["graph_main"] == graph
     committed = json.loads(json.dumps(build_context_commit(state)))
     regenerated = build_report_analysis_context({"report_revision_mode": "full_regeneration_from_context",
@@ -256,7 +267,7 @@ def test_continuous_confounder_runs_real_ols_and_passes_gate():
         context, registry, source, source_record, outcome_model="hgb",
     )
     assert flex.status == "valid"
-    # 小样本上 OLS 残差与调整变量相关，程序判定要求灵活估计作主结果。
+    # 有两种有效估计时，由决策选择主效应。
     _validate_with_estimations(context, registry, source, source_record,
         [(result, record), (flex, flex_record)],
         primary_ref=flex.result_ref, parameters=PARAMETERS)
@@ -264,7 +275,12 @@ def test_continuous_confounder_runs_real_ols_and_passes_gate():
 
 @pytest.mark.parametrize("kind", ["category", "ordinal", "binary"])
 def test_encoded_confounder_is_rejected_before_estimation_and_satisfies_gate(kind):
-    context, registry, source, source_record = _setup(kinds={"z": kind})
+    csv_data = CSV
+    if kind == "binary":
+        frame = pd.read_csv(StringIO(CSV))
+        frame["z"] = frame["z"] % 2
+        csv_data = frame.to_csv(index=False)
+    context, registry, source, source_record = _setup(kinds={"z": kind}, csv_data=csv_data)
     result, record = _call(context, registry, source, source_record)
     assert result.status == "not_applicable"
     assert result.ate_check.reason_code == "ATE_ADJUSTMENT_SEMANTICS_UNSUPPORTED"
@@ -328,19 +344,22 @@ def test_another_variable_pair_does_not_satisfy_current_query(evidence_only):
         ledger={record.invocation_id: record},
         execution_id="other-pair-response", call_id="other-pair-call",
     )
-    assert other_result.status == "valid"
+    assert other_result.status == "invalid_input"
     other = _diagnose_record(
         context.trusted_identity, subject_ref=source.result_ref,
         treatment="z", outcome="y",
     )
     decision = {
         "outcome": "evidence_only" if evidence_only else "algorithm_supported",
-        "primary_result_ref": None if evidence_only else result.result_ref,
+        "primary_graph_result_ref": None if evidence_only else source.result_ref,
+        "primary_effect_result_ref": None if evidence_only else result.result_ref,
+        "effect_status": "incomplete" if evidence_only else "adopted",
+        "effect_reason": "当前查询缺少诊断。",
         "result_assessments": [{"result_ref": item.result_ref,
             "disposition": (
                 "discarded" if evidence_only
-                else "primary" if item.result_ref == result.result_ref
-                else "supporting"
+                else "primary_effect" if item is result
+                else "primary_graph"
             ),
             "rationale": "依据真实执行状态评估。"}
             for item in (source, result, other_result) if item.status == "valid"],
@@ -376,12 +395,13 @@ def test_another_variable_pair_does_not_satisfy_current_query(evidence_only):
     accepted = FinalizationGate(registry=registry).validate(
         decision={
             "outcome": "algorithm_supported",
-            "primary_result_ref": flex.result_ref,
+            "primary_graph_result_ref": source.result_ref,
+            "primary_effect_result_ref": flex.result_ref, "effect_status": "adopted",
             "result_assessments": [
                 {"result_ref": item.result_ref,
-                 "disposition": "primary" if item is flex else "supporting",
+                 "disposition": "primary_effect" if item is flex else "primary_graph" if item is source else "supporting",
                  "rationale": "依据真实执行状态评估。"}
-                for item in (source, result, other_result, flex)
+                for item in (source, result, flex)
             ],
             "conflict_status": "none", "conflicts": [], "revision_proposals": [],
             "selection_rationale": "保留方法边界。", "confidence": "low",
@@ -466,12 +486,13 @@ def test_dispatch_deadline_retains_completed_local_check_for_current_call():
     builder.add_edge("tools", END)
     initial_state = {
         "messages": [AIMessage(content="", tool_calls=[{"name": "causal_backdoor_ols",
-            "args": {"graph_result_ref": source.result_ref, "treatment": "x", "outcome": "y"},
+            "args": {"graph_result_ref": source.result_ref, "treatment": "x", "outcome": "y", "effect_request": EFFECT_REQUEST},
             "id": "deadline-ate-call", "type": "tool_call"}, {"name": "causal_backdoor_ols",
-            "args": {"graph_result_ref": "absent-source:0", "treatment": "x", "outcome": "y"},
+            "args": {"graph_result_ref": "absent-source:0", "treatment": "x", "outcome": "y", "effect_request": EFFECT_REQUEST},
             "id": "unchecked-ate-call", "type": "tool_call"}])],
         "message_execution_id": "deadline-response", "data_profile": context.algorithm_executor.data_profile,
         "algorithm_results": {source.result_ref: source},
+        "analysis_parameters": PARAMETERS,
         "action_ledger": {source_record.invocation_id: source_record},
         "rag_evidence": {}, "web_evidence": {},
     }
@@ -510,7 +531,7 @@ def _nonlinear_csv(n=400):
     return pd.DataFrame({"z": z, "x": x, "y": y, "other": np.arange(n) % 2}).to_csv(index=False)
 
 
-def _call_g_formula(context, registry, source, source_record, *, contrast=(0.0, 1.0),
+def _call_g_formula(context, registry, source, source_record, *, contrast=(1.0, 2.0),
                     outcome_model="linear", bootstrap=20):
     tool = next(item for item in build_algorithm_tools(registry, runtime_context=context)
                 if item.name == "causal_g_formula").to_langchain_tool()
@@ -519,12 +540,13 @@ def _call_g_formula(context, registry, source, source_record, *, contrast=(0.0, 
         state={"message_execution_id": "g-formula-response",
                "data_profile": context.algorithm_executor.data_profile,
                "algorithm_results": {source.result_ref: source},
+        "analysis_parameters": PARAMETERS,
                "action_ledger": {source_record.invocation_id: source_record}},
         context=context, config={}, stream_writer=[].append, store=None,
     )
     command = asyncio.run(tool.coroutine(
         runtime=runtime, graph_result_ref=source.result_ref, treatment="x", outcome="y",
-        contrast=contrast, outcome_model=outcome_model, bootstrap=bootstrap))
+        effect_request=fixed_effect_request(*contrast), outcome_model=outcome_model, bootstrap=bootstrap))
     result = next(iter(command.update["algorithm_results"].values()))
     record = next(iter(command.update["action_ledger"].values()))
     return result, record
@@ -541,10 +563,13 @@ def _validate_with_estimations(context, registry, source, source_record, entries
     }
     decision = {
         "outcome": "algorithm_supported",
-        "primary_result_ref": primary_ref,
+        "primary_graph_result_ref": source.result_ref,
+        "primary_effect_result_ref": primary_ref if primary_ref != source.result_ref else None,
+        "effect_status": "adopted" if primary_ref != source.result_ref else "not_adopted",
+        "effect_reason": "依据已有结果保留方法限制。",
         "result_assessments": [
             {"result_ref": ref,
-             "disposition": "primary" if ref == primary_ref else (
+             "disposition": "primary_graph" if item is source else "primary_effect" if ref == primary_ref else (
                  "supporting" if item.status == "valid" else "discarded"),
              "rationale": "依据真实执行状态评估。"}
             for ref, item in results.items()
@@ -560,47 +585,33 @@ def _validate_with_estimations(context, registry, source, source_record, entries
     )
 
 
-def test_gate_requires_flexible_check_when_signal_triggered():
+def test_confirmed_query_rejects_g_formula_with_different_intervention():
     context, registry, source, source_record = _setup()
-    ols, ols_record = _call(context, registry, source, source_record)
-    with pytest.raises(StructuredResponseError) as failure:
-        _validate_with_estimations(context, registry, source, source_record,
-            [(ols, ols_record)], primary_ref=ols.result_ref, parameters=TRIGGERED)
-    assert failure.value.rule == "form_check_not_attempted"
-
-
-@pytest.mark.parametrize("contrast,outcome_model", [((1.0, 3.0), "hgb"), ((0.0, 1.0), "linear")])
-def test_flexible_check_with_other_scale_or_linear_model_does_not_count(
-    contrast, outcome_model,
-):
-    """只有 (0, 1) 对比区间加 hgb 结局模型的调用才满足函数形式检查。"""
-
-    context, registry, source, source_record = _setup()
-    ols, ols_record = _call(context, registry, source, source_record)
-    flex, flex_record = _call_g_formula(
-        context, registry, source, source_record,
-        contrast=contrast, outcome_model=outcome_model,
+    result, record = _call_g_formula(
+        context, registry, source, source_record, contrast=(1.0, 3.0), outcome_model="hgb",
     )
-    with pytest.raises(StructuredResponseError) as failure:
-        _validate_with_estimations(
-            context, registry, source, source_record,
-            [(ols, ols_record), (flex, flex_record)],
-            primary_ref=ols.result_ref, parameters=TRIGGERED,
-        )
-    assert failure.value.rule == "form_check_not_attempted"
+    assert result.status == "invalid_input"
+    assert record.final_status == "failed"
+    assert context.algorithm_executor.calls == []
 
 
-def test_gate_rejects_linear_primary_when_verdict_is_nonlinear():
+@pytest.mark.parametrize("with_flexible_estimator", [False, True])
+def test_gate_allows_linear_primary_with_nonlinear_signal(with_flexible_estimator):
     context, registry, source, source_record = _setup(csv_data=_nonlinear_csv())
     ols, ols_record = _call(context, registry, source, source_record)
-    flex, flex_record = _call_g_formula(context, registry, source, source_record,
-        outcome_model="hgb", bootstrap=20)
-    assert ols.status == "valid" and flex.status == "valid"
-    with pytest.raises(StructuredResponseError) as failure:
-        _validate_with_estimations(context, registry, source, source_record,
-            [(ols, ols_record), (flex, flex_record)],
-            primary_ref=ols.result_ref, parameters=TRIGGERED)
-    assert failure.value.rule == "linear_primary_despite_nonlinear_verdict"
+    entries = [(ols, ols_record)]
+    if with_flexible_estimator:
+        flex, flex_record = _call_g_formula(
+            context, registry, source, source_record, outcome_model="hgb", bootstrap=20,
+        )
+        assert flex.status == "valid"
+        entries.append((flex, flex_record))
+    assert ols.status == "valid"
+    accepted = _validate_with_estimations(
+        context, registry, source, source_record, entries,
+        primary_ref=ols.result_ref, parameters=TRIGGERED,
+    )
+    assert accepted.primary_effect_result_ref == ols.result_ref
 
 
 def test_gate_allows_undetermined_flex_failure_with_graph_primary():
@@ -615,10 +626,11 @@ def test_gate_allows_undetermined_flex_failure_with_graph_primary():
         subject_ref=source.result_ref,
     )
     decision = {
-        "outcome": "algorithm_supported", "primary_result_ref": source.result_ref,
+        "outcome": "algorithm_supported", "primary_graph_result_ref": source.result_ref,
+        "effect_status": "not_identifiable", "effect_reason": "源图含未定向边。",
         "result_assessments": [
             {"result_ref": result.result_ref,
-             "disposition": "primary" if result is source else "discarded",
+             "disposition": "primary_graph" if result is source else "discarded",
              "rationale": "依据真实执行状态评估。"}
             for result in (source, ols, flex)
         ],
@@ -662,13 +674,14 @@ def test_report_facts_carry_functional_form_and_survive_regeneration():
             flex_record.invocation_id: flex_record,
         },
         "analysis_parameters": TRIGGERED,
-        "deep_agent_decision": decision,
+        "deep_agent_accepted_decision": decision,
         "finalization_status": "valid",
     }
     facts = build_report_analysis_context(state)
-    assert facts["functional_form"]["verdict"] == "nonlinear"
-    assert facts["functional_form"]["comparison"]["difference_se"] > 0
-    assert facts["functional_form"]["signals"]["dataset_ratio"] == 1.5
+    assert facts["functional_form"]["verdict"] == "agent_assessed"
+    comparison, = facts["effect_comparisons"]
+    assert comparison["comparable"]
+    assert comparison["difference_se"] > 0
     commit = json.loads(json.dumps(build_context_commit(state)))
     restored = build_report_analysis_context({
         "report_revision_mode": "full_regeneration_from_context",

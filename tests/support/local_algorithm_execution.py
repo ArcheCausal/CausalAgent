@@ -41,6 +41,7 @@ def pc_csv() -> str:
 PC_CSV = pc_csv()
 # 两行非恒定数据通过输入检查，但真实 Fisher-Z 无法估计该样本的相关性。
 PC_INSUFFICIENT_SAMPLE_CSV = "x,y\n1,2\n2,4\n"
+PC_SEMANTIC_KINDS = {"x": "continuous", "y": "continuous"}
 
 
 @dataclass(frozen=True)
@@ -57,13 +58,14 @@ class LocalAlgorithmExecutor:
         executor_pool: BoundedProcessPool | None = None,
         analysis_parameters: Mapping[str, object] | None = None,
         effect_execution_context: Mapping[str, object] | None = None,
+        prepared_metadata: Mapping[str, object] | None = None,
     ) -> None:
         self.csv_data = csv_data
         self.executor_pool = executor_pool
         self.data_profile = build_data_profile_from_csv(csv_data)
         kinds = normalize_semantic_kinds(
-            {"x": "continuous", "y": "continuous"}
-            if semantic_kinds is None and csv_data == PC_CSV else (semantic_kinds or {}),
+            PC_SEMANTIC_KINDS
+            if semantic_kinds is None and csv_data in (PC_CSV, PC_INSUFFICIENT_SAMPLE_CSV) else (semantic_kinds or {}),
             columns=self.data_profile.column_names,
         )
         self.analysis_parameters = (
@@ -80,6 +82,7 @@ class LocalAlgorithmExecutor:
             "observation_unit": "CSV 中的一条观测记录",
             "transformations": ["保留原始行列和值"],
             "variable_semantics": {},
+            **(prepared_metadata or {}),
         }
         if effect_execution_context is not None:
             self.metadata["effect_execution_context"] = deepcopy(dict(effect_execution_context))

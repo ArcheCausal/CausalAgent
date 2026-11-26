@@ -6,6 +6,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 import time
 from unittest.mock import patch
@@ -115,6 +116,14 @@ def _sleep_runner(_csv_data, parameters, _artifacts):
     return {"ok": True, "delay": parameters["delay"]}
 
 
+def _signaled_process_runner(_csv_data, parameters, _artifacts):
+    Path(parameters["started_path"]).touch()
+    release_path = Path(parameters["release_path"])
+    while not release_path.exists():
+        time.sleep(0.01)
+    return {"ok": True}
+
+
 def test_hmac_binds_command_and_rejects_expired_context() -> None:
     context = _context()
     command = _command(context)
@@ -154,8 +163,8 @@ def test_service_returns_normalized_result_without_raw_runner_text() -> None:
     assert result["diagnostics"]["sample_count"] == 100
     assert result["diagnostics"]["variable_count"] == 2
     assert result["diagnostics"]["metrics"]["n_features"] == 2
-    assert result["provenance"]["algorithm_runner_version"] == "causalachieve-v2"
-    assert result["implementation"]["runner_version"] == "causalachieve-v2"
+    assert result["provenance"]["algorithm_runner_version"] == "causalachieve-v3"
+    assert result["implementation"]["runner_version"] == "causalachieve-v3"
     assert "runner" not in result
     assert "raw_payload" not in result
     assert response.raw_payload["data"]["edges"]
@@ -320,7 +329,7 @@ def test_bounded_pool_releases_capability_after_global_admission_timeout() -> No
     asyncio.run(scenario())
 
 
-def test_cancel_terminates_only_the_target_invocation_process() -> None:
+def test_cancel_terminates_only_the_target_invocation_process(tmp_path) -> None:
     async def scenario():
         pool = BoundedProcessPool(
             process_workers=2,
@@ -328,13 +337,16 @@ def test_cancel_terminates_only_the_target_invocation_process() -> None:
         )
         await pool.start()
         identity = ("job-1", 1, 1, "worker-1")
+        target_started = tmp_path / "target-started"
+        sibling_started = tmp_path / "sibling-started"
+        sibling_release = tmp_path / "sibling-release"
         canceled = asyncio.create_task(
             pool.execute(
                 capability_id="test.cancel",
-                runner=_sleep_runner,
+                runner=_signaled_process_runner,
                 csv_data="A\n1\n",
-                parameters={"delay": 2.0},
-                timeout_seconds=5,
+                parameters={"started_path": str(target_started), "release_path": str(tmp_path / "target-release")},
+                timeout_seconds=45,
                 concurrency=2,
                 invocation_id="inv-cancel",
                 execution_identity=identity,
@@ -343,16 +355,18 @@ def test_cancel_terminates_only_the_target_invocation_process() -> None:
         sibling = asyncio.create_task(
             pool.execute(
                 capability_id="test.cancel",
-                runner=_sleep_runner,
+                runner=_signaled_process_runner,
                 csv_data="A\n1\n",
-                parameters={"delay": 0.1},
-                timeout_seconds=5,
+                parameters={"started_path": str(sibling_started), "release_path": str(sibling_release)},
+                timeout_seconds=45,
                 concurrency=2,
                 invocation_id="inv-sibling",
                 execution_identity=identity,
             )
         )
-        await asyncio.sleep(0.05)
+        async with asyncio.timeout(25):
+            while not (target_started.exists() and sibling_started.exists()):
+                await asyncio.sleep(0.01)
         cancellation = await pool.cancel(
             "inv-cancel",
             execution_identity=identity,
@@ -361,6 +375,8 @@ def test_cancel_terminates_only_the_target_invocation_process() -> None:
         with pytest.raises(PoolExecutionError) as error:
             await canceled
         assert error.value.safe_error_code == SafeErrorCode.ALGORITHM_CANCELED
+        assert not sibling.done()
+        sibling_release.touch()
         assert (await sibling).value["ok"] is True
         assert (
             await pool.cancel("inv-cancel", execution_identity=identity)
@@ -452,7 +468,7 @@ def test_service_rechecks_lease_before_process_start_and_after_result(revoke_on_
 
 def test_pc_runner_forwards_spec_alpha() -> None:
     csv_data = "A,B\n" + "0,0\n0,0\n1,1\n1,1\n" * 50
-    result = _pc(csv_data, {"alpha": 0.2, "test": "chisq"}, {})
+    result = _pc(csv_data, {"alpha": 0.2, "test": "chisq"}, {"semantic_kinds": {"A": "binary", "B": "binary"}})
     assert result["success"] is True
     assert result["diagnostics"]["alpha"] == 0.2
     assert result["diagnostics"]["independence_test"] == "chisq"

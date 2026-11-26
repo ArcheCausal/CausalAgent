@@ -137,6 +137,7 @@ def test_algorithm_summary_keeps_normalized_graph_diagnostics_and_warnings():
             "target": "sales",
             "edge_type": "directed",
             "weight": 0.42,
+            "prediction": None,
         }
     ]
     assert summary["assumptions"] == ["linearity", "no_latent_confounder"]
@@ -319,16 +320,16 @@ def test_context_graph_requires_nodes_and_an_edge_list():
 def test_build_context_commit_projects_primary_result_evidence_and_report_id():
     state = {
         "analysis_context": {"analysis_context_id": "ctx-1"},
-        "analysis_parameters": {"target": "sales", "treatment": "promotion"},
+        "analysis_parameters": {"target": "sales", "treatment": "promotion", "effect_request": None},
         "deep_agent_algorithm_results": {"invocation-1:0": _result()},
         "finalization_status": "valid",
-        "deep_agent_decision": FinalAnalysisDecision(
+        "deep_agent_accepted_decision": FinalAnalysisDecision(
             outcome="algorithm_supported",
-            primary_result_ref="invocation-1:0",
+            primary_graph_result_ref="invocation-1:0",
             result_assessments=[
                 ResultAssessment(
                     result_ref="invocation-1:0",
-                    disposition="primary",
+                    disposition="primary_graph",
                     rationale="唯一有效结果",
                 )
             ],
@@ -366,7 +367,7 @@ def test_build_context_commit_skips_ambiguous_valid_results():
                 provenance=_provenance(invocation_id="invocation-2"),
             ),
         },
-        "deep_agent_decision": None,
+        "analysis_parameters": {"effect_request": None},
     }
 
     saved = build_context_commit(state)["algorithm_summary"]

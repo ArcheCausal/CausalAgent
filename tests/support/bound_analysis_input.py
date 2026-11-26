@@ -6,6 +6,7 @@ from hashlib import sha256
 import csv
 from io import StringIO
 
+from Agent.data_processing.parameters import parameter_identity
 from Agent.data_processing.validation import validate_candidate
 from Agent.deep_agent.context import AnalysisInputRef, TrustedJobIdentity
 from Agent.deep_agent_tools.algorithm_specs import DEFAULT_ALGORITHM_SPECS
@@ -13,7 +14,7 @@ from Agent.measurement_semantics import (
     normalize_semantic_kinds,
     semantic_kinds_from_validation_report,
 )
-from tests.support.local_algorithm_execution import PC_CSV
+from tests.support.local_algorithm_execution import PC_CSV, PC_INSUFFICIENT_SAMPLE_CSV, PC_SEMANTIC_KINDS
 
 
 def bind_analysis_input(
@@ -22,13 +23,20 @@ def bind_analysis_input(
     *,
     semantic_kinds: Mapping[str, str] | None = None,
     dataset_id: int = 1,
+    analysis_parameters: Mapping[str, object] | None = None,
+    prepared_metadata: Mapping[str, object] | None = None,
 ) -> TrustedJobIdentity:
     """保留来源身份，只把通过真实校验的数据集绑定到身份副本。"""
     data_bytes = csv_data.encode("utf-8")
     kinds = normalize_semantic_kinds(
-        {"x": "continuous", "y": "continuous"}
-        if semantic_kinds is None and csv_data == PC_CSV else (semantic_kinds or {}),
+        PC_SEMANTIC_KINDS
+        if semantic_kinds is None and csv_data in (PC_CSV, PC_INSUFFICIENT_SAMPLE_CSV) else (semantic_kinds or {}),
     )
+    parameters = dict(analysis_parameters) if analysis_parameters is not None else {"effect_request": None}
+    parameters.setdefault("measurement_semantics", [
+        {"column": column, "kind": kind, "evidence": f"{column}: {kind}"}
+        for column, kind in kinds.items()
+    ])
     report = validate_candidate(
         data_bytes=data_bytes,
         script_bytes=b"import pandas as pd\n",
@@ -38,14 +46,9 @@ def bind_analysis_input(
             "observation_unit": "CSV 中的一条观测记录",
             "transformations": ["保留原始行列和值"],
             "variable_semantics": {},
+            **(prepared_metadata or {}),
         },
-        analysis_parameters={
-            "effect_request": None,
-            "measurement_semantics": [
-                {"column": column, "kind": kind, "evidence": f"{column}: {kind}"}
-                for column, kind in kinds.items()
-            ],
-        },
+        analysis_parameters=parameters,
         specifications=DEFAULT_ALGORITHM_SPECS,
         max_bytes=max(1, len(data_bytes)),
     )
@@ -56,5 +59,6 @@ def bind_analysis_input(
         content_hash=sha256(data_bytes).hexdigest(),
         filename="analysis.csv",
         semantic_kinds=semantic_kinds_from_validation_report(report),
+        research_identity=parameter_identity(parameters),
     )
     return replace(identity, analysis_input=ref)

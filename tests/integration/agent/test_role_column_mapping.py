@@ -14,7 +14,7 @@ from langgraph.runtime import Runtime
 from Agent.Processing.fold_processing import get_data_summary
 from Agent.Processing.fold_verify import validate_analysis
 from Agent.causal_agent.graph import _finalization_gate_node
-from tests.support.research_specs import spec_from_parameters
+from tests.support.research_specs import fixed_effect_request, identity_effect_context, spec_from_parameters
 from Agent.data_processing.agent import ProcessingPlanInput
 from Agent.data_processing.graph import _validation_retry_message
 from Agent.data_processing.parameters import (
@@ -40,6 +40,7 @@ COLUMNS = {"target": "surface_roughness_ra_um", "treatment": "coolant_flow_l_min
 PLAN = {
     "summary": "保留独立测量值", "observation_unit": "一次独立测量",
     "transformations": ["保留原始行列"], "role_columns": COLUMNS,
+    "analysis_columns": [COLUMNS["treatment"], COLUMNS["target"]],
     "variable_semantics": {COLUMNS["target"]: "表面粗糙度，因果结果变量",
                            COLUMNS["treatment"]: "冷却液流量，因果处理变量"},
 }
@@ -54,13 +55,13 @@ def source_csv():
 
 def validate(parameters, metadata):
     return validate_candidate(data_bytes=source_csv().encode(), script_bytes=b"import pandas as pd\n",
-        metadata=metadata, analysis_parameters=parameters, specifications=DEFAULT_ALGORITHM_SPECS,
+        metadata=metadata, analysis_parameters={"effect_request": None, **parameters}, specifications=DEFAULT_ALGORITHM_SPECS,
         max_bytes=100_000)
 
 
 def test_semantic_roles_are_preserved_while_validation_and_preprocess_use_real_columns():
     parameters = spec_from_parameters({
-        **ROLES, "observation_unit": "每行代表一件工件的一次独立加工",
+        **ROLES, "effect_request": None, "observation_unit": "每行代表一件工件的一次独立加工",
     }).model_dump()
     original = deepcopy(parameters)
     metadata = ProcessingPlanInput.model_validate(PLAN).model_dump(mode="json")
@@ -107,15 +108,24 @@ def test_role_mapping_checks_actual_columns_without_creating_or_clearing_roles(p
 def test_resolved_roles_reach_real_algorithm_tools_and_parent_finalization_gate():
     async def scenario():
         csv_data = source_csv()
-        executor = LocalAlgorithmExecutor(csv_data)
+        request = fixed_effect_request(0.5, 1.5)
+        effect_context = identity_effect_context(COLUMNS["treatment"], COLUMNS["target"])
+        parameters = {**ROLES, "effect_request": request}
+        semantics = {column: "continuous" for column in COLUMNS.values()}
+        executor = LocalAlgorithmExecutor(
+            csv_data, semantic_kinds=semantics,
+            analysis_parameters=parameters, prepared_metadata={**PLAN, "effect_execution_context": effect_context},
+        )
         identity = bind_analysis_input(TrustedJobIdentity(job_id=JOB,
             session_id="00000000-0000-0000-0000-000000000985", user_id=7,
-            attempt_count=1, lease_epoch=1, worker_id="role-mapping-test", input_identity="source-input"), csv_data)
+            attempt_count=1, lease_epoch=1, worker_id="role-mapping-test", input_identity="source-input"), csv_data,
+            semantic_kinds=semantics, analysis_parameters=parameters,
+            prepared_metadata={**PLAN, "effect_execution_context": effect_context})
         context = AgentRunContext(execution_guard=None, trusted_identity=identity,
             algorithm_executor=executor, filesystem_backend=build_in_memory_backend(user_id=7))
         registry = build_default_registry(build_default_adapters(executor=executor, raw_backend=context.filesystem_backend))
-        parent = {"analysis_parameters": {**ROLES, "columns": list(pd.read_csv(StringIO(csv_data)).columns)},
-            "prepared_dataset_metadata": deepcopy(PLAN), "data_profile": executor.data_profile, "route_decision": "data_processing"}
+        parent = {"analysis_parameters": {**parameters, "columns": PLAN["analysis_columns"]},
+            "prepared_dataset_metadata": {**PLAN, "effect_execution_context": effect_context}, "data_profile": executor.data_profile, "route_decision": "data_processing"}
         original = deepcopy(parent["analysis_parameters"])
         child = to_deep_agent_input(parent)
         child["message_execution_id"] = "role-mapping-response"
@@ -146,13 +156,14 @@ def test_resolved_roles_reach_real_algorithm_tools_and_parent_finalization_gate(
         assert diagnose_payload["recommended_tool_name"] == "causal_backdoor_ols"
 
         effect = await call("causal_backdoor_ols", "ate-call", graph_result_ref=discovery.result_ref,
-            treatment=treatment, outcome=outcome)
-        assert effect.status in {"valid", "not_applicable"}
+            treatment=treatment, outcome=outcome, effect_request=request)
+        assert effect.status == "valid"
         assert effect.ate_check.treatment == COLUMNS["treatment"]
         assert effect.ate_check.outcome == COLUMNS["target"]
         discovery_decision = {
-            "outcome": "algorithm_supported", "primary_result_ref": discovery.result_ref,
-            "result_assessments": [{"result_ref": discovery.result_ref, "disposition": "primary", "rationale": "依据真实工具结果"}],
+            "outcome": "algorithm_supported", "primary_graph_result_ref": discovery.result_ref,
+            "effect_status": "incomplete", "effect_reason": "效应诊断尚未执行。",
+            "result_assessments": [{"result_ref": discovery.result_ref, "disposition": "primary_graph", "rationale": "依据真实工具结果"}],
             "conflict_status": "none", "conflicts": [], "revision_proposals": [],
             "selection_rationale": "保留实际算法结果及方法限制", "confidence": "low", "confidence_basis": ["实际工具结果"],
         }
@@ -161,13 +172,14 @@ def test_resolved_roles_reach_real_algorithm_tools_and_parent_finalization_gate(
                 if record.result_ref == discovery.result_ref}, "deep_agent_structured_response": discovery_decision}
         retry = await _finalization_gate_node(missing_ate, runtime=Runtime(context=context), config={},
                                               gate=FinalizationGate(registry=registry))
-        assert retry["finalization_retry_count"] == 1
-        assert "effect_diagnose" in retry["deep_agent_retry_instruction"]
+        assert retry["finalization_status"] == "valid"
+        assert any(item["code"] == "effect_question_without_diagnose" for item in retry["analysis_limitations"])
         parent.update(deep_agent_algorithm_results=child["algorithm_results"], deep_agent_action_ledger=child["action_ledger"],
             deep_agent_structured_response={
-                "outcome": "algorithm_supported", "primary_result_ref": effect.result_ref,
+                "outcome": "algorithm_supported", "primary_graph_result_ref": discovery.result_ref,
+                "primary_effect_result_ref": effect.result_ref, "effect_status": "adopted",
                 "result_assessments": [{"result_ref": result.result_ref,
-                    "disposition": "primary" if result is effect else "supporting", "rationale": "依据真实工具结果"}
+                    "disposition": "primary_effect" if result is effect else "primary_graph", "rationale": "依据真实工具结果"}
                     for result in (discovery, effect) if result.status == "valid"],
                 "conflict_status": "none", "conflicts": [], "revision_proposals": [],
                 "selection_rationale": "保留实际算法结果及方法限制", "confidence": "low", "confidence_basis": ["实际工具结果"],

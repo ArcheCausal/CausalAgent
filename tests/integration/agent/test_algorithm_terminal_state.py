@@ -179,10 +179,16 @@ def pc_csv():
     )
 
 
+PC_SEMANTICS = {"x": "continuous", "y": "continuous", "z": "continuous"}
+
+
 @pytest.fixture(scope="module")
 def pc_payload(pc_csv):
     """真实 causal-learn PC runner 计算已绑定的 CSV。"""
-    payload = run_pc_analysis(pc_csv, alpha=0.05, test="fisherz")
+    payload = run_pc_analysis(
+        pc_csv, alpha=0.05, test="fisherz",
+        semantic_kinds=PC_SEMANTICS,
+    )
     assert payload["success"] is True, "真实本地 PC runner 必须成功"
     return payload
 
@@ -235,7 +241,7 @@ def terminal(identity, result):
 
 def decision_for(pc, timeout=None):
     assessments = [ResultAssessment(
-        result_ref=pc.result_ref, disposition="primary", rationale="采用有效 PC 结果。",
+        result_ref=pc.result_ref, disposition="primary_graph", rationale="采用有效 PC 结果。",
     )]
     if timeout is not None:
         assessments.append(ResultAssessment(
@@ -244,7 +250,7 @@ def decision_for(pc, timeout=None):
         ))
     return FinalAnalysisDecision(
         outcome="algorithm_supported",
-        primary_result_ref=pc.result_ref,
+        primary_graph_result_ref=pc.result_ref,
         result_assessments=assessments,
         conflict_status="none",
         selection_rationale="采用 PC；超时算法不参与结论。",
@@ -416,7 +422,10 @@ def test_real_graph_checkpoints_queued_running_and_timeout_then_recovers(
     context, registry, pc_payload, pc_csv, pc_failure,
 ):
     csv = PC_INSUFFICIENT_SAMPLE_CSV if pc_failure else pc_csv
-    context = replace(context, trusted_identity=bind_analysis_input(context.trusted_identity, csv))
+    semantics = {"x": "continuous", "y": "continuous"} if pc_failure else PC_SEMANTICS
+    context = replace(context, trusted_identity=bind_analysis_input(
+        context.trusted_identity, csv, semantic_kinds=semantics,
+    ))
 
     async def scenario():
         identity_hook = _build_message_identity_middleware(registry=registry)
@@ -429,7 +438,7 @@ def test_real_graph_checkpoints_queued_running_and_timeout_then_recovers(
             """将真实本地 PC runner 的产物写入生产终态 Command。"""
             calls.append(runtime.tool_call_id)
             identity = resolve_runtime_invocation(runtime)
-            payload = run_pc_analysis(csv) if pc_failure else pc_payload
+            payload = run_pc_analysis(csv, semantic_kinds=semantics) if pc_failure else pc_payload
             return await algorithm_terminal_command(
                 runtime, identity=identity, tool_name="causal_pc",
                 result=pc_result(identity, payload), started_at=datetime.now(timezone.utc),
@@ -559,7 +568,9 @@ def test_slow_terminal_sink_does_not_timeout_completed_local_pc_toolnode(
         ",".join(f"{value:.12g}" for value in row)
         for row in rng.normal(size=(80, 3))
     )
-    context = replace(context, trusted_identity=bind_analysis_input(context.trusted_identity, csv))
+    context = replace(context, trusted_identity=bind_analysis_input(
+        context.trusted_identity, csv, semantic_kinds=PC_SEMANTICS,
+    ))
 
     async def scenario():
         deadline = 1.0
@@ -593,7 +604,7 @@ def test_slow_terminal_sink_does_not_timeout_completed_local_pc_toolnode(
             pc_calls.append(runtime.tool_call_id)
             started_at = datetime.now(timezone.utc)
             identity = resolve_runtime_invocation(runtime)
-            payload = run_pc_analysis(csv, alpha=0.05, test="fisherz")
+            payload = run_pc_analysis(csv, alpha=0.05, test="fisherz", semantic_kinds=PC_SEMANTICS)
             assert payload["success"] is True
             command = await algorithm_terminal_command(
                 runtime, identity=identity, tool_name="causal_pc",
@@ -703,7 +714,8 @@ def test_gate_rejects_registered_call_without_terminal_result_and_parent_stops_r
     assert caught.value.rule is None
     with pytest.raises(StructuredResponseError, match=match):
         asyncio.run(_finalization_gate_node({
-            "deep_agent_decision": decision_for(pc),
+            "analysis_parameters": {"effect_request": None},
+            "deep_agent_structured_response": decision_for(pc),
             "deep_agent_algorithm_results": results,
             "deep_agent_action_ledger": ledger,
         }, runtime=Runtime(context=context), config={}, gate=gate))

@@ -197,7 +197,7 @@ def test_gate_reuses_complete_same_attempt_but_requires_new_attempt_web_call():
     result, = state["algorithm_results"].values()
     assert result.status == "execution_failed"
     decision = FinalAnalysisDecision(
-        outcome="evidence_only", primary_result_ref=None,
+        outcome="evidence_only", effect_status="not_requested", effect_reason="本次未请求效应估计。",
         result_assessments=[{
             "result_ref": result.result_ref, "disposition": "discarded",
             "rationale": "真实 PC runner 无法从两行数据完成估计。",
@@ -210,6 +210,7 @@ def test_gate_reuses_complete_same_attempt_but_requires_new_attempt_web_call():
         decision=decision, algorithm_results=state["algorithm_results"],
         action_ledger=state["action_ledger"], trusted_identity=context.trusted_identity,
         route_decision="data_processing", web_search_enabled=True,
+        analysis_parameters={"effect_request": None},
     )
     assert gate.validate(**kwargs) == decision
     retry = retry_deep_agent_from_checkpoint(state, retry_instruction="修正最终决策。")

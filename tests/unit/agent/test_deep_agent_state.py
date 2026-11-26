@@ -23,7 +23,7 @@ from Agent.deep_agent.prompts import (
 ANALYSIS_PARENT = {
     "messages": [],
     "analysis_question": "question",
-    "analysis_parameters": {"target": "y"},
+    "analysis_parameters": {"effect_request": None, "target": "y"},
     "file_summary": {"rows": 10, "columns": ["x", "y"]},
 }
 
@@ -83,7 +83,7 @@ def test_parent_projection_does_not_copy_job_or_runtime_fields() -> None:
     parent = {
         "messages": ["message"],
         "analysis_question": "question",
-        "analysis_parameters": {"target": "y"},
+        "analysis_parameters": {"effect_request": None, "target": "y"},
         "file_summary": {"rows": 10, "columns": ["x", "y"]},
         "job_id": "job-secret-to-parent-only",
         "execution_guard": object(),
@@ -103,6 +103,8 @@ def test_parent_projection_does_not_copy_job_or_runtime_fields() -> None:
         "deep_agent_decision",
         "deep_agent_structured_response",
         "deep_agent_status",
+        "deep_agent_budget_exhausted",
+        "deep_agent_accepted_decision",
     }
 
 
@@ -167,7 +169,7 @@ def test_linearity_signal_and_preprocess_report_reach_the_algorithm_prompt() -> 
             **ANALYSIS_PARENT,
             "route_decision": "data_processing",
             "preprocess_summary": "非线性度 ratio 3.19，以非线性机制为主。",
-            "analysis_parameters": {"target": "y", "nonlinearity": nonlinearity},
+            "analysis_parameters": {"effect_request": None, "target": "y", "nonlinearity": nonlinearity},
         }
     )
 
